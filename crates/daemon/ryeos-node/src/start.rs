@@ -8,8 +8,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::status::{is_running, LifecycleStatus};
-use crate::LocalLifecycleEnv;
+use crate::status::{is_ready, LifecycleStatus};
+use crate::{LifecycleProgressObserver, LocalLifecycleEnv};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartReport {
@@ -18,10 +18,20 @@ pub struct StartReport {
 }
 
 pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartReport> {
+    start_with_progress(env, timeout, None).await
+}
+
+pub async fn start_with_progress(
+    env: &LocalLifecycleEnv,
+    timeout: Duration,
+    mut observer: Option<&mut dyn LifecycleProgressObserver>,
+) -> Result<StartReport> {
     let config = env.config();
     let deadline = Instant::now() + timeout;
 
-    match crate::status::status(env).await? {
+    let initial = crate::status::status(env).await?;
+    observe(&mut observer, &initial);
+    match initial {
         LifecycleStatus::NotInitialized { .. } => {
             bail!("RyeOS is not initialized. Run: ryeos init")
         }
@@ -33,20 +43,38 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
         }
         LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. } => {}
         LifecycleStatus::Unresponsive { diagnostics, .. } => {
-            // A busy daemon is still a daemon — starting a second one here
-            // would double-run against the same state.
+            // A live but unusable control socket is still ownership evidence;
+            // starting a second daemon could double-run against the same state.
             bail!(
-                "a daemon appears to be running but did not answer the control probe \
-                 ({}); retry shortly, or `ryeos stop` it first",
+                "a daemon control socket is live but unusable ({}); refusing to start a \
+                 replacement — inspect or stop the existing daemon first",
                 diagnostics.message
             )
         }
-        LifecycleStatus::Starting { pid, .. } => {
-            // A booting daemon holds the state lock; a second one here
-            // would double-run against the same state.
+        LifecycleStatus::Starting { .. } => {
+            // Join the live lifecycle stream instead of treating an already
+            // booting daemon as an error. This is what makes concurrent
+            // `ryeos start` and install wrappers show the same rebuild/replay
+            // progress without ever spawning a second daemon.
+            if let Some(status) = wait_for_existing_start(env, deadline, &mut observer).await? {
+                return Ok(StartReport {
+                    status,
+                    already_running: true,
+                });
+            }
+        }
+        LifecycleStatus::Failed { metadata, startup } => {
             bail!(
-                "a daemon (pid {pid}) is already starting up but not yet serving; \
-                 wait for it to become ready"
+                "daemon startup failed{} during {}: {}",
+                metadata
+                    .pid
+                    .map(|pid| format!(" (pid {pid})"))
+                    .unwrap_or_default(),
+                startup.phase.as_str(),
+                startup
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown startup failure"),
             )
         }
     }
@@ -57,11 +85,15 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 // Another `ryeos start` is in flight; let it converge.
                 let status = crate::status::status(env).await?;
-                if is_running(&status) {
+                observe(&mut observer, &status);
+                if is_ready(&status) {
                     return Ok(StartReport {
                         status,
                         already_running: true,
                     });
+                }
+                if let Some(message) = startup_failure_message(&status) {
+                    bail!("{message}");
                 }
                 if Instant::now() >= deadline {
                     bail!("timed out waiting for concurrent RyeOS daemon start");
@@ -87,35 +119,23 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
         .spawn()
         .with_context(|| format!("spawn {}", ryeosd.display()))?;
 
-    // A boot that includes projection catch-up (e.g. right after a deploy)
-    // can take minutes before the control socket exists. Say so instead of
-    // sitting silent for the whole readiness wait.
-    let wait_started = Instant::now();
-    let mut next_progress_note = wait_started + Duration::from_secs(5);
+    // Projection recovery can take minutes, but the lifecycle socket remains
+    // live throughout. Publish each structured phase/counter snapshot to the
+    // caller-owned observer.
     loop {
         let status = crate::status::status(env).await?;
-        if is_running(&status) {
+        observe(&mut observer, &status);
+        if is_ready(&status) {
             return Ok(StartReport {
                 status,
                 already_running: false,
             });
         }
-
-        if Instant::now() >= next_progress_note {
-            match &status {
-                LifecycleStatus::Starting { pid, .. } => eprintln!(
-                    "ryeosd (pid {pid}) is booting — still initializing after {}s \
-                     (projection catch-up after a deploy can take minutes); log: {}",
-                    wait_started.elapsed().as_secs(),
-                    stderr_log_path.display()
-                ),
-                _ => eprintln!(
-                    "waiting for the daemon to become ready ({}s); log: {}",
-                    wait_started.elapsed().as_secs(),
-                    stderr_log_path.display()
-                ),
-            }
-            next_progress_note = Instant::now() + Duration::from_secs(15);
+        if let Some(message) = startup_failure_message(&status) {
+            bail!(
+                "{message}\nstartup stderr log: {}",
+                stderr_log_path.display()
+            );
         }
 
         if let Some(exit) = child.try_wait().context("poll spawned ryeosd")? {
@@ -123,7 +143,7 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
             // our child may have exited because the lock was held by a
             // sibling that became Running.
             let status = crate::status::status(env).await?;
-            if is_running(&status) {
+            if is_ready(&status) {
                 return Ok(StartReport {
                     status,
                     already_running: false,
@@ -147,7 +167,7 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
 
         if Instant::now() >= deadline {
             let status = crate::status::status(env).await?;
-            if is_running(&status) {
+            if is_ready(&status) {
                 return Ok(StartReport {
                     status,
                     already_running: false,
@@ -158,6 +178,68 @@ pub async fn start(env: &LocalLifecycleEnv, timeout: Duration) -> Result<StartRe
 
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+/// Wait for a daemon which was already in Starting when this command began.
+/// `None` means it disappeared cleanly before readiness, so the caller may
+/// continue through the normal start-lock/spawn path.
+async fn wait_for_existing_start(
+    env: &LocalLifecycleEnv,
+    deadline: Instant,
+    observer: &mut Option<&mut dyn LifecycleProgressObserver>,
+) -> Result<Option<LifecycleStatus>> {
+    loop {
+        let status = crate::status::status(env).await?;
+        observe(observer, &status);
+        match &status {
+            LifecycleStatus::Running { .. } => return Ok(Some(status)),
+            LifecycleStatus::Failed { .. } => {
+                bail!(
+                    "{}",
+                    startup_failure_message(&status)
+                        .unwrap_or_else(|| "ryeosd startup failed".to_string())
+                )
+            }
+            LifecycleStatus::Starting { .. } => {}
+            LifecycleStatus::Unresponsive { .. } => {
+                // The process is still authoritative for this app root. Keep
+                // waiting; never turn a busy or incompatible control plane
+                // into a duplicate spawn.
+            }
+            LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. } => return Ok(None),
+            LifecycleStatus::NotInitialized { .. } => {
+                bail!("RyeOS became uninitialized while waiting for startup")
+            }
+        }
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for existing RyeOS daemon lifecycle readiness");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn observe(observer: &mut Option<&mut dyn LifecycleProgressObserver>, status: &LifecycleStatus) {
+    if let Some(observer) = observer.as_deref_mut() {
+        observer.observe(status);
+    }
+}
+
+fn startup_failure_message(status: &LifecycleStatus) -> Option<String> {
+    let LifecycleStatus::Failed { metadata, startup } = status else {
+        return None;
+    };
+    Some(format!(
+        "ryeosd startup failed{} during {}: {}",
+        metadata
+            .pid
+            .map(|pid| format!(" (pid {pid})"))
+            .unwrap_or_default(),
+        startup.phase.as_str(),
+        startup
+            .error
+            .as_deref()
+            .unwrap_or("unknown startup failure"),
+    ))
 }
 
 fn startup_stderr_log_path(env: &LocalLifecycleEnv) -> PathBuf {

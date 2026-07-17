@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-03T09:54:31Z:1bc3cb1387a5721f9f4fe97d1d57e906054c30826523869adc30af20ba1daa57:TxBSWHBvPTm1W/aGSqB5V/txoCTGnfseDyIaLfIiXtuaVddeppc7SHfL6zd5EoTYj56NDf17+ZfTwRphhpBYDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T10:54:58Z:ff86c44525fa336df2f43bf5b625912aec184d3b977fa1e3e8b0b467bcdadcb3:FK+kfxZS/3f2ab881hE0LoJN0Z0U5c9cWQFUuQ2Rq+cn4QilTmBFxs8qoUTrx4Fml0FXFEIJpqWGdpMJ9MICAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime, operations, callbacks, identity]
-version: "1.0.0"
+version: "1.1.0"
 description: >
-  The bundle-events runtime operation surface — the three neutral daemon
-  callbacks a bundle uses to append, read, and scan its event chains, their
+  The bundle-events runtime operation surface — the neutral daemon callbacks
+  a bundle uses to append, read, scan, and materialize event attachments, their
   input shapes, and why bundle identity is never a caller-supplied field.
 ---
 
@@ -18,13 +18,14 @@ runtime is privileged over another. For *who* may call these (the capability /
 manifest runtime-authority model), see `ryeos/standard/bundle-events`. This
 document covers *how* the calls are shaped.
 
-## The three operations
+## The operations
 
 The canonical public operation names are the live daemon callbacks:
 
 - `runtime.bundle_events_append`
 - `runtime.bundle_events_read_chain`
 - `runtime.bundle_events_scan`
+- `runtime.bundle_events_materialize_attachment`
 
 These names (namespaced under `runtime.`) are the wire contract. Any
 language-specific helper is a thin wrapper over exactly these operations, never
@@ -57,7 +58,14 @@ before any handler logic runs. Identity cannot be spoofed by input.
   "expected_chain_head_hash": null,
   "idempotency_key": "optional",
   "correlation_id": "optional",
-  "causation_id": "optional"
+  "causation_id": "optional",
+  "attachments": [
+    {
+      "name": "checkpoint",
+      "source_path": "models/actor/checkpoint.bin",
+      "media_type": "application/octet-stream"
+    }
+  ]
 }
 ```
 
@@ -68,36 +76,92 @@ current chain head (optimistic concurrency); `idempotency_key` makes a retry
 return the prior result instead of writing twice; `correlation_id` /
 `causation_id` carry cross-event lineage.
 
+`attachments` defaults to empty. Each source is a regular project-relative
+file opened without following symlinks. The event response contains its CAS
+blob hash and size; the event object retains that blob through GC and sync.
+
 ### Read chain
 
 ```json
 {
   "event_kind": "example_event",
-  "chain_id": "example_123"
+  "chain_id": "example_123",
+  "cursor": null,
+  "limit": 16
 }
 ```
 
-Returns the ordered events of one chain. Authorized under the `scan` verb (not a
-separate `read`): a create-or-append tool needs **both** `scan` and `append`.
+Returns a newest-first page from one chain. `cursor` is the signed cursor
+object returned as `next_cursor` by the previous page. It is bound to the
+bundle, event kind, chain, and verified chain head; the daemon rejects forged
+or stale cursors. `limit` defaults to 16 and may not exceed 16. Authorized
+under the `scan` verb (not a separate `read`): a create-or-append tool needs
+**both** `scan` and `append`.
 
 ### Scan
 
 ```json
 {
-  "event_kind": "example_event"
+  "event_kind": "example_event",
+  "cursor": null,
+  "limit": 16
 }
 ```
 
-Returns events of a kind across the bundle. Authorized under `scan`.
+Returns a bounded page for an event kind across the bundle. A non-null scan
+cursor has the shape returned by `next_cursor`:
 
-## Scan pagination is the pre-high-volume gate
+```json
+{
+  "schema": 1,
+  "kind": "bundle_event_cursor",
+  "bundle_id": "example-bundle",
+  "event_kind": "example_event",
+  "chain_id": "example_123",
+  "head_hash": "sha256...",
+  "event_hash": "sha256...",
+  "signer": "node-fingerprint",
+  "signature": "base64..."
+}
+```
 
-Scan currently returns the full matching set for an event kind. Before any
-high-volume use, `runtime.bundle_events_scan` must grow cursor/pagination
-parameters (an opaque cursor plus a bounded page size); until then, treat scan
-as bounded to modest event counts and prefer `read_chain` for a known chain.
-Downstream read-model caches over bundle events remain rebuildable projections
-and must not own durable truth.
+Chains are visited in lexical `chain_id` order and events within each chain are
+newest-first. Clients must return the cursor unchanged; its signature and head
+anchor are authoritative. `limit` defaults to 16 and may not exceed 16.
+Authorized under `scan`.
+
+### Materialize attachment
+
+```json
+{
+  "event_kind": "example_event",
+  "event_hash": "<event hash>",
+  "attachment_name": "checkpoint",
+  "destination_path": "models/actor/checkpoint.bin",
+  "replace": true
+}
+```
+
+Authorized under `scan`. The event must belong to the callback's effective
+bundle and requested event kind. The destination is confined below the pinned
+project root and published atomically without following symlinks.
+
+## Pagination and page bounds
+
+Both read operations return `events` plus `next_cursor`. A null cursor means the
+page is final. In addition to the 16-record maximum, the daemon enforces an 8
+MiB serialized-record budget per page; a page may therefore end before its
+requested record limit. Continue from `next_cursor` until it is null.
+
+A cross-chain scan inspects at most 4,096 chain-directory entries while choosing
+the next lexical chain. Larger namespaces are rejected instead of making a
+small callback page perform an unbounded filesystem walk; an indexed chain-head
+ordering is required before raising that operational ceiling.
+
+Each cursor names an exact immutable event hash, so later appends to that chain
+do not move the remaining traversal behind the cursor. Downstream read-model
+caches over bundle events remain rebuildable projections and must not own
+durable truth.
 
 ## What these are not
 

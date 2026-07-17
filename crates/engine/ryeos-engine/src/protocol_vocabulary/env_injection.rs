@@ -7,9 +7,6 @@ use crate::subprocess_spec::SubprocessBuildRequest;
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum EnvInjectionSource {
-    /// Full URL the child posts callbacks to. Requires
-    /// CallbackChannel != None.
-    CallbackTokenUrl,
     /// Unix socket path of the daemon's callback listener. Used when
     /// the descriptor wants the raw socket path (e.g., `RYEOSD_SOCKET_PATH`).
     CallbackSocketPath,
@@ -19,14 +16,13 @@ pub enum EnvInjectionSource {
     ThreadId,
     /// Effective project root path on disk.
     ProjectPath,
+    /// Callback authorization/state anchor. This is the deliberate state-root
+    /// override when present, otherwise the effective project root.
+    CallbackProjectPath,
     /// Acting principal fingerprint (key used to authorize the dispatch).
     ActingPrincipal,
     /// Path to the daemon's CAS root (objects directory).
     CasRoot,
-    /// Vault handle the child uses to fetch decrypted secrets.
-    VaultHandle,
-    /// Daemon-wide app rootectory (e.g. `RYEOS_APP_ROOT`).
-    AppRoot,
     /// Per-thread auth token proving subprocess identity on callbacks.
     /// Required on every `runtime.dispatch_action` call.
     ThreadAuthToken,
@@ -56,14 +52,30 @@ pub fn produce_env_value(
 ) -> Result<String, EngineError> {
     match source {
         EnvInjectionSource::ThreadId => Ok(request.thread_id.clone()),
-        EnvInjectionSource::ProjectPath => Ok(request.project_path.to_string_lossy().to_string()),
+        EnvInjectionSource::ProjectPath => request
+            .project_path
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("project path is not valid UTF-8".into())),
+        EnvInjectionSource::CallbackProjectPath => request
+            .callback_project_path
+            .as_ref()
+            .ok_or_else(|| {
+                EngineError::Internal(
+                    "callback_project_path requested but no callback project path available".into(),
+                )
+            })?
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                EngineError::Internal("callback project path is not valid UTF-8".into())
+            }),
         EnvInjectionSource::ActingPrincipal => Ok(request.acting_principal.clone()),
-        EnvInjectionSource::CasRoot => Ok(request.cas_root.to_string_lossy().to_string()),
-        EnvInjectionSource::CallbackTokenUrl => request.callback_token.clone().ok_or_else(|| {
-            EngineError::Internal(
-                "callback_token_url requested but no callback_token available".into(),
-            )
-        }),
+        EnvInjectionSource::CasRoot => request
+            .cas_root
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| EngineError::Internal("CAS root is not valid UTF-8".into())),
         EnvInjectionSource::CallbackSocketPath => {
             request.callback_socket_path.clone().ok_or_else(|| {
                 EngineError::Internal(
@@ -74,10 +86,6 @@ pub fn produce_env_value(
         EnvInjectionSource::CallbackToken => request.callback_token.clone().ok_or_else(|| {
             EngineError::Internal("callback_token requested but no callback_token available".into())
         }),
-        EnvInjectionSource::VaultHandle => request.vault_handle.clone().ok_or_else(|| {
-            EngineError::Internal("vault_handle requested but no vault_handle available".into())
-        }),
-        EnvInjectionSource::AppRoot => Ok(request.app_root.to_string_lossy().to_string()),
         EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.clone().ok_or_else(|| {
             EngineError::Internal(
                 "thread_auth_token requested but no thread_auth_token available".into(),
@@ -118,8 +126,7 @@ mod tests {
             cas_root: PathBuf::from("/cas/root"),
             callback_token: Some("tok-abc".to_string()),
             callback_socket_path: Some("/tmp/ryeos-callback.sock".to_string()),
-            vault_handle: Some("vault-handle-1".to_string()),
-            app_root: PathBuf::from("/var/lib/ryeos"),
+            callback_project_path: Some(PathBuf::from("/project-state")),
             thread_auth_token: Some("tat-abc123".to_string()),
             params: serde_json::json!({}),
             resolution_output: None,
@@ -129,15 +136,13 @@ mod tests {
     #[test]
     fn round_trip_all_sources() {
         for src in [
-            EnvInjectionSource::CallbackTokenUrl,
             EnvInjectionSource::CallbackSocketPath,
             EnvInjectionSource::CallbackToken,
             EnvInjectionSource::ThreadId,
             EnvInjectionSource::ProjectPath,
+            EnvInjectionSource::CallbackProjectPath,
             EnvInjectionSource::ActingPrincipal,
             EnvInjectionSource::CasRoot,
-            EnvInjectionSource::VaultHandle,
-            EnvInjectionSource::AppRoot,
             EnvInjectionSource::ThreadAuthToken,
         ] {
             let yaml = serde_yaml::to_string(&src).unwrap();
@@ -167,6 +172,13 @@ mod tests {
     }
 
     #[test]
+    fn producer_callback_project_path() {
+        let req = make_request();
+        let val = produce_env_value(EnvInjectionSource::CallbackProjectPath, &req).unwrap();
+        assert_eq!(val, "/project-state");
+    }
+
+    #[test]
     fn producer_acting_principal() {
         let req = make_request();
         let val = produce_env_value(EnvInjectionSource::ActingPrincipal, &req).unwrap();
@@ -178,13 +190,6 @@ mod tests {
         let req = make_request();
         let val = produce_env_value(EnvInjectionSource::CasRoot, &req).unwrap();
         assert_eq!(val, "/cas/root");
-    }
-
-    #[test]
-    fn producer_callback_token_url() {
-        let req = make_request();
-        let val = produce_env_value(EnvInjectionSource::CallbackTokenUrl, &req).unwrap();
-        assert_eq!(val, "tok-abc");
     }
 
     #[test]
@@ -202,14 +207,6 @@ mod tests {
     }
 
     #[test]
-    fn producer_callback_token_url_errors_when_missing() {
-        let mut req = make_request();
-        req.callback_token = None;
-        let result = produce_env_value(EnvInjectionSource::CallbackTokenUrl, &req);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn producer_callback_socket_path_errors_when_missing() {
         let mut req = make_request();
         req.callback_socket_path = None;
@@ -223,13 +220,6 @@ mod tests {
         req.callback_token = None;
         let result = produce_env_value(EnvInjectionSource::CallbackToken, &req);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn producer_vault_handle() {
-        let req = make_request();
-        let val = produce_env_value(EnvInjectionSource::VaultHandle, &req).unwrap();
-        assert_eq!(val, "vault-handle-1");
     }
 
     #[test]

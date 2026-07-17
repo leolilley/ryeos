@@ -21,9 +21,10 @@ pub mod timer;
 pub mod types;
 
 // Re-export primary types
+pub use db::SchedulerDb;
 pub use result_outcome::{
     classify_result_payload, completed_fire_outcome, fire_outcome_for_terminal,
-    fire_status_for_thread_status, ThreadResultOutcome,
+    fire_status_for_thread_status, thread_status_is_terminal, ThreadResultOutcome,
 };
 pub use types::{FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 
@@ -50,7 +51,7 @@ pub trait SchedulerContext: Send + Sync + 'static {
     fn scheduler_runtime_gate(&self) -> Arc<RwLock<()>>;
 
     /// The trust store for schedule signature verification.
-    fn trust_store(&self) -> &TrustStore;
+    fn schedule_trust_store(&self) -> &TrustStore;
 
     /// Check a thread's status. Returns `None` if thread doesn't exist.
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>>;
@@ -67,6 +68,15 @@ pub trait SchedulerContext: Send + Sync + 'static {
 
     /// Submit a cancel command for a thread.
     fn submit_cancel(&self, thread_id: &str) -> Result<()>;
+
+    /// Hold startup-recovered execution behind the daemon's final readiness
+    /// boundary. False means startup was cancelled and this detached dispatch
+    /// must stop; contexts without a startup coordinator proceed immediately.
+    fn wait_for_recovery_execution_release(
+        &self,
+    ) -> impl std::future::Future<Output = bool> + Send {
+        async { true }
+    }
 
     /// Dispatch a scheduled item for execution.
     ///
@@ -99,8 +109,8 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
         (**self).scheduler_runtime_gate()
     }
 
-    fn trust_store(&self) -> &TrustStore {
-        (**self).trust_store()
+    fn schedule_trust_store(&self) -> &TrustStore {
+        (**self).schedule_trust_store()
     }
 
     fn get_thread_status(&self, thread_id: &str) -> Result<Option<String>> {
@@ -113,6 +123,10 @@ impl<T: SchedulerContext> SchedulerContext for Arc<T> {
 
     fn submit_cancel(&self, thread_id: &str) -> Result<()> {
         (**self).submit_cancel(thread_id)
+    }
+
+    async fn wait_for_recovery_execution_release(&self) -> bool {
+        (**self).wait_for_recovery_execution_release().await
     }
 
     async fn dispatch_scheduled_item(

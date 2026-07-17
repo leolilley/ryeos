@@ -25,22 +25,22 @@ Test creating, signing, loading, and searching for a directive.
   </inputs>
 
   <outputs>
-    <success>Directive lifecycle test completed for {input:test_directive_name}.</success>
+    <success>Directive lifecycle test completed for ${inputs.test_directive_name}.</success>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="create_directive">
-    Create a new test directive file at `.ai/directives/test/{input:test_directive_name}.md` with a valid directive markdown structure containing metadata, a simple echo step, and basic permissions.
+    Create a new test directive file at `.ai/directives/test/${inputs.test_directive_name}.md` with a valid directive markdown structure containing metadata, a simple echo step, and basic permissions.
   </step>
   <step name="sign_directive">
-    Sign the newly created directive `test/{input:test_directive_name}`.
+    Sign the newly created directive `test/${inputs.test_directive_name}`.
   </step>
   <step name="load_directive">
-    Load the signed directive `test/{input:test_directive_name}` to verify it was created correctly.
+    Load the signed directive `test/${inputs.test_directive_name}` to verify it was created correctly.
   </step>
   <step name="search_directives">
-    Search for directives matching "{input:test_directive_name}" to verify it appears in search results.
+    Search for directives matching "${inputs.test_directive_name}" to verify it appears in search results.
   </step>
 </process>

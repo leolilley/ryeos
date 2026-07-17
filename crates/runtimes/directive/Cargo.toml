@@ -18,6 +18,7 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 futures-util = { workspace = true }
 bytes = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-directive-core = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-state = { workspace = true }
 serde = { workspace = true }
@@ -32,4 +33,5 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }

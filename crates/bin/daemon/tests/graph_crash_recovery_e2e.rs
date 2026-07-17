@@ -14,11 +14,10 @@
 //!      parks the graph runtime AFTER it durably writes the checkpoint
 //!      whose cursor is node `b` — i.e. node `a` is done, `b` is next.
 //!   3. SIGKILL the daemon (it never observes the child exit, so the
-//!      thread row stays `running`), then SIGKILL the orphaned graph
-//!      process group so its pgid is dead.
-//!   4. Respawn the daemon. Startup reconcile finds a `running` orphan
-//!      with a dead pgid + `native_resume` + `ResumeContext{runtime_ref}`,
-//!      classifies it `NativeResume`, and routes it through
+//!      thread row stays `running`) and leave the exact orphan group alive.
+//!   4. Respawn the daemon. Holding the single-daemon state lock, startup
+//!      reconcile pins and hard-kills that exact prior group, compare-clears
+//!      its attachment, classifies the row `NativeResume`, and routes it through
 //!      `launch_existing_native_resume` → the managed envelope path. The
 //!      resumed launch injects `RYEOS_RESUME=1`, so the park hook does NOT
 //!      fire and the walker resumes from node `b` to completion.
@@ -81,14 +80,12 @@ config:
   nodes:
     a:
       node_type: gate
-      assign: {at: "a"}
       next:
         type: conditional
         branches:
           - to: b
     b:
       node_type: gate
-      assign: {at: "b"}
       next:
         type: conditional
         branches:
@@ -151,10 +148,14 @@ async fn await_checkpoint_cursor(checkpoints_dir: &Path, cursor: &str, deadline:
     }
 }
 
-/// Read the recorded process-group id for `thread_id` from the runtime DB
+/// Read the recorded process identity for `thread_id` from the runtime DB
 /// (recorded by the runtime's `runtime.mark_running` callback, which is
 /// its first action — so it is present by the time any checkpoint exists).
-fn read_pgid(state_path: &Path, thread_id: &str, deadline: Instant) -> i64 {
+fn read_process_identity(
+    state_path: &Path,
+    thread_id: &str,
+    deadline: Instant,
+) -> ryeos_app::process::ExecutionProcessIdentity {
     let db_path = state_path
         .join(ryeos_engine::AI_DIR)
         .join("state/runtime.sqlite3");
@@ -163,23 +164,23 @@ fn read_pgid(state_path: &Path, thread_id: &str, deadline: Instant) -> i64 {
             &db_path,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         ) {
-            let pgid: Option<i64> = conn
+            let identity: Option<String> = conn
                 .query_row(
-                    "SELECT pgid FROM thread_runtime WHERE thread_id = ?1",
+                    "SELECT process_identity FROM thread_runtime WHERE thread_id = ?1",
                     rusqlite::params![thread_id],
                     |row| row.get(0),
                 )
                 .ok()
                 .flatten();
-            if let Some(p) = pgid {
-                if p > 0 {
-                    return p;
+            if let Some(value) = identity {
+                if let Ok(identity) = serde_json::from_str(&value) {
+                    return identity;
                 }
             }
         }
         assert!(
             Instant::now() < deadline,
-            "pgid for {thread_id} never recorded in {}",
+            "process identity for {thread_id} never recorded in {}",
             db_path.display()
         );
         std::thread::sleep(Duration::from_millis(50));
@@ -187,9 +188,10 @@ fn read_pgid(state_path: &Path, thread_id: &str, deadline: Instant) -> i64 {
 }
 
 fn projection_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -259,6 +261,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
     let url = format!("http://{}/execute", h.bind);
     let body = json!({
         "item_ref": "graph:chain",
+        "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
     });
@@ -306,25 +309,19 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         "pre-crash: exactly one thread_started; events={pre:#?}"
     );
 
-    // 2. Record the orphan pgid, then SIGKILL the daemon (leaving the row
-    //    `running`) and the orphaned graph process group (so it is dead).
-    let pgid = read_pgid(&h.state_path, &thread_id, setup_deadline);
+    // 2. Record the process identity, then SIGKILL only the daemon (leaving the
+    //    row `running` and the exact attached group alive for restart-owned
+    //    teardown).
+    let process_identity = read_process_identity(&h.state_path, &thread_id, setup_deadline);
     h.kill_daemon().await.expect("kill daemon");
     exec_task.abort();
-    // Best-effort: the daemon SIGKILL may already have reaped it.
-    let _ = ryeos_app::process::hard_kill_process_group(pgid);
-    // Confirm the process group is actually gone before respawn, so
-    // reconcile classifies the row as crashed (not live).
-    let dead_deadline = Instant::now() + Duration::from_secs(5);
-    while ryeos_app::process::pgid_alive(pgid) {
-        assert!(
-            Instant::now() < dead_deadline,
-            "orphaned graph pgid {pgid} still alive after kill"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    assert!(
+        ryeos_app::process::execution_group_alive(&process_identity),
+        "restart recovery fixture requires the exact orphan group to remain pin-able"
+    );
 
-    // 3. Respawn: startup reconcile must native-resume the crashed graph.
+    // 3. Respawn: startup reconcile must terminate the exact orphan and
+    // native-resume the crashed graph.
     h.respawn_with(|cmd| {
         // Crucially do NOT set the block hook on respawn — the resumed run
         // also carries RYEOS_RESUME=1 so the hook is inert, but leaving it

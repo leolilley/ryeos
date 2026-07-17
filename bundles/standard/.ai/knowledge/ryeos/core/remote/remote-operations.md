@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:435f4b883248d1b439c99eed46c4f5155eed98f3aadc98cc7f7380552358c34a:os4FLs8xJZG1gWdCEjAiRf4UE7uhyXXYBW0iKu5edyBg5XI7r1+Z7B+5q5JNyT8Vc5gI/3lzQAj7sRFaiVRHAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:476964b58c9cbcee3403c1d817c3e9ef5fce115245750ef348477d8b72a98dad:p8yIdW5jatpx2FpN9pZTTyRKluZ93EbxYpUJes+xTs4BeonqY1e59CxqrLR4hr+AlkmkgAUibHAYx3+K6a6PCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
-version: "3.5.0"
+version: "3.7.0"
 description: >
   Remote execution and bundle synchronization — trust model,
   operator workflows, fail-closed semantics, and security requirements.
@@ -21,6 +21,7 @@ See also:
 - [Identity Model](../identity-model.md) for the four trust layers and request authentication flow.
 - [Spaces](../spaces.md) for project/system resolution.
 - [Execution Provenance](../execution/provenance.md) for local vs pushed-head execution source invariants.
+- [Execution Isolation](../node/execution-isolation.md) for the target node's immutable subprocess boundary.
 - [HTTP API](../node/http-api.md) and [Services: remote](../services/remote.md) for route/service mappings.
 
 ## v1 Trust Boundary
@@ -241,14 +242,14 @@ keys must enumerate their capabilities explicitly.
 When a node's signing key is compromised or needs rotation, treat it as a
 break-glass operation. The daemon no longer has an `--init-only` path and
 will not auto-regenerate the node key, because doing so would invalidate
-the node trust doc pinned in the operator trust store.
+the node trust doc pinned in the node trust store.
 
 Safe rotation requires explicit operator action:
 
 1. Stop the daemon.
 2. Replace/regenerate the node signing key under
    `<system>/.ai/node/identity/private_key.pem`.
-3. Recreate and pin the matching node trust doc in the operator trust store.
+3. Recreate and pin the matching node trust doc in the node trust store.
 4. Re-sign or recreate node-signed local config items as needed.
 5. Reissue every remotely granted authorized key.
 
@@ -315,9 +316,27 @@ ryeos remote bundle-install --remote production --bundle-name standard
 ```
 
 **Fail-closed**:
-- Missing blobs → abort before materialization.
-- Preflight failure → clean up partial directory.
-- No registration written unless preflight passes.
+
+- The export is limited to 10,000 files, 20,000 total tree entries, 64 levels,
+  4 KiB paths, 32 MiB per file, and 256 MiB of declared file content.
+- Object responses are streamed into bounded buffers and fetched in bounded
+  batches; the installer never retains a whole-bundle blob map. The export and
+  each object batch have a five-minute total request bound covering both the
+  response and bounded body read.
+- Missing, duplicate, malformed, wrong-sized, or hash-mismatched blobs abort
+  the operation and remove the hidden staging generation.
+- Network transfer uses a request-unique hidden generation while no bundle
+  mutation lock is held. The installer reacquires that lock only to reconcile,
+  run prospective admission, journal, and durably activate the completed tree;
+  it rechecks for a concurrent install before activation. A bounded scavenger
+  removes only same-owner, real-directory UUID transfer generations that have
+  remained stale for at least 24 hours; current transfers are not age-eligible.
+- The completed staging tree must pass signed-manifest preflight and the same
+  prospective engine/node-config admission used at node boot. A bundle that
+  would introduce a registry, protocol, runtime, command, or native-executor
+  collision never becomes live.
+- No registration is written unless activation succeeds. Transaction recovery
+  completes an interrupted committed install and invalidates cached engines.
 
 Local capability: `ryeos.execute.service.bundle/install`.
 Remote scopes on the target: `ryeos.execute.service.bundle/export`,
@@ -423,6 +442,13 @@ A `pushed_head` request resolves only against the pushed project
 checkout plus the remote's registered bundle roots. There is no
 operator user space to fall through to — user-tier resolution does not
 exist in the single-app-root model.
+
+Executable tool/runtime launches then pass through the target node's sandbox
+snapshot exactly like local launches. Remote content cannot enable or weaken
+that policy. The default readable placeholders expose only the verified bundle
+roots, resolved pushed item source, node trusted-key directory, and any exact
+callback socket required by the managed launch; the request-owned checkout is
+the writable project.
 
 ### Borrowed workspace for callbacks
 

@@ -1,7 +1,7 @@
 //! `SubprocessRole` — role the subprocess plays in the dispatch loop.
 //!
 //! Drives B1 cap-gate enforcement. The role is INDEPENDENT of the protocol
-//! the subprocess speaks — a future kind using `protocol: runtime_v1`
+//! the subprocess speaks — a future kind using `protocol: runtime`
 //! without being a runtime MUST NOT trigger the `runtime.execute` cap check.
 //! Only `SubprocessRole::RuntimeTarget` does that, and the role is set
 //! EXACTLY ONCE based on the user's original `item_ref` at the top of

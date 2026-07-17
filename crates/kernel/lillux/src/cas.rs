@@ -1,15 +1,12 @@
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
-use std::io::{ErrorKind, Write};
-
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
-#[cfg(unix)]
-use crate::atomic_fs::next_temp_sequence;
-use crate::atomic_fs::{atomic_write, atomic_write_with_mode};
+use crate::atomic_fs::atomic_write_with_mode;
 
 // ── Public library primitives ──────────────────────────────────────
 
@@ -30,18 +27,16 @@ pub fn shard_path(root: &Path, namespace: &str, hash: &str, ext: &str) -> PathBu
 
 /// Atomically write a batch of files with a single durability barrier.
 ///
-/// Each file is written tmp+rename like [`atomic_write`], but per-file
-/// fsyncs are deferred: on Linux one `syncfs` flushes the whole batch
-/// (one journal commit instead of one per file); elsewhere each file is
-/// fsynced in a second pass. Only use this when the batch shares one
-/// downstream durability point (e.g. CAS event objects flushed before
-/// the chain head that references them advances): a crash mid-batch may
-/// leave some files missing or empty, which is only safe while nothing
-/// references them yet.
+/// Each file is written under a hidden temporary name. One batch barrier makes
+/// every complete temp durable before any target becomes visible; create-only
+/// renames then publish the immutable names, and a second batch barrier makes
+/// that namespace update durable. An existing target is accepted only when its
+/// exact bytes match. A crash may leave a hidden temp or omit some targets, but
+/// it can never leave a visible target naming partial bytes.
 pub fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     #[cfg(unix)]
     {
-        atomic_write_batch_unix(writes)
+        atomic_write_batch_unix(None, writes)
     }
     #[cfg(not(unix))]
     {
@@ -50,71 +45,186 @@ pub fn atomic_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
     }
 }
 
+/// Atomically write a batch beneath an already-pinned CAS root.
+///
+/// Every target must be lexically beneath `root.path()`. Parent directories
+/// are traversed and created descriptor-relative to the retained root inode,
+/// so replacing any pathname ancestor cannot rebind a multi-object commit.
+pub fn atomic_write_batch_in_pinned_root(
+    root: &crate::secure_fs::PinnedDirectory,
+    writes: &[(PathBuf, Vec<u8>)],
+) -> Result<()> {
+    #[cfg(unix)]
+    {
+        atomic_write_batch_unix(Some(root), writes)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, writes);
+        anyhow::bail!("durable CAS batch writes are unavailable on this platform")
+    }
+}
+
 #[cfg(unix)]
-fn atomic_write_batch_unix(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
-    if let [(target, data)] = writes {
-        atomic_write(target, data)?;
+fn atomic_write_batch_unix(
+    pinned_root: Option<&crate::secure_fs::PinnedDirectory>,
+    writes: &[(PathBuf, Vec<u8>)],
+) -> Result<()> {
+    let mut first_directory = None;
+    let mut filesystem_device = None;
+    let mut prepared = Vec::new();
+    for (index, (target, data)) in writes.iter().enumerate() {
+        let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
+        let name = target.file_name().ok_or_else(|| {
+            anyhow::anyhow!("CAS batch target has no file name: {}", target.display())
+        })?;
+        let directory = match pinned_root {
+            Some(root) => open_batch_parent_in_pinned_root(root, target)?,
+            None => crate::secure_fs::PinnedDirectory::open_or_create(parent_path)
+                .with_context(|| format!("open CAS batch parent {}", parent_path.display()))?,
+        };
+        let device = directory.filesystem_device()?;
+        match filesystem_device {
+            None => filesystem_device = Some(device),
+            Some(expected) if expected != device => {
+                anyhow::bail!("CAS batch spans multiple filesystems")
+            }
+            Some(_) => {}
+        }
+        if first_directory.is_none() {
+            first_directory = Some(directory.try_clone()?);
+        }
+        match directory
+            .prepare_atomic_create(name, data, 0o644)
+            .with_context(|| format!("prepare immutable CAS batch entry {}", target.display()))?
+        {
+            Some(temp) => prepared.push((directory, name.to_os_string(), index, temp)),
+            None => verify_batch_entry(&directory, name, target, data)?,
+        }
+    }
+    if prepared.is_empty() {
         return Ok(());
     }
-    for (target, data) in writes {
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
+    let first_directory = first_directory
+        .as_ref()
+        .expect("a prepared CAS batch has a first directory");
+
+    if let Err(flush_error) = sync_write_batch(first_directory) {
+        drop(prepared);
+        return match sync_write_batch(first_directory) {
+            Ok(()) => Err(flush_error).context("flush hidden CAS batch entries"),
+            Err(cleanup_error) => Err(flush_error).context(format!(
+                "flush hidden CAS batch entries; flushing temp cleanup also failed: {cleanup_error:#}"
+            )),
+        };
+    }
+
+    let mut publication_error = None;
+    for (directory, name, index, temp) in prepared {
+        if publication_error.is_some() {
+            drop(temp);
+            continue;
         }
-        let mut written = false;
-        for _ in 0..128 {
-            let sequence = next_temp_sequence();
-            let tmp = target.with_extension(format!("tmp.{}.{sequence}", std::process::id()));
-            let mut file = match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
-            {
-                Ok(file) => file,
-                Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
-                Err(err) => return Err(err.into()),
-            };
-            let result = (|| -> std::io::Result<()> {
-                file.write_all(data)?;
-                drop(file);
-                fs::rename(&tmp, target)
-            })();
-            if let Err(err) = result {
-                let _ = fs::remove_file(&tmp);
-                return Err(err.into());
+        match temp.publish() {
+            Ok(true) => {}
+            Ok(false) => {
+                let (target, data) = &writes[index];
+                if let Err(error) = verify_batch_entry(&directory, &name, target, data) {
+                    publication_error = Some(error);
+                }
             }
-            written = true;
-            break;
-        }
-        if !written {
-            return Err(std::io::Error::new(
-                ErrorKind::AlreadyExists,
-                "atomic batch temp file collision",
-            )
-            .into());
+            Err(error) => publication_error = Some(error),
         }
     }
-    sync_write_batch(writes)
+    let durability = sync_write_batch(first_directory);
+    match (publication_error, durability) {
+        (None, Ok(())) => Ok(()),
+        (Some(error), Ok(())) => Err(error).context("publish immutable CAS batch entries"),
+        (None, Err(error)) => Err(error).context("make CAS batch publication durable"),
+        (Some(error), Err(durability_error)) => Err(error).context(format!(
+            "publish immutable CAS batch entries; publication durability also failed: {durability_error:#}"
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn open_batch_parent_in_pinned_root(
+    root: &crate::secure_fs::PinnedDirectory,
+    target: &Path,
+) -> Result<crate::secure_fs::PinnedDirectory> {
+    use std::path::Component;
+
+    let relative = target.strip_prefix(root.path()).with_context(|| {
+        format!(
+            "CAS batch target {} is outside pinned root {}",
+            target.display(),
+            root.path().display()
+        )
+    })?;
+    let parent = relative.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "CAS batch target has no relative parent: {}",
+            target.display()
+        )
+    })?;
+    let mut directory = root.try_clone()?;
+    for component in parent.components() {
+        let name = match component {
+            Component::CurDir => continue,
+            Component::Normal(name) => name,
+            Component::RootDir | Component::ParentDir | Component::Prefix(_) => {
+                anyhow::bail!(
+                    "CAS batch target has an unsafe relative path: {}",
+                    target.display()
+                )
+            }
+        };
+        directory = directory
+            .open_or_create_child(name, 0o777)
+            .with_context(|| {
+                format!(
+                    "open CAS batch parent beneath pinned root for {}",
+                    target.display()
+                )
+            })?;
+    }
+    Ok(directory)
 }
 
 #[cfg(target_os = "linux")]
-fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
-    use std::os::unix::io::AsRawFd;
-    let Some((first, _)) = writes.first() else {
-        return Ok(());
-    };
-    let dir = fs::File::open(first.parent().unwrap_or_else(|| Path::new(".")))?;
-    if unsafe { libc::syncfs(dir.as_raw_fd()) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
+fn sync_write_batch(directory: &crate::secure_fs::PinnedDirectory) -> Result<()> {
+    directory.sync_filesystem()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn sync_write_batch(_directory: &crate::secure_fs::PinnedDirectory) -> Result<()> {
+    anyhow::bail!("batched crash-safe CAS publication requires Linux syncfs")
+}
+
+fn verify_batch_entry(
+    directory: &crate::secure_fs::PinnedDirectory,
+    name: &OsStr,
+    target: &Path,
+    data: &[u8],
+) -> Result<()> {
+    let file = directory
+        .open_regular(name, false)?
+        .ok_or_else(|| anyhow::anyhow!("CAS batch entry disappeared: {}", target.display()))?;
+    let existing = read_open_file(file, target)?;
+    if existing.as_slice() != data {
+        anyhow::bail!(
+            "immutable CAS batch entry differs from requested bytes: {}",
+            target.display()
+        );
     }
     Ok(())
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
-fn sync_write_batch(writes: &[(PathBuf, Vec<u8>)]) -> Result<()> {
-    for (target, _) in writes {
-        fs::File::open(target)?.sync_all()?;
-    }
-    Ok(())
+fn read_open_file(mut file: fs::File, path: &Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read regular file {}", path.display()))?;
+    Ok(bytes)
 }
 
 /// Materialize a blob from CAS to a target path, setting Unix permission
@@ -128,8 +238,23 @@ pub fn materialize_executable(target: &Path, data: &[u8], mode: u32) -> Result<(
     Ok(())
 }
 
-fn escape_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+/// Failure to encode a value with the RyeOS canonical JSON contract.
+///
+/// The current `serde_json::Value` domain is fully encodable. The explicit
+/// result keeps failures at this persistence boundary visible if that domain
+/// is ever extended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalJsonError;
+
+impl std::fmt::Display for CanonicalJsonError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("canonical JSON encoding failed")
+    }
+}
+
+impl std::error::Error for CanonicalJsonError {}
+
+fn write_string(s: &str, out: &mut String) {
     out.push('"');
     for ch in s.chars() {
         match ch {
@@ -141,119 +266,344 @@ fn escape_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c < '\x20' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                use std::fmt::Write as _;
+                write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
             }
             c if c.is_ascii() => out.push(c),
             c if (c as u32) <= 0xFFFF => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                use std::fmt::Write as _;
+                write!(out, "\\u{:04x}", c as u32).expect("writing to a String cannot fail");
             }
             c => {
-                let n = c as u32 - 0x10000;
-                out.push_str(&format!(
+                use std::fmt::Write as _;
+                let scalar = c as u32 - 0x10000;
+                write!(
+                    out,
                     "\\u{:04x}\\u{:04x}",
-                    0xD800 + (n >> 10),
-                    0xDC00 + (n & 0x3FF)
-                ));
+                    0xD800 + (scalar >> 10),
+                    0xDC00 + (scalar & 0x3FF)
+                )
+                .expect("writing to a String cannot fail");
             }
         }
     }
     out.push('"');
-    out
 }
 
-pub fn canonical_json(v: &serde_json::Value) -> String {
+fn write_number(number: &serde_json::Number, out: &mut String) -> Result<(), CanonicalJsonError> {
+    out.push_str(&number.to_string());
+    Ok(())
+}
+
+fn write_canonical_json(v: &serde_json::Value, out: &mut String) -> Result<(), CanonicalJsonError> {
     match v {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s) => escape_string(s),
+        serde_json::Value::Null => out.push_str("null"),
+        serde_json::Value::Bool(true) => out.push_str("true"),
+        serde_json::Value::Bool(false) => out.push_str("false"),
+        serde_json::Value::Number(number) => write_number(number, out)?,
+        serde_json::Value::String(string) => write_string(string, out),
         serde_json::Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort();
-            let entries: Vec<String> = keys
-                .iter()
-                .map(|k| format!("{}:{}", escape_string(k), canonical_json(&map[*k])))
-                .collect();
-            format!("{{{}}}", entries.join(","))
+            out.push('{');
+            for (index, key) in keys.into_iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                write_string(key, out);
+                out.push(':');
+                write_canonical_json(&map[key], out)?;
+            }
+            out.push('}');
         }
         serde_json::Value::Array(arr) => {
-            format!(
-                "[{}]",
-                arr.iter().map(canonical_json).collect::<Vec<_>>().join(",")
-            )
+            out.push('[');
+            for (index, value) in arr.iter().enumerate() {
+                if index != 0 {
+                    out.push(',');
+                }
+                write_canonical_json(value, out)?;
+            }
+            out.push(']');
         }
     }
+    Ok(())
+}
+
+/// Serialize a value using the sole canonical JSON encoding for RyeOS CAS
+/// objects.
+///
+/// These bytes are a persistence and signing protocol: object keys use
+/// decoded-string ordering, non-ASCII scalars use lowercase `\u` escapes, and
+/// numbers retain `serde_json::Number` rendering (including `0.0` versus `0`).
+/// This is deliberately not RFC 8785/JCS. Changing any rule changes content
+/// addresses and therefore requires a new, explicit content-address domain.
+pub fn canonical_json(v: &serde_json::Value) -> Result<String, CanonicalJsonError> {
+    let mut canonical = String::new();
+    write_canonical_json(v, &mut canonical)?;
+    Ok(canonical)
 }
 
 // ── CasStore ───────────────────────────────────────────────────────
 
 pub struct CasStore {
     root: PathBuf,
+    pinned_root: Option<crate::secure_fs::PinnedDirectory>,
+}
+
+/// Result of an immutable CAS publication. `created` is false only when the
+/// exact verified bytes already occupied the addressed typed entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CasPutOutcome {
+    pub hash: String,
+    pub created: bool,
 }
 
 impl CasStore {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            pinned_root: None,
+        }
+    }
+
+    /// Bind every subsequent CAS operation to one already-open root inode.
+    /// This is the authority-preserving form for operations spanning more than
+    /// one object read or write.
+    pub fn from_pinned_root(root: crate::secure_fs::PinnedDirectory) -> Self {
+        Self {
+            root: root.path().to_path_buf(),
+            pinned_root: Some(root),
+        }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    pub fn has_blob(&self, hash: &str) -> bool {
-        valid_hash(hash) && shard_path(&self.root, "blobs", hash, "").exists()
+    /// Return whether a verified blob exists. A malformed hash is absent;
+    /// namespace traversal failures and corrupt entries are errors.
+    pub fn has_blob(&self, hash: &str) -> Result<bool> {
+        Ok(self.get_blob(hash)?.is_some())
     }
 
-    pub fn has_object(&self, hash: &str) -> bool {
-        valid_hash(hash) && shard_path(&self.root, "objects", hash, ".json").exists()
+    /// Return whether a verified, canonically encoded JSON object exists.
+    /// A malformed hash is absent; authority failures are errors.
+    pub fn has_object(&self, hash: &str) -> Result<bool> {
+        Ok(self.get_object(hash)?.is_some())
     }
 
-    pub fn has(&self, hash: &str) -> bool {
-        self.has_blob(hash) || self.has_object(hash)
+    /// Return whether the digest exists as a valid entry in either typed CAS
+    /// namespace. Both namespaces are checked so corruption is not hidden by a
+    /// valid entry of the other kind.
+    pub fn has(&self, hash: &str) -> Result<bool> {
+        let has_blob = self.has_blob(hash)?;
+        let has_object = self.has_object(hash)?;
+        Ok(has_blob || has_object)
     }
 
     pub fn get_blob(&self, hash: &str) -> Result<Option<Vec<u8>>> {
-        if !valid_hash(hash) {
+        if !canonical_cas_hash(hash) {
             return Ok(None);
         }
-        let path = shard_path(&self.root, "blobs", hash, "");
-        if !path.exists() {
+        let Some((file, path)) =
+            open_existing_entry(&self.root, self.pinned_root.as_ref(), "blobs", hash, "")?
+        else {
             return Ok(None);
-        }
-        Ok(Some(fs::read(&path)?))
+        };
+        Ok(Some(read_verified_entry(file, hash, &path)?))
     }
 
     pub fn get_object(&self, hash: &str) -> Result<Option<serde_json::Value>> {
-        if !valid_hash(hash) {
+        if !canonical_cas_hash(hash) {
             return Ok(None);
         }
-        let path = shard_path(&self.root, "objects", hash, ".json");
-        if !path.exists() {
+        let Some((file, path)) = open_existing_entry(
+            &self.root,
+            self.pinned_root.as_ref(),
+            "objects",
+            hash,
+            ".json",
+        )?
+        else {
             return Ok(None);
+        };
+        let data = read_verified_entry(file, hash, &path)?;
+        let value: serde_json::Value = serde_json::from_slice(&data)
+            .with_context(|| format!("decode CAS object {}", path.display()))?;
+        let canonical = canonical_json(&value)
+            .with_context(|| format!("canonicalize CAS object {}", path.display()))?;
+        if canonical.as_bytes() != data {
+            let canonical_hash = sha256_hex(canonical.as_bytes());
+            anyhow::bail!(
+                "CAS object bytes satisfy address {hash} but violate the RyeOS canonical JSON contract: {} (canonical bytes would address {canonical_hash})",
+                path.display()
+            );
         }
-        let data = fs::read(&path)?;
-        Ok(Some(serde_json::from_slice(&data)?))
+        Ok(Some(value))
     }
 
     pub fn store_blob(&self, data: &[u8]) -> Result<String> {
+        Ok(self.put_blob(data)?.hash)
+    }
+
+    pub fn put_blob(&self, data: &[u8]) -> Result<CasPutOutcome> {
         let hash = sha256_hex(data);
-        let dest = shard_path(&self.root, "blobs", &hash, "");
-        if dest.exists() {
-            return Ok(hash);
-        }
-        atomic_write(&dest, data)?;
-        Ok(hash)
+        let created = store_exact_entry(
+            &self.root,
+            self.pinned_root.as_ref(),
+            "blobs",
+            &hash,
+            "",
+            data,
+        )?;
+        Ok(CasPutOutcome { hash, created })
     }
 
     pub fn store_object(&self, value: &serde_json::Value) -> Result<String> {
-        let json = canonical_json(value);
+        Ok(self.put_object(value)?.hash)
+    }
+
+    pub fn put_object(&self, value: &serde_json::Value) -> Result<CasPutOutcome> {
+        let json = canonical_json(value)?;
         let hash = sha256_hex(json.as_bytes());
-        let dest = shard_path(&self.root, "objects", &hash, ".json");
-        if dest.exists() {
-            return Ok(hash);
+        let created = store_exact_entry(
+            &self.root,
+            self.pinned_root.as_ref(),
+            "objects",
+            &hash,
+            ".json",
+            json.as_bytes(),
+        )?;
+        Ok(CasPutOutcome { hash, created })
+    }
+}
+
+fn canonical_cas_hash(hash: &str) -> bool {
+    valid_hash(hash) && !hash.bytes().any(|byte| byte.is_ascii_uppercase())
+}
+
+fn open_existing_entry(
+    root_path: &Path,
+    pinned_root: Option<&crate::secure_fs::PinnedDirectory>,
+    namespace: &str,
+    hash: &str,
+    extension: &str,
+) -> Result<Option<(fs::File, PathBuf)>> {
+    let root = match pinned_root {
+        Some(root) => root.try_clone()?,
+        None => {
+            let Some(root) = crate::secure_fs::PinnedDirectory::open(root_path)? else {
+                return Ok(None);
+            };
+            root
         }
-        atomic_write(&dest, json.as_bytes())?;
-        Ok(hash)
+    };
+    let Some(namespace_dir) = root.open_child_directory(OsStr::new(namespace))? else {
+        return Ok(None);
+    };
+    let Some(first_shard) = namespace_dir.open_child_directory(OsStr::new(&hash[..2]))? else {
+        return Ok(None);
+    };
+    let Some(second_shard) = first_shard.open_child_directory(OsStr::new(&hash[2..4]))? else {
+        return Ok(None);
+    };
+    let name = OsString::from(format!("{hash}{extension}"));
+    let path = second_shard.path().join(&name);
+    Ok(second_shard
+        .open_regular(&name, false)?
+        .map(|file| (file, path)))
+}
+
+fn open_or_create_entry_parent(
+    root_path: &Path,
+    pinned_root: Option<&crate::secure_fs::PinnedDirectory>,
+    namespace: &str,
+    hash: &str,
+    extension: &str,
+) -> Result<(crate::secure_fs::PinnedDirectory, OsString, PathBuf)> {
+    debug_assert!(canonical_cas_hash(hash));
+    let root = match pinned_root {
+        Some(root) => root.try_clone()?,
+        None => crate::secure_fs::PinnedDirectory::open_or_create(root_path)?,
+    };
+    let namespace_dir = root.open_or_create_child(OsStr::new(namespace), 0o777)?;
+    let first_shard = namespace_dir.open_or_create_child(OsStr::new(&hash[..2]), 0o777)?;
+    let second_shard = first_shard.open_or_create_child(OsStr::new(&hash[2..4]), 0o777)?;
+    let name = OsString::from(format!("{hash}{extension}"));
+    let path = second_shard.path().join(&name);
+    Ok((second_shard, name, path))
+}
+
+fn read_verified_entry(mut file: fs::File, expected_hash: &str, path: &Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read CAS entry {}", path.display()))?;
+    let actual_hash = sha256_hex(&bytes);
+    if actual_hash != expected_hash {
+        anyhow::bail!(
+            "CAS corruption: entry at {} hashes to {}, expected {}",
+            path.display(),
+            actual_hash,
+            expected_hash
+        );
+    }
+    Ok(bytes)
+}
+
+fn verify_existing_exact_entry(
+    file: fs::File,
+    expected_hash: &str,
+    expected_bytes: &[u8],
+    path: &Path,
+) -> Result<()> {
+    let existing = read_verified_entry(file, expected_hash, path)?;
+    if existing != expected_bytes {
+        anyhow::bail!(
+            "CAS collision: existing entry at {} differs from the bytes addressed by {}",
+            path.display(),
+            expected_hash
+        );
+    }
+    Ok(())
+}
+
+fn store_exact_entry(
+    root_path: &Path,
+    pinned_root: Option<&crate::secure_fs::PinnedDirectory>,
+    namespace: &str,
+    hash: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<bool> {
+    let (parent, name, path) =
+        open_or_create_entry_parent(root_path, pinned_root, namespace, hash, extension)?;
+    if let Some(existing) = parent.open_regular(&name, false)? {
+        verify_existing_exact_entry(existing, hash, bytes, &path)?;
+        return Ok(false);
+    }
+
+    match parent.atomic_write_if_same(&name, None, bytes, 0o644) {
+        Ok(()) => Ok(true),
+        Err(publication_error) => match parent.open_regular(&name, false) {
+            Ok(Some(existing)) => {
+                verify_existing_exact_entry(existing, hash, bytes, &path).with_context(|| {
+                    format!(
+                        "CAS publication at {} raced with an invalid entry",
+                        path.display()
+                    )
+                })?;
+                Ok(false)
+            }
+            Ok(None) => Err(publication_error)
+                .with_context(|| format!("publish CAS entry {}", path.display())),
+            Err(verification_error) => Err(verification_error).with_context(|| {
+                format!(
+                    "inspect CAS entry {} after publication failed: {publication_error:#}",
+                    path.display()
+                )
+            }),
+        },
     }
 }
 
@@ -328,8 +678,9 @@ pub fn run(action: CasAction) -> serde_json::Value {
             } else {
                 match store.get_object(&hash) {
                     Ok(Some(val)) => {
-                        let canon = canonical_json(&val);
-                        serde_json::json!({ "valid": sha256_hex(canon.as_bytes()) == hash, "hash": hash })
+                        let valid = canonical_json(&val)
+                            .is_ok_and(|canon| sha256_hex(canon.as_bytes()) == hash);
+                        serde_json::json!({ "valid": valid, "hash": hash })
                     }
                     _ => serde_json::json!({ "valid": false, "hash": hash }),
                 }
@@ -337,7 +688,10 @@ pub fn run(action: CasAction) -> serde_json::Value {
         }
         CasAction::Has { root, hash } => {
             let store = CasStore::new(PathBuf::from(&root));
-            serde_json::json!({ "exists": store.has(&hash), "hash": hash })
+            match store.has(&hash) {
+                Ok(exists) => serde_json::json!({ "exists": exists, "hash": hash }),
+                Err(error) => serde_json::json!({ "error": error.to_string(), "hash": hash }),
+            }
         }
     }
 }
@@ -370,9 +724,11 @@ fn cli_fetch(root: &str, hash: &str, blob: bool) -> serde_json::Value {
     let data = if blob {
         store.get_blob(hash)
     } else {
-        store
-            .get_object(hash)
-            .map(|opt| opt.map(|v| canonical_json(&v).into_bytes()))
+        store.get_object(hash).and_then(|opt| {
+            opt.map(|value| canonical_json(&value).map(String::into_bytes))
+                .transpose()
+                .map_err(Into::into)
+        })
     };
     match data {
         Ok(Some(bytes)) => {

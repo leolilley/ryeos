@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:e2e3479da4bc6cf61acd2f7e16711ae540543947c3236dc7a5aca8b6405f0d4e:5CbF59i4CV1QoEDrL7RZOg/Xu+I5gcAoH/TlwvBmgykYqGyxSyzia2X8Q8bWl0/UyA9F3On2ZKl5VU8yvIqnCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:11:07Z:df4052d7ea944f56536b2357506ccb520bc90ddcdb56768680cfb800d21f6a4c:5b+AUimef6w5kSCiTBMBJnx9H7YEAl9obd4F+PvuCwFYhk3taQPVggkECJu8oZRI2gz+uisNQs/V22lbOo/ZDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "set-policy"
@@ -9,7 +9,7 @@ description: "Store the central-auth role/capability policy for a realm."
 config:
   command: "python3"
   args:
-    - "{tool_dir}/../../../bin/central_auth.py"
+    - "{tool_dir}/lib/central_auth.py"
     - "set-policy"
   input_data: "{params_json}"
   timeout_secs: 15

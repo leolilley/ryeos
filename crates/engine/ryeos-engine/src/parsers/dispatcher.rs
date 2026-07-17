@@ -80,7 +80,12 @@ impl ParserDispatcher {
             source_path: path.map(|p| p.display().to_string()),
         });
 
-        let resp = run_handler_subprocess(handler, &request, PARSE_TIMEOUT)?;
+        let resp = run_handler_subprocess(
+            handler,
+            &request,
+            PARSE_TIMEOUT,
+            self.handlers.launch_runtime(),
+        )?;
 
         match resp {
             HandlerResponse::ParseOk { value } => Ok(value),
@@ -112,7 +117,12 @@ impl ParserDispatcher {
             parser_config: descriptor.parser_config.clone(),
         });
 
-        let resp = run_handler_subprocess(handler, &request, PARSE_TIMEOUT)?;
+        let resp = run_handler_subprocess(
+            handler,
+            &request,
+            PARSE_TIMEOUT,
+            self.handlers.launch_runtime(),
+        )?;
 
         match resp {
             HandlerResponse::ValidateOk => Ok(()),

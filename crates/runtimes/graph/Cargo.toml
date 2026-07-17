@@ -17,6 +17,7 @@ lillux = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
 ryeos-bundle = { workspace = true }
+ryeos-engine = { workspace = true }
 ryeos-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -33,4 +34,5 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-tracing = { workspace = true, features = ["test-harness"] }

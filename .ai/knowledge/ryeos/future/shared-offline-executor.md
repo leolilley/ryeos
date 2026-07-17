@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-25T06:08:13Z:d548309ac2de35dea54c6882848591859e569ccc34a350652b0ce7de93a7f65f:qTMU3aXR7iAcX7S1taAo2xUnd70xw5A3fOZSEBF6a5JwiuFs0YR2Sb1egt+X4oRgrZCo/A3etlXXTX2b80foDA==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-16T03:44:57Z:c94332fb19102ffc4cab0427bb5fd0bdec57a964f6069677d805064f459360fd:4DLIpgvSuNis/kgTDl7WrOUtjT7Kx+iOJ2INvY+ERx8aVMCrHBb0vkethMf7MqyJxtHIruH9VGk1FGZxOiBoCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Shared Engine-Backed Offline Executor
 
 ## Status
@@ -21,7 +21,12 @@ Create a shared executor only when there is real pressure from more than one cal
 - The daemon or another local worker needs identical `cli_exec` / subprocess launch semantics.
 - More executable item shapes appear beyond the current field patterns.
 - Protocol handling grows beyond simple env injection, argv forwarding, stdin/stdout mode, and trusted binary resolution.
-- Execution needs centralized tracing, policy, sandboxing, lifecycle control, or cancellation.
+- Execution needs centralized tracing, lifecycle control, or cancellation.
+- The existing shared immutable isolation boundary proves insufficient for a new
+  offline executable shape; isolationing alone is no longer a trigger because
+  current offline tool/service launches already share the node policy path when
+  it is enabled. The default remains direct execution, and backend selection
+  follows `ryeos/core/node/execution-isolation` rather than this executor.
 - Engine startup cost per CLI invocation becomes a measurable problem and needs a cached local execution service.
 
 ## Target shape

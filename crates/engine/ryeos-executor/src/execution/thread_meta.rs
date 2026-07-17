@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -18,8 +19,9 @@ pub struct ThreadMeta {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub limits: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub ref_bindings: BTreeMap<String, String>,
+    pub binding_launch_records: BTreeMap<String, super::launch_preparation::RefBindingLaunchRecord>,
+    pub runtime_facts: BTreeMap<String, Value>,
     pub started_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completed_at: Option<String>,
@@ -30,8 +32,7 @@ pub struct ThreadMeta {
     /// Daemon-computed effective trust posture (weakest of root +
     /// extends chain). Written here so the thread.json audit trail
     /// shows what trust class spawned the runtime.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effective_trust_class: Option<TrustClass>,
+    pub effective_trust_class: TrustClass,
 }
 
 pub fn write_thread_meta(
@@ -70,12 +71,14 @@ mod tests {
             item_ref: "directive:my/agent".to_string(),
             capabilities: vec!["ryeos.execute.tool.*".to_string()],
             limits: serde_json::json!({"turns": 25}),
-            model: Some("anthropic/claude".to_string()),
+            ref_bindings: BTreeMap::new(),
+            binding_launch_records: BTreeMap::new(),
+            runtime_facts: BTreeMap::new(),
             started_at: "2026-04-19T00:00:00Z".to_string(),
             completed_at: None,
             cost: None,
             outputs: None,
-            effective_trust_class: Some(TrustClass::TrustedBundle),
+            effective_trust_class: TrustClass::TrustedBundle,
         };
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -87,9 +90,6 @@ mod tests {
         let parsed: ThreadMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.thread_id, "T-test");
         assert_eq!(parsed.status, "running");
-        assert_eq!(
-            parsed.effective_trust_class,
-            Some(TrustClass::TrustedBundle)
-        );
+        assert_eq!(parsed.effective_trust_class, TrustClass::TrustedBundle);
     }
 }

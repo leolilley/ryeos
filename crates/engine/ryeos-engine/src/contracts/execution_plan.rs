@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +35,15 @@ pub struct PlanContext {
 #[derive(Debug, Clone)]
 pub struct EngineContext {
     pub app_root: PathBuf,
-    pub sandbox_enabled: bool,
+    pub isolation: Arc<crate::isolation::IsolationRuntime>,
+    pub isolation_project_authority: crate::isolation::IsolationProjectAuthority,
+    pub isolation_state_root: Option<PathBuf>,
+    pub isolation_checkpoint_dir: Option<PathBuf>,
+    /// Typed callback-socket fact paired with this plan's daemon callback env.
+    pub isolation_daemon_socket_path: Option<PathBuf>,
+    pub isolation_bundle_roots: Vec<PathBuf>,
+    pub isolation_node_trusted_keys_dir: Option<PathBuf>,
+    pub isolation_verified_code: Vec<crate::isolation::IsolationVerifiedCode>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,
@@ -79,6 +88,9 @@ pub struct MaterializationRequirement {
 #[serde(deny_unknown_fields)]
 pub struct PlanSubprocessSpec {
     pub cmd: String,
+    /// Exact identity of a bundle/CAS command resolved while building this
+    /// plan. System executables and project-local interpreters use `None`.
+    pub verified_command: Option<crate::isolation::IsolationVerifiedCode>,
     #[serde(default)]
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
@@ -86,10 +98,6 @@ pub struct PlanSubprocessSpec {
     pub env: HashMap<String, String>,
     /// Source category for each env entry. This lets the daemon apply
     /// final subprocess env policy without guessing from key names.
-    ///
-    /// Kept as a sidecar instead of changing `env` wire shape so older
-    /// serialized specs remain readable and current callers can keep
-    /// using `spec.env` as the final key/value map.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env_sources: HashMap<String, RuntimeEnvSource>,
     pub stdin_data: Option<String>,
@@ -170,6 +178,7 @@ mod tests {
     fn subprocess_defaults_and_plan_node_wire_shape_are_stable() {
         let spec: PlanSubprocessSpec = serde_json::from_value(serde_json::json!({
             "cmd": "/bin/true",
+            "verified_command": null,
             "cwd": null,
             "stdin_data": null
         }))

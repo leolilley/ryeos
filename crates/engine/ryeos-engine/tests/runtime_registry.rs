@@ -55,6 +55,12 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
     fs::write(runtimes_dir.join(format!("{name}.yaml")), signed).unwrap();
 }
 
+fn with_empty_launch_contract(body: &str, serves: &str) -> String {
+    format!(
+        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n"
+    )
+}
+
 /// Build a `KindRegistry` containing a single executable `directive`
 /// kind whose execution block delegates to the runtime registry. Used
 /// by parser tests so the post-parse `RuntimeServesUnknownKind` /
@@ -104,19 +110,45 @@ binary_ref: bin/{host_triple}/directive_runner
 abi_version: v1
 required_caps:
   - ryeos.read.directive.*
-required_envelope_fields:
-  - provider_snapshot
+launch_contract:
+  primary_allowed_kinds: [directive]
+  primary_allowed_spaces: [bundle, project]
+  primary_allowed_trust: [trusted_bundle, trusted_project]
+  ref_bindings:
+    context:
+      required: false
+      allowed_kinds: [directive]
+      allowed_spaces: [bundle, project]
+      allowed_trust: [trusted_bundle, trusted_project]
+  preparation:
+    kind: none
+  config_inputs: {}
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: []
+  runtime_facts: {}
 description: Default directive runtime
-schema:
-  envelope: LaunchEnvelope
-  result: RuntimeResult
 ";
 
 const MINIMAL_RUNTIME_YAML: &str = "\
 kind: runtime
 serves: directive
-binary_ref: bin/runner
+binary_ref: bin/test-triple/runner
 abi_version: v1
+launch_contract:
+  primary_allowed_kinds: [directive]
+  primary_allowed_spaces: [bundle]
+  primary_allowed_trust: [trusted_bundle]
+  ref_bindings: {}
+  preparation:
+    kind: none
+  config_inputs: {}
+  secret_policy:
+    max_requirements: 0
+    allowed_names: []
+  required_runtime_data: []
+  runtime_facts: {}
 ";
 
 // ── Parser-only tests ────────────────────────────────────────────────
@@ -160,26 +192,27 @@ fn parse_runtime_yaml_success() {
         vec!["ryeos.read.directive.*".to_string()]
     );
     assert_eq!(
-        yaml.required_envelope_fields,
-        vec!["provider_snapshot".to_string()]
+        yaml.launch_contract.primary_allowed_kinds,
+        vec!["directive".to_string()]
     );
+    assert!(yaml.launch_contract.ref_bindings.contains_key("context"));
     assert_eq!(
         yaml.description.as_deref(),
         Some("Default directive runtime")
     );
-    let schema = yaml.schema.expect("schema present");
-    assert_eq!(schema.envelope, "LaunchEnvelope");
-    assert_eq!(schema.result, "RuntimeResult");
 }
 
 #[test]
 fn parse_runtime_yaml_missing_serves_rejected() {
-    let body = "\
+    let body = with_empty_launch_contract(
+        "\
 kind: runtime
-binary_ref: bin/x
+binary_ref: bin/test-triple/x
 abi_version: v1
-";
-    let err = parse_via_registry(body).unwrap_err();
+",
+        "directive",
+    );
+    let err = parse_via_registry(&body).unwrap_err();
     assert!(
         matches!(err, EngineError::RuntimeYamlInvalid { .. }),
         "expected RuntimeYamlInvalid, got: {err:?}"
@@ -188,12 +221,15 @@ abi_version: v1
 
 #[test]
 fn parse_runtime_yaml_missing_binary_ref_rejected() {
-    let body = "\
+    let body = with_empty_launch_contract(
+        "\
 kind: runtime
 serves: directive
 abi_version: v1
-";
-    let err = parse_via_registry(body).unwrap_err();
+",
+        "directive",
+    );
+    let err = parse_via_registry(&body).unwrap_err();
     assert!(
         matches!(err, EngineError::RuntimeYamlInvalid { .. }),
         "expected RuntimeYamlInvalid, got: {err:?}"
@@ -202,12 +238,15 @@ abi_version: v1
 
 #[test]
 fn parse_runtime_yaml_missing_abi_version_rejected() {
-    let body = "\
+    let body = with_empty_launch_contract(
+        "\
 kind: runtime
 serves: directive
-binary_ref: bin/x
-";
-    let err = parse_via_registry(body).unwrap_err();
+binary_ref: bin/test-triple/x
+",
+        "directive",
+    );
+    let err = parse_via_registry(&body).unwrap_err();
     assert!(
         matches!(err, EngineError::RuntimeYamlInvalid { .. }),
         "expected RuntimeYamlInvalid, got: {err:?}"
@@ -216,13 +255,16 @@ binary_ref: bin/x
 
 #[test]
 fn parse_runtime_yaml_wrong_kind_rejected() {
-    let body = "\
+    let body = with_empty_launch_contract(
+        "\
 kind: tool
 serves: directive
-binary_ref: bin/x
+binary_ref: bin/test-triple/x
 abi_version: v1
-";
-    let err = parse_via_registry(body).unwrap_err();
+",
+        "directive",
+    );
+    let err = parse_via_registry(&body).unwrap_err();
     match err {
         EngineError::RuntimeYamlInvalid { reason, .. } => {
             assert!(
@@ -272,23 +314,29 @@ fn registry_two_runtimes_one_default_returns_default() {
     write_signed_runtime(
         &bundle,
         "fast",
-        "\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 default: true
-binary_ref: bin/fast
+binary_ref: bin/test-triple/fast
 abi_version: v1
 ",
+            "directive",
+        ),
     );
     write_signed_runtime(
         &bundle,
         "slow",
-        "\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
-binary_ref: bin/slow
+binary_ref: bin/test-triple/slow
 abi_version: v1
 ",
+            "directive",
+        ),
     );
 
     let registry = RuntimeRegistry::build_from_bundles(
@@ -308,24 +356,30 @@ fn registry_two_runtimes_both_default_fails_build() {
     write_signed_runtime(
         &bundle,
         "a",
-        "\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 default: true
-binary_ref: bin/a
+binary_ref: bin/test-triple/a
 abi_version: v1
 ",
+            "directive",
+        ),
     );
     write_signed_runtime(
         &bundle,
         "b",
-        "\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
 default: true
-binary_ref: bin/b
+binary_ref: bin/test-triple/b
 abi_version: v1
 ",
+            "directive",
+        ),
     );
 
     let err = RuntimeRegistry::build_from_bundles(
@@ -349,22 +403,28 @@ fn registry_two_runtimes_neither_default_lookup_fails() {
     write_signed_runtime(
         &bundle,
         "a",
-        "\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
-binary_ref: bin/a
+binary_ref: bin/test-triple/a
 abi_version: v1
 ",
+            "directive",
+        ),
     );
     write_signed_runtime(
         &bundle,
         "b",
-        "\
+        &with_empty_launch_contract(
+            "\
 kind: runtime
 serves: directive
-binary_ref: bin/b
+binary_ref: bin/test-triple/b
 abi_version: v1
 ",
+            "directive",
+        ),
     );
 
     let registry = RuntimeRegistry::build_from_bundles(
@@ -396,7 +456,7 @@ fn registry_lookup_by_ref_returns_runtime() {
 
     let canonical = CanonicalRef::parse("runtime:default").unwrap();
     let rt = registry.lookup_by_ref(&canonical).expect("lookup hit");
-    assert_eq!(rt.yaml.binary_ref, "bin/runner");
+    assert_eq!(rt.yaml.binary_ref, "bin/test-triple/runner");
 
     let missing = CanonicalRef::parse("runtime:nope").unwrap();
     assert!(registry.lookup_by_ref(&missing).is_none());
@@ -431,15 +491,14 @@ fn registry_tampered_yaml_aborts_build() {
     }
 }
 
-/// η: runtime YAML whose `serves` kind has a terminator pointing at a
-/// different protocol (opaque instead of runtime_v1) must fail boot with
-/// `RuntimeProtocolMismatch`.
+/// A runtime registry validates executable kind membership without imposing a
+/// built-in protocol ref. The signed kind schema remains the protocol authority.
 #[test]
-fn runtime_serves_kind_with_wrong_protocol_fails() {
+fn runtime_serves_kind_uses_schema_declared_protocol() {
     let bundle = tempdir();
 
-    // Write a kind schema for "fake_kind" that uses opaque protocol,
-    // NOT runtime_v1.
+    // Write a kind schema whose protocol is intentionally not a built-in
+    // runtime descriptor. Registry construction must not rewrite that choice.
     let kinds_dir = bundle.join(".ai/node/engine/kinds/fake_kind");
     fs::create_dir_all(&kinds_dir).unwrap();
     let schema_body = r##"category: "engine/kinds/fake_kind"
@@ -489,33 +548,26 @@ metadata:
     write_signed_runtime(
         &bundle,
         "wrong-protocol-rt",
-        r#"kind: runtime
+        &with_empty_launch_contract(
+            r#"kind: runtime
 serves: fake_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
 abi_version: "v1"
 "#,
+            "fake_kind",
+        ),
     );
 
-    let err = RuntimeRegistry::build_from_bundles(
+    let registry = RuntimeRegistry::build_from_bundles(
         &[(bundle.clone(), TrustClass::TrustedBundle)],
         &trust_store(),
         &kinds,
     )
-    .unwrap_err();
-    match err {
-        EngineError::RuntimeProtocolMismatch {
-            runtime,
-            kind,
-            expected,
-            found,
-        } => {
-            assert_eq!(kind, "fake_kind");
-            assert_eq!(expected, "protocol:ryeos/core/runtime_v1");
-            assert_eq!(found, "protocol:ryeos/core/opaque");
-            assert!(runtime.contains("wrong-protocol-rt"));
-        }
-        other => panic!("expected RuntimeProtocolMismatch, got: {other:?}"),
-    }
+    .unwrap();
+    assert!(registry.lookup_for("fake_kind").is_ok_and(|runtime| runtime
+        .canonical_ref
+        .to_string()
+        .contains("wrong-protocol-rt")));
 }
 
 /// ε: runtime YAML whose `serves` kind has no execution block at all
@@ -564,11 +616,14 @@ metadata:
     write_signed_runtime(
         &bundle,
         "no-exec-rt",
-        r#"kind: runtime
+        &with_empty_launch_contract(
+            r#"kind: runtime
 serves: no_exec_kind
 binary_ref: bin/x86_64-unknown-linux-gnu/fake-binary
 abi_version: "v1"
 "#,
+            "no_exec_kind",
+        ),
     );
 
     let err = RuntimeRegistry::build_from_bundles(

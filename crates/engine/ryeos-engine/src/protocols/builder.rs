@@ -4,7 +4,7 @@
 //! "protocols-as-data" structurally true. It consumes a verified
 //! `ProtocolDescriptor` and dispatch-time inputs (`BuildRequest`),
 //! walks the descriptor's vocabulary fields, and emits a fully-formed
-//! `SubprocessSpec` ready for `sandbox_wrap` and `to_lillux_request`.
+//! `SubprocessSpec` ready for translation and `IsolationRuntime::apply`.
 //!
 //! ## Design invariants
 //!
@@ -12,7 +12,7 @@
 //!    `EnvInjection` in the descriptor. The builder cannot manufacture
 //!    env keys.
 //! 2. The launch envelope is serialized exactly once, only when the
-//!    descriptor declares `stdin.shape: launch_envelope_v1`.
+//!    descriptor declares `stdin.shape: launch_envelope`.
 //! 3. Callback bookkeeping (token registration, callback URL fabrication)
 //!    happens BEFORE the builder is called, in the launcher. The builder
 //!    takes the resulting `CallbackBindings` and surfaces them via
@@ -36,6 +36,7 @@ use thiserror::Error;
 
 use crate::canonical_ref::CanonicalRef;
 use crate::launch_envelope_types::LaunchEnvelope;
+use crate::method_wire::MethodCallEnvelope;
 use crate::protocol_vocabulary::{
     validate_env_name, EnvInjectionSource, StdinShape, VocabularyError,
 };
@@ -72,6 +73,10 @@ pub struct BuildRequest<'a> {
     /// Project root for env/secret expansion contexts.
     pub project_path: &'a Path,
 
+    /// Callback authorization/state anchor. May differ from `project_path`
+    /// when execution provenance deliberately overrides the state root.
+    pub callback_project_path: &'a Path,
+
     /// Thread identity used by callback bookkeeping.
     pub thread_id: &'a str,
 
@@ -81,12 +86,8 @@ pub struct BuildRequest<'a> {
     /// injection asks for them.
     pub callback: Option<&'a CallbackBindings>,
 
-    /// Vault-resolved secrets. Keyed by vault handle name.
-    /// Only injected if a descriptor `EnvInjection` requests it.
-    pub vault_bindings: &'a [(String, String)],
-
     /// The fully-built launch envelope when the protocol's
-    /// `stdin.shape` is `launch_envelope_v1`. `None` when the protocol
+    /// `stdin.shape` is `launch_envelope`. `None` when the protocol
     /// is opaque or parameters-json stdin.
     pub launch_envelope: Option<&'a LaunchEnvelope>,
 
@@ -99,12 +100,9 @@ pub struct BuildRequest<'a> {
     /// Path to the daemon's CAS root.
     pub cas_root: &'a Path,
 
-    /// Path to the daemon's state directory.
-    pub app_root: &'a Path,
-
     /// Per-thread auth token injected into env for callback identity.
-    /// Required — no `Option` fallback.
-    pub thread_auth_token: &'a str,
+    /// Absent when the verified descriptor does not request that source.
+    pub thread_auth_token: Option<&'a str>,
 }
 
 /// Errors produced by the builder.
@@ -116,6 +114,15 @@ pub enum BuildError {
     #[error("descriptor `{0}` requires a launch envelope; caller supplied none")]
     EnvelopeRequired(String),
 
+    #[error("descriptor `{0}` requires a method-call envelope on its owning dispatch path")]
+    MethodEnvelopeRequired(String),
+
+    #[error("descriptor `{0}` does not declare method_call_envelope stdin")]
+    WrongMethodStdinShape(String),
+
+    #[error("descriptor `{descriptor}` rejected its method-call envelope: {reason}")]
+    InvalidMethodEnvelope { descriptor: String, reason: String },
+
     #[error("env injection `{key}` declared twice in descriptor `{descriptor}`")]
     DuplicateEnvKey { descriptor: String, key: String },
 
@@ -124,47 +131,26 @@ pub enum BuildError {
 
     #[error("stdin envelope serialize failed: {0}")]
     StdinSerialize(String),
+
+    #[error("{path_kind} path is not valid UTF-8")]
+    NonUtf8Path { path_kind: &'static str },
 }
 
 /// Build a `SubprocessSpec` from a protocol descriptor and dispatch inputs.
 ///
-/// This is the single entry point for all protocol-backed subprocess
-/// construction. Both tool and runtime paths converge through this
-/// function.
+/// This builder owns the managed launch-envelope path. Ordinary executor-plan
+/// subprocesses retain plan-owned stdin and use the shared typed env vocabulary
+/// during final daemon composition.
 pub fn build_subprocess_spec(
     descriptor: &ProtocolDescriptor,
     request: &BuildRequest<'_>,
 ) -> Result<SubprocessSpec, BuildError> {
     let descriptor_id = format!("{}:{}", descriptor.category, descriptor.name);
 
-    // 1. Build stdin bytes from the descriptor's stdin shape.
-    let stdin_data = match descriptor.stdin.shape {
-        StdinShape::LaunchEnvelopeV1 => match request.launch_envelope {
-            Some(envelope) => serde_json::to_vec(envelope).map_err(|e| {
-                BuildError::StdinSerialize(format!("launch_envelope_v1 serialize failed: {e}"))
-            })?,
-            None => return Err(BuildError::EnvelopeRequired(descriptor_id)),
-        },
-        StdinShape::ParametersJson => {
-            if request.launch_envelope.is_some() {
-                return Err(BuildError::OpaqueStdinWithEnvelope(descriptor_id));
-            }
-            // ParametersJson: the caller is expected to serialize params
-            // and pass them as the launch_envelope field. If no envelope
-            // is provided, stdin is empty (the caller may feed it out of band).
-            // For now, produce empty stdin — the daemon caller serializes
-            // params separately in the tool dispatch path.
-            Vec::new()
-        }
-        StdinShape::Opaque => {
-            if request.launch_envelope.is_some() {
-                return Err(BuildError::OpaqueStdinWithEnvelope(descriptor_id));
-            }
-            Vec::new()
-        }
-    };
-
-    // 2. Build env from the descriptor's env_injections.
+    // 1. Validate and build every declared env source before considering stdin.
+    // Boot validation deliberately supplies no launch envelope, so this order
+    // ensures a launch-envelope descriptor cannot hide a bad env contract
+    // behind the accepted `EnvelopeRequired` result.
     let mut env_map: BTreeMap<String, String> = BTreeMap::new();
     for injection in &descriptor.env_injections {
         // Validate env name.
@@ -180,14 +166,6 @@ pub fn build_subprocess_spec(
 
         // Produce the value based on the source.
         let value = match injection.source {
-            EnvInjectionSource::CallbackTokenUrl => {
-                request.callback.map(|cb| cb.token.clone()).ok_or_else(|| {
-                    VocabularyError::UnknownEnvInjection(
-                        injection.name.clone(),
-                        "callback_token_url (no callback bindings)".into(),
-                    )
-                })?
-            }
             EnvInjectionSource::CallbackSocketPath => request
                 .callback
                 .map(|cb| cb.socket_path.clone())
@@ -209,21 +187,37 @@ pub fn build_subprocess_spec(
             // build a synthetic request. This avoids duplicating the
             // production logic while keeping the builder pure.
             EnvInjectionSource::ThreadId => request.thread_id.to_string(),
-            EnvInjectionSource::ProjectPath => request.project_path.to_string_lossy().to_string(),
+            EnvInjectionSource::ProjectPath => request
+                .project_path
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "project",
+                })?
+                .to_owned(),
+            EnvInjectionSource::CallbackProjectPath => request
+                .callback_project_path
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "callback project",
+                })?
+                .to_owned(),
             EnvInjectionSource::ActingPrincipal => request.acting_principal.to_string(),
-            EnvInjectionSource::CasRoot => request.cas_root.to_string_lossy().to_string(),
-            EnvInjectionSource::AppRoot => request.app_root.to_string_lossy().to_string(),
-            EnvInjectionSource::ThreadAuthToken => request.thread_auth_token.to_string(),
-            EnvInjectionSource::VaultHandle => {
-                // Look up the vault handle from vault_bindings.
-                // For now, vault_handle injection is not yet wired through
-                // BuildRequest; fail with a clear error if the source
-                // doesn't have bindings.
-                return Err(BuildError::Injection(VocabularyError::UnknownEnvInjection(
-                    injection.name.clone(),
-                    "vault_handle (vault bindings not yet supported in builder)".into(),
-                )));
-            }
+            EnvInjectionSource::CasRoot => request
+                .cas_root
+                .to_str()
+                .ok_or(BuildError::NonUtf8Path {
+                    path_kind: "CAS root",
+                })?
+                .to_owned(),
+            EnvInjectionSource::ThreadAuthToken => request
+                .thread_auth_token
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    VocabularyError::UnknownEnvInjection(
+                        injection.name.clone(),
+                        "thread_auth_token (no thread auth binding)".into(),
+                    )
+                })?,
         };
 
         env_map.insert(injection.name.clone(), value);
@@ -231,6 +225,36 @@ pub fn build_subprocess_spec(
 
     // Convert BTreeMap to Vec<(String, String)> for SubprocessSpec.
     let env: Vec<(String, String)> = env_map.into_iter().collect();
+
+    // 2. Build stdin bytes from the descriptor's stdin shape.
+    let stdin_data = match descriptor.stdin.shape {
+        StdinShape::LaunchEnvelope => match request.launch_envelope {
+            Some(envelope) => serde_json::to_vec(envelope).map_err(|e| {
+                BuildError::StdinSerialize(format!("launch_envelope serialize failed: {e}"))
+            })?,
+            None => return Err(BuildError::EnvelopeRequired(descriptor_id)),
+        },
+        StdinShape::MethodCallEnvelope => {
+            if request.launch_envelope.is_some() {
+                return Err(BuildError::OpaqueStdinWithEnvelope(descriptor_id));
+            }
+            return Err(BuildError::MethodEnvelopeRequired(descriptor_id));
+        }
+        StdinShape::ParametersJson => {
+            if request.launch_envelope.is_some() {
+                return Err(BuildError::OpaqueStdinWithEnvelope(descriptor_id));
+            }
+            // ParametersJson stdin is serialized by its owning dispatch path;
+            // this managed launch-envelope builder has no parameters payload.
+            Vec::new()
+        }
+        StdinShape::Opaque => {
+            if request.launch_envelope.is_some() {
+                return Err(BuildError::OpaqueStdinWithEnvelope(descriptor_id));
+            }
+            Vec::new()
+        }
+    };
 
     // 3. Record stdout shape from descriptor.
     let stdout_shape = descriptor.stdout.shape;
@@ -251,7 +275,28 @@ pub fn build_subprocess_spec(
         item_ref: request.item_ref.clone(),
         thread_id: request.thread_id.to_string(),
         project_path: request.project_path.to_path_buf(),
-        sandbox: None,
+    })
+}
+
+/// Serialize the exact method-call wire only when the verified descriptor
+/// declares that stdin shape. Method dispatch and launch augmentations share
+/// this helper so neither can manually contradict the signed protocol.
+pub fn build_method_call_stdin(
+    descriptor: &ProtocolDescriptor,
+    envelope: &MethodCallEnvelope,
+) -> Result<Vec<u8>, BuildError> {
+    let descriptor_id = format!("{}:{}", descriptor.category, descriptor.name);
+    if descriptor.stdin.shape != StdinShape::MethodCallEnvelope {
+        return Err(BuildError::WrongMethodStdinShape(descriptor_id));
+    }
+    envelope
+        .validate_schema_version()
+        .map_err(|reason| BuildError::InvalidMethodEnvelope {
+            descriptor: descriptor_id,
+            reason,
+        })?;
+    serde_json::to_vec(envelope).map_err(|error| {
+        BuildError::StdinSerialize(format!("method_call_envelope serialize failed: {error}"))
     })
 }
 
@@ -264,19 +309,19 @@ mod tests {
     use crate::protocols::descriptor::{ProtocolLifecycle, ProtocolStdin, ProtocolStdout};
     use std::path::PathBuf;
 
-    /// Helper to create a minimal runtime_v1-like descriptor.
-    fn runtime_v1_descriptor() -> ProtocolDescriptor {
+    /// Helper to create a minimal runtime-like descriptor.
+    fn runtime_descriptor() -> ProtocolDescriptor {
         ProtocolDescriptor {
             kind: "protocol".to_string(),
-            name: "runtime_v1".to_string(),
+            name: "runtime".to_string(),
             category: "ryeos/core".to_string(),
             abi_version: "v1".to_string(),
             description: Some("test descriptor".to_string()),
             stdin: ProtocolStdin {
-                shape: StdinShape::LaunchEnvelopeV1,
+                shape: StdinShape::LaunchEnvelope,
             },
             stdout: ProtocolStdout {
-                shape: StdoutShape::RuntimeResultV1,
+                shape: StdoutShape::RuntimeResult,
                 mode: crate::protocol_vocabulary::StdoutMode::Terminal,
             },
             env_injections: vec![
@@ -294,7 +339,7 @@ mod tests {
                 },
                 EnvInjection {
                     name: "RYEOSD_PROJECT_PATH".to_string(),
-                    source: EnvInjectionSource::ProjectPath,
+                    source: EnvInjectionSource::CallbackProjectPath,
                 },
             ],
             capabilities: ProtocolCapabilities {
@@ -305,11 +350,11 @@ mod tests {
             lifecycle: ProtocolLifecycle {
                 mode: LifecycleMode::Managed,
             },
-            callback_channel: CallbackChannel::HttpV1,
+            callback_channel: CallbackChannel::Http,
         }
     }
 
-    /// Helper to create a minimal tool descriptor (parameters_json stdin).
+    /// Helper to create a minimal callback-free tool descriptor.
     fn tool_descriptor() -> ProtocolDescriptor {
         ProtocolDescriptor {
             kind: "protocol".to_string(),
@@ -318,14 +363,14 @@ mod tests {
             abi_version: "v1".to_string(),
             description: None,
             stdin: ProtocolStdin {
-                shape: StdinShape::ParametersJson,
+                shape: StdinShape::Opaque,
             },
             stdout: ProtocolStdout {
                 shape: StdoutShape::OpaqueBytes,
                 mode: crate::protocol_vocabulary::StdoutMode::Terminal,
             },
             env_injections: vec![EnvInjection {
-                name: "RYEOSD_PROJECT_PATH".to_string(),
+                name: "RYE_PROJECT_PATH".to_string(),
                 source: EnvInjectionSource::ProjectPath,
             }],
             capabilities: ProtocolCapabilities {
@@ -349,7 +394,7 @@ mod tests {
 
     /// Returns owned values so lifetimes work in tests.
     fn make_test_fixtures() -> (CanonicalRef, CallbackBindings, Vec<String>, LaunchEnvelope) {
-        let item_ref = CanonicalRef::parse("runtime:spawn").unwrap();
+        let item_ref = CanonicalRef::parse("runtime:ryeos/core/test-runtime").unwrap();
         let cb = CallbackBindings {
             socket_path: "/tmp/ryeos-callback.sock".to_string(),
             token: "tok-test-123".to_string(),
@@ -370,15 +415,14 @@ mod tests {
             args,
             cwd: Path::new("/project"),
             project_path: Path::new("/project"),
+            callback_project_path: Path::new("/project-state"),
             thread_id: "T-test-thread",
             callback: Some(callback),
-            vault_bindings: &[],
             launch_envelope: None, // set per-test
             timeout: Duration::from_secs(120),
             acting_principal: "fp:abc123",
             cas_root: Path::new("/cas/root"),
-            app_root: Path::new("/var/lib/ryeos"),
-            thread_auth_token: "tat-test-123",
+            thread_auth_token: Some("tat-test-123"),
         }
     }
 
@@ -395,7 +439,7 @@ mod tests {
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
-                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
                 state_root: None,
             },
             request: EnvelopeRequest {
@@ -416,13 +460,15 @@ mod tests {
             },
             resolution: ResolutionOutput {
                 root: ResolvedAncestor {
-                    requested_id: "runtime:spawn".to_string(),
-                    resolved_ref: "runtime:spawn".to_string(),
+                    requested_id: "runtime:ryeos/core/test-runtime".to_string(),
+                    resolved_ref: "runtime:ryeos/core/test-runtime".to_string(),
                     source_path: PathBuf::from("/project/.ai/runtimes/ryeos/core/runtime.yaml"),
+                    source_space: crate::contracts::ItemSpace::Project,
                     trust_class: TrustClass::Unsigned,
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
                     raw_content: String::new(),
+                    source_content_digest: "0".repeat(64),
                     raw_content_digest: "0".repeat(64),
                 },
                 ancestors: vec![],
@@ -433,7 +479,7 @@ mod tests {
                 referenced_items: vec![],
             },
             inventory: HashMap::new(),
-            provider_snapshot: None,
+            runtime_data: BTreeMap::new(),
         }
     }
 
@@ -451,8 +497,8 @@ mod tests {
     }
 
     #[test]
-    fn launch_envelope_v1_without_envelope_fails_loud() {
-        let desc = runtime_v1_descriptor();
+    fn launch_envelope_without_envelope_fails_loud() {
+        let desc = runtime_descriptor();
         let (item_ref, cb, args, _envelope) = make_test_fixtures();
         let req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
         let result = build_subprocess_spec(&desc, &req);
@@ -463,7 +509,7 @@ mod tests {
     fn duplicate_env_key_fails_loud() {
         let mut desc = tool_descriptor();
         desc.env_injections.push(EnvInjection {
-            name: "RYEOSD_PROJECT_PATH".to_string(), // duplicate!
+            name: "RYE_PROJECT_PATH".to_string(), // duplicate!
             source: EnvInjectionSource::ProjectPath,
         });
         let (item_ref, cb, args, _envelope) = make_test_fixtures();
@@ -483,8 +529,8 @@ mod tests {
     }
 
     #[test]
-    fn runtime_v1_descriptor_produces_expected_spec() {
-        let desc = runtime_v1_descriptor();
+    fn runtime_descriptor_produces_expected_spec() {
+        let desc = runtime_descriptor();
         let (item_ref, cb, args, envelope) = make_test_fixtures();
         let mut req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);
         req.launch_envelope = Some(&envelope);
@@ -505,11 +551,11 @@ mod tests {
         assert_eq!(env_map["RYEOSD_SOCKET_PATH"], "/tmp/ryeos-callback.sock");
         assert_eq!(env_map["RYEOSD_CALLBACK_TOKEN"], "tok-test-123");
         assert_eq!(env_map["RYEOSD_THREAD_ID"], "T-test-thread");
-        assert_eq!(env_map["RYEOSD_PROJECT_PATH"], "/project");
+        assert_eq!(env_map["RYEOSD_PROJECT_PATH"], "/project-state");
 
         // Assert callback_channel and stdout_shape propagated.
-        assert_eq!(spec.callback_channel, CallbackChannel::HttpV1);
-        assert_eq!(spec.stdout_shape, StdoutShape::RuntimeResultV1);
+        assert_eq!(spec.callback_channel, CallbackChannel::Http);
+        assert_eq!(spec.stdout_shape, StdoutShape::RuntimeResult);
 
         // Assert stdin parses back as the launch envelope.
         let parsed: LaunchEnvelope =
@@ -528,7 +574,7 @@ mod tests {
 
         // Assert env contains only the 1 declared key.
         assert_eq!(spec.env.len(), 1);
-        assert_eq!(spec.env[0].0, "RYEOSD_PROJECT_PATH");
+        assert_eq!(spec.env[0].0, "RYE_PROJECT_PATH");
 
         // Assert no stdin data.
         assert!(spec.stdin.is_empty());
@@ -544,7 +590,7 @@ mod tests {
 
     #[test]
     fn no_callback_bindings_when_injection_needs_it_fails() {
-        let desc = runtime_v1_descriptor();
+        let desc = runtime_descriptor();
         let (item_ref, _cb, args, envelope) = make_test_fixtures();
         let cb = make_callback_bindings();
         let mut req = make_runtime_request_from_fixtures(&item_ref, &args, &cb);

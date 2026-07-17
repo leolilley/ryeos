@@ -13,6 +13,7 @@ use anyhow::Result;
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::handler_context::HandlerContext;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -34,6 +35,12 @@ pub struct ObjectEntry {
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// Server-issued durable publication capability. Omit only on the first
+    /// batch; the server mints and returns one before storing any CAS bytes.
+    #[serde(default)]
+    pub staging_id: Option<String>,
+    /// Canonical publication target for this upload session.
+    pub project_path: String,
     #[serde(default)]
     pub blobs: Vec<BlobEntry>,
     #[serde(default)]
@@ -46,13 +53,53 @@ pub struct Request {
 /// generous body cap.
 pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 
-pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    let cas = state.cas_store()?;
-
+pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
+    ctx.require_verified()
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let authority = state
+        .state_store
+        .with_state_db(|db| db.pinned_authority())?;
+    let cas_guard = authority.acquire_shared_guard()?;
+    let cas = authority.cas_store()?;
     let _permit = state
         .write_barrier
         .try_acquire()
         .map_err(|e| anyhow::anyhow!("cannot acquire CAS write permit: {e}"))?;
+    let recovery = authority.require_recovery()?;
+    let canonical_project_path =
+        ryeos_executor::execution::project_source::canonical_project_ref(&req.project_path)
+            .map_err(|error| anyhow::anyhow!("objects.put: {error}"))?;
+    let principal_key = ryeos_state::refs::principal_storage_key(&ctx.fingerprint)?;
+    let project_hash = lillux::sha256_hex(canonical_project_path.as_bytes());
+    let publication_key =
+        ryeos_state::DurableCasPublicationKey::project_head(principal_key, &project_hash)?;
+    let mut stage = match req.staging_id.as_deref() {
+        Some(staging_id) => {
+            let stage = recovery.open_durable_cas_upload_admitted(
+                &cas_guard,
+                staging_id,
+                &ctx.fingerprint,
+            )?;
+            let expected = stage.expected_previous_hash().map(str::to_string);
+            stage.ensure_publication_contract(&publication_key, expected.as_deref())?;
+            stage
+        }
+        None => {
+            let expected_previous_hash = state
+                .state_store
+                .with_state_db(|db| db.read_project_head(principal_key, &project_hash))?;
+            recovery.begin_durable_cas_upload_admitted(
+                &cas_guard,
+                &ctx.fingerprint,
+                "project-push",
+                &publication_key,
+                expected_previous_hash.as_deref(),
+            )?
+        }
+    };
+    if let Some(target) = stage.admitted_target_hash() {
+        anyhow::bail!("durable upload session is already admitted for publication target {target}");
+    }
 
     let mut blob_hashes = Vec::with_capacity(req.blobs.len());
     for blob in &req.blobs {
@@ -63,17 +110,19 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&blob.data)
             .map_err(|e| anyhow::anyhow!("invalid base64 in blob data: {e}"))?;
-        let hash = cas.store_blob(&bytes)?;
+        let hash = stage.store_blob(&cas_guard, &cas, &bytes)?;
         blob_hashes.push(hash);
     }
 
     let mut object_hashes = Vec::with_capacity(req.objects.len());
     for obj in &req.objects {
-        let hash = cas.store_object(&obj.value)?;
+        let hash = stage.store_object(&cas_guard, &cas, &obj.value)?;
         object_hashes.push(hash);
     }
 
     Ok(serde_json::json!({
+        "staging_id": stage.staging_id(),
+        "expected_previous_hash": stage.expected_previous_hash(),
         "blob_hashes": blob_hashes,
         "object_hashes": object_hashes,
     }))
@@ -84,10 +133,10 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
     endpoint: "objects.put",
     availability: ServiceAvailability::DaemonOnly,
     required_caps: &["ryeos.execute.service.objects/put"],
-    handler: |params, _ctx, state| {
+    handler: |params, ctx, state| {
         Box::pin(async move {
             let req: Request = crate::handler_error::parse_request(params)?;
-            handle(req, state).await
+            handle(req, ctx, state).await
         })
     },
 };

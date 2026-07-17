@@ -1,8 +1,13 @@
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use serde_json::json;
 
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
-use ryeos_app::process::pgid_alive;
+use ryeos_app::process::{
+    execution_group_liveness, execution_identity_is_current_boot, execution_liveness,
+    kill_by_action, resolve_shutdown_action, IdentityLiveness,
+};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
@@ -36,32 +41,69 @@ fn continuation_shape(thread: &ThreadDetail) -> bool {
 ///     duplicate relaunch would spawn a second child),
 ///   - NO `native_resume` policy — set only once the launch runs (a launched-then-
 ///     crashed child carries it and is recovered by the native-resume path),
-///   - it is some non-cleared waiter's child chain root.
+///   - complete current-format resume, sealed-root, and parent authority whose
+///     identities agree with the authoritative row, and
+///   - an exact sealed-authority match with its non-cleared waiter slot.
 ///
 /// A row failing any clause is left to the normal `reconcile` / native-resume /
 /// finalize paths — never skipped here and never relaunched.
-fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> bool {
+fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> Result<bool> {
     if thread.status != ThreadStatus::Created.as_str() {
-        return false;
+        return Ok(false);
     }
     if thread.runtime.pgid.is_some() {
-        return false;
+        return Ok(false);
     }
-    if thread
-        .runtime
-        .launch_metadata
-        .as_ref()
-        .and_then(|m| m.native_resume.as_ref())
-        .is_some()
+    let Some(metadata) = thread.runtime.launch_metadata.as_ref() else {
+        return Ok(false);
+    };
+    if metadata.native_resume.is_some() {
+        return Ok(false);
+    }
+    let Some(waiter) = state
+        .state_store
+        .get_follow_waiter_by_child_chain(&thread.chain_root_id)?
+    else {
+        return Ok(false);
+    };
+    let Some(slot) = waiter
+        .children
+        .iter()
+        .find(|child| child.child_thread_id == thread.thread_id)
+    else {
+        return Ok(false);
+    };
+    let (Some(resume), Some(sealed), Some(parent_context)) = (
+        metadata.resume_context.as_ref(),
+        metadata.sealed_root_request.as_ref(),
+        metadata.follow_parent_context.as_ref(),
+    ) else {
+        // Current-format child birth installs all three values before the
+        // authoritative root becomes visible. A partial row is not launch
+        // authority and must fall through to ordinary reconciliation.
+        return Ok(false);
+    };
+    if slot.child_chain_root_id != thread.chain_root_id
+        || resume.kind != thread.kind
+        || resume.item_ref != thread.item_ref
+        || resume.item_ref != slot.item_ref
+        || resume.launch_mode != thread.launch_mode
+        || resume.launch_mode != "detached"
+        || resume.executor_ref.as_deref() != Some(sealed.executor_ref())
+        || resume.runtime_ref.as_deref() != Some(sealed.runtime_ref())
+        || sealed.item_ref() != slot.item_ref
+        || parent_context.parent_thread_id != waiter.parent_thread_id
     {
-        return false;
+        return Ok(false);
     }
-    matches!(
-        state
-            .state_store
-            .get_follow_waiter_by_child_chain(&thread.chain_root_id),
-        Ok(Some(w)) if w.children.iter().any(|c| c.child_thread_id == thread.thread_id)
-    )
+    if serde_json::to_value(sealed)? != serde_json::to_value(&slot.sealed_root_request)? {
+        anyhow::bail!(
+            "follow child {} sealed launch authority differs from waiter {} slot",
+            thread.thread_id,
+            waiter.follow_key
+        );
+    }
+    Ok(true)
 }
 
 /// Machine-only proof that `successor` is an autonomous MACHINE continuation of
@@ -87,7 +129,8 @@ fn is_operator_successor(successor: &ThreadDetail, upstream: &ThreadDetail) -> b
         && upstream.successor_thread_id.as_deref() == Some(successor.thread_id.as_str())
 }
 
-/// Decision the reconciler makes for a single dead thread.
+/// Decision the reconciler makes for a single interrupted thread after any
+/// attached prior-daemon execution has been terminated or safely cleared.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResumeDecision {
     /// No `native_resume` policy on the persisted spec — finalize.
@@ -164,12 +207,31 @@ pub struct ResumeIntent {
     pub chain_root_id: String,
     pub resume_context: ResumeContext,
     /// Status of the thread row at reconcile time. The dispatcher uses
-    /// this to decide whether to call `mark_running` after attaching
-    /// the new spawn — `created` rows have never been transitioned,
-    /// and `drain_running_threads` only sees `running` rows.
+    /// this to decide whether to call `mark_running` after attaching the new
+    /// spawn: `created` rows have never made that transition, while resumed
+    /// `running` rows already have.
     pub prior_status: String,
     /// Which launch path to take post-listener.
     pub kind: ResumeKind,
+}
+
+/// Complete result of one indexed active-thread reconciliation pass.
+/// `active_thread_ids` is the exact initial `created|running` set, including
+/// rows classified into follow/window ownership rather than a resume intent.
+#[derive(Debug, Clone)]
+pub struct ActiveThreadReconcileReport {
+    pub active_thread_ids: BTreeSet<String>,
+    pub resume_intents: Vec<ResumeIntent>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveReconcileMode {
+    /// No process from the prior daemon can retain callback authority. Prove
+    /// its identity, stop it, then classify the row for resume/finalization.
+    Startup,
+    /// Processes launched by this daemon remain owned. Only rows with no live
+    /// process and no active launch claim are re-driven.
+    Live,
 }
 
 /// Finalize a dead thread as failed. Centralized so the `Finalize` /
@@ -181,7 +243,7 @@ fn finalize_dead(
     prior_status: &str,
     extra: Option<(&'static str, serde_json::Value)>,
     reconciled: &mut usize,
-) {
+) -> Result<()> {
     let (outcome_code, error_extra) = match extra {
         Some((code, val)) => (code, Some(val)),
         None => ("daemon_reconciled", None),
@@ -194,7 +256,7 @@ fn finalize_dead(
     if let Some(extra) = error_extra {
         error_obj["details"] = extra;
     }
-    if let Err(err) = state.threads.finalize_thread(&ThreadFinalizeParams {
+    state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: "failed".to_string(),
         outcome_code: Some(outcome_code.to_string()),
@@ -204,24 +266,73 @@ fn finalize_dead(
         artifacts: Vec::new(),
         final_cost: None,
         summary_json: None,
+    })?;
+    *reconciled += 1;
+    Ok(())
+}
+
+fn finalize_recovered_stop(
+    state: &AppState,
+    thread_id: &str,
+    prior_status: &str,
+    stop_intent: ryeos_app::state_store::StopIntent,
+    reconciled: &mut usize,
+) {
+    let terminal_status = match stop_intent {
+        ryeos_app::state_store::StopIntent::Cancel => "cancelled",
+        ryeos_app::state_store::StopIntent::Kill => "killed",
+    };
+    if let Err(error) = state.threads.finalize_thread(&ThreadFinalizeParams {
+        thread_id: thread_id.to_string(),
+        status: terminal_status.to_string(),
+        outcome_code: Some(terminal_status.to_string()),
+        result: None,
+        error: Some(json!({
+            "reason": "recovered_durable_stop_request",
+            "stop_intent": stop_intent.as_str(),
+            "reconciled_from_status": prior_status,
+        })),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
     }) {
-        tracing::warn!(
-            thread_id,
-            error = %err,
-            "failed to finalize thread"
-        );
+        tracing::warn!(thread_id, error = %error, "failed to finalize recovered stop request");
     } else {
         *reconciled += 1;
     }
 }
 
+fn dead_identity_safe_to_clear(
+    identity: &ryeos_app::process::ExecutionProcessIdentity,
+    thread_id: &str,
+) -> bool {
+    match execution_identity_is_current_boot(identity) {
+        Ok(false) => true,
+        Ok(true) => {
+            tracing::warn!(
+                thread_id,
+                "dead same-boot group leader cannot prove descendant group emptiness; quarantining until reboot or outer-worker cleanup"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                thread_id,
+                error = %error,
+                "cannot compare process-identity boot; quarantining"
+            );
+            false
+        }
+    }
+}
+
 /// Reconcile daemon state after restart.
 ///
-/// Three phases:
-/// 1. Catch up projection from CAS (repair any projection drift)
-/// 2. Find threads left in non-terminal status whose processes are dead
+/// Two phases, against an already-current projection:
+/// 1. Find threads left in non-terminal status whose processes are dead
 ///    (or whose spawn was interrupted before pid/pgid attach)
-/// 3. For each: either finalize-as-failed, or collect a `ResumeIntent`
+/// 2. For each: either finalize-as-failed, or collect a `ResumeIntent`
 ///    that the caller dispatches AFTER the daemon's listeners are bound
 ///
 /// Returns the `ResumeIntent`s the caller must dispatch. The reconciler
@@ -229,47 +340,46 @@ fn finalize_dead(
 /// daemon's listener startup, and a resumed subprocess making its first
 /// callback before the UDS / HTTP server is bound would fail.
 #[tracing::instrument(name = "state:reconcile", skip(state))]
-pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
-    // Catch up projection from CAS.
-    let cas_root = state.state_store.cas_root()?;
-    let refs_root = state.state_store.refs_root()?;
+pub async fn reconcile_active_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Startup).await
+}
 
-    state.state_store.with_projection(|projection| {
-        let catch_up =
-            ryeos_state::rebuild::catch_up_projection(projection, &cas_root, &refs_root)?;
+/// Mid-life counterpart used by the supervised periodic recovery task. It
+/// never clears claims or stops a verified live process owned by this daemon.
+pub async fn reconcile_live_threads(state: &AppState) -> Result<ActiveThreadReconcileReport> {
+    reconcile_active_threads_inner(state, ActiveReconcileMode::Live).await
+}
 
-        if catch_up.chains_updated > 0 {
-            tracing::info!(
-                chains_checked = catch_up.chains_checked,
-                chains_updated = catch_up.chains_updated,
-                threads_restored = catch_up.threads_restored,
-                events_projected = catch_up.events_projected,
-                "projection caught up from CAS"
-            );
-        }
-
-        Ok::<_, anyhow::Error>(())
-    })?;
-
-    // Clear stale launch claims BEFORE collecting intents: a restart proves every
-    // prior in-process launcher is gone, so any surviving (even unexpired) claim is
-    // stale. Without this, a `created` successor whose launcher crashed after
-    // claiming but before `mark_running` would have its reconcile relaunch blocked
-    // by `AlreadyClaimed` until the lease expired — stranding accepted work.
-    match state.state_store.clear_all_launch_claims() {
-        Ok(n) if n > 0 => tracing::info!(cleared = n, "cleared stale launch claims at startup"),
-        Ok(_) => {}
-        Err(err) => tracing::warn!(error = %err, "failed to clear stale launch claims at startup"),
-    }
-
+async fn reconcile_active_threads_inner(
+    state: &AppState,
+    mode: ActiveReconcileMode,
+) -> Result<ActiveThreadReconcileReport> {
     // Orphan thread cleanup.
-    let running_threads = state
+    let mut running_threads = state
         .state_store
         .list_threads_by_status(&["created", "running"])?;
+    let active_thread_ids = running_threads
+        .iter()
+        .map(|thread| thread.thread_id.clone())
+        .collect::<BTreeSet<_>>();
+    for thread_id in state.state_store.list_attached_thread_ids()? {
+        if running_threads
+            .iter()
+            .any(|thread| thread.thread_id == thread_id)
+        {
+            continue;
+        }
+        if let Some(thread) = state.state_store.get_thread(&thread_id)? {
+            running_threads.push(thread);
+        }
+    }
 
     if running_threads.is_empty() {
         tracing::debug!("no orphaned threads");
-        return Ok(Vec::new());
+        return Ok(ActiveThreadReconcileReport {
+            active_thread_ids,
+            resume_intents: Vec::new(),
+        });
     }
 
     tracing::info!(
@@ -281,20 +391,214 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
     let mut intents: Vec<ResumeIntent> = Vec::new();
 
     for thread in &running_threads {
-        let pgid = thread.runtime.pgid;
-
-        // A thread is "dead" when:
-        //  - it has a pgid and that pgid is no longer alive, OR
-        //  - it has NO pid/pgid: spawn was interrupted before attach
-        //    (created/running but never made it to attach_process).
-        // Both cases route through the same decide_resume path.
-        let process_dead = match pgid {
-            Some(p) => !pgid_alive(p),
-            None => true,
-        };
-
-        if !process_dead {
+        let kind_profile = state.threads.kind_profiles().get(&thread.kind);
+        if is_daemon_owned_non_execution_thread(thread, kind_profile) {
+            tracing::debug!(
+                thread_id = %thread.thread_id,
+                kind = %thread.kind,
+                status = %thread.status,
+                "daemon-owned non-execution thread — leaving to its lifecycle owner"
+            );
             continue;
+        }
+
+        let pgid = thread.runtime.pgid;
+        let identity = thread.runtime.process_identity.as_ref();
+        let target_liveness = identity
+            .map(execution_liveness)
+            .unwrap_or(IdentityLiveness::DeadOrStale);
+        let group_liveness = identity
+            .map(execution_group_liveness)
+            .unwrap_or(IdentityLiveness::DeadOrStale);
+
+        // A live-mode launch claim is durable ownership of the attach window.
+        // Do not mistake a current daemon's claimed `created` row for a crashed
+        // spawn merely because it has not attached a pgid yet.
+        if mode == ActiveReconcileMode::Live
+            && state
+                .state_store
+                .get_launch_claim(&thread.thread_id)?
+                .is_some()
+        {
+            continue;
+        }
+
+        // Explicit cancellation/kill intent survives a daemon crash. Recover it
+        // before any normal resume decision so a stop-requested row can never
+        // launch a replacement. Exact pidfd group signalling fails closed.
+        if thread.runtime.stop_requested_at_ms.is_some() {
+            let stop_intent = thread
+                .runtime
+                .stop_intent
+                .expect("runtime decode enforces complete stop tombstones");
+            if let Some(identity) = identity {
+                if group_liveness == IdentityLiveness::Alive {
+                    let action = match stop_intent {
+                        ryeos_app::state_store::StopIntent::Kill => {
+                            ryeos_app::process::ShutdownAction::Hard
+                        }
+                        ryeos_app::state_store::StopIntent::Cancel => resolve_shutdown_action(
+                            thread
+                                .runtime
+                                .launch_metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.cancellation_mode),
+                        ),
+                    };
+                    let result = kill_by_action(identity, action);
+                    if !result.success {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            method = result.method,
+                            "durable stop recovery could not prove process-group termination"
+                        );
+                        continue;
+                    }
+                } else if group_liveness == IdentityLiveness::Unavailable
+                    || target_liveness != IdentityLiveness::DeadOrStale
+                {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        target_liveness = ?target_liveness,
+                        group_liveness = ?group_liveness,
+                        "durable stop process liveness is unavailable; failing closed"
+                    );
+                    continue;
+                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                    continue;
+                }
+                match state
+                    .state_store
+                    .clear_thread_process_if_matches(&thread.thread_id, identity)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            "durable stop identity changed before compare-and-clear"
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            error = %error,
+                            "failed to clear durable stop identity"
+                        );
+                        continue;
+                    }
+                }
+            }
+            if !ryeos_app::state_store::is_terminal_status(&thread.status) {
+                finalize_recovered_stop(
+                    state,
+                    &thread.thread_id,
+                    &thread.status,
+                    stop_intent,
+                    &mut reconciled,
+                );
+            }
+            continue;
+        }
+
+        if ryeos_app::state_store::is_terminal_status(&thread.status) {
+            if let Some(identity) = identity {
+                if group_liveness == IdentityLiveness::Alive {
+                    let result = kill_by_action(identity, ryeos_app::process::ShutdownAction::Hard);
+                    if !result.success {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            method = result.method,
+                            "failed to drain terminal attached process during reconcile"
+                        );
+                        continue;
+                    }
+                } else if group_liveness == IdentityLiveness::Unavailable
+                    || target_liveness != IdentityLiveness::DeadOrStale
+                {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        target_liveness = ?target_liveness,
+                        group_liveness = ?group_liveness,
+                        "terminal process liveness is unavailable; failing closed"
+                    );
+                    continue;
+                } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
+                    continue;
+                }
+                if !state
+                    .state_store
+                    .clear_thread_process_if_matches(&thread.thread_id, identity)?
+                {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        "terminal identity changed before reconcile compare-and-clear"
+                    );
+                }
+            }
+            continue;
+        }
+
+        // The single-daemon state lock proves an exact still-live attached group
+        // belongs to the interrupted prior daemon instance. Tear that group down
+        // through its verified pidfd before relaunching; never adopt an orphan
+        // whose stdout/wait ownership was lost in the crash. If the same-boot
+        // leader is already gone, descendants cannot be proven absent and the
+        // conservative quarantine below remains mandatory.
+        if let Some(identity) = identity {
+            if mode == ActiveReconcileMode::Live && group_liveness == IdentityLiveness::Alive {
+                continue;
+            }
+            match group_liveness {
+                IdentityLiveness::Alive => {
+                    let result = kill_by_action(identity, ryeos_app::process::ShutdownAction::Hard);
+                    if !result.success {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            method = result.method,
+                            "startup could not terminate exact orphan process group"
+                        );
+                        continue;
+                    }
+                }
+                IdentityLiveness::DeadOrStale => {
+                    if target_liveness != IdentityLiveness::DeadOrStale
+                        || !dead_identity_safe_to_clear(identity, &thread.thread_id)
+                    {
+                        continue;
+                    }
+                }
+                IdentityLiveness::Unavailable => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        target_liveness = ?target_liveness,
+                        group_liveness = ?group_liveness,
+                        "process liveness is unavailable; refusing reconcile resume"
+                    );
+                    continue;
+                }
+            }
+            match state
+                .state_store
+                .clear_thread_process_if_matches(&thread.thread_id, identity)
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        "attached identity changed before reconcile compare-and-clear"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        error = %error,
+                        "failed to clear terminated process identity before reconcile"
+                    );
+                    continue;
+                }
+            }
         }
 
         let interrupted_spawn = pgid.is_none();
@@ -315,88 +619,83 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     .upstream_thread_id
                     .as_deref()
                     .expect("continuation_shape implies upstream is Some");
-                if let Ok(Some(src)) = state.threads.get_thread(upstream_id) {
-                    // A follow-resume successor has the same shape as a stranded
-                    // machine continuation (source `continued`, points back), but it
-                    // must NOT be auto-launched here — it waits for the followed
-                    // child's result and is driven by the follow-resume path. Leave
-                    // it pending. Fail closed: a marker-read error must not let a
-                    // follow-resume successor slip into machine launch.
-                    match state
+                let src = state.threads.get_thread(upstream_id)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "continuation successor {} references missing upstream {upstream_id}",
+                        thread.thread_id
+                    )
+                })?;
+                // A follow-resume successor has the same shape as a stranded
+                // machine continuation (source `continued`, points back), but it
+                // must NOT be auto-launched here — it waits for the followed
+                // child's result and is driven by the follow-resume path. Leave
+                // it pending. Fail closed: a marker-read error must not let a
+                // follow-resume successor slip into machine launch.
+                match state
+                    .state_store
+                    .is_follow_resume_successor(upstream_id, &thread.thread_id)
+                {
+                    Ok(true) => {
+                        tracing::info!(
+                            thread_id = %thread.thread_id,
+                            "follow-resume successor — leaving pending, not a machine continuation"
+                        );
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(err) => return Err(err),
+                }
+                if is_machine_successor(thread, &src) {
+                    // Autonomous continuation is always-on, bounded by the
+                    // chain-depth cap enforced at create time (an unbounded
+                    // chain can no longer form), so reconcile recovers a
+                    // stranded machine successor unconditionally. Collect the
+                    // intent only — `launch_successor` (post-listener) owns the
+                    // lease claim AND the attempt budget.
+                    let resume_context = lm
+                        .and_then(|m| m.resume_context.clone())
+                        .expect("continuation_shape implies resume_context is Some");
+                    tracing::info!(
+                        thread_id = %thread.thread_id,
+                        "machine continuation successor stranded by crash — collecting launch intent"
+                    );
+                    intents.push(ResumeIntent {
+                        thread_id: thread.thread_id.clone(),
+                        chain_root_id: thread.chain_root_id.clone(),
+                        resume_context,
+                        prior_status: thread.status.clone(),
+                        kind: ResumeKind::Continuation,
+                    });
+                    reconciled += 1;
+                    continue;
+                }
+                // OPERATOR follow-up stranded by a crash before its launch task
+                // ran. NOT gated — accepted operator work must be recovered, not
+                // lost. Confirm via the persisted request fingerprint (only
+                // operator `create_or_get` records one) so we never mistake some
+                // other completed→created lineage for a follow-up.
+                if is_operator_successor(thread, &src)
+                    && state
                         .state_store
-                        .is_follow_resume_successor(upstream_id, &thread.thread_id)
-                    {
-                        Ok(true) => {
-                            tracing::info!(
-                                thread_id = %thread.thread_id,
-                                "follow-resume successor — leaving pending, not a machine continuation"
-                            );
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(err) => {
-                            tracing::warn!(
-                                thread_id = %thread.thread_id,
-                                error = %err,
-                                "follow-resume marker read failed — leaving pending"
-                            );
-                            continue;
-                        }
-                    }
-                    if is_machine_successor(thread, &src) {
-                        // Autonomous continuation is always-on, bounded by the
-                        // chain-depth cap enforced at create time (an unbounded
-                        // chain can no longer form), so reconcile recovers a
-                        // stranded machine successor unconditionally. Collect the
-                        // intent only — `launch_successor` (post-listener) owns the
-                        // lease claim AND the attempt budget.
-                        let resume_context = lm
-                            .and_then(|m| m.resume_context.clone())
-                            .expect("continuation_shape implies resume_context is Some");
-                        tracing::info!(
-                            thread_id = %thread.thread_id,
-                            "machine continuation successor stranded by crash — collecting launch intent"
-                        );
-                        intents.push(ResumeIntent {
-                            thread_id: thread.thread_id.clone(),
-                            chain_root_id: thread.chain_root_id.clone(),
-                            resume_context,
-                            prior_status: thread.status.clone(),
-                            kind: ResumeKind::Continuation,
-                        });
-                        reconciled += 1;
-                        continue;
-                    }
-                    // OPERATOR follow-up stranded by a crash before its launch task
-                    // ran. NOT gated — accepted operator work must be recovered, not
-                    // lost. Confirm via the persisted request fingerprint (only
-                    // operator `create_or_get` records one) so we never mistake some
-                    // other completed→created lineage for a follow-up.
-                    if is_operator_successor(thread, &src)
-                        && state
-                            .state_store
-                            .get_continuation_fingerprint(upstream_id)
-                            .ok()
-                            .flatten()
-                            .is_some()
-                    {
-                        let resume_context = lm
-                            .and_then(|m| m.resume_context.clone())
-                            .expect("continuation_shape implies resume_context is Some");
-                        tracing::info!(
-                            thread_id = %thread.thread_id,
-                            "operator follow-up successor stranded by crash — collecting launch intent"
-                        );
-                        intents.push(ResumeIntent {
-                            thread_id: thread.thread_id.clone(),
-                            chain_root_id: thread.chain_root_id.clone(),
-                            resume_context,
-                            prior_status: thread.status.clone(),
-                            kind: ResumeKind::OperatorContinuation,
-                        });
-                        reconciled += 1;
-                        continue;
-                    }
+                        .get_continuation_fingerprint(upstream_id)?
+                        .is_some()
+                {
+                    let resume_context = lm
+                        .and_then(|m| m.resume_context.clone())
+                        .expect("continuation_shape implies resume_context is Some");
+                    tracing::info!(
+                        thread_id = %thread.thread_id,
+                        "operator follow-up successor stranded by crash — collecting launch intent"
+                    );
+                    intents.push(ResumeIntent {
+                        thread_id: thread.thread_id.clone(),
+                        chain_root_id: thread.chain_root_id.clone(),
+                        resume_context,
+                        prior_status: thread.status.clone(),
+                        kind: ResumeKind::OperatorContinuation,
+                    });
+                    reconciled += 1;
+                    continue;
                 }
             }
         }
@@ -405,7 +704,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         // window) has no native_resume policy yet, so `decide_resume` below would
         // finalize it failed. Leave it to `reconcile_follow`, which relaunches it
         // fresh via `launch_follow_child`.
-        if is_pending_follow_child(state, thread) {
+        if is_pending_follow_child(state, thread)? {
             tracing::info!(
                 thread_id = %thread.thread_id,
                 "follow child stranded pre-launch — leaving for reconcile_follow relaunch"
@@ -421,8 +720,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         if thread.status == ThreadStatus::Created.as_str()
             && state
                 .state_store
-                .launch_window_is_queued(&thread.chain_root_id)
-                .unwrap_or(false)
+                .launch_window_is_queued(&thread.chain_root_id)?
         {
             tracing::info!(
                 thread_id = %thread.thread_id,
@@ -446,7 +744,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     &thread.status,
                     Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
                     &mut reconciled,
-                );
+                )?;
                 continue;
             }
         };
@@ -477,7 +775,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                     &thread.status,
                     extra,
                     &mut reconciled,
-                );
+                )?;
             }
             ResumeDecision::MissingResumeContext => {
                 tracing::warn!(
@@ -498,7 +796,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         json!({"reason": "no resume_context in launch_metadata"}),
                     )),
                     &mut reconciled,
-                );
+                )?;
             }
             ResumeDecision::Exhausted { attempts, max } => {
                 tracing::warn!(
@@ -517,7 +815,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         json!({"attempts": attempts, "max": max}),
                     )),
                     &mut reconciled,
-                );
+                )?;
             }
             ResumeDecision::Resume { next_attempt, max } => {
                 // Persist the bumped counter BEFORE scheduling the
@@ -537,7 +835,7 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
                         &thread.status,
                         Some(("resume_counter_io_error", json!({"error": err.to_string()}))),
                         &mut reconciled,
-                    );
+                    )?;
                     continue;
                 }
                 // Pull the resume_context for the dispatcher.
@@ -570,7 +868,26 @@ pub async fn reconcile(state: &AppState) -> Result<Vec<ResumeIntent>> {
         resume_intents = intents.len(),
         "reconciled orphaned threads"
     );
-    Ok(intents)
+    Ok(ActiveThreadReconcileReport {
+        active_thread_ids,
+        resume_intents: intents,
+    })
+}
+
+/// Process reconciliation owns executable threads and any row that carries
+/// process/launch state. A daemon-owned non-execution root (for example an
+/// operator seat) deliberately has neither: its subsystem owns liveness and
+/// terminal settlement, so treating the absent pid as an interrupted spawn
+/// would corrupt a healthy thread on every daemon restart.
+fn is_daemon_owned_non_execution_thread(
+    thread: &ThreadDetail,
+    profile: Option<&ryeos_app::kind_profiles::ThreadKindProfile>,
+) -> bool {
+    profile.is_some_and(|profile| !profile.root_executable)
+        && thread.runtime.pid.is_none()
+        && thread.runtime.pgid.is_none()
+        && thread.runtime.process_identity.is_none()
+        && thread.runtime.launch_metadata.is_none()
 }
 
 /// A follow-recovery action collected at startup and driven post-listener (the
@@ -635,14 +952,10 @@ pub fn reconcile_follow(state: &AppState) -> Result<Vec<FollowReconcileAction>> 
             }
             follow_phase::WAITING => waiting_follow_action(state, &w)?,
             follow_phase::RESERVED => converge_reserved_follow(state, &w)?,
-            other => {
-                tracing::debug!(
-                    follow_key = %w.follow_key,
-                    phase = %other,
-                    "follow waiter in an unrecognized phase — skipped"
-                );
-                Vec::new()
-            }
+            other => anyhow::bail!(
+                "follow waiter {} has unrecognized phase {other}",
+                w.follow_key
+            ),
         };
         match waiter_actions.is_empty() {
             false => actions.extend(waiter_actions),
@@ -692,8 +1005,10 @@ fn waiting_follow_action(
     w: &ryeos_app::runtime_db::FollowWaiter,
 ) -> Result<Vec<FollowReconcileAction>> {
     if w.children.is_empty() {
-        tracing::warn!(follow_key = %w.follow_key, "waiting follow waiter has no child thread recorded");
-        return Ok(Vec::new());
+        anyhow::bail!(
+            "waiting follow waiter {} has no child thread recorded",
+            w.follow_key
+        );
     }
     let mut actions = Vec::new();
     let mut resume = false;
@@ -705,11 +1020,11 @@ fn waiting_follow_action(
         match state.state_store.get_thread(child_id)? {
             // Pre-launch window: the child provably never launched.
             Some(child)
-                if is_pending_follow_child(state, &child)
+                if is_pending_follow_child(state, &child)?
                     && state
                         .state_store
                         .launch_window_is_queued(&slot.child_chain_root_id)? => {}
-            Some(child) if is_pending_follow_child(state, &child) => {
+            Some(child) if is_pending_follow_child(state, &child)? => {
                 if state
                     .state_store
                     .launch_window_is_cancelled(&slot.child_chain_root_id)?
@@ -769,9 +1084,10 @@ fn waiting_follow_action(
                     resume = true;
                 }
             }
-            None => {
-                tracing::warn!(follow_key = %w.follow_key, child_thread_id = %child_id, "waiting follow waiter's child row is missing");
-            }
+            None => anyhow::bail!(
+                "waiting follow waiter {} references missing child {child_id}",
+                w.follow_key
+            ),
         }
     }
     if resume {
@@ -795,18 +1111,25 @@ fn waiting_follow_action(
 /// `continued`, reconcile's native resume of the parent re-drives the idempotent
 /// `spawn_follow_child` and converges it — leave it. If the parent HAS continued
 /// (suspended past its follow node, so it will never re-drive), converge here: adopt
-/// its follow-resume successor if unrecorded, mark `waiting`, then apply the waiting
-/// recovery. A continued parent with no child row is unreconstructable corruption —
-/// clear the orphan.
+/// its follow-resume successor if unrecorded, commit the durable `waiting`/`ready`
+/// phase, then immediately emit the matching recovery action. A continued parent
+/// with no child row is unreconstructable corruption — clear the orphan.
 fn converge_reserved_follow(
     state: &AppState,
     w: &ryeos_app::runtime_db::FollowWaiter,
 ) -> Result<Vec<FollowReconcileAction>> {
-    let parent_continued = w.parent_successor_thread_id.is_some()
-        || matches!(
-            state.state_store.get_thread(&w.parent_thread_id),
-            Ok(Some(p)) if p.status == ThreadStatus::Continued.as_str()
-        );
+    let parent = state
+        .state_store
+        .get_thread(&w.parent_thread_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "reserved follow waiter {} references missing parent {}",
+                w.follow_key,
+                w.parent_thread_id
+            )
+        })?;
+    let parent_continued =
+        w.parent_successor_thread_id.is_some() || parent.status == ThreadStatus::Continued.as_str();
     if !parent_continued {
         tracing::debug!(follow_key = %w.follow_key, "reserved follow waiter, parent not yet continued — parent resume re-drives");
         return Ok(Vec::new());
@@ -818,29 +1141,29 @@ fn converge_reserved_follow(
             .any(|(i, c)| c.item_index != i as u32)
     {
         tracing::warn!(follow_key = %w.follow_key, "reserved waiter: parent continued but no child recorded — clearing orphan");
-        let _ = state.state_store.clear_follow_waiter(&w.follow_key);
+        state.state_store.clear_follow_waiter(&w.follow_key)?;
         return Ok(Vec::new());
     }
     // Adopt the parent's follow-resume successor if step 3 created it but did not
     // record it on the waiter.
     if w.parent_successor_thread_id.is_none() {
-        if let Ok(Some(parent)) = state.state_store.get_thread(&w.parent_thread_id) {
-            if let Some(succ) = parent.successor_thread_id {
-                if state
+        if let Some(successor_id) = parent.successor_thread_id {
+            if state
+                .state_store
+                .is_follow_resume_successor(&w.parent_thread_id, &successor_id)?
+            {
+                state
                     .state_store
-                    .is_follow_resume_successor(&w.parent_thread_id, &succ)
-                    .unwrap_or(false)
-                {
-                    let _ = state
-                        .state_store
-                        .set_follow_parent_successor(&w.follow_key, &succ);
-                }
+                    .set_follow_parent_successor(&w.follow_key, &successor_id)?;
             }
         }
     }
-    if let Err(e) = state.state_store.mark_follow_waiting(&w.follow_key) {
-        tracing::warn!(follow_key = %w.follow_key, error = %e, "reserved waiter: could not converge to waiting (missing child/successor) — leaving");
-        return Ok(Vec::new());
+    let phase = state.state_store.mark_follow_waiting(&w.follow_key)?;
+    if phase == ryeos_app::runtime_db::follow_phase::READY {
+        tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter directly to ready");
+        return Ok(vec![FollowReconcileAction::Resume {
+            follow_key: w.follow_key.clone(),
+        }]);
     }
     tracing::info!(follow_key = %w.follow_key, "converged a stuck reserved follow waiter to waiting");
     match state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
@@ -869,6 +1192,7 @@ mod tests {
         ResumeContext {
             kind: "tool_run".into(),
             item_ref: "ns/foo".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "detached".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
@@ -915,6 +1239,9 @@ mod tests {
             runtime: ryeos_app::state_store::RuntimeInfo {
                 pid: None,
                 pgid: None,
+                process_identity: None,
+                stop_requested_at_ms: None,
+                stop_intent: None,
                 launch_metadata: lm,
             },
         }
@@ -928,6 +1255,41 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn daemon_owned_non_execution_thread_is_not_process_reconciled() {
+        let mut seat = thread_detail("seat", "running", None, None, None);
+        seat.kind = "seat_session".into();
+        let non_execution = ryeos_app::kind_profiles::ThreadKindProfile {
+            root_executable: false,
+            supports_interrupt: false,
+            supports_continuation: false,
+            supports_operator_followup: false,
+        };
+        assert!(is_daemon_owned_non_execution_thread(
+            &seat,
+            Some(&non_execution)
+        ));
+
+        // Any launch metadata moves the row back under process recovery. This
+        // fails closed if a supposedly daemon-owned kind ever starts carrying
+        // executable lifecycle state.
+        seat.runtime.launch_metadata = Some(RuntimeLaunchMetadata::default());
+        assert!(!is_daemon_owned_non_execution_thread(
+            &seat,
+            Some(&non_execution)
+        ));
+
+        let executable = ryeos_app::kind_profiles::ThreadKindProfile {
+            root_executable: true,
+            ..non_execution
+        };
+        seat.runtime.launch_metadata = None;
+        assert!(!is_daemon_owned_non_execution_thread(
+            &seat,
+            Some(&executable)
+        ));
     }
 
     #[test]

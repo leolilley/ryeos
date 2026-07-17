@@ -27,9 +27,16 @@ pub fn load_verified_snapshot(app_root: &Path) -> anyhow::Result<NodeConfigSnaps
         &ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config(),
     )
     .context("load trust store for verified node config")?;
+    load_verified_snapshot_with_trust(app_root, &trust_store)
+}
+
+pub fn load_verified_snapshot_with_trust(
+    app_root: &Path,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> anyhow::Result<NodeConfigSnapshot> {
     let loader = BootstrapLoader {
         app_root,
-        trust_store: &trust_store,
+        trust_store,
     };
     let bundles = loader
         .load_bundle_section()

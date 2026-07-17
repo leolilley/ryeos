@@ -15,15 +15,14 @@ use anyhow::{Context, Result};
 use lillux::crypto::SigningKey;
 use serde::Serialize;
 
-use crate::actions::publish::generate_and_sign_manifest;
+use crate::actions::publish::generate_and_sign_manifest_in_place;
 
 #[derive(Debug, Serialize)]
 pub struct ManifestSignReport {
     pub bundle_source: PathBuf,
     pub author_fingerprint: String,
-    /// Path to the generated + signed `.ai/manifest.yaml`. `None` when the
-    /// bundle declares no `manifest.source.yaml` (manifests are optional).
-    pub manifest_generated: Option<PathBuf>,
+    /// Path to the generated + signed `.ai/manifest.yaml`.
+    pub manifest_generated: PathBuf,
     /// Whether the manifest file was actually (re)written.
     pub manifest_changed: bool,
 }
@@ -40,6 +39,38 @@ pub fn manifest_sign(
     name: Option<&str>,
     signing_key: &SigningKey,
 ) -> Result<ManifestSignReport> {
+    let live_root = bundle_source.to_path_buf();
+    let canonical_live_root = std::fs::canonicalize(bundle_source).with_context(|| {
+        format!(
+            "canonicalize bundle source before manifest signing {}",
+            bundle_source.display()
+        )
+    })?;
+    let effective_name = match name {
+        Some(name) => name.to_string(),
+        None => canonical_live_root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+            .context("bundle_source path has no UTF-8 directory name")?,
+    };
+    // This operation authors exactly one file and the shared generator
+    // validates/materializes the complete body before its atomic write. A full
+    // publisher-generation copy is both unnecessary and incorrect here: it
+    // makes an unrelated project symlink (for example `.venv/bin/python`)
+    // prevent manifest-only authoring even though neither manifest input nor
+    // output traverses that path.
+    let mut report = manifest_sign_in_place(&canonical_live_root, &effective_name, signing_key)?;
+    report.bundle_source = live_root.clone();
+    report.manifest_generated = live_root.join(ryeos_engine::AI_DIR).join("manifest.yaml");
+    Ok(report)
+}
+
+fn manifest_sign_in_place(
+    bundle_source: &Path,
+    effective_name: &str,
+    signing_key: &SigningKey,
+) -> Result<ManifestSignReport> {
     if !bundle_source.is_dir() {
         anyhow::bail!(
             "bundle_source is not a directory: {}",
@@ -52,12 +83,8 @@ pub fn manifest_sign(
     }
 
     let (manifest_generated, manifest_changed) =
-        match generate_and_sign_manifest(&ai_dir, bundle_source, name, signing_key)
-            .context("manifest generation failed")?
-        {
-            Some((path, changed)) => (Some(path), changed),
-            None => (None, false),
-        };
+        generate_and_sign_manifest_in_place(bundle_source, effective_name, signing_key)
+            .context("manifest generation failed")?;
 
     let author_fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
 
@@ -94,7 +121,7 @@ mod tests {
         );
 
         let report = manifest_sign(&bundle, None, &test_key()).expect("manifest sign");
-        let manifest_path = report.manifest_generated.expect("manifest generated");
+        let manifest_path = report.manifest_generated;
         assert_eq!(manifest_path, ai.join("manifest.yaml"));
         assert!(report.manifest_changed);
 
@@ -128,7 +155,7 @@ mod tests {
 
         // With the override equal to the declared name it materializes.
         let report = manifest_sign(&bundle, Some("arc"), &test_key()).expect("override");
-        assert!(report.manifest_generated.is_some());
+        assert!(report.manifest_generated.is_file());
 
         // An override that disagrees with the declared name is rejected.
         let err = manifest_sign(&bundle, Some("nope"), &test_key()).unwrap_err();
@@ -136,5 +163,24 @@ mod tests {
             format!("{err:#}").contains("identity mismatch"),
             "got {err:#}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_project_symlink_does_not_block_manifest_only_signing() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("arc");
+        let ai = bundle.join(ryeos_engine::AI_DIR);
+        write(
+            &ai.join("manifest.source.yaml"),
+            "name: arc\nversion: \"0.1.0\"\n",
+        );
+        std::fs::create_dir_all(bundle.join(".venv/bin")).unwrap();
+        symlink("/usr/bin/python", bundle.join(".venv/bin/python")).unwrap();
+
+        let report = manifest_sign(&bundle, None, &test_key()).expect("manifest-only sign");
+        assert!(report.manifest_generated.is_file());
     }
 }

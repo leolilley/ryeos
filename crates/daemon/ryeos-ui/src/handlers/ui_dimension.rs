@@ -164,7 +164,7 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
 
     let project_path = session.project_root.clone().map(PathBuf::from);
 
-    let projection = build_dimension_projection(&state, &session, project_path.as_ref());
+    let projection = build_dimension_projection(&state, &session, project_path.as_ref())?;
 
     serde_json::to_value(projection).map_err(Into::into)
 }
@@ -173,7 +173,7 @@ fn build_dimension_projection(
     state: &AppState,
     session: &crate::browser_session::BrowserSession,
     project_path: Option<&PathBuf>,
-) -> RyeOsDimensionProjection {
+) -> Result<RyeOsDimensionProjection> {
     // ── Identity ──
     let identity = IdentityInfo {
         principal_id: state.identity.principal_id(),
@@ -181,7 +181,7 @@ fn build_dimension_projection(
     };
 
     // ── Status + Health (reuse existing logic inline) ──
-    let status = serde_json::to_value(state.status()).unwrap_or_default();
+    let status = serde_json::to_value(state.status()?)?;
     let health_status = if state.catalog_health.missing_services.is_empty() {
         "healthy"
     } else {
@@ -279,8 +279,8 @@ fn build_dimension_projection(
     // ── GC ──
     let gc = load_gc_summary(state);
 
-    RyeOsDimensionProjection {
-        schema_version: "ryeos.ui.dimension.v0",
+    Ok(RyeOsDimensionProjection {
+        schema_version: "ryeos.ui.dimension.v1",
         generated_at: lillux::time::iso8601_now(),
         session: SessionInfo {
             session_id: session.session_id.clone(),
@@ -309,7 +309,7 @@ fn build_dimension_projection(
             enabled: enabled_schedules,
         },
         gc,
-    }
+    })
 }
 
 // ── Data-loading helpers ────────────────────────────────────────────

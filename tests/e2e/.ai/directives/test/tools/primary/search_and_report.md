@@ -28,17 +28,17 @@ Multi-step directive that searches the knowledge base for entries on a topic, th
   </inputs>
 
   <outputs>
-    <success>Knowledge search complete. Report written to {input:report_path}.</success>
-    <failure>No knowledge entries found for topic "{input:topic}".</failure>
+    <success>Knowledge search complete. Report written to ${inputs.report_path}.</success>
+    <failure>No knowledge entries found for topic "${inputs.topic}".</failure>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="search_knowledge">
-    Search the knowledge base for entries related to "{input:topic}".
+    Search the knowledge base for entries related to "${inputs.topic}".
   </step>
   <step name="write_report">
-    Compile the search findings into a summary and write it to `{input:report_path}`.
+    Compile the search findings into a summary and write it to `${inputs.report_path}`.
   </step>
 </process>

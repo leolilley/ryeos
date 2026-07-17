@@ -61,10 +61,12 @@ pub fn resolve_item_for_corpus(
         requested_id: item.to_string(),
         resolved_ref: item.to_string(),
         source_path: raw.source_path.clone(),
+        source_space: raw.source_space,
         trust_class: raw.trust_class,
         alias_resolution: None,
         added_by: ResolutionStepName::PipelineInit,
         raw_content: raw.raw_content.clone(),
+        source_content_digest: raw.source_content_digest.clone(),
         raw_content_digest: raw.raw_content_digest.clone(),
     };
 

@@ -11,6 +11,7 @@ const KIND_SCHEMA_SUFFIX: &str = ".kind-schema.yaml";
 pub(super) fn load_schemas_from_dir(
     kinds_root: &Path,
     schemas: &mut HashMap<String, KindSchema>,
+    schema_content_hashes: &mut HashMap<String, String>,
     fingerprint_data: &mut Vec<u8>,
     trust_store: &TrustStore,
 ) -> Result<(), EngineError> {
@@ -60,8 +61,9 @@ pub(super) fn load_schemas_from_dir(
                 continue;
             }
 
-            let parsed = load_and_verify_kind_schema(&yaml_path, trust_store)?;
+            let (parsed, content_hash) = load_and_verify_kind_schema(&yaml_path, trust_store)?;
             schemas.insert(kind_name.clone(), parsed);
+            schema_content_hashes.insert(kind_name.clone(), content_hash);
             if let Ok(content) = std::fs::read(&yaml_path) {
                 fingerprint_data.extend_from_slice(&content);
             }

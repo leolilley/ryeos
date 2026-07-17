@@ -1,4 +1,4 @@
-//! Smoke tests for the build-bundle pipeline (V5.4 / V6.0 manifest v2).
+//! Smoke tests for the signed build-bundle manifest pipeline.
 //!
 //! These tests verify the *structure* of a built bundle without
 //! re-running the full build pipeline (which requires `cargo build`).
@@ -13,6 +13,33 @@ use std::path::Path;
 /// The standard bundle directory relative to workspace root.
 fn bundle_dir() -> std::path::PathBuf {
     workspace_root().join("bundles/standard")
+}
+
+fn read_signed_manifest_hash(path: &Path) -> String {
+    let content = std::fs::read_to_string(path).expect("read signed manifest ref");
+    let (signature_line, body) = content
+        .split_once('\n')
+        .expect("manifest ref must contain signature header and hash body");
+    lillux::signature::parse_signature_line(signature_line, "#", None)
+        .expect("manifest ref must have a RyeOS signature header");
+    let hash_body = body
+        .strip_prefix(&format!(
+            "{}\n",
+            ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+        ))
+        .expect("manifest ref must carry the executor-manifest domain separator");
+    let hash = hash_body
+        .strip_suffix('\n')
+        .expect("manifest ref hash body must have a trailing newline");
+    assert_eq!(
+        body,
+        format!(
+            "{}\n{hash}\n",
+            ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+        ),
+        "manifest ref body shape"
+    );
+    hash.to_string()
 }
 
 /// Default host triple.
@@ -87,13 +114,10 @@ fn bundle_sidecar_exists_and_parsable() {
     );
     assert!(value.get("mode").is_some(), "missing mode");
     assert_eq!(value["mode"], 493, "mode should be 0o755");
-    assert!(
-        value["signature_info"]["fingerprint"]
-            .as_str()
-            .unwrap_or("")
-            .len()
-            == 64,
-        "fingerprint should be 64-char hex"
+    assert_eq!(
+        value.get("signature_info"),
+        Some(&serde_json::Value::Null),
+        "unsigned ItemSource must carry an explicit null, never a claimed signer fingerprint"
     );
 }
 
@@ -112,8 +136,7 @@ fn bundle_manifest_ref_exists() {
         return;
     }
 
-    let content = std::fs::read_to_string(&ref_path).expect("read manifest ref");
-    let hash = content.trim();
+    let hash = read_signed_manifest_hash(&ref_path);
 
     // SHA-256 hash is 64 hex chars
     assert_eq!(hash.len(), 64, "manifest ref should be 64-char hex hash");
@@ -130,10 +153,7 @@ fn bundle_cas_contains_manifest_object() {
         return; // Skip if bundle not built
     }
 
-    let hash = std::fs::read_to_string(&ref_path)
-        .unwrap()
-        .trim()
-        .to_string();
+    let hash = read_signed_manifest_hash(&ref_path);
 
     let objects_dir = bundle_dir().join(".ai/objects/objects");
     // lillux uses 2+2 shard prefix
@@ -164,10 +184,7 @@ fn bundle_cas_contains_binary_blob() {
     }
 
     // Load the manifest to get the item_source hash
-    let manifest_hash = std::fs::read_to_string(&ref_path)
-        .unwrap()
-        .trim()
-        .to_string();
+    let manifest_hash = read_signed_manifest_hash(&ref_path);
 
     let objects_dir = bundle_dir().join(".ai/objects/objects");
     let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
@@ -333,10 +350,7 @@ fn bundle_manifest_includes_all_runtime_binaries() {
     if !ref_path.exists() {
         return; // bundle not built
     }
-    let manifest_hash = std::fs::read_to_string(&ref_path)
-        .unwrap()
-        .trim()
-        .to_string();
+    let manifest_hash = read_signed_manifest_hash(&ref_path);
     let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
     let manifest_path = bundle_dir()
         .join(".ai/objects/objects")
@@ -367,10 +381,7 @@ fn materialization_resolves_each_runtime_binary() {
     if !ref_path.exists() {
         return;
     }
-    let manifest_hash = std::fs::read_to_string(&ref_path)
-        .unwrap()
-        .trim()
-        .to_string();
+    let manifest_hash = read_signed_manifest_hash(&ref_path);
     let shard = format!("{}/{}", &manifest_hash[..2], &manifest_hash[2..4]);
     let manifest_path = bundle_dir()
         .join(".ai/objects/objects")

@@ -1,33 +1,39 @@
-<!-- ryeos:signed:2026-06-04T06:46:29Z:61b8fa494421a0118a7c5cf7f0f6445fe53af8adde6e0838c3351c326056a6fa:4Qt/oElhTa8b8l6Ykaope3SaWOTyFwZcnw278kfSbpdDOAQIf3pBDOihKhXiW7esF4UYdf1l0PGfufGHG6FjDQ==:f168bc6752bd022d89a6778a8d2239b302f453d7e862770ed7ed1093c96363d1 -->
+<!-- ryeos:signed:2026-07-16T03:44:57Z:2d98b5482c02321fa3abc0fe1580cfce91fc863893b9a1590c10c1fed6b9923a:4KePbUgPy1TuDyOQpDGb1EZwq8EKUwzS6TbGXviMZfrosb8RUqukBziJSk9E2N144V59cAn/ZjkWXp7FBjRjBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Future: Tool Runtime Authority Advanced Path
 
 ## Status
 
-Deferred. The domain-events branch intentionally implements only the narrow first slice: direct tool executions may receive exact self-bundle domain-event callback capabilities derived from signed generated bundle manifests.
+Deferred. The current implementation intentionally provides only the narrow
+first slice: direct tool executions may receive exact self-bundle callback
+capabilities derived from signed generated bundle manifests.
 
-This advanced path is for the broader question: what should a first-class tool runtime authority model look like once tools need more than self-bundle domain events?
+The signed `tool_callback` descriptor makes callback transport explicit;
+authority remains separately derived and deny-by-default. This advanced path is
+for the broader question: what should a first-class tool runtime authority model
+look like once tools need more than current self-bundle authority?
 
 ## Why this is deferred
 
 The immediate problem was specific and bounded:
 
-- Python tools needed `ryeos_runtime.events.append/read/scan`.
-- The daemon already enforced runtime domain-event callbacks by callback-token capabilities.
+- Tools needed bundle-event, runtime-vault, and item-authoring callbacks.
+- The daemon already enforced those callbacks by callback-token capabilities.
 - Direct tool subprocesses had no callback caps.
 - Granting generic tool `permissions` or reusing `required_caps` would create a self-grant footgun.
 
-So the safe branch solution was narrow manifest-derived domain-event caps, not a complete tool authority system.
+So the safe solution was narrow manifest-derived caps, not a complete tool
+authority system.
 
 ## Trigger for revisiting
 
 Reopen this design when direct tools need one or more of:
 
-- callback access to daemon APIs beyond self-bundle domain events;
-- cross-bundle domain-event read/write delegation;
-- caller-delegated capabilities narrower than the caller but broader than self-domain-events;
+- callback access to daemon APIs beyond current self-bundle authority;
+- cross-bundle bundle-event or vault delegation;
+- caller-delegated capabilities narrower than the caller but broader than self-bundle authority;
 - user-visible approval grants for tool authority;
 - install-time namespace ownership and revocation;
-- per-tool sandbox profiles tied to authority;
+- per-tool isolation profiles tied to authority;
 - nested tool execution authority;
 - long-lived, resumable, or cancellable tool runtime sessions;
 - a real managed tool runtime binary for launch standardization.
@@ -43,6 +49,24 @@ callback enforcement      = daemon callback token effective_caps
 ```
 
 A managed tool runtime can standardize process behavior, but it should not be the source of permission. Authority should be minted by the daemon from signed metadata and explicit delegation.
+
+Likewise, any future per-tool isolation profile is an intersecting restriction
+beneath the immutable node policy, never item-authored authority to enable or
+broaden mounts, network, environment, or limits.
+
+The profile should name typed requirements rather than an OS backend. The node
+selects and proves the backend using the contract in
+`ryeos/core/node/execution-isolation`; an unavailable required
+boundary fails closed instead of falling back to direct execution.
+
+That profile remains an inner application-policy layer. It must not be used as
+the claim that hostile multi-tenancy is complete: CPU, memory, and process-count
+budgets belong to an outer cgroup/worker controller; hostile workloads require a
+VM, microVM, or dedicated worker boundary; and principal-scoped storage,
+secrets, networking, audit, and cleanup remain hosted-node concerns. The
+node-owned isolation provides the stable launch handoff where those later layers
+can be attached. See `ryeos/future/hosted-node-trust-boundaries` for the layered
+completion model.
 
 ## Authority model sketch
 
@@ -68,12 +92,13 @@ The grant set should be explicit and auditable. It should never be accepted from
 
 ## Possible signed manifest shape
 
-Future manifests may grow from the current `domain_events` declaration into typed authority blocks:
+Future manifests may grow from the current typed `runtime_authority` blocks:
 
 ```yaml
-domain_events:
-  - event_kind: email_event
-    operations: [append, scan]
+runtime_authority:
+  bundle_events:
+    - event_kind: email_event
+      operations: [append, scan]
 
 tool_authority:
   callbacks:
@@ -110,7 +135,7 @@ direct subprocess tool
 managed tool runtime
   -> daemon derives ToolAuthority
   -> daemon mints callback token
-  -> runtime supervises/streams/sandboxes actual tool execution
+  -> runtime supervises/streams/isolationes actual tool execution
 ```
 
 The same authority derivation should feed both paths.
@@ -127,8 +152,8 @@ The same authority derivation should feed both paths.
 
 ## Migration path
 
-1. Keep the current self-bundle domain-events slice as the baseline.
+1. Keep the current self-bundle manifest-authority slice as the baseline.
 2. Add structured manifest declarations only when a new callback API needs them.
-3. Add install-policy checks before any cross-bundle or non-domain-event authority.
+3. Add install-policy checks before any cross-bundle or new callback authority.
 4. Add caller/session delegation as an intersecting constraint, not a replacement for signed declarations.
 5. Only then introduce a managed tool runtime if execution behavior, not authority, needs centralization.

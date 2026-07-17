@@ -18,8 +18,10 @@ impl FakeCas {
         }
     }
 
-    fn store_object(&self, hash: &str, value: Value) {
-        self.objects.lock().unwrap().insert(hash.to_string(), value);
+    fn store_object(&self, value: Value) -> String {
+        let hash = lillux::cas::sha256_hex(lillux::cas::canonical_json(&value).unwrap().as_bytes());
+        self.objects.lock().unwrap().insert(hash.clone(), value);
+        hash
     }
 
     fn get_object(&self, hash: &str) -> Option<Value> {
@@ -33,23 +35,12 @@ impl FakeCas {
 
 fn make_item_source_value(blob_hash: &str, mode: u32) -> Value {
     json!({
+        "kind": "item_source",
         "item_ref": "bin/x86_64-unknown-linux-gnu/directive-runtime",
         "content_blob_hash": blob_hash,
         "mode": mode,
-        "integrity": "sha256:deadbeef",
-    })
-}
-
-fn make_signed_item_source_value(blob_hash: &str, mode: u32, fingerprint: &str) -> Value {
-    json!({
-        "item_ref": "bin/x86_64-unknown-linux-gnu/directive-runtime",
-        "content_blob_hash": blob_hash,
-        "mode": mode,
-        "integrity": "sha256:deadbeef",
-        "signature_info": {
-            "fingerprint": fingerprint,
-            "signature": "fake-sig",
-        },
+        "integrity": format!("sha256:{blob_hash}"),
+        "signature_info": null,
     })
 }
 
@@ -58,8 +49,7 @@ fn resolves_from_manifest_for_host_triple() {
     let cas = FakeCas::new();
 
     let item_source = make_item_source_value("aa".repeat(32).as_str(), 0o755);
-    let is_hash = "cc".repeat(32);
-    cas.store_object(&is_hash, item_source.clone());
+    let is_hash = cas.store_object(item_source.clone());
 
     let mut manifest_hashes = HashMap::new();
     manifest_hashes.insert(
@@ -175,8 +165,7 @@ fn missing_blob_in_cas_errors() {
     let cas = FakeCas::new();
 
     let item_source = make_item_source_value("aa".repeat(32).as_str(), 0o755);
-    let is_hash = "cc".repeat(32);
-    cas.store_object(&is_hash, item_source);
+    let is_hash = cas.store_object(item_source);
 
     let mut manifest_hashes = HashMap::new();
     manifest_hashes.insert(
@@ -204,12 +193,13 @@ fn missing_mode_errors() {
 
     // item_source without mode field
     let item_source = json!({
+        "kind": "item_source",
         "item_ref": "bin/x86_64-unknown-linux-gnu/directive-runtime",
         "content_blob_hash": "aa".repeat(32),
-        "integrity": "sha256:deadbeef",
+        "integrity": format!("sha256:{}", "aa".repeat(32)),
+        "signature_info": null,
     });
-    let is_hash = "cc".repeat(32);
-    cas.store_object(&is_hash, item_source);
+    let is_hash = cas.store_object(item_source);
 
     let mut manifest_hashes = HashMap::new();
     manifest_hashes.insert(
@@ -227,8 +217,8 @@ fn missing_mode_errors() {
 
     let msg = format!("{err}");
     assert!(
-        msg.contains("no mode"),
-        "expected MissingMode error, got: {msg}"
+        msg.contains("expected fields") && msg.contains("mode"),
+        "expected strict missing-mode error, got: {msg}"
     );
 }
 
@@ -244,10 +234,9 @@ fn not_native_executor_errors() {
     )
     .unwrap_err();
 
-    let msg = format!("{err}");
     assert!(
-        msg.contains("not a native executor"),
-        "expected NotNativeExecutor error, got: {msg}"
+        matches!(&err, ExecutorResolutionError::NotNativeExecutor),
+        "expected NotNativeExecutor error, got: {err:?}"
     );
 }
 
@@ -263,85 +252,82 @@ fn empty_native_prefix_errors() {
     )
     .unwrap_err();
 
-    let msg = format!("{err}");
     assert!(
-        msg.contains("not a native executor"),
-        "expected NotNativeExecutor error for empty prefix, got: {msg}"
+        matches!(&err, ExecutorResolutionError::NotNativeExecutor),
+        "expected NotNativeExecutor error for empty prefix, got: {err:?}"
     );
 }
 
-// ── Trust verification tests ────────────────────────────────────
+// ── Trust-root verification tests ───────────────────────────────
 
 #[test]
-fn trusted_binary_passes() {
-    let item_source = make_signed_item_source_value("aa".repeat(32).as_str(), 0o755, "trusted-fp");
+fn signed_manifest_ref_requires_cryptographic_proof() {
+    let key = lillux::crypto::SigningKey::from_bytes(&[41; 32]);
+    let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+    let manifest_hash = "ab".repeat(32);
+    let signed = lillux::signature::sign_content(
+        &format!("{EXECUTOR_MANIFEST_REF_DOMAIN}\n{manifest_hash}\n"),
+        &key,
+        "#",
+        None,
+    );
 
-    let (trust_class, fp) = verify_executor_trust(
-        &item_source,
-        |f| f == "trusted-fp",
+    let verified = verify_signed_executor_manifest_ref(
+        &signed,
+        |candidate| (candidate == fingerprint.as_str()).then(|| key.verifying_key()),
         ryeos_engine::resolution::TrustClass::TrustedBundle,
-    );
+    )
+    .unwrap();
 
-    assert_eq!(
-        trust_class,
-        ryeos_engine::resolution::TrustClass::TrustedBundle
-    );
-    assert_eq!(fp.as_deref(), Some("trusted-fp"));
+    assert_eq!(verified.manifest_hash, manifest_hash);
+    assert_eq!(verified.signer_fingerprint, fingerprint);
 }
 
 #[test]
-fn untrusted_binary_with_unknown_signer() {
-    let item_source = make_signed_item_source_value("aa".repeat(32).as_str(), 0o755, "unknown-fp");
-
-    let (trust_class, fp) = verify_executor_trust(
-        &item_source,
-        |_f| false,
+fn claimed_fingerprint_without_signed_ref_is_rejected() {
+    let hash = "ab".repeat(32);
+    let err = verify_signed_executor_manifest_ref(
+        &format!("{hash}\n"),
+        |_candidate| None,
         ryeos_engine::resolution::TrustClass::TrustedBundle,
-    );
+    )
+    .unwrap_err();
 
-    assert_eq!(
-        trust_class,
-        ryeos_engine::resolution::TrustClass::UntrustedProject
-    );
-    assert_eq!(fp.as_deref(), Some("unknown-fp"));
+    assert!(matches!(
+        err,
+        ExecutorResolutionError::ManifestRefInvalid { .. }
+    ));
 }
 
 #[test]
-fn unsigned_binary_is_unsigned() {
+fn item_source_cas_substitution_is_rejected() {
+    let cas = FakeCas::new();
     let item_source = make_item_source_value("aa".repeat(32).as_str(), 0o755);
-
-    let (trust_class, fp) = verify_executor_trust(
-        &item_source,
-        |_f| false,
-        ryeos_engine::resolution::TrustClass::TrustedBundle,
+    let actual_hash = cas.store_object(item_source);
+    let mut manifest_hashes = HashMap::new();
+    manifest_hashes.insert(
+        "bin/x86_64-unknown-linux-gnu/directive-runtime".to_string(),
+        "cc".repeat(32),
     );
+    let substituted = cas.get_object(&actual_hash).unwrap();
+    cas.objects
+        .lock()
+        .unwrap()
+        .insert("cc".repeat(32), substituted);
 
-    assert_eq!(trust_class, ryeos_engine::resolution::TrustClass::Unsigned);
-    assert!(fp.is_none());
-}
+    let err = resolve_native_executor(
+        &manifest_hashes,
+        "native:directive-runtime",
+        "x86_64-unknown-linux-gnu",
+        cas.get_object_fn(),
+    )
+    .unwrap_err();
 
-#[test]
-fn empty_fingerprint_is_untrusted() {
-    let item_source = json!({
-        "item_ref": "bin/x86_64-unknown-linux-gnu/directive-runtime",
-        "content_blob_hash": "aa".repeat(32),
-        "mode": 0o755,
-        "integrity": "sha256:deadbeef",
-        "signature_info": {
-            "fingerprint": "",
-            "signature": "",
-        },
-    });
-
-    let (trust_class, fp) = verify_executor_trust(
-        &item_source,
-        |_f| false,
-        ryeos_engine::resolution::TrustClass::TrustedBundle,
-    );
-
-    assert_eq!(
-        trust_class,
-        ryeos_engine::resolution::TrustClass::UntrustedProject
-    );
-    assert!(fp.is_none());
+    assert!(matches!(
+        err,
+        ExecutorResolutionError::CasObjectHashMismatch {
+            object_kind: "ItemSource",
+            ..
+        }
+    ));
 }

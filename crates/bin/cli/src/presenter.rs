@@ -6,22 +6,28 @@ use crate::exec_stream::StreamOutcome;
 use crate::transport::http::SseEvent;
 
 pub enum Presenter {
-    Plain,
-    Tty(TtyPresenter),
+    Plain(crate::tty::Console),
+    Tty(Box<TtyPresenter>),
+}
+
+pub enum StructuredPresentation {
+    Machine,
+    Rendered,
+    Failed(String),
 }
 
 impl Presenter {
-    pub fn for_stdout(use_tty: bool) -> Self {
-        if use_tty {
-            Self::Tty(TtyPresenter::default())
+    pub fn for_console(console: &crate::tty::Console) -> Self {
+        if console.capabilities().tty() {
+            Self::Tty(Box::new(TtyPresenter::new(console.clone())))
         } else {
-            Self::Plain
+            Self::Plain(console.clone())
         }
     }
 
     pub fn loading(&mut self, command: &str, route: &str) -> io::Result<usize> {
         match self {
-            Self::Plain => Ok(0),
+            Self::Plain(_) => Ok(0),
             Self::Tty(tty) => tty.loading(command, route),
         }
     }
@@ -31,12 +37,16 @@ impl Presenter {
         command: &str,
         payload: &Value,
         previous_lines: usize,
-    ) -> io::Result<bool> {
+    ) -> io::Result<StructuredPresentation> {
         match self {
-            Self::Plain => Ok(false),
+            Self::Plain(_) => Ok(StructuredPresentation::Machine),
             Self::Tty(tty) => {
+                if let Some(detail) = crate::tty::structured_result_failure(payload) {
+                    tty.clear_loading()?;
+                    return Ok(StructuredPresentation::Failed(detail));
+                }
                 tty.structured_result(command, payload, previous_lines)?;
-                Ok(true)
+                Ok(StructuredPresentation::Rendered)
             }
         }
     }
@@ -48,22 +58,38 @@ impl Presenter {
         Ok(())
     }
 
-    pub fn stream_event(&mut self, ev: &SseEvent) -> io::Result<Option<StreamOutcome>> {
+    pub fn stream_event(&mut self, ev: &SseEvent) -> io::Result<StreamOutcome> {
         match self {
-            Self::Plain => Ok(None),
-            Self::Tty(tty) => tty.stream_event(ev).map(Some),
+            Self::Plain(console) => crate::exec_stream::render_event(console, ev),
+            Self::Tty(tty) => tty.stream_event(ev),
         }
     }
 }
 
-#[derive(Default)]
 pub struct TtyPresenter {
+    console: crate::tty::Console,
+    loading: Option<crate::tty::OperationProgress>,
     stream: Option<crate::tty::TtyStreamPresenter>,
 }
 
 impl TtyPresenter {
+    fn new(console: crate::tty::Console) -> Self {
+        Self {
+            console,
+            loading: None,
+            stream: None,
+        }
+    }
+
     fn loading(&mut self, command: &str, route: &str) -> io::Result<usize> {
-        crate::tty::render_command_loading(command, route)
+        let mut progress = self
+            .console
+            .progress(crate::tty::OperationKind::Run, command)?;
+        if let Some(progress) = progress.as_mut() {
+            progress.update(command, Some(route))?;
+        }
+        self.loading = progress;
+        Ok(0)
     }
 
     fn structured_result(
@@ -72,14 +98,24 @@ impl TtyPresenter {
         payload: &Value,
         previous_lines: usize,
     ) -> io::Result<usize> {
-        crate::tty::render_command_result(command, payload, previous_lines)
+        self.clear_loading()?;
+        crate::tty::render_command_result(&self.console, command, payload, previous_lines)
     }
 
     fn stream_with_previous(&mut self, command: &str, previous_lines: usize) -> io::Result<()> {
+        self.clear_loading()?;
         self.stream = Some(crate::tty::TtyStreamPresenter::with_previous(
+            self.console.clone(),
             command,
             previous_lines,
         )?);
+        Ok(())
+    }
+
+    fn clear_loading(&mut self) -> io::Result<()> {
+        if let Some(progress) = self.loading.take() {
+            progress.finish()?;
+        }
         Ok(())
     }
 
@@ -87,7 +123,7 @@ impl TtyPresenter {
         match self.stream.as_mut() {
             Some(stream) => stream.render_event(ev),
             None => {
-                let mut stream = crate::tty::TtyStreamPresenter::new("")?;
+                let mut stream = crate::tty::TtyStreamPresenter::new(self.console.clone(), "")?;
                 let outcome = stream.render_event(ev)?;
                 self.stream = Some(stream);
                 Ok(outcome)

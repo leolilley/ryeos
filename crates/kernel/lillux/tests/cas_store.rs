@@ -8,8 +8,12 @@
 use std::fs;
 use std::path::Path;
 
-use lillux::cas::{atomic_write_batch, shard_path, valid_hash, CasStore};
+#[cfg(unix)]
+use lillux::cas::atomic_write_batch_in_pinned_root;
+use lillux::cas::{atomic_write_batch, canonical_json, shard_path, valid_hash, CasStore};
 use lillux::sha256_hex;
+#[cfg(unix)]
+use lillux::PinnedDirectory;
 
 /// True when `dir` holds no atomic-write temp file (`*.tmp.<pid>`).
 fn no_temp_files_left(dir: &Path) -> bool {
@@ -49,6 +53,29 @@ fn valid_hash_edge_cases() {
     );
 }
 
+#[test]
+fn canonical_json_contract_has_stable_bytes_and_hash() {
+    let value = serde_json::json!({
+        "\u{1f600}": "\u{e9}",
+        "\u{10000}": "supplementary",
+        "\u{e000}": "bmp",
+        "z": -0.0,
+        "large": 9_007_199_254_740_993_u64,
+        "fraction": 1.0,
+        "a": "\u{0001}\n\t\"\\",
+    });
+
+    let bytes = canonical_json(&value).expect("canonical encoding");
+    assert_eq!(
+        bytes,
+        r#"{"a":"\u0001\n\t\"\\","fraction":1.0,"large":9007199254740993,"z":-0.0,"\ue000":"bmp","\ud800\udc00":"supplementary","\ud83d\ude00":"\u00e9"}"#
+    );
+    assert_eq!(
+        sha256_hex(bytes.as_bytes()),
+        "ceef0b93428ef1491f105eff72899eb35a4ea1a210424196ad1b84f0e90c6386"
+    );
+}
+
 // ── CasStore blob round-trip ───────────────────────────────────────────
 
 #[test]
@@ -59,8 +86,8 @@ fn store_blob_round_trip_and_membership() {
 
     let hash = store.store_blob(data).expect("store");
     assert_eq!(hash, sha256_hex(data), "hash must be the content digest");
-    assert!(store.has_blob(&hash));
-    assert!(store.has(&hash));
+    assert!(store.has_blob(&hash).expect("has blob"));
+    assert!(store.has(&hash).expect("has typed entry"));
     assert_eq!(
         store.get_blob(&hash).expect("get").expect("present"),
         data,
@@ -83,12 +110,64 @@ fn store_blob_is_idempotent() {
 }
 
 #[test]
+fn store_blob_rehashes_and_rejects_a_corrupt_existing_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let data = b"expected blob bytes";
+    let hash = sha256_hex(data);
+    let path = shard_path(store.root(), "blobs", &hash, "");
+    fs::create_dir_all(path.parent().unwrap()).expect("create shard");
+    fs::write(&path, b"substituted bytes").expect("seed corrupt entry");
+
+    let error = store
+        .store_blob(data)
+        .expect_err("path existence must not satisfy a CAS write");
+
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("CAS corruption"), "{diagnostic}");
+    assert!(diagnostic.contains(&hash), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&sha256_hex(b"substituted bytes")),
+        "{diagnostic}"
+    );
+    assert_eq!(
+        fs::read(&path).expect("read corrupt entry"),
+        b"substituted bytes",
+        "failed verification must not silently repair or conceal corruption"
+    );
+}
+
+#[test]
+fn store_object_rehashes_and_rejects_a_corrupt_existing_entry() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let value = serde_json::json!({"kind": "test", "value": 7});
+    let canonical = lillux::cas::canonical_json(&value).unwrap();
+    let hash = sha256_hex(canonical.as_bytes());
+    let path = shard_path(store.root(), "objects", &hash, ".json");
+    fs::create_dir_all(path.parent().unwrap()).expect("create shard");
+    fs::write(&path, br#"{"kind":"substituted"}"#).expect("seed corrupt entry");
+
+    let error = store
+        .store_object(&value)
+        .expect_err("path existence must not satisfy a CAS object write");
+
+    let diagnostic = format!("{error:#}");
+    assert!(diagnostic.contains("CAS corruption"), "{diagnostic}");
+    assert!(diagnostic.contains(&hash), "{diagnostic}");
+    assert!(
+        diagnostic.contains(&sha256_hex(br#"{"kind":"substituted"}"#)),
+        "{diagnostic}"
+    );
+}
+
+#[test]
 fn get_and_has_reject_malformed_hash() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());
 
-    assert!(!store.has_blob("nothex"));
-    assert!(!store.has("too-short"));
+    assert!(!store.has_blob("nothex").expect("has malformed blob"));
+    assert!(!store.has("too-short").expect("has malformed entry"));
     assert!(
         store.get_blob("not-a-valid-hash").expect("get").is_none(),
         "a malformed hash must never resolve to a blob"
@@ -101,8 +180,91 @@ fn get_blob_absent_returns_none() {
     let store = CasStore::new(tmp.path().to_path_buf());
     let absent = "b".repeat(64);
 
-    assert!(!store.has_blob(&absent));
+    assert!(!store.has_blob(&absent).expect("has absent blob"));
     assert!(store.get_blob(&absent).expect("get").is_none());
+}
+
+#[test]
+fn corrupt_existing_entry_is_an_error_and_is_never_replaced() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let expected = b"addressed bytes";
+    let hash = store.store_blob(expected).expect("initial store");
+    let path = shard_path(store.root(), "blobs", &hash, "");
+    fs::write(&path, b"corrupt bytes").expect("inject corruption");
+
+    assert!(store.get_blob(&hash).is_err());
+    assert!(store.has_blob(&hash).is_err());
+    assert!(store.store_blob(expected).is_err());
+    assert_eq!(
+        fs::read(&path).expect("read corrupt entry"),
+        b"corrupt bytes",
+        "a CAS store must not repair corruption by replacing authority"
+    );
+}
+
+#[test]
+fn canonical_json_reader_rejects_hash_valid_noncanonical_json() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let bytes = br#"{"b":2,"a":1}"#;
+    let hash = sha256_hex(bytes);
+    let path = shard_path(store.root(), "objects", &hash, ".json");
+    fs::create_dir_all(path.parent().expect("object parent")).expect("create shard");
+    fs::write(&path, bytes).expect("write noncanonical object");
+
+    let error = store
+        .get_object(&hash)
+        .expect_err("hash-valid noncanonical bytes must fail closed");
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("violate the RyeOS canonical JSON contract"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&sha256_hex(br#"{"a":1,"b":2}"#)),
+        "the diagnostic must identify the canonical content address: {message}"
+    );
+}
+
+#[test]
+fn canonical_json_reader_accepts_deployed_decimal_zero_encoding() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let bytes = br#"{"spend_usd":0.0}"#;
+    let hash = "15f250824176b3f9990583a856ff21a8588c4e1db5683d10a466a2941a727e93";
+    assert_eq!(sha256_hex(bytes), hash, "the deployed byte vector changed");
+
+    let path = shard_path(store.root(), "objects", hash, ".json");
+    fs::create_dir_all(path.parent().expect("object parent")).expect("create shard");
+    fs::write(&path, bytes).expect("write deployed object");
+
+    let value = store
+        .get_object(hash)
+        .expect("read deployed object")
+        .expect("deployed object exists");
+    assert_eq!(value["spend_usd"].as_f64(), Some(0.0));
+}
+
+#[cfg(unix)]
+#[test]
+fn cas_store_rejects_a_symlinked_root() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outside = tmp.path().join("outside");
+    fs::create_dir(&outside).expect("outside");
+    let root = tmp.path().join("cas-link");
+    symlink(&outside, &root).expect("root symlink");
+    let store = CasStore::new(root);
+    let hash = "a".repeat(64);
+
+    assert!(store.get_blob(&hash).is_err());
+    assert!(store.store_blob(b"must not escape").is_err());
+    assert!(fs::read_dir(&outside)
+        .expect("outside listing")
+        .next()
+        .is_none());
 }
 
 // ── atomic write crash-window behavior ─────────────────────────────────
@@ -139,4 +301,77 @@ fn atomic_write_batch_multi_writes_all_and_cleans_up() {
         no_temp_files_left(tmp.path()),
         "no batch temp file may survive a successful flush"
     );
+}
+
+#[test]
+fn atomic_write_batch_accepts_exact_existing_bytes_but_never_replaces_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let target = tmp.path().join("immutable");
+    fs::write(&target, b"existing").expect("seed immutable entry");
+
+    atomic_write_batch(&[(target.clone(), b"existing".to_vec())])
+        .expect("exact existing bytes are idempotent");
+    assert!(atomic_write_batch(&[(target.clone(), b"different".to_vec())]).is_err());
+    assert_eq!(
+        fs::read(&target).expect("read immutable entry"),
+        b"existing"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_batch_rejects_a_symlinked_parent() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outside = tmp.path().join("outside");
+    fs::create_dir(&outside).expect("outside");
+    let linked = tmp.path().join("linked");
+    symlink(&outside, &linked).expect("parent symlink");
+
+    assert!(atomic_write_batch(&[(linked.join("escaped"), b"bytes".to_vec())]).is_err());
+    assert!(!outside.join("escaped").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_atomic_batch_rejects_targets_outside_its_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root_path = tmp.path().join("cas");
+    fs::create_dir(&root_path).expect("cas root");
+    let root = PinnedDirectory::open(&root_path)
+        .expect("open root")
+        .expect("root exists");
+    let outside = tmp.path().join("outside");
+
+    assert!(atomic_write_batch_in_pinned_root(
+        &root,
+        &[(outside.clone(), b"must not escape".to_vec())]
+    )
+    .is_err());
+    assert!(!outside.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn pinned_atomic_batch_does_not_rebind_after_root_replacement() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root_path = tmp.path().join("cas");
+    fs::create_dir(&root_path).expect("cas root");
+    let root = PinnedDirectory::open(&root_path)
+        .expect("open root")
+        .expect("root exists");
+    let retained_path = tmp.path().join("retained-cas");
+    fs::rename(&root_path, &retained_path).expect("move retained root");
+    fs::create_dir(&root_path).expect("replacement root");
+    let target = root_path.join("objects/aa/bb/value.json");
+
+    atomic_write_batch_in_pinned_root(&root, &[(target, b"authority".to_vec())])
+        .expect("write through retained root");
+
+    assert_eq!(
+        fs::read(retained_path.join("objects/aa/bb/value.json")).expect("retained object"),
+        b"authority"
+    );
+    assert!(!root_path.join("objects/aa/bb/value.json").exists());
 }

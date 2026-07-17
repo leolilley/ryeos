@@ -70,13 +70,12 @@ pub enum EnvSourceKind {
     BaseAllowlist,
     DaemonRoot,
     DeclaredSecret,
-    ProviderSecret,
+    LaunchSecret,
     EnginePlanEnv,
     RuntimeDescriptor,
     RuntimeInterpreter,
     RuntimePathMutation,
     ProtocolInjection,
-    DaemonCallback,
     DaemonResume,
     PerSpawnDaemon,
 }
@@ -86,13 +85,12 @@ pub enum EnvSourceDetail {
     BaseAllowlist,
     DaemonRoot,
     DeclaredSecret,
-    ProviderSecret,
+    LaunchSecret,
     EnginePlanEnv,
     RuntimeDescriptor,
     RuntimeInterpreter,
     RuntimePathMutation,
     ProtocolInjection { source: EnvInjectionSource },
-    DaemonCallback,
     DaemonResume,
     PerSpawnDaemon,
 }
@@ -103,7 +101,7 @@ impl From<EnvSourceKind> for EnvSourceDetail {
             EnvSourceKind::BaseAllowlist => EnvSourceDetail::BaseAllowlist,
             EnvSourceKind::DaemonRoot => EnvSourceDetail::DaemonRoot,
             EnvSourceKind::DeclaredSecret => EnvSourceDetail::DeclaredSecret,
-            EnvSourceKind::ProviderSecret => EnvSourceDetail::ProviderSecret,
+            EnvSourceKind::LaunchSecret => EnvSourceDetail::LaunchSecret,
             EnvSourceKind::EnginePlanEnv => EnvSourceDetail::EnginePlanEnv,
             EnvSourceKind::RuntimeDescriptor => EnvSourceDetail::RuntimeDescriptor,
             EnvSourceKind::RuntimeInterpreter => EnvSourceDetail::RuntimeInterpreter,
@@ -111,7 +109,6 @@ impl From<EnvSourceKind> for EnvSourceDetail {
             EnvSourceKind::ProtocolInjection => {
                 panic!("protocol injection env requires EnvSourceDetail::ProtocolInjection")
             }
-            EnvSourceKind::DaemonCallback => EnvSourceDetail::DaemonCallback,
             EnvSourceKind::DaemonResume => EnvSourceDetail::DaemonResume,
             EnvSourceKind::PerSpawnDaemon => EnvSourceDetail::PerSpawnDaemon,
         }
@@ -144,10 +141,13 @@ impl DaemonRootEnv {
     pub fn from_resolution_roots(
         _roots: &ryeos_engine::item_resolution::ResolutionRoots,
         app_root: &std::path::Path,
-    ) -> Self {
-        Self {
-            app_root: Some(app_root.to_string_lossy().into_owned()),
-        }
+    ) -> anyhow::Result<Self> {
+        let app_root = app_root
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("daemon app root is not valid UTF-8"))?;
+        Ok(Self {
+            app_root: Some(app_root.to_owned()),
+        })
     }
 }
 
@@ -296,7 +296,7 @@ fn validate_binding_name(binding: &EnvBinding) -> Result<(), EnvContractError> {
             DAEMON_ROOT_NAMES,
             "not a daemon root env name",
         ),
-        EnvSourceDetail::DeclaredSecret | EnvSourceDetail::ProviderSecret => {
+        EnvSourceDetail::DeclaredSecret | EnvSourceDetail::LaunchSecret => {
             validate_application_controlled_name(binding)
         }
         EnvSourceDetail::EnginePlanEnv => require_name_in(
@@ -323,12 +323,6 @@ fn validate_binding_name(binding: &EnvBinding) -> Result<(), EnvContractError> {
         EnvSourceDetail::ProtocolInjection { source } => {
             validate_protocol_injection_name(&binding.key, *source, &binding.source)
         }
-        EnvSourceDetail::DaemonCallback => require_name_in(
-            &binding.key,
-            &binding.source,
-            DAEMON_CALLBACK_NAMES,
-            "not an allowed daemon callback env name",
-        ),
         EnvSourceDetail::PerSpawnDaemon => {
             if DAEMON_CALLBACK_NAMES.contains(&binding.key.as_str()) {
                 Ok(())
@@ -397,20 +391,24 @@ fn validate_protocol_injection_name(
         (source, key),
         (EnvInjectionSource::CallbackSocketPath, "RYEOSD_SOCKET_PATH")
             | (EnvInjectionSource::CallbackToken, "RYEOSD_CALLBACK_TOKEN")
+            | (EnvInjectionSource::ThreadId, "RYE_THREAD_ID")
             | (EnvInjectionSource::ThreadId, "RYEOSD_THREAD_ID")
-            | (EnvInjectionSource::ProjectPath, "RYEOSD_PROJECT_PATH")
+            | (
+                EnvInjectionSource::CallbackProjectPath,
+                "RYEOSD_PROJECT_PATH"
+            )
+            | (EnvInjectionSource::ProjectPath, "RYE_PROJECT_PATH")
             | (EnvInjectionSource::ProjectPath, "RYEOS_PROJECT_PATH")
             | (
                 EnvInjectionSource::ThreadAuthToken,
                 "RYEOSD_THREAD_AUTH_TOKEN"
             )
-            | (EnvInjectionSource::AppRoot, "RYEOS_APP_ROOT")
     );
     if allowed {
         return Ok(());
     }
 
-    if key.starts_with("RYEOS_") || key.starts_with("RYEOSD_") {
+    if key.starts_with("RYE_") || key.starts_with("RYEOS_") || key.starts_with("RYEOSD_") {
         return invalid(key, detail, "protected protocol env name/source mismatch");
     }
     if BASE_ALLOWLIST_NAMES.contains(&key)

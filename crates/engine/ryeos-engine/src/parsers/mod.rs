@@ -7,8 +7,7 @@
 //!
 //! Each descriptor names a `handler:ryeos/core/<name>` ref; the
 //! `ParserDispatcher` resolves that through `HandlerRegistry` and
-//! spawns the handler binary as an env-cleared subprocess
-//! (via `lillux::exec::lib_run`). There are no in-process native
+//! spawns the handler binary through the immutable node isolation. There are no in-process native
 //! parser handlers in the engine anymore.
 //!
 //! Bootstrap order (cycle break):

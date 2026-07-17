@@ -1,7 +1,0 @@
-# ryeos:signed:2026-06-07T05:18:56Z:a72eaa06c77953e8f29322dcbbe17bd3faed6a80dd84984c3964d32ee8fdeb6e:HvA5gmwjBzZaVUjLUhHO1aUAgIS+xMeVkw+exxbODeAoIsoShIXz4uJOjB5JhaJmnML8Bn1S2pLgo3koDxhNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-kind: service
-endpoint: rebuild
-required_caps: ["ryeos.execute.service.rebuild"]
-schema:
-  verify: boolean?
-description: "Rebuild projection.sqlite3 from CAS state (offline-only — daemon must be stopped)"

@@ -63,7 +63,8 @@ fn build_test_engine() -> ryeos_engine::engine::Engine {
         .expect("derive composers");
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, vec![bundle_root, standard_root])
-        .with_trust_store(trust_store)
+        .with_trust_store(trust_store.clone())
+        .with_node_trust_store(trust_store)
         .with_composers(composers)
 }
 
@@ -239,7 +240,8 @@ fn gate_05_offline_only_services_correct() {
     let expected = [
         "service:bundle/install",
         "service:bundle/remove",
-        "service:rebuild",
+        "service:projection/verify",
+        "service:projection/rebuild",
     ];
     assert_eq!(
         offline_only.as_slice(),
@@ -564,8 +566,9 @@ fn gate_18_remote_execute_request_defaults() {
     let req: ryeos_api::handlers::remote_execute::Request =
         serde_json::from_value(serde_json::json!({
             "item_ref": "directive:some/test",
+            "ref_bindings": {},
         }))
-        .expect("Request with only item_ref must parse");
+        .expect("Request with required identity fields must parse");
     assert!(
         !req.no_project,
         "no_project must default to false (the CLI must set it explicitly for --no-project mode)"

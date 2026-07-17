@@ -34,10 +34,10 @@ Simple child directive — writes a message to a file, then reads it back to con
 
 <process>
   <step name="write">
-    Write the message "{input:message}" to `{input:file_path}`.
+    Write the message "${inputs.message}" to `${inputs.file_path}`.
   </step>
   <step name="verify">
-    Read `{input:file_path}` back to confirm it was written correctly.
+    Read `${inputs.file_path}` back to confirm it was written correctly.
   </step>
   <step name="return_result">
     Return the path and the verified content.

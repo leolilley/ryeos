@@ -161,6 +161,7 @@ pub fn builtin_patterns() -> Vec<&'static str> {
         ".svn/",
         "node_modules/",
         "target/",
+        ".venv/",
         "__pycache__/",
         ".DS_Store",
         "*.pyc",
@@ -170,6 +171,12 @@ pub fn builtin_patterns() -> Vec<&'static str> {
         // no use for a copy, so never ship it. Anchored so it only matches the
         // project's own `.ai/config/remotes/`, not any dir named `remotes`.
         "/.ai/config/remotes/",
+        // Runtime-owned and rebuildable project data must never be folded
+        // into a durable source snapshot. Besides wasting hundreds of MB,
+        // ingesting `.ai/state` recursively snapshots the very thread state
+        // being created and can prevent admission from ever converging.
+        "/.ai/state/",
+        "/.ai/cache/",
     ]
 }
 
@@ -225,6 +232,15 @@ mod tests {
         assert!(m.is_ignored("target/debug/ryeosd"));
         assert!(m.is_ignored("target"));
         assert!(!m.is_ignored("my-target/file.txt"));
+    }
+
+    #[test]
+    fn builtins_exclude_runtime_state_and_virtualenvs() {
+        let matcher = matcher_from_builtins();
+        assert!(matcher.is_ignored(".venv/bin/python"));
+        assert!(matcher.is_ignored(".ai/state/cas/objects/aa/hash"));
+        assert!(matcher.is_ignored(".ai/cache/generated"));
+        assert!(!matcher.is_ignored(".ai/graphs/arc/hash_probe.yaml"));
     }
 
     #[test]

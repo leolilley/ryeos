@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-06-15T04:48:21Z:bb641fa1aa49a59893ec595c3d32da62738c75d454ebc1586504d251d9032fb0:pA8C29BLPnJ5NiL6LAmCwSR/5uGIxqrU9SsauAQJ3aLiQDcg3d2tcBPsko+6X7sI8cPlTRwNz1KHgvbPVHHaAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:54cb175baf6f0426edf3949de2f9d574f6d0fa4035791c97e3b940b8c3dd2fd7:EykCTu/OBMvrQOWnXajfigwwfNhl0ryj7sXnCuowsX5u1NjrMS/u2Vcn5B7eEvQtS3Ka7h4c9jD0kdexw5BnAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
 title: "Build, Test, and Local Install Runbook"
 description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Build, Test, and Local Install Runbook
@@ -21,7 +21,7 @@ test, refresh bundles, or install this checkout locally.
 | Rebuild/sign bundles only | `./scripts/gate.sh --no-tests` |
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
 | Fresh repo-local daemon | `./scripts/dev-up.sh` |
-| Fast packaged-layout install | `./scripts/pkg/install-local-direct.sh` |
+| Fast packaged-layout install | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 | Verify source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
 
 Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
@@ -113,7 +113,7 @@ Use this to install the current checkout into the same layout as a package,
 without running `makepkg`/`yay`:
 
 ```bash
-./scripts/pkg/install-local-direct.sh
+./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
 It populates bundles, stops a running daemon before replacing files, installs
@@ -130,10 +130,16 @@ Post-install smoke:
 
 ```bash
 command -v ryeos                 # should be /usr/bin/ryeos
-ryeos status
+ryeos node status
+ryeos node doctor --json
 ryeos execute tool:ryeos/core/identity/public_key
 script -q -c 'ryeos tui --mock' /tmp/ryeos-tui-smoke.log
 ```
+
+The generated isolation policy is disabled by default. `node doctor` uses the
+production policy loader; after changing mode or policy contents, restart the
+node before judging execution behavior. See [Execution
+Isolation](../../../../bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md).
 
 If `ryeos tui` works but `ryeos help tui` fails, fix the CLI help path. Do not
 work around it by adding kind-specific CLI dispatch logic.

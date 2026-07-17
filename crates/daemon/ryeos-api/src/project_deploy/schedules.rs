@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,15 @@ use serde_json::Value;
 use super::ProjectDeployContext;
 
 const MANAGED_BY_TYPE: &str = "project_ai_sync";
+
+fn project_path_identity(path: &Path) -> Result<&str> {
+    path.to_str().ok_or_else(|| {
+        anyhow!(
+            "canonical project path '{}' is not valid UTF-8 and cannot be used as schedule authority",
+            path.display()
+        )
+    })
+}
 
 #[derive(Debug, Default)]
 pub struct ScheduleDeployPlan {
@@ -65,26 +74,17 @@ struct ScheduleDeclarationFile {
 struct ScheduleDeclaration {
     schedule_id: String,
     item_ref: String,
+    ref_bindings: BTreeMap<String, String>,
     schedule_type: String,
     expression: String,
-    #[serde(default)]
-    timezone: Option<String>,
-    #[serde(default)]
-    misfire_policy: Option<String>,
-    #[serde(default)]
-    overlap_policy: Option<String>,
-    #[serde(default)]
-    lateness_grace_secs: Option<i64>,
-    #[serde(default = "default_schedule_enabled")]
+    timezone: String,
+    misfire_policy: String,
+    overlap_policy: String,
+    lateness_grace_secs: i64,
     enabled: bool,
     #[serde(default)]
     project_root: Option<String>,
-    #[serde(default)]
     params: Value,
-}
-
-fn default_schedule_enabled() -> bool {
-    true
 }
 
 #[cfg(test)]
@@ -97,6 +97,7 @@ pub(crate) fn validate_declarations_for_test(
 
 pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
     let desired = load_desired_schedules(ctx.staging_root, ctx.project_path)?;
+    let canonical_project_path = project_path_identity(ctx.project_path)?;
     let mut actions = Vec::new();
     let desired_ids: HashSet<String> = desired
         .iter()
@@ -114,12 +115,20 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
         .join(ryeos_engine::AI_DIR)
         .join("node");
     let schedules_dir = node_dir.join("schedules");
-    let managed_yaml = load_project_managed_schedule_yaml(&schedules_dir, ctx.project_key)?;
+    let managed_yaml = load_project_managed_schedule_yaml(
+        &schedules_dir,
+        ctx.project_key,
+        &ctx.state.engine.trust_store,
+    )?;
 
     for desired_schedule in desired_by_id.values() {
         let schedule_id = &desired_schedule.declaration.schedule_id;
         let existing = ctx.state.scheduler_db.get_spec(schedule_id)?;
-        let existing_body = read_existing_schedule_body(&schedules_dir, schedule_id)?;
+        let existing_body = read_existing_schedule_body(
+            &schedules_dir,
+            schedule_id,
+            &ctx.state.engine.trust_store,
+        )?;
 
         match existing {
             Some(existing) => {
@@ -135,8 +144,7 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
                     }
                     None => {
                         let existing_project_root = existing.project_root.as_deref();
-                        let sync_project_root = ctx.project_path.to_string_lossy();
-                        if existing_project_root != Some(sync_project_root.as_ref()) {
+                        if existing_project_root != Some(canonical_project_path) {
                             anyhow::bail!(
                                 "schedule_id '{}' already exists as a manual schedule for project_root {:?}; refusing to adopt for project {}",
                                 schedule_id,
@@ -199,7 +207,7 @@ pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ScheduleDeployPlan> {
         {
             continue;
         }
-        if existing.project_root.as_deref() == Some(ctx.project_path.to_string_lossy().as_ref()) {
+        if existing.project_root.as_deref() == Some(canonical_project_path) {
             let yaml_path = schedules_dir.join(format!("{}.yaml", existing.schedule_id));
             if !yaml_path.exists() {
                 anyhow::bail!(
@@ -269,7 +277,7 @@ pub fn prepare_commit(
         .join(ryeos_engine::AI_DIR)
         .join("node");
     let schedules_dir = node_dir.join("schedules");
-    let mut tx = ScheduleReconcileTx::new(schedules_dir.clone());
+    let mut tx = ScheduleReconcileTx::new(&schedules_dir)?;
     let mut report = ScheduleDeployReport {
         declared: plan.declared,
         ..ScheduleDeployReport::default()
@@ -282,7 +290,7 @@ pub fn prepare_commit(
                 ScheduleAction::Create(desired) => {
                     tx.backup(ctx, &desired.declaration.schedule_id)?;
                     write_reconciled_schedule(
-                        &node_dir,
+                        &tx.directory,
                         desired,
                         ctx,
                         lillux::time::timestamp_millis(),
@@ -299,7 +307,7 @@ pub fn prepare_commit(
                 } => {
                     tx.backup(ctx, &desired.declaration.schedule_id)?;
                     write_reconciled_schedule(
-                        &node_dir,
+                        &tx.directory,
                         desired,
                         ctx,
                         existing.registered_at,
@@ -315,8 +323,11 @@ pub fn prepare_commit(
                 } => {
                     tx.backup(ctx, schedule_id)?;
                     let yaml_path = tx.schedule_path(schedule_id);
-                    if yaml_path.exists() {
-                        fs::remove_file(&yaml_path).with_context(|| {
+                    let name = yaml_path
+                        .file_name()
+                        .ok_or_else(|| anyhow!("schedule path has no filename"))?;
+                    if let Some(file) = tx.directory.open_regular(name, false)? {
+                        tx.directory.remove_if_same(name, &file).with_context(|| {
                             format!("delete schedule YAML {}", yaml_path.display())
                         })?;
                     }
@@ -361,36 +372,26 @@ fn parse_project_managed_by(body: &Value) -> Option<ProjectManagedBy> {
 fn load_project_managed_schedule_yaml(
     schedules_dir: &Path,
     project_key: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
 ) -> Result<HashMap<String, Value>> {
     let mut out = HashMap::new();
-    if !schedules_dir.is_dir() {
-        return Ok(out);
-    }
-    for entry in fs::read_dir(schedules_dir)
-        .with_context(|| format!("read schedules dir {}", schedules_dir.display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if !entry.file_type()?.is_file() || path.is_symlink() {
-            continue;
-        }
-        let ext = path.extension().and_then(|e| e.to_str());
-        if !matches!(ext, Some("yaml" | "yml")) {
-            continue;
-        }
-        let Some(schedule_id) = path.file_stem().and_then(|s| s.to_str()) else {
+    for path in ryeos_scheduler::projection::canonical_schedule_source_paths(schedules_dir)? {
+        let schedule_id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("canonical schedule path has a validated UTF-8 stem");
+        let verified =
+            ryeos_scheduler::projection::load_verified_schedule_source(&path, trust_store)?;
+        let body = serde_json::to_value(verified.record)?;
+        let Some(managed) = parse_project_managed_by(&body) else {
             continue;
         };
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("read schedule YAML {}", path.display()))?;
-        let body = lillux::signature::strip_signature_lines(&content);
-        let value: Value = serde_yaml::from_str(&body)
-            .with_context(|| format!("parse schedule YAML {}", path.display()))?;
-        let Some(managed) = parse_project_managed_by(&value) else {
-            continue;
-        };
-        if managed.project_key == project_key {
-            out.insert(schedule_id.to_string(), value);
+        if managed.project_key == project_key && out.insert(schedule_id.to_string(), body).is_some()
+        {
+            anyhow::bail!(
+                "multiple project-managed schedule sources declare schedule_id '{}'",
+                schedule_id
+            );
         }
     }
     Ok(out)
@@ -401,6 +402,7 @@ fn revalidate_action(
     ctx: &ProjectDeployContext<'_>,
     schedules_dir: &Path,
 ) -> Result<()> {
+    let canonical_project_path = project_path_identity(ctx.project_path)?;
     match action {
         ScheduleAction::Create(desired) => {
             let schedule_id = &desired.declaration.schedule_id;
@@ -410,7 +412,13 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            if read_existing_schedule_body(schedules_dir, schedule_id)?.is_some() {
+            if read_existing_schedule_body(
+                schedules_dir,
+                schedule_id,
+                &ctx.state.engine.trust_store,
+            )?
+            .is_some()
+            {
                 anyhow::bail!(
                     "schedule_id '{}' gained node YAML during project deploy; refusing to overwrite",
                     schedule_id
@@ -443,13 +451,17 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            let body =
-                read_existing_schedule_body(schedules_dir, schedule_id)?.ok_or_else(|| {
-                    anyhow!(
-                        "schedule_id '{}' lost node YAML during project deploy; refusing update",
-                        schedule_id
-                    )
-                })?;
+            let body = read_existing_schedule_body(
+                schedules_dir,
+                schedule_id,
+                &ctx.state.engine.trust_store,
+            )?
+            .ok_or_else(|| {
+                anyhow!(
+                    "schedule_id '{}' lost node YAML during project deploy; refusing update",
+                    schedule_id
+                )
+            })?;
             let yaml_hash = read_existing_schedule_content_hash(schedules_dir, schedule_id)?
                 .ok_or_else(|| {
                     anyhow!(
@@ -473,9 +485,7 @@ fn revalidate_action(
                     }
                 }
                 None if *adopt_manual => {
-                    if current.project_root.as_deref()
-                        != Some(ctx.project_path.to_string_lossy().as_ref())
-                    {
+                    if current.project_root.as_deref() != Some(canonical_project_path) {
                         anyhow::bail!(
                             "schedule_id '{}' changed project_root during project deploy; refusing manual adoption",
                             schedule_id
@@ -518,13 +528,17 @@ fn revalidate_action(
                     schedule_id
                 );
             }
-            let body =
-                read_existing_schedule_body(schedules_dir, schedule_id)?.ok_or_else(|| {
-                    anyhow!(
-                        "schedule_id '{}' lost node YAML during project deploy; refusing delete",
-                        schedule_id
-                    )
-                })?;
+            let body = read_existing_schedule_body(
+                schedules_dir,
+                schedule_id,
+                &ctx.state.engine.trust_store,
+            )?
+            .ok_or_else(|| {
+                anyhow!(
+                    "schedule_id '{}' lost node YAML during project deploy; refusing delete",
+                    schedule_id
+                )
+            })?;
             let yaml_hash = read_existing_schedule_content_hash(schedules_dir, schedule_id)?
                 .ok_or_else(|| {
                     anyhow!(
@@ -572,14 +586,19 @@ fn load_desired_schedules(
         return Ok(Vec::new());
     }
 
-    let canonical_project_path = project_path.to_string_lossy().to_string();
+    let canonical_project_path = project_path_identity(project_path)?;
     let mut seen = HashSet::new();
     let mut desired = Vec::new();
     for path in schedule_declaration_files(&schedules_root)? {
-        let rel_path = path
-            .strip_prefix(staging_root)
-            .unwrap_or(&path)
-            .to_string_lossy()
+        let relative = path.strip_prefix(staging_root).unwrap_or(&path);
+        let rel_path = relative
+            .to_str()
+            .ok_or_else(|| {
+                anyhow!(
+                    "schedule declaration path '{}' is not valid UTF-8",
+                    relative.display()
+                )
+            })?
             .replace('\\', "/");
         let content = fs::read_to_string(&path)
             .with_context(|| format!("read schedule declaration {}", rel_path))?;
@@ -589,7 +608,7 @@ fn load_desired_schedules(
         validate_schedule_declaration_file(&file, &rel_path)?;
         let source_body_hash = lillux::cas::sha256_hex(body.as_bytes());
         for schedule in file.schedules {
-            validate_schedule_declaration(&schedule, &rel_path, &canonical_project_path)?;
+            validate_schedule_declaration(&schedule, &rel_path, canonical_project_path)?;
             if !seen.insert(schedule.schedule_id.clone()) {
                 anyhow::bail!(
                     "duplicate schedule_id '{}' across project schedule declarations",
@@ -628,11 +647,11 @@ fn collect_schedule_declaration_files(dir: &Path, files: &mut Vec<PathBuf>) -> R
             collect_schedule_declaration_files(&path, files)?;
         } else if ft.is_file() {
             let ext = path.extension().and_then(|ext| ext.to_str());
-            if matches!(ext, Some("yaml" | "yml")) {
+            if ext == Some("yaml") {
                 files.push(path);
             } else {
                 anyhow::bail!(
-                    "schedule declaration path '{}' is not YAML; expected .yaml or .yml",
+                    "schedule declaration path '{}' is not canonical YAML; expected .yaml",
                     path.display()
                 );
             }
@@ -681,6 +700,13 @@ fn validate_schedule_declaration(
         .with_context(|| format!("invalid schedule_id in {}", rel_path))?;
     ryeos_engine::canonical_ref::CanonicalRef::parse(&schedule.item_ref)
         .with_context(|| format!("invalid item_ref for schedule '{}'", schedule.schedule_id))?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&schedule.ref_bindings)
+        .with_context(|| {
+            format!(
+                "invalid ref_bindings for schedule '{}'",
+                schedule.schedule_id
+            )
+        })?;
     ryeos_scheduler::crontab::validate_expression(&schedule.schedule_type, &schedule.expression)
         .with_context(|| format!("invalid expression for schedule '{}'", schedule.schedule_id))?;
     if schedule.schedule_type == "at"
@@ -694,36 +720,31 @@ fn validate_schedule_declaration(
             schedule.schedule_id
         );
     }
-    let timezone = schedule.timezone.as_deref().unwrap_or("UTC");
-    ryeos_scheduler::crontab::validate_timezone(timezone)
+    ryeos_scheduler::crontab::validate_timezone(&schedule.timezone)
         .with_context(|| format!("invalid timezone for schedule '{}'", schedule.schedule_id))?;
-    if let Some(ref p) = schedule.overlap_policy {
-        if !matches!(p.as_str(), "allow" | "skip" | "cancel_previous") {
-            anyhow::bail!(
-                "invalid overlap_policy '{}' for schedule '{}'",
-                p,
+    ryeos_scheduler::overlap::parse_overlap_policy(&schedule.overlap_policy).with_context(
+        || {
+            format!(
+                "invalid overlap_policy for schedule '{}'",
                 schedule.schedule_id
-            );
-        }
-    }
-    if let Some(ref p) = schedule.misfire_policy {
-        if !is_valid_misfire_policy(p) {
-            anyhow::bail!(
-                "invalid misfire_policy '{}' for schedule '{}'",
-                p,
+            )
+        },
+    )?;
+    ryeos_scheduler::misfire::parse_misfire_policy(&schedule.misfire_policy).with_context(
+        || {
+            format!(
+                "invalid misfire_policy for schedule '{}'",
                 schedule.schedule_id
-            );
-        }
+            )
+        },
+    )?;
+    if schedule.lateness_grace_secs <= 0 {
+        anyhow::bail!(
+            "lateness_grace_secs must be positive for schedule '{}'",
+            schedule.schedule_id
+        );
     }
-    if let Some(secs) = schedule.lateness_grace_secs {
-        if secs <= 0 {
-            anyhow::bail!(
-                "lateness_grace_secs must be positive for schedule '{}'",
-                schedule.schedule_id
-            );
-        }
-    }
-    if !schedule.params.is_null() && !schedule.params.is_object() {
+    if !schedule.params.is_object() {
         anyhow::bail!(
             "params must be a mapping for schedule '{}'",
             schedule.schedule_id
@@ -747,21 +768,6 @@ fn validate_schedule_declaration(
         }
     }
     Ok(())
-}
-
-fn is_valid_misfire_policy(p: &str) -> bool {
-    match p {
-        "skip" | "fire_once_now" => true,
-        s if s.starts_with("catch_up_bounded:") => s
-            .strip_prefix("catch_up_bounded:")
-            .and_then(|n| n.parse::<usize>().ok())
-            .is_some(),
-        s if s.starts_with("catch_up_within_secs:") => s
-            .strip_prefix("catch_up_within_secs:")
-            .and_then(|n| n.parse::<u64>().ok())
-            .is_some(),
-        _ => false,
-    }
 }
 
 fn require_schedule_registration_authority(ctx: &ProjectDeployContext<'_>) -> Result<()> {
@@ -821,36 +827,69 @@ fn reject_schedule_history_reuse(ctx: &ProjectDeployContext<'_>, schedule_id: &s
         .join("state")
         .join("schedules")
         .join(schedule_id);
-    if fires_dir.exists() {
-        anyhow::bail!(
-            "schedule_id '{}' reuse not allowed: fire history exists at {} — deregister first or use a different ID",
-            schedule_id,
+    match fs::symlink_metadata(&fires_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "schedule_id '{}' reuse not allowed: fire history exists at {} — deregister first or use a different ID",
+                schedule_id,
+                fires_dir.display()
+            );
+        }
+        Ok(_) => anyhow::bail!(
+            "schedule history path must be a real directory: {}",
             fires_dir.display()
-        );
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
 
-fn read_existing_schedule_body(schedules_dir: &Path, schedule_id: &str) -> Result<Option<Value>> {
-    let yaml_path = schedules_dir.join(format!("{schedule_id}.yaml"));
-    if !yaml_path.exists() {
-        return Ok(None);
+fn canonical_project_schedule_path(schedules_dir: &Path, schedule_id: &str) -> Result<PathBuf> {
+    let _ = ryeos_scheduler::projection::canonical_schedule_source_paths(schedules_dir)?;
+    Ok(schedules_dir.join(format!("{schedule_id}.yaml")))
+}
+
+fn read_existing_schedule_body(
+    schedules_dir: &Path,
+    schedule_id: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<Option<Value>> {
+    let yaml_path = canonical_project_schedule_path(schedules_dir, schedule_id)?;
+    match fs::symlink_metadata(&yaml_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect schedule source {}", yaml_path.display()));
+        }
     }
-    let content = fs::read_to_string(&yaml_path)
-        .with_context(|| format!("read existing schedule YAML {}", yaml_path.display()))?;
-    let body = lillux::signature::strip_signature_lines(&content);
-    let value = serde_yaml::from_str(&body)
-        .with_context(|| format!("parse existing schedule YAML {}", yaml_path.display()))?;
-    Ok(Some(value))
+    let verified =
+        ryeos_scheduler::projection::load_verified_schedule_source(&yaml_path, trust_store)
+            .with_context(|| format!("verify existing schedule YAML {}", yaml_path.display()))?;
+    Ok(Some(serde_json::to_value(verified.record)?))
 }
 
 fn read_existing_schedule_content_hash(
     schedules_dir: &Path,
     schedule_id: &str,
 ) -> Result<Option<String>> {
-    let yaml_path = schedules_dir.join(format!("{schedule_id}.yaml"));
-    if !yaml_path.exists() {
-        return Ok(None);
+    let yaml_path = canonical_project_schedule_path(schedules_dir, schedule_id)?;
+    match fs::symlink_metadata(&yaml_path) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            anyhow::bail!(
+                "schedule source {} is not a regular non-symlink file",
+                yaml_path.display()
+            );
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect schedule source {}", yaml_path.display()));
+        }
     }
     let content = fs::read(&yaml_path)
         .with_context(|| format!("read existing schedule YAML {}", yaml_path.display()))?;
@@ -859,7 +898,7 @@ fn read_existing_schedule_content_hash(
 
 #[allow(clippy::too_many_arguments)]
 fn write_reconciled_schedule(
-    node_dir: &Path,
+    schedules_dir: &lillux::PinnedDirectory,
     desired: &DesiredSchedule,
     ctx: &ProjectDeployContext<'_>,
     registered_at: i64,
@@ -874,32 +913,21 @@ fn write_reconciled_schedule(
     }
 
     let schedule = &desired.declaration;
-    let canonical_project_path = ctx.project_path.to_string_lossy().to_string();
-    let timezone = schedule.timezone.as_deref().unwrap_or("UTC");
-    let normalized_misfire = match schedule.misfire_policy.as_deref() {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => match schedule.schedule_type.as_str() {
-            "interval" => "fire_once_now".to_string(),
-            _ => "skip".to_string(),
-        },
-    };
-    let overlap_policy = schedule
-        .overlap_policy
-        .clone()
-        .unwrap_or_else(|| "skip".to_string());
-    let lateness_grace_secs = schedule.lateness_grace_secs.unwrap_or(60);
-    let mut body = serde_json::json!({
+    let canonical_project_path = project_path_identity(ctx.project_path)?.to_owned();
+    let body = serde_json::json!({
         "spec_version": 1,
         "schedule_id": schedule.schedule_id,
         "item_ref": schedule.item_ref,
+        "ref_bindings": schedule.ref_bindings,
         "schedule_type": schedule.schedule_type,
         "expression": schedule.expression,
-        "timezone": timezone,
+        "timezone": schedule.timezone,
         "enabled": schedule.enabled,
         "registered_at": registered_at,
-        "misfire_policy": normalized_misfire,
-        "overlap_policy": overlap_policy,
-        "lateness_grace_secs": lateness_grace_secs,
+        "misfire_policy": schedule.misfire_policy,
+        "overlap_policy": schedule.overlap_policy,
+        "lateness_grace_secs": schedule.lateness_grace_secs,
+        "params": schedule.params,
         "project_root": canonical_project_path,
         "execution": {
             "requester_fingerprint": requester_fingerprint,
@@ -914,46 +942,25 @@ fn write_reconciled_schedule(
             "source_body_hash": desired.source_body_hash,
         },
     });
-    if !schedule.params.is_null() {
-        body["params"] = schedule.params.clone();
-    } else {
-        body["params"] = serde_json::json!({});
-    }
 
-    let spec_path = writer::write_signed_node_item(
-        node_dir,
+    let bytes = writer::render_signed_node_item(
         "schedules",
         &schedule.schedule_id,
         &body,
         &ctx.state.identity,
     )?;
-    let content = fs::read_to_string(&spec_path)?;
-    let signer_fingerprint =
-        ryeos_scheduler::projection::parse_signer_fingerprint_from_str(&content)
-            .unwrap_or_else(|| ctx.state.identity.fingerprint().to_string());
-    let spec_hash = lillux::cas::sha256_hex(content.as_bytes());
-    let rec = ScheduleSpecRecord {
-        schedule_id: schedule.schedule_id.clone(),
-        item_ref: schedule.item_ref.clone(),
-        params: if schedule.params.is_null() {
-            "{}".to_string()
-        } else {
-            serde_json::to_string(&schedule.params)?
-        },
-        schedule_type: schedule.schedule_type.clone(),
-        expression: schedule.expression.clone(),
-        timezone: timezone.to_string(),
-        misfire_policy: normalized_misfire,
-        overlap_policy,
-        lateness_grace_secs,
-        enabled: schedule.enabled,
-        project_root: Some(canonical_project_path),
-        signer_fingerprint,
-        spec_hash,
-        registered_at,
-        requester_fingerprint: requester_fingerprint.to_string(),
-        capabilities: capabilities.to_vec(),
-    };
+    let filename = format!("{}.yaml", schedule.schedule_id);
+    let filename = std::ffi::OsStr::new(&filename);
+    let expected = schedules_dir.open_regular(filename, false)?;
+    schedules_dir.atomic_write_if_same(filename, expected.as_ref(), &bytes, 0o600)?;
+    let spec_path = schedules_dir.path().join(filename);
+    let content = String::from_utf8(bytes).context("signed schedule source is not UTF-8")?;
+    let verified = ryeos_scheduler::projection::verify_schedule_source_content(
+        &spec_path,
+        &content,
+        &ctx.state.engine.trust_store,
+    )?;
+    let rec = verified.to_spec_record()?;
     ctx.state.scheduler_db.upsert_spec(&rec)?;
     Ok(())
 }
@@ -967,22 +974,26 @@ struct ScheduleBackup {
 
 #[derive(Debug)]
 struct ScheduleReconcileTx {
-    schedules_dir: PathBuf,
+    directory: lillux::PinnedDirectory,
+    _directory_lock: lillux::PinnedDirectoryLock,
     backups: Vec<ScheduleBackup>,
     touched: HashSet<String>,
 }
 
 impl ScheduleReconcileTx {
-    fn new(schedules_dir: PathBuf) -> Self {
-        Self {
-            schedules_dir,
+    fn new(schedules_dir: &Path) -> Result<Self> {
+        let directory = lillux::PinnedDirectory::open_or_create(schedules_dir)?;
+        let directory_lock = directory.lock_exclusive()?;
+        Ok(Self {
+            directory,
+            _directory_lock: directory_lock,
             backups: Vec::new(),
             touched: HashSet::new(),
-        }
+        })
     }
 
     fn schedule_path(&self, schedule_id: &str) -> PathBuf {
-        self.schedules_dir.join(format!("{schedule_id}.yaml"))
+        self.directory.path().join(format!("{schedule_id}.yaml"))
     }
 
     fn backup(&mut self, ctx: &ProjectDeployContext<'_>, schedule_id: &str) -> Result<()> {
@@ -990,11 +1001,20 @@ impl ScheduleReconcileTx {
             return Ok(());
         }
         let yaml_path = self.schedule_path(schedule_id);
-        let yaml_bytes = if yaml_path.exists() {
-            Some(fs::read(&yaml_path).with_context(|| format!("backup {}", yaml_path.display()))?)
-        } else {
-            None
-        };
+        let name = yaml_path
+            .file_name()
+            .ok_or_else(|| anyhow!("schedule path has no filename"))?;
+        let yaml_bytes = self
+            .directory
+            .open_regular(name, false)?
+            .map(|mut file| {
+                let mut bytes = Vec::new();
+                use std::io::Read as _;
+                file.read_to_end(&mut bytes)?;
+                Ok::<_, std::io::Error>(bytes)
+            })
+            .transpose()
+            .with_context(|| format!("backup {}", yaml_path.display()))?;
         let db_record = ctx.state.scheduler_db.get_spec(schedule_id)?;
         self.backups.push(ScheduleBackup {
             schedule_id: schedule_id.to_string(),
@@ -1017,14 +1037,22 @@ impl ScheduleReconcileTx {
             let yaml_path = self.schedule_path(&backup.schedule_id);
             match &backup.yaml_bytes {
                 Some(bytes) => {
-                    if let Some(parent) = yaml_path.parent() {
-                        let _ = fs::create_dir_all(parent);
+                    if let Some(name) = yaml_path.file_name() {
+                        if let Ok(expected) = self.directory.open_regular(name, false) {
+                            let _ = self.directory.atomic_write_if_same(
+                                name,
+                                expected.as_ref(),
+                                bytes,
+                                0o600,
+                            );
+                        }
                     }
-                    let _ = lillux::atomic_write(&yaml_path, bytes);
                 }
                 None => {
-                    if yaml_path.exists() {
-                        let _ = fs::remove_file(&yaml_path);
+                    if let Some(name) = yaml_path.file_name() {
+                        if let Ok(Some(file)) = self.directory.open_regular(name, false) {
+                            let _ = self.directory.remove_if_same(name, &file);
+                        }
                     }
                 }
             }

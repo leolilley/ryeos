@@ -282,6 +282,7 @@ pub struct CompileContext<'a> {
     pub parsers: &'a ParserDispatcher,
     pub kinds: &'a KindRegistry,
     pub trust_store: &'a TrustStore,
+    pub node_trust_store: &'a TrustStore,
     pub project_root: Option<&'a Path>,
     pub root_trust_class: TrustClass,
     /// Operator-supplied allowlist + snapshot for host-env passthrough.
@@ -439,6 +440,7 @@ pub fn compile_with_handlers(
     parsers: &ParserDispatcher,
     kinds: &KindRegistry,
     trust_store: &TrustStore,
+    node_trust_store: &TrustStore,
     roots: &ResolutionRoots,
     root_trust_class: TrustClass,
 ) -> Result<PlanSubprocessSpec, EngineError> {
@@ -458,6 +460,7 @@ pub fn compile_with_handlers(
         parsers,
         kinds,
         trust_store,
+        node_trust_store,
         project_root,
         root_trust_class,
         host_env,
@@ -596,7 +599,7 @@ pub fn compile_with_handlers(
     // that must appear in the params JSON passed to the subprocess.
     ctx.template_ctx.params_json = ctx.params.to_string();
 
-    let trust_ref = ctx.trust_store;
+    let node_trust_ref = ctx.node_trust_store;
 
     let CompileContext {
         template_ctx,
@@ -618,17 +621,23 @@ pub fn compile_with_handlers(
     // material instead of PATH. Unqualified refs stay wrapper-local;
     // qualified refs (`bin:<bundle>/<name>`) resolve from a registered bundle
     // while keeping runtime authority on the wrapper item.
-    let cmd = if cmd_expanded.starts_with("bin:") {
+    let (cmd, verified_command) = if cmd_expanded.starts_with("bin:") {
         let resolved = crate::binary_resolver::resolve_runtime_binary_command_ref(
             &cmd_expanded,
             root_source_path,
             roots,
-            trust_ref,
+            node_trust_ref,
             ctx.root_trust_class,
         )?;
-        resolved.absolute_path.to_string_lossy().into_owned()
+        (
+            resolved.absolute_path.to_string_lossy().into_owned(),
+            Some(crate::isolation::IsolationVerifiedCode {
+                source_path: resolved.absolute_path,
+                content_hash: resolved.content_hash,
+            }),
+        )
     } else {
-        cmd_expanded
+        (cmd_expanded, None)
     };
 
     let args_template = spec_overrides.args.unwrap_or_default();
@@ -659,6 +668,7 @@ pub fn compile_with_handlers(
 
     Ok(PlanSubprocessSpec {
         cmd,
+        verified_command,
         args,
         cwd: spec_overrides
             .cwd

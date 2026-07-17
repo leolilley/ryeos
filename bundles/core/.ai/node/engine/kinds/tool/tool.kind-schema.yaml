@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-02T02:39:08Z:a7ef0bab0337886f8787b0557241fae54b7013ea2768cd097d40be9e3718af7d:2ztijFtD8Y8U97PA2eDehlPUle0qkkmJRoYSaJkc20lwRY+tNkXI5KJx7jvrClAEM6E7JWUKPm/Qk2gh3gOMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-15T07:49:04Z:d19a580dc3bb900c87b9d5987fb0d10d374edd1b22edab94fd27839664ac3338:JZ8v+2p7kd1BBnt2Ltpw93hzuQdXpj6cXTCxkm86hk0ToTvnZjy2UYh1e7ghdGVLN4tEQ7TeXMSQYyOrRx8IDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/tool"
 version: "1.0.0"
 location:
@@ -9,7 +9,7 @@ resolution: []
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/opaque
+    protocol: protocol:ryeos/core/tool_callback
   thread_profile:
     name: tool_run
     root_executable: true

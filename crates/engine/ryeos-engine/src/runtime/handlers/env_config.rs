@@ -61,7 +61,7 @@ pub enum InterpreterConfig {
         search_paths: Vec<String>,
         var: Option<String>,
         /// Bare names tried at the end and resolved against the engine
-        /// process's PATH before the sandbox boundary.
+        /// process's PATH before the isolation boundary.
         #[serde(default)]
         path_candidates: Vec<String>,
     },
@@ -97,7 +97,7 @@ pub fn resolve_interpreter(
                     }
                 }
             }
-            // 3. Resolve PATH candidates now. Sandboxed subprocess specs require
+            // 3. Resolve PATH candidates now. Isolationed subprocess specs require
             // an absolute executable and cannot defer lookup to spawn time.
             for name in path_candidates {
                 if let Some(path) = resolve_path_candidate(name) {

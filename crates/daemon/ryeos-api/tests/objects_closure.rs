@@ -28,24 +28,28 @@ fn store_fixture(state: &ryeos_app::state::AppState) -> (String, String, Vec<u8>
     let item_hash = cas
         .store_object(&json!({
             "kind": "item_source",
-            "item_ref": "directive:test/closure",
+            "item_ref": ".ai/directives/test/closure.md",
             "content_blob_hash": blob_hash,
             "integrity": "none",
+            "signature_info": null,
+            "mode": null,
         }))
         .unwrap();
     let manifest_hash = cas
         .store_object(&json!({
             "kind": "source_manifest",
             "item_source_hashes": {
-                "directive:test/closure": item_hash,
+                ".ai/directives/test/closure.md": item_hash,
             }
         }))
         .unwrap();
     let snapshot_hash = cas
         .store_object(&json!({
             "kind": "project_snapshot",
-            "schema": 3,
+            "schema": ryeos_state::objects::ProjectSnapshot::SCHEMA,
             "project_manifest_hash": manifest_hash,
+            "user_manifest_hash": null,
+            "message": null,
             "project_sync_scope": "full_project",
             "parent_hashes": [],
             "created_at": "2026-05-29T00:00:00Z",
@@ -115,7 +119,7 @@ async fn closure_get_enforces_blob_byte_budget() {
         .await
         .unwrap_err();
 
-    assert!(err.to_string().contains("exceeds max_blob_bytes"));
+    assert!(format!("{err:#}").contains("max_blob_bytes=1"));
 }
 
 #[tokio::test]

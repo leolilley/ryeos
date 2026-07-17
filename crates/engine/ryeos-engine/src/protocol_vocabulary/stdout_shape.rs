@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
 use crate::launch_envelope_types::RuntimeResult;
+#[cfg(test)]
+use crate::launch_envelope_types::RuntimeResultStatus;
+use crate::method_wire::MethodCallResult;
 
 /// Maximum permitted size of a single streaming frame body.
 ///
@@ -22,12 +25,15 @@ pub enum StdoutShape {
 
     /// Daemon parses stdout as a single RuntimeResult JSON object at exit.
     /// Wire shape: `RuntimeResult` from `launch_envelope_types`.
-    RuntimeResultV1,
+    RuntimeResult,
+
+    /// Daemon parses stdout as one method-runtime result object at exit.
+    MethodCallResult,
 
     /// Daemon reads length-prefixed JSON frames during execution. Each
     /// frame is a StreamingChunk. The final frame's terminal: true bit
     /// ends the stream.
-    StreamingChunksV1,
+    StreamingChunks,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,6 +60,7 @@ pub struct StreamingChunk {
 pub enum DecodedStdout {
     Opaque(Vec<u8>),
     RuntimeResult(RuntimeResult),
+    MethodCallResult(MethodCallResult),
     Streaming(Vec<StreamingChunk>),
 }
 
@@ -132,14 +139,25 @@ pub fn decode_stdout_terminal(
 ) -> Result<DecodedStdout, EngineError> {
     match shape {
         StdoutShape::OpaqueBytes => Ok(DecodedStdout::Opaque(raw_bytes.to_vec())),
-        StdoutShape::RuntimeResultV1 => {
+        StdoutShape::RuntimeResult => {
             let parsed: RuntimeResult = serde_json::from_slice(raw_bytes).map_err(|e| {
                 EngineError::Internal(format!("failed to parse RuntimeResult from stdout: {e}"))
             })?;
             Ok(DecodedStdout::RuntimeResult(parsed))
         }
-        StdoutShape::StreamingChunksV1 => Err(EngineError::Internal(
-            "StreamingChunksV1 cannot be decoded as terminal; use frame reader".into(),
+        StdoutShape::MethodCallResult => {
+            let parsed: MethodCallResult = serde_json::from_slice(raw_bytes).map_err(|e| {
+                EngineError::Internal(format!("failed to parse MethodCallResult from stdout: {e}"))
+            })?;
+            parsed.validate().map_err(|reason| {
+                EngineError::Internal(format!(
+                    "invalid MethodCallResult semantics from stdout: {reason}"
+                ))
+            })?;
+            Ok(DecodedStdout::MethodCallResult(parsed))
+        }
+        StdoutShape::StreamingChunks => Err(EngineError::Internal(
+            "StreamingChunks cannot be decoded as terminal; use frame reader".into(),
         )),
     }
 }
@@ -151,14 +169,14 @@ pub fn decode_stdout_frame(
     frame_bytes: &[u8],
 ) -> Result<DecodedFrame, EngineError> {
     match shape {
-        StdoutShape::StreamingChunksV1 => {
+        StdoutShape::StreamingChunks => {
             let chunk: StreamingChunk = serde_json::from_slice(frame_bytes).map_err(|e| {
                 EngineError::Internal(format!("failed to parse StreamingChunk frame: {e}"))
             })?;
             Ok(DecodedFrame::Streaming(chunk))
         }
         _ => Err(EngineError::Internal(
-            "frame decode only valid for StreamingChunksV1".into(),
+            "frame decode only valid for StreamingChunks".into(),
         )),
     }
 }
@@ -274,7 +292,12 @@ pub fn read_all_frames<R: Read>(mut reader: R) -> Result<Vec<StreamingChunk>, Fr
         offset = body_offset + frame_len;
 
         if seen_terminal {
-            break;
+            let mut trailing = [0u8; 1];
+            match reader.read(&mut trailing) {
+                Ok(0) => break,
+                Ok(_) => return Err(FrameReadError::FrameAfterTerminal),
+                Err(source) => return Err(FrameReadError::IoLength { offset, source }),
+            }
         }
     }
 
@@ -295,8 +318,9 @@ mod tests {
     fn round_trip_all_variants() {
         for shape in [
             StdoutShape::OpaqueBytes,
-            StdoutShape::RuntimeResultV1,
-            StdoutShape::StreamingChunksV1,
+            StdoutShape::RuntimeResult,
+            StdoutShape::MethodCallResult,
+            StdoutShape::StreamingChunks,
         ] {
             let yaml = serde_yaml::to_string(&shape).unwrap();
             let parsed: StdoutShape = serde_yaml::from_str(&yaml).unwrap();
@@ -324,7 +348,7 @@ mod tests {
     fn runtime_result_decoder_accepts_valid() {
         let rr = RuntimeResult {
             success: true,
-            status: "completed".into(),
+            status: RuntimeResultStatus::Completed,
             thread_id: "T-test".into(),
             result: None,
             outputs: serde_json::Value::Null,
@@ -332,7 +356,7 @@ mod tests {
             warnings: vec![],
         };
         let bytes = serde_json::to_vec(&rr).unwrap();
-        let result = decode_stdout_terminal(StdoutShape::RuntimeResultV1, &bytes).unwrap();
+        let result = decode_stdout_terminal(StdoutShape::RuntimeResult, &bytes).unwrap();
         match result {
             DecodedStdout::RuntimeResult(parsed) => {
                 assert!(parsed.success);
@@ -344,8 +368,62 @@ mod tests {
 
     #[test]
     fn runtime_result_decoder_rejects_non_json() {
-        let result = decode_stdout_terminal(StdoutShape::RuntimeResultV1, b"not json");
+        let result = decode_stdout_terminal(StdoutShape::RuntimeResult, b"not json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn runtime_result_decoder_rejects_success_status_contradiction() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "success": true,
+            "status": "failed",
+            "thread_id": "T-test",
+            "outputs": null,
+            "warnings": [],
+        }))
+        .unwrap();
+
+        let error = decode_stdout_terminal(StdoutShape::RuntimeResult, &bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("success"));
+        assert!(error.contains("contradicts `status` `failed`"));
+    }
+
+    #[test]
+    fn method_result_decoder_accepts_valid() {
+        let method_result = MethodCallResult {
+            success: true,
+            kind: "knowledge".to_string(),
+            method: "compose".to_string(),
+            output: Some(serde_json::json!({"rendered": "context"})),
+            error: None,
+            warnings: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&method_result).unwrap();
+        let decoded = decode_stdout_terminal(StdoutShape::MethodCallResult, &bytes).unwrap();
+        match decoded {
+            DecodedStdout::MethodCallResult(parsed) => {
+                assert!(parsed.success);
+                assert_eq!(parsed.kind, "knowledge");
+                assert_eq!(parsed.method, "compose");
+            }
+            _ => panic!("expected MethodCallResult"),
+        }
+    }
+
+    #[test]
+    fn method_result_decoder_rejects_incoherent_shape() {
+        let method_result = MethodCallResult {
+            success: true,
+            kind: "knowledge".to_string(),
+            method: "compose".to_string(),
+            output: None,
+            error: None,
+            warnings: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&method_result).unwrap();
+        assert!(decode_stdout_terminal(StdoutShape::MethodCallResult, &bytes).is_err());
     }
 
     fn write_frame(chunk: &StreamingChunk) -> Vec<u8> {
@@ -452,12 +530,27 @@ mod tests {
             exit_code: None,
             terminal: false,
         }));
-        // The reader stops after the terminal frame; trailing bytes are
-        // ignored. Callers that need to detect bytes-after-exit should
-        // check the underlying reader's remaining bytes themselves.
-        let chunks = read_all_frames(&mut &buf[..]).unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].terminal);
+        assert!(matches!(
+            read_all_frames(&mut &buf[..]),
+            Err(FrameReadError::FrameAfterTerminal)
+        ));
+    }
+
+    #[test]
+    fn frame_reader_rejects_partial_bytes_after_terminal() {
+        let mut buf = write_frame(&StreamingChunk {
+            seq: 0,
+            kind: StreamingChunkKind::Exit,
+            data: None,
+            exit_code: Some(0),
+            terminal: true,
+        });
+        buf.push(0xff);
+
+        assert!(matches!(
+            read_all_frames(&mut &buf[..]),
+            Err(FrameReadError::FrameAfterTerminal)
+        ));
     }
 
     #[test]

@@ -1,10 +1,10 @@
-# ryeos:signed:2026-06-11T05:13:13Z:4112fa03a905d76ad5738090f3e7fb2c6daa336962902407d5a2f0ba5df3f1bf:vjkkTzhKkSSnwpa44GuV6CwuUF/ae3yyVRSeJTQxFK4Obw3hvjclCe/WkVtW/L5dm3hWtUhZjP+8lu0kggb4Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:18:43Z:7299b412bc5c132f8256fc89ccc749d059b1a20ce6ce2950880ba527d39a3667:BWIItrr089dnya1cAeuUM6+eUw6CSz1HbzougE9gaWKurkPQZWU5yTB5ik0SStMYpBCUp3g9uWJ2PX3y5EmuBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: project.apply-snapshot
 required_caps: ["ryeos.execute.service.project/apply-snapshot"]
 schema:
   project_path: string
   snapshot_hash: string
-  expected_deployed_hash: string?
-  force: boolean?
-description: "Apply an AI-only project snapshot to a live project directory"
+  # Required: explicit null for first deployment, otherwise the observed hash.
+  expected_deployed_hash: json
+description: "Apply an AI-only project snapshot using an explicit nullable expected_deployed_hash"

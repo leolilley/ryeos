@@ -137,11 +137,19 @@ impl DaemonClient {
         project_path: Option<&str>,
         read_only: bool,
     ) -> Result<(), ClientError> {
-        let body = serde_json::json!({
-            "surface_ref": surface_ref,
-            "project_path": project_path,
-            "read_only": read_only,
-        });
+        if self.ui_session_id.is_some() {
+            return Ok(());
+        }
+        let user_principal_id = self
+            .signer
+            .as_ref()
+            .map(|signer| format!("fp:{}", signer.fingerprint));
+        let body = ui_session_mint_body(
+            surface_ref,
+            project_path,
+            read_only,
+            user_principal_id.as_deref(),
+        );
         let response = self.signed_post("/ui/api/launch/mint", &body).await?;
         let Some(session_id) = response.get("session_id").and_then(|value| value.as_str()) else {
             return Err(ClientError::DaemonDown {
@@ -304,11 +312,13 @@ impl DaemonClient {
     pub async fn execute_stream(
         &self,
         item_ref: &str,
+        ref_bindings: &std::collections::BTreeMap<String, String>,
         project_path: &str,
         parameters: &serde_json::Value,
     ) -> Result<SseStream, ClientError> {
         let body = serde_json::json!({
             "item_ref": item_ref,
+            "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
             "stream": true,
@@ -353,15 +363,7 @@ impl DaemonClient {
         if let Some(pp) = project_path {
             params["project_path"] = serde_json::Value::String(pp.to_string());
         }
-        let mut body = serde_json::json!({
-            "item_ref": "service:items/effective",
-            "parameters": params,
-        });
-        if let Some(pp) = project_path {
-            body["project_path"] = serde_json::Value::String(pp.to_string());
-        }
-        let response = self.signed_post("/execute", &body).await?;
-        Ok(response.get("result").cloned().unwrap_or(response))
+        self.signed_post("/ui/api/items/effective", &params).await
     }
 
     /// Resolve an effective surface via the daemon's items.effective
@@ -385,16 +387,22 @@ impl DaemonClient {
                 "expected_kind": "surface",
             })
         };
-        let mut body = serde_json::json!({
-            "item_ref": "service:items/effective",
-            "parameters": params,
-        });
-        if let Some(pp) = project_path {
-            body["project_path"] = serde_json::Value::String(pp.to_string());
-        }
-        let response = self.signed_post("/execute", &body).await?;
-        Ok(response.get("result").cloned().unwrap_or(response))
+        self.signed_post("/ui/api/items/effective", &params).await
     }
+}
+
+fn ui_session_mint_body(
+    surface_ref: &str,
+    project_path: Option<&str>,
+    read_only: bool,
+    user_principal_id: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "surface_ref": surface_ref,
+        "project_path": project_path,
+        "read_only": read_only,
+        "user_principal_id": user_principal_id,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -470,5 +478,22 @@ impl SseStream {
             event_type: event_type.to_string(),
             data,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ui_session_mint_body;
+
+    #[test]
+    fn ui_session_is_bound_to_the_verified_operator_principal() {
+        let body = ui_session_mint_body(
+            "surface:ryeos/ui/lens",
+            Some("/work/project"),
+            true,
+            Some("fp:operator"),
+        );
+        assert_eq!(body["user_principal_id"], "fp:operator");
+        assert_eq!(body["project_path"], "/work/project");
     }
 }

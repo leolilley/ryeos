@@ -1,5 +1,6 @@
 //! Crash-recoverable coordination for installed bundle trees and registrations.
 
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -51,8 +52,73 @@ pub struct BundleTransaction {
     _lock: lillux::ExclusiveFileLock,
 }
 
+/// Node-wide serialization for mutations of the installed bundle registry.
+///
+/// Every operation that can reconcile, re-plan, activate, register, or remove
+/// an installed bundle must acquire this lock before acquiring a bundle's
+/// per-name transaction lock. Keeping that order global -> per-name prevents
+/// deadlocks while making each prospective plan exact until its mutation is
+/// committed.
+pub struct BundleRegistryMutationLock {
+    app_root: PathBuf,
+    _lock: lillux::ExclusiveFileLock,
+}
+
+/// A stable read view of the installed bundle registry.
+///
+/// Read-side engine operations share this lock with one another. Bundle
+/// install/replace/remove paths take [`BundleRegistryMutationLock`], so a
+/// verified generation cannot change while any reader is using it.
+pub struct BundleRegistryReadLock {
+    _lock: lillux::SharedFileLock,
+}
+
+/// A per-name bundle transaction tied to a held node-wide registry lock.
+///
+/// The borrow makes it impossible for normal callers to drop the registry lock
+/// while continuing to mutate through this transaction.
+pub struct BundleMutationTransaction<'a> {
+    transaction: BundleTransaction,
+    _registry_lock: &'a BundleRegistryMutationLock,
+}
+
+impl BundleRegistryMutationLock {
+    pub fn acquire(app_root: &Path) -> Result<Self> {
+        let target = app_root.join(".ai/bundles");
+        let lock = lillux::ExclusiveFileLock::acquire(&target)?;
+        Ok(Self {
+            app_root: app_root.to_path_buf(),
+            _lock: lock,
+        })
+    }
+
+    /// Acquire a bundle's per-name transaction lock after the node-wide lock.
+    pub fn acquire_bundle(&self, name: &str) -> Result<BundleMutationTransaction<'_>> {
+        Ok(BundleMutationTransaction {
+            transaction: BundleTransaction::acquire(&self.app_root, name)?,
+            _registry_lock: self,
+        })
+    }
+}
+
+impl BundleRegistryReadLock {
+    pub fn acquire(app_root: &Path) -> Result<Self> {
+        let target = app_root.join(".ai/bundles");
+        let lock = lillux::SharedFileLock::acquire_existing(&target)?;
+        Ok(Self { _lock: lock })
+    }
+}
+
+impl Deref for BundleMutationTransaction<'_> {
+    type Target = BundleTransaction;
+
+    fn deref(&self) -> &Self::Target {
+        &self.transaction
+    }
+}
+
 impl BundleTransaction {
-    pub fn acquire(app_root: &Path, name: &str) -> Result<Self> {
+    fn acquire(app_root: &Path, name: &str) -> Result<Self> {
         if !valid_bundle_name(name) {
             anyhow::bail!("invalid bundle transaction name: {name}");
         }
@@ -93,7 +159,7 @@ impl BundleTransaction {
             );
         }
         let generation_digest = tree_digest(staging)?;
-        let registration_digest = registration_digest(&registration);
+        let registration_digest = registration_digest(&registration)?;
         self.write_journal(&Journal {
             bundle_name: self.name.clone(),
             operation,
@@ -205,7 +271,7 @@ impl BundleTransaction {
             .registration
             .as_ref()
             .context("present transaction missing registration")?;
-        if registration_digest(registration)
+        if registration_digest(registration)?
             != journal
                 .registration_digest
                 .as_deref()
@@ -315,6 +381,7 @@ pub fn reconcile_all_bundle_transactions(
     app_root: &Path,
     signing_key: &SigningKey,
 ) -> Result<Vec<String>> {
+    let registry_lock = BundleRegistryMutationLock::acquire(app_root)?;
     let diagnostics = inspect_bundle_transactions(app_root)?;
     if !diagnostics.invalid.is_empty() {
         anyhow::bail!(
@@ -323,7 +390,7 @@ pub fn reconcile_all_bundle_transactions(
         );
     }
     for name in &diagnostics.pending {
-        BundleTransaction::acquire(app_root, name)?.reconcile(signing_key)?;
+        registry_lock.acquire_bundle(name)?.reconcile(signing_key)?;
     }
     Ok(diagnostics.pending)
 }
@@ -380,8 +447,9 @@ fn validate_journal(app_root: &Path, name: &str, journal: &Journal) -> Result<()
     Ok(())
 }
 
-fn registration_digest(value: &serde_json::Value) -> String {
-    lillux::sha256_hex(lillux::canonical_json(value).as_bytes())
+fn registration_digest(value: &serde_json::Value) -> Result<String> {
+    let canonical = lillux::canonical_json(value)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
 fn tree_digest(root: &Path) -> Result<String> {

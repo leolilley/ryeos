@@ -69,6 +69,7 @@ pub async fn handle(
     Ok(serde_json::json!({
         "schedule_id": spec.schedule_id,
         "item_ref": spec.item_ref,
+        "ref_bindings": spec.ref_bindings,
         "schedule_type": spec.schedule_type,
         "expression": spec.expression,
         "timezone": spec.timezone,

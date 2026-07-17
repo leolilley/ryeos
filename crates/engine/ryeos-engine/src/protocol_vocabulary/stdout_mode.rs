@@ -15,16 +15,18 @@ pub enum StdoutMode {
 /// | StdoutShape           | Terminal | Streaming |
 /// | --------------------- | -------- | --------- |
 /// | opaque_bytes          | YES      | NO        |
-/// | runtime_result_v1     | YES      | NO        |
-/// | streaming_chunks_v1   | NO       | YES       |
+/// | runtime_result     | YES      | NO        |
+/// | method_call_result | YES      | NO        |
+/// | streaming_chunks   | NO       | YES       |
 pub fn is_compatible_shape_mode(
     shape: StdoutShape,
     mode: StdoutMode,
 ) -> Result<(), VocabularyError> {
     match (shape, mode) {
         (StdoutShape::OpaqueBytes, StdoutMode::Terminal) => Ok(()),
-        (StdoutShape::RuntimeResultV1, StdoutMode::Terminal) => Ok(()),
-        (StdoutShape::StreamingChunksV1, StdoutMode::Streaming) => Ok(()),
+        (StdoutShape::RuntimeResult, StdoutMode::Terminal) => Ok(()),
+        (StdoutShape::MethodCallResult, StdoutMode::Terminal) => Ok(()),
+        (StdoutShape::StreamingChunks, StdoutMode::Streaming) => Ok(()),
         (shape, mode) => Err(VocabularyError::StdoutShapeModeMismatch {
             shape: format!("{:?}", shape),
             mode: format!("{:?}", mode),
@@ -56,10 +58,12 @@ mod tests {
         let cases: Vec<(StdoutShape, StdoutMode, bool)> = vec![
             (StdoutShape::OpaqueBytes, StdoutMode::Terminal, true),
             (StdoutShape::OpaqueBytes, StdoutMode::Streaming, false),
-            (StdoutShape::RuntimeResultV1, StdoutMode::Terminal, true),
-            (StdoutShape::RuntimeResultV1, StdoutMode::Streaming, false),
-            (StdoutShape::StreamingChunksV1, StdoutMode::Terminal, false),
-            (StdoutShape::StreamingChunksV1, StdoutMode::Streaming, true),
+            (StdoutShape::RuntimeResult, StdoutMode::Terminal, true),
+            (StdoutShape::RuntimeResult, StdoutMode::Streaming, false),
+            (StdoutShape::MethodCallResult, StdoutMode::Terminal, true),
+            (StdoutShape::MethodCallResult, StdoutMode::Streaming, false),
+            (StdoutShape::StreamingChunks, StdoutMode::Terminal, false),
+            (StdoutShape::StreamingChunks, StdoutMode::Streaming, true),
         ];
         for (shape, mode, compatible) in cases {
             let result = is_compatible_shape_mode(shape, mode);

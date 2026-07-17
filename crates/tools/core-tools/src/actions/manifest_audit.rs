@@ -335,6 +335,7 @@ pub fn load_audit_manifest(path: &Path) -> Result<BundleManifest> {
         runtime_authority: src.runtime_authority,
         smoke: src.smoke,
         shadows: src.shadows,
+        isolation_backends: src.isolation_backends,
     })
 }
 
@@ -368,6 +369,7 @@ mod tests {
             runtime_authority: ra,
             smoke: vec![],
             shadows: vec![],
+            isolation_backends: vec![],
         }
     }
 

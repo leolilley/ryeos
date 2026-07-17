@@ -74,6 +74,10 @@ pub struct RyeOsKeyContext {
     pub focused_row_expandable: bool,
     /// The focused expandable point is currently open.
     pub focused_row_expanded: bool,
+    /// The selected table row owns one or more hierarchy children.
+    pub focused_tree_collapsible: bool,
+    /// The selected hierarchy row currently hides those descendants.
+    pub focused_tree_collapsed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -242,6 +246,13 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
         }
         RyeOsKey::ArrowRight
             if event.modifiers.none()
+                && context.focused_tree_collapsible
+                && context.focused_tree_collapsed =>
+        {
+            ui(RyeOsUiEvent::SetTreeRowCollapsed { collapsed: false })
+        }
+        RyeOsKey::ArrowRight
+            if event.modifiers.none()
                 && context.focused_row_expandable
                 && !context.focused_row_expanded =>
         {
@@ -253,6 +264,13 @@ pub fn ryeos_key_command(event: RyeOsKeyEvent, context: RyeOsKeyContext) -> RyeO
                 && context.focused_row_expanded =>
         {
             ui(RyeOsUiEvent::ExpandSelectedRow { expand: false })
+        }
+        RyeOsKey::ArrowLeft
+            if event.modifiers.none()
+                && context.focused_tree_collapsible
+                && !context.focused_tree_collapsed =>
+        {
+            ui(RyeOsUiEvent::SetTreeRowCollapsed { collapsed: true })
         }
         RyeOsKey::ArrowLeft if event.modifiers.none() => focus(FocusDirection::Left),
         RyeOsKey::ArrowRight if event.modifiers.none() => focus(FocusDirection::Right),
@@ -594,6 +612,7 @@ fn initial_list_local_state() -> crate::workspace::ViewLocalState {
         scroll: 0,
         collapsed: std::collections::BTreeSet::new(),
         expanded_rows: std::collections::BTreeSet::new(),
+        collapsed_tree_rows: std::collections::BTreeSet::new(),
         changed_rows: std::collections::BTreeMap::new(),
     }
 }
@@ -790,6 +809,42 @@ mod tests {
             ryeos_key_command(ctrl('d'), context(false, true)),
             RyeOsKeyCommand::MoveFocusedRowPage { direction: 1 }
         );
+    }
+
+    #[test]
+    fn horizontal_arrows_fold_the_focused_tree_row_before_moving_focus() {
+        let mut collapsed = context(false, false);
+        collapsed.focused_tree_collapsible = true;
+        collapsed.focused_tree_collapsed = true;
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowRight), collapsed),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::SetTreeRowCollapsed { collapsed: false }
+            }
+        ));
+
+        let mut expanded = context(false, false);
+        expanded.focused_tree_collapsible = true;
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowLeft), expanded),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::SetTreeRowCollapsed { collapsed: true }
+            }
+        ));
+    }
+
+    #[test]
+    fn left_closes_row_details_before_folding_its_tree_branch() {
+        let mut ctx = context(false, false);
+        ctx.focused_tree_collapsible = true;
+        ctx.focused_row_expandable = true;
+        ctx.focused_row_expanded = true;
+        assert!(matches!(
+            ryeos_key_command(key(RyeOsKey::ArrowLeft), ctx),
+            RyeOsKeyCommand::Ui {
+                event: RyeOsUiEvent::ExpandSelectedRow { expand: false }
+            }
+        ));
     }
 
     #[test]

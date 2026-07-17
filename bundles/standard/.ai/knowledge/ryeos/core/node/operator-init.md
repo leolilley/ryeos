@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:f25ef9f5046e1f56324b40ba3e7a2bf3be22aea77deb47ceb5b1c65987a461cb:NyV12kNRb0RL/su6+nb2cK5sf9MDX6RXDJb6LagV3g+kO+jLfELm7rzTNkjUWfHPRh9m3W0iIDz7JpEgdoVbDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T04:18:05Z:4f1586c4d0e69da43222e3c5d2e941c2292aac39d4f3f89e2bb81fea1ad5f614:h7mN3qAHaemRype2KhHiqxEcnRNGv/lNCG16MBWOTFizbn13ta/F906Cb4NQh7sRqRwLK/xTxExNYAsrK1DzBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, init, setup, bundles, trust, publisher, ryeos-node]
-version: "1.0.0"
+version: "1.3.0"
 description: >
   Operator initialization contract implemented by ryeos-node: keys,
   trust, bundle discovery, bundle planning, install, and post-init checks.
@@ -30,17 +30,23 @@ or `RYEOS_APP_ROOT`. Packaged installs initialize with plain `ryeos init`.
 2. Create the app-root layout (`<app_root>/.ai/{node,state,bundles,config}`).
 3. Load-or-create the operator Ed25519 signing key.
 4. Load-or-create the node Ed25519 signing key.
-5. Write self-trust docs for both keys into the operator trust store.
+5. Write self-trust docs for both keys into the node trust store.
 6. Pin the official publisher key from hardcoded public key bytes.
 7. Pin any additional `--trust-file` publisher docs.
 8. Discover bundles in the source directory.
 9. Build the bundle plan and verify manifest dependency policy.
-10. Preflight-verify source bundles unless explicitly skipped by tests.
-11. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
+10. Compose and admit the exact prospective source generation. An existing
+    enforced policy must resolve and inspect its selected backend here even
+    when ordinary test preflight is skipped.
+11. Preflight-verify source bundles unless explicitly skipped by tests.
+12. Install/replace bundles under `<system>/.ai/bundles/<name>/` and
     write signed registrations under `<system>/.ai/node/bundles/`.
-12. Create/load the vault X25519 keypair.
-13. Write default ingest-ignore config if missing.
-14. Reload trust and verify official publisher, user key, and node key
+    Before selected-backend activation, resolve and inspect its exact completed
+    staging tree.
+13. Create/load the vault X25519 keypair.
+14. Write create-once node policy files if missing, including the disabled strict
+    subprocess isolation policy and ingest-ignore config.
+15. Reload trust and verify official publisher, user key, and node key
     are trusted.
 
 The init report includes the app root, operator/node key fingerprints,
@@ -61,6 +67,23 @@ Rotation requires a coordinated `ryeos` binary release. Development
 bundles are signed with `.dev-keys/PUBLISHER_DEV.pem` and trusted with
 `--trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml`.
 
+A packaged `PUBLISHER_TRUST.toml` is only a trust pointer. Its location beside
+a bundle, package, or container never grants authority by itself. Additional
+publishers enter the node trust store only through an explicit trust
+choice:
+
+- `ryeos init --trust-file <PUBLISHER_TRUST.toml>` pins a named publisher;
+- development/custom containers may opt in to their baked publisher set with
+  `RYEOS_TRUST_BAKED_PUBLISHERS=1`; and
+- the local source installer may opt in with `--trust-source-publishers`.
+
+Release containers pass no packaged trust documents to `ryeos init`.
+Development opt-ins trust every publisher document in the selected source
+boundary, so use them only after independently verifying that source. The
+loader validates each document's decoded key and fingerprint before pinning it,
+and bundle preflight still fails closed when content is not signed by a pinned
+publisher.
+
 ## Bundle discovery and planning
 
 The source directory is scanned only for immediate child directories that
@@ -75,4 +98,6 @@ one-generation backup.
 `ryeos init` does not start the daemon and does not depend on it. Runtime
 startup may repair daemon-local public identity, daemon config, vault
 public key output, and local authorized-key entry, but only after
-init-state verification succeeds.
+init-state verification succeeds. Init also never overwrites an existing
+operator-edited `.ai/node/isolation.yaml`. See
+[Execution Isolation](execution-isolation.md) for the complete accepted policy.

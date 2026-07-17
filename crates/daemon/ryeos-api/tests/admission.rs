@@ -21,14 +21,8 @@ const PUSH_SCOPES: &[&str] = &[
 fn store_subject(state: &ryeos_app::state::AppState) -> String {
     let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
     cas.store_object(&json!({
-        "kind": "chain_state",
-        "schema": 1,
-        "chain_root_id": "T-admission",
-        "prev_chain_state_hash": null,
-        "last_event_hash": null,
-        "last_chain_seq": 0,
-        "updated_at": "2026-05-30T00:00:00Z",
-        "threads": {}
+        "kind": "source_manifest",
+        "item_source_hashes": {}
     }))
     .unwrap()
 }

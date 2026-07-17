@@ -105,6 +105,8 @@ pub enum RuntimeEventType {
     /// launch so the explain view can render what a thread launched with
     /// rather than a fresh re-resolve.
     AsLaunchedResolution,
+    AsLaunchedRefBindings,
+    RuntimeLaunchFacts,
     /// A `(key, value)` metadata tag stamped on a thread post-launch (cohort
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
@@ -177,6 +179,8 @@ impl RuntimeEventType {
             Self::StreamClosed => wire::STREAM_CLOSED,
             Self::ArtifactPublished => wire::ARTIFACT_PUBLISHED,
             Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
+            Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
+            Self::RuntimeLaunchFacts => wire::RUNTIME_LAUNCH_FACTS,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
             Self::ThreadReconciled => wire::THREAD_RECONCILED,
             Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
@@ -226,6 +230,8 @@ impl RuntimeEventType {
             wire::STREAM_CLOSED => Ok(Self::StreamClosed),
             wire::ARTIFACT_PUBLISHED => Ok(Self::ArtifactPublished),
             wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
+            wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
+            wire::RUNTIME_LAUNCH_FACTS => Ok(Self::RuntimeLaunchFacts),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
             wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
             wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
@@ -321,6 +327,8 @@ impl RuntimeEventType {
             | Self::StreamClosed
             | Self::ArtifactPublished
             | Self::AsLaunchedResolution
+            | Self::AsLaunchedRefBindings
+            | Self::RuntimeLaunchFacts
             | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
@@ -376,6 +384,8 @@ mod tests {
             RuntimeEventType::StreamClosed,
             RuntimeEventType::ArtifactPublished,
             RuntimeEventType::AsLaunchedResolution,
+            RuntimeEventType::AsLaunchedRefBindings,
+            RuntimeEventType::RuntimeLaunchFacts,
             RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::ThreadReconciled,
             RuntimeEventType::OrphanProcessKilled,

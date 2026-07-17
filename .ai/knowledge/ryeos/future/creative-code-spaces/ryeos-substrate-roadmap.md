@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-21T02:55:23Z:7f5cbb914232bbf5206181e56720a1ff50b3ad0f216317839dc7ed910a2b08ec:iGOYZEBNxfudT9EwtV7hmWp1SnVZSPiFve9AdHqbVW17dyigGnp5omny/eHhsK1Kqm0uabEiRtbn6rnuzVyYCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-16T02:18:47Z:d9f21b66cc543bf1ff7fafef49fadc5a276b48373a3e491151e5563885656841:y/1Z1b5UK3VRTtd/NREJrzmT7kH6IqOr2qLyG0nEgtNmW5kSpbjhegDuSAedbVXN+I/0JWOzGeKfsa3GW5qTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 <!-- rye:signed:2026-06-03T03:31:14Z:41823d75c9809ff76ae9e8e621014b981eee359eee6629cdf16592a39765c42f:kG1hveYOMEoTULljD7ppaUekyvjBwknaPiBOKNeQ2tSlj2wtSO_x4HIaFYKq9sNkWORKz3-gHaDjMlUEKKPrDg:4b987fd4e40303ac -->
 ```yaml
 category: ryeos/future/creative-code-spaces
@@ -284,7 +284,7 @@ Add it when one hosted node is insufficient:
 - cluster routing;
 - resource/hardware descriptors;
 - optional fleet enrollment for managed pools;
-- hardware/sandbox attestation when self-reporting is insufficient.
+- hardware/isolation attestation when self-reporting is insufficient.
 
 Fleet enrollment, hardware attestation, cluster vaults, and remote capability leases are hosted/operator scale features. They should not become the base RyeOS identity model.
 

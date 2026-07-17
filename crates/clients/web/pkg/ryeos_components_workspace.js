@@ -740,10 +740,24 @@ function tableRow(item, ncols, index, dispatchUi) {
   const cellTones = item.cell_tones || [];
   for (let i = 0; i < ncols; i += 1) {
     const tone = cellTones[i] && cellTones[i] !== "neutral" ? ` tone-${cellTones[i]}` : "";
-    row.append(textEl("span", cells[i] || "", `ryeos-table-cell${i === 0 ? " lead" : ""}${tone}`));
+    const tree = i === 0 ? hierarchyPrefix(item.hierarchy) : "";
+    row.append(textEl("span", `${tree}${cells[i] || ""}`, `ryeos-table-cell${i === 0 ? " lead" : ""}${tone}`));
   }
   if (item.intent) row.addEventListener("click", () => dispatchUi({ type: "activate", intent: item.intent }));
   return row;
+}
+
+function hierarchyPrefix(hierarchy) {
+  if (!hierarchy) return "";
+  const ancestors = hierarchy.ancestor_continues || [];
+  let prefix = "";
+  for (let i = 0; i + 1 < ancestors.length; i += 1) {
+    prefix += ancestors[i] ? "│ " : "  ";
+  }
+  if (ancestors.length) prefix += hierarchy.is_last ? "└─" : "├─";
+  if (hierarchy.has_children) prefix += hierarchy.collapsed ? "▸ " : "▾ ";
+  else prefix += "· ";
+  return prefix;
 }
 
 // The sections widget: a foldable multi-section list (the magit-style status

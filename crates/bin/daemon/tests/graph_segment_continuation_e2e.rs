@@ -62,21 +62,18 @@ config:
   nodes:
     a:
       node_type: gate
-      assign: {at: "a"}
       next:
         type: conditional
         branches:
           - to: b
     b:
       node_type: gate
-      assign: {at: "b"}
       next:
         type: conditional
         branches:
           - to: c
     c:
       node_type: gate
-      assign: {at: "c"}
       next:
         type: conditional
         branches:
@@ -103,7 +100,7 @@ config:
   segment_steps: 1
   nodes:
     flaky:
-      action: {item_id: "tool:segmenttest/never_resolves"}
+      action: {item_id: "tool:segmenttest/never_resolves", ref_bindings: {}}
       retry: {attempts: 2, backoff_ms: 1}
       on_error: recover
     recover:
@@ -118,9 +115,10 @@ config:
 /// ordered by chain sequence. Segment successors are distinct threads, so the
 /// whole run must be read across threads, not filtered to one.
 fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -171,6 +169,7 @@ fn spawn_execute(
     let url = format!("http://{}/execute", h.bind);
     let body = json!({
         "item_ref": item_ref,
+        "ref_bindings": {},
         "project_path": project_path.to_str().unwrap(),
         "parameters": {},
     });

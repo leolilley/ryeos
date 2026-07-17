@@ -39,6 +39,29 @@ struct WriteBarrierInner {
     notify: tokio::sync::Notify,
 }
 
+/// Restores normal admission if a quiesce future is timed out, cancelled, or
+/// otherwise dropped before it publishes the fully quiesced state.
+struct QuiesceAttempt {
+    barrier: std::sync::Arc<WriteBarrierInner>,
+    committed: bool,
+}
+
+impl Drop for QuiesceAttempt {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if self
+            .barrier
+            .state
+            .compare_exchange(QUIESCING, NORMAL, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            self.barrier.notify.notify_waiters();
+        }
+    }
+}
+
 /// Global write barrier for CAS writes.
 ///
 /// Thread-safe. Cloneable (all clones share the same inner state).
@@ -97,12 +120,19 @@ impl WriteBarrier {
     /// Begin quiesce: set state to QUIESCING, block new permits, wait for
     /// active writers to drain. Returns error on timeout.
     pub async fn quiesce(&self, timeout: Duration) -> Result<()> {
-        // Set to quiescing — new try_acquire calls will fail
-        self.inner.state.store(QUIESCING, Ordering::SeqCst);
+        self.inner
+            .state
+            .compare_exchange(NORMAL, QUIESCING, Ordering::SeqCst, Ordering::SeqCst)
+            .map_err(|state| anyhow::anyhow!("write barrier cannot quiesce from state {state}"))?;
+        let mut attempt = QuiesceAttempt {
+            barrier: self.inner.clone(),
+            committed: false,
+        };
 
         // Fast path: already no writers
         if self.inner.active_writers.load(Ordering::SeqCst) == 0 {
             self.inner.state.store(QUIESCED, Ordering::SeqCst);
+            attempt.committed = true;
             tracing::info!("write barrier quiesced (no active writers)");
             return Ok(());
         }
@@ -113,14 +143,13 @@ impl WriteBarrier {
             let writers = self.inner.active_writers.load(Ordering::SeqCst);
             if writers == 0 {
                 self.inner.state.store(QUIESCED, Ordering::SeqCst);
+                attempt.committed = true;
                 tracing::info!("write barrier quiesced");
                 return Ok(());
             }
 
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
-                // Timeout — resume normal operation
-                self.inner.state.store(NORMAL, Ordering::SeqCst);
                 bail!(
                     "write barrier quiesce timed out after {:?} ({} writers still active)",
                     timeout,
@@ -137,6 +166,7 @@ impl WriteBarrier {
     /// Resume normal operation after GC.
     pub fn resume(&self) {
         self.inner.state.store(NORMAL, Ordering::SeqCst);
+        self.inner.notify.notify_waiters();
         tracing::info!("write barrier resumed normal operation");
     }
 

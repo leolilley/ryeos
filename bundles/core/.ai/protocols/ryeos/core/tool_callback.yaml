@@ -1,0 +1,26 @@
+# ryeos:signed:2026-07-15T07:49:08Z:f6d862c8e8cbd814242305ddb81031911851494b8092301afdd687d1a4e47377:VZfhEQEwGDwgNwOhjWbd3/kwpOjPRWVymsSZP1nSyhoz7HV90GifIJJeCC3ne+tGfUxpMe/OVebOC42hA2dZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: tool_callback
+category: ryeos/core
+abi_version: v1
+description: Tool subprocess with opaque terminal output and an explicitly declared daemon callback channel.
+stdin:
+  shape: opaque
+stdout:
+  shape: opaque_bytes
+  mode: terminal
+env_injections:
+  - { name: RYE_THREAD_ID, source: thread_id }
+  - { name: RYE_PROJECT_PATH, source: project_path }
+  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }
+  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
+  - { name: RYEOSD_THREAD_ID, source: thread_id }
+  - { name: RYEOSD_PROJECT_PATH, source: callback_project_path }
+  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+capabilities:
+  allows_pushed_head: true
+  allows_target_site: true
+  allows_detached: true
+lifecycle:
+  mode: detached_ok
+callback_channel: http

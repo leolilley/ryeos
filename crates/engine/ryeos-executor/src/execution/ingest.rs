@@ -2,10 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
-
-use lillux::cas::{sha256_hex, CasStore};
 
 use ryeos_state::objects::ItemSource;
 
@@ -17,11 +15,20 @@ pub struct IngestResult {
     pub integrity: String,
 }
 
-pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<IngestResult> {
-    let cas = CasStore::new(cas_root.to_path_buf());
+pub fn ingest_item(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    item_ref: &str,
+    file_path: &Path,
+) -> Result<IngestResult> {
+    authority.ensure_guard(guard)?;
+    let cas = authority.cas_store()?;
     let bytes = fs::read(file_path)?;
     let blob_hash = cas.store_blob(&bytes)?;
-    let integrity = sha256_hex(&bytes);
+    // CAS blob identity and ItemSource integrity are the same SHA-256 of the
+    // source bytes. Reuse the verified address instead of hashing every file a
+    // second time during live-project capture.
+    let integrity = blob_hash.clone();
 
     let signature_info = parse_signature_info_from_bytes(&bytes);
 
@@ -32,7 +39,7 @@ pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                m.permissions().mode()
+                m.permissions().mode() & 0o7777
             }
             #[cfg(not(unix))]
             None
@@ -58,17 +65,24 @@ pub fn ingest_item(cas_root: &Path, item_ref: &str, file_path: &Path) -> Result<
 /// Ingest a directory into CAS, applying the ignore matcher to skip
 /// excluded paths (`.git/`, `node_modules/`, etc.).
 pub fn ingest_directory(
-    cas_root: &Path,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
     base_path: &Path,
     ignore: &IgnoreMatcher,
 ) -> Result<HashMap<String, String>> {
     let mut items = HashMap::new();
-    ingest_walk(cas_root, base_path, base_path, &mut items, ignore)?;
+    ingest_walk(authority, guard, base_path, base_path, &mut items, ignore)?;
     Ok(items)
 }
 
-pub fn materialize_item(cas_root: &Path, object_hash: &str, target_path: &Path) -> Result<()> {
-    let cas = CasStore::new(cas_root.to_path_buf());
+pub fn materialize_item(
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
+    object_hash: &str,
+    target_path: &Path,
+) -> Result<()> {
+    authority.ensure_guard(guard)?;
+    let cas = authority.cas_store()?;
     let obj = cas
         .get_object(object_hash)?
         .ok_or_else(|| anyhow::anyhow!("item source object {object_hash} not found"))?;
@@ -87,7 +101,8 @@ pub fn materialize_item(cas_root: &Path, object_hash: &str, target_path: &Path) 
 }
 
 fn ingest_walk(
-    cas_root: &Path,
+    authority: &ryeos_state::PinnedStateAuthority,
+    guard: &ryeos_state::CasMutationGuard,
     root: &Path,
     dir: &Path,
     items: &mut HashMap<String, String>,
@@ -99,12 +114,30 @@ fn ingest_walk(
     };
     for entry in entries {
         let entry = entry?;
+        let file_type = entry.file_type()?;
+        // Project snapshots capture source bytes, not filesystem topology.
+        // Never follow a symlink out of (or recursively back into) the live
+        // project. Virtualenv interpreter links are intentionally omitted.
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
+        let relative = path.strip_prefix(root).with_context(|| {
+            format!(
+                "ingest path '{}' escaped project root '{}'",
+                path.display(),
+                root.display()
+            )
+        })?;
+        let rel = relative
+            .to_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ingest project-relative path '{}' is not valid UTF-8",
+                    relative.display()
+                )
+            })?
+            .replace('\\', "/");
 
         // Always skip the state/ directory (internal daemon state)
         if rel.starts_with("state/") || rel == "state" {
@@ -116,10 +149,16 @@ fn ingest_walk(
             continue;
         }
 
-        if path.is_dir() {
-            ingest_walk(cas_root, root, &path, items, ignore)?;
-        } else if path.is_file() {
-            let result = ingest_item(cas_root, &rel, &path)?;
+        if file_type.is_dir() {
+            ingest_walk(authority, guard, root, &path, items, ignore)?;
+        } else if file_type.is_file() {
+            // The caller holds the global CAS write permit and mutation guard
+            // for the complete walk. GC therefore cannot observe or sweep the
+            // descendants before the final SourceManifest is durably staged.
+            // Staging every intermediate hash would rewrite a growing recovery
+            // record once per blob and object (quadratic metadata I/O); the
+            // manifest's verified closure protects all of them after capture.
+            let result = ingest_item(authority, guard, &rel, &path)?;
             items.insert(rel, result.object_hash);
         }
     }

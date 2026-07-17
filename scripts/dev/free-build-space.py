@@ -42,6 +42,16 @@ for rel in PRUNE:
         freed += size
         print(f"removed {path} ({size:.1f}G)")
 
-df = subprocess.run(["df", "-h", str(target)], capture_output=True, text=True).stdout
+df_path = target
+while not df_path.exists() and df_path != df_path.parent:
+    df_path = df_path.parent
+df_result = subprocess.run(
+    ["df", "-h", str(df_path)], capture_output=True, text=True, check=False
+)
 print(f"freed ~{freed:.1f}G")
-print(df.strip().splitlines()[-1])
+df_lines = df_result.stdout.strip().splitlines()
+if df_result.returncode == 0 and df_lines:
+    print(df_lines[-1])
+else:
+    detail = df_result.stderr.strip() or "no filesystem usage output"
+    print(f"warning: could not report free space for {df_path}: {detail}", file=sys.stderr)

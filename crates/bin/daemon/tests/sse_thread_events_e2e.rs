@@ -2,7 +2,7 @@
 //!
 //! Proves the full SSE chain works:
 //!   1. Start mock provider
-//!   2. Pre-init: trusted signer, standard bundle, mock provider, model routing,
+//!   2. Pre-init: trusted signer, standard bundle, provider-config bundle, model routing,
 //!      directive, route YAML, node signing key, authorized key file
 //!   3. Start daemon
 //!   4. POST /execute to run a directive, capture thread_id
@@ -16,7 +16,10 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
+use common::fast_fixture::{
+    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
+    FastFixture,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
@@ -195,6 +198,12 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-thread-events-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             // thread/events-stream route is provided by the standard bundle.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. The SSE GET must be
@@ -208,7 +217,6 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + route YAML");
@@ -217,9 +225,9 @@ async fn sse_thread_events_e2e_live_directive_round_trip() {
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 
-    // Dispatch resolves items from the project root, not HOME.
+    // Dispatch resolves the directive and routing overlay from the project;
+    // provider authority is bundle-owned.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(
         project.path(),
@@ -359,6 +367,12 @@ async fn boot_and_run_directive_with_extra_keys(
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-thread-events-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             // thread/events-stream route is provided by the standard bundle.
             // post_execute signs with fixture.user, so the thread's
             // requested_by is the user fingerprint. Authorize the user key
@@ -380,7 +394,6 @@ async fn boot_and_run_directive_with_extra_keys(
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + route YAML");
@@ -389,9 +402,9 @@ async fn boot_and_run_directive_with_extra_keys(
     let user_sk = fixture.user.clone();
     let node_fp = fixture.node_fp();
 
-    // Dispatch resolves items from the project root, not HOME.
+    // Dispatch resolves the directive and routing overlay from the project;
+    // provider authority is bundle-owned.
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(
         project.path(),

@@ -11,13 +11,464 @@ use ryeos_state::event_types::{
     outcome_code_is_failure, thread_terminal_outcome, ThreadOutcomeKind,
 };
 use serde_json::Value;
+use unicode_width::UnicodeWidthChar;
 
 use crate::error::{CliError, CliTransportError};
 use crate::exec_stream::StreamOutcome;
 use crate::transport::http::SseEvent;
 use crate::transport::signing::Signer;
 
-const DEFAULT_TERMINAL_WIDTH: usize = 80;
+mod capabilities;
+mod diagnostic;
+mod document;
+mod progress;
+mod result;
+mod theme;
+pub use capabilities::TerminalCapabilities;
+pub use diagnostic::{Diagnostic, DiagnosticLevel};
+pub use document::{Document, Hint, Row, Section, StatusBanner};
+pub use progress::{
+    LifecycleProgress, LifecycleProgressAction, OfflineGcProgress, OperationKind, OperationProgress,
+};
+pub use result::{write_json, write_machine_diagnostics, write_raw};
+pub use theme::Tone;
+
+#[derive(Debug, Clone)]
+pub struct Console {
+    capabilities: TerminalCapabilities,
+}
+
+impl Console {
+    pub fn new(capabilities: TerminalCapabilities) -> Self {
+        Self { capabilities }
+    }
+
+    pub fn detect(force_plain: bool) -> Self {
+        Self::new(TerminalCapabilities::detect(force_plain))
+    }
+
+    pub fn capabilities(&self) -> TerminalCapabilities {
+        self.capabilities
+    }
+
+    pub fn document(&self, document: &Document) -> io::Result<()> {
+        let lines = self.document_lines(document);
+        self.write_stdout(&lines)
+    }
+
+    pub fn text(&self, value: &str) -> io::Result<()> {
+        let lines = value.lines().map(str::to_owned).collect::<Vec<_>>();
+        self.write_stdout(&lines)
+    }
+
+    pub fn stream_fragment(&self, value: &str) -> io::Result<()> {
+        let mut out = io::stdout().lock();
+        write!(out, "{value}")?;
+        out.flush()
+    }
+
+    pub fn success(&self, status: &StatusBanner) -> io::Result<()> {
+        self.status(status)
+    }
+
+    pub fn status(&self, status: &StatusBanner) -> io::Result<()> {
+        let mut lines = Vec::new();
+        if self.capabilities.tty() {
+            let glyph = theme::style(
+                theme::glyph(status.tone, self.capabilities.unicode),
+                status.tone,
+                self.capabilities.color,
+            );
+            let heading = theme::style(&status.heading, status.tone, self.capabilities.color);
+            let detail = status
+                .detail
+                .as_deref()
+                .map(|value| {
+                    theme::style(
+                        &format!("  ·  {value}"),
+                        Tone::Secondary,
+                        self.capabilities.color,
+                    )
+                })
+                .unwrap_or_default();
+            lines.push(format!("{glyph}  RYEOS  {heading}{detail}"));
+        } else {
+            let detail = status
+                .detail
+                .as_deref()
+                .map(|value| format!(": {value}"))
+                .unwrap_or_default();
+            lines.push(format!("{}{}", status.heading.to_ascii_lowercase(), detail));
+        }
+        append_rows(&mut lines, &status.rows, self.capabilities);
+        self.write_stdout(&lines)
+    }
+
+    pub fn warning(&self, diagnostic: &Diagnostic) -> io::Result<()> {
+        self.diagnostic(diagnostic)
+    }
+
+    pub fn info(&self, diagnostic: &Diagnostic) -> io::Result<()> {
+        self.diagnostic(diagnostic)
+    }
+
+    pub fn error(&self, diagnostic: &Diagnostic) -> io::Result<()> {
+        self.diagnostic(diagnostic)
+    }
+
+    pub fn progress(
+        &self,
+        operation: OperationKind,
+        label: &str,
+    ) -> io::Result<Option<OperationProgress>> {
+        OperationProgress::new(operation, label, self.capabilities)
+    }
+
+    pub fn diagnostic(&self, diagnostic: &Diagnostic) -> io::Result<()> {
+        let mut lines = Vec::new();
+        if self.capabilities.tty() {
+            let tone = diagnostic.level.tone();
+            let glyph = theme::style(
+                theme::glyph(tone, self.capabilities.unicode),
+                tone,
+                self.capabilities.color,
+            );
+            let heading = diagnostic
+                .heading
+                .as_deref()
+                .unwrap_or(match diagnostic.level {
+                    DiagnosticLevel::Info => "INFO",
+                    DiagnosticLevel::Warning => "WARNING",
+                    DiagnosticLevel::Error => "COMMAND FAILED",
+                });
+            let heading = theme::style(heading, tone, self.capabilities.color);
+            lines.push(format!("{glyph}  RYEOS  {heading}"));
+            lines.extend(
+                wrap_words(
+                    &diagnostic.message,
+                    self.capabilities.width.saturating_sub(4).max(8),
+                )
+                .into_iter()
+                .map(|value| {
+                    format!(
+                        "   {}",
+                        theme::style(&value, Tone::Neutral, self.capabilities.color)
+                    )
+                }),
+            );
+            for value in &diagnostic.context {
+                lines.extend(
+                    wrap_words(value, self.capabilities.width.saturating_sub(4).max(8))
+                        .into_iter()
+                        .map(|value| {
+                            format!(
+                                "   {}",
+                                theme::style(&value, Tone::Secondary, self.capabilities.color,)
+                            )
+                        }),
+                );
+            }
+            if let Some(hint) = &diagnostic.hint {
+                lines.push(String::new());
+                let prefix = "   hint  ";
+                let available = self
+                    .capabilities
+                    .width
+                    .saturating_sub(visible_width(prefix) + 1)
+                    .max(8);
+                for (index, value) in wrap_words(&hint.0, available).into_iter().enumerate() {
+                    let value = theme::style(&value, Tone::Secondary, self.capabilities.color);
+                    lines.push(if index == 0 {
+                        format!("{prefix}{value}")
+                    } else {
+                        format!("{}{value}", " ".repeat(visible_width(prefix)))
+                    });
+                }
+            }
+        } else {
+            let prefix = match diagnostic.level {
+                DiagnosticLevel::Info => "ryeos: info: ",
+                DiagnosticLevel::Warning => "ryeos: warning: ",
+                DiagnosticLevel::Error => "ryeos: ",
+            };
+            lines.push(format!("{prefix}{}", diagnostic.message));
+            lines.extend(
+                diagnostic
+                    .context
+                    .iter()
+                    .map(|value| format!("ryeos: {value}")),
+            );
+            if let Some(hint) = &diagnostic.hint {
+                lines.push(format!("ryeos: hint: {}", hint.0));
+            }
+        }
+        self.write_stderr(&lines)
+    }
+
+    fn document_lines(&self, document: &Document) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(title) = &document.title {
+            lines.push(if self.capabilities.tty() {
+                theme::style(
+                    &format!("RYEOS  {title}"),
+                    Tone::Neutral,
+                    self.capabilities.color,
+                )
+            } else {
+                title.clone()
+            });
+        }
+        for section in &document.sections {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            if let Some(heading) = &section.heading {
+                lines.push(if self.capabilities.tty() {
+                    theme::style(
+                        &heading.to_ascii_lowercase(),
+                        Tone::Neutral,
+                        self.capabilities.color,
+                    )
+                } else {
+                    heading.to_ascii_uppercase()
+                });
+            }
+            append_rows(&mut lines, &section.rows, self.capabilities);
+        }
+        if !document.hints.is_empty() {
+            lines.push(String::new());
+            for hint in &document.hints {
+                if !self.capabilities.tty() {
+                    lines.push(hint.0.clone());
+                    continue;
+                }
+                let prefix = "hint  ";
+                let available = self
+                    .capabilities
+                    .width
+                    .saturating_sub(visible_width(prefix) + 1)
+                    .max(8);
+                for (index, value) in wrap_words(&hint.0, available).into_iter().enumerate() {
+                    let line = if index == 0 {
+                        format!("{prefix}{value}")
+                    } else {
+                        format!("{}{value}", " ".repeat(visible_width(prefix)))
+                    };
+                    lines.push(theme::style(
+                        &line,
+                        Tone::Secondary,
+                        self.capabilities.color,
+                    ));
+                }
+            }
+        }
+        lines
+    }
+
+    fn write_stdout(&self, lines: &[String]) -> io::Result<()> {
+        let mut out = io::stdout().lock();
+        write_lines(&mut out, lines, self.capabilities.width)
+    }
+
+    fn write_stderr(&self, lines: &[String]) -> io::Result<()> {
+        let mut out = io::stderr().lock();
+        write_lines(&mut out, lines, self.capabilities.width)
+    }
+}
+
+fn append_rows(lines: &mut Vec<String>, rows: &[Row], capabilities: TerminalCapabilities) {
+    let key_width = rows
+        .iter()
+        .filter_map(|row| row.key.as_ref().map(|key| visible_width(key)))
+        .max()
+        .unwrap_or(0)
+        .min(24);
+    for row in rows {
+        match &row.key {
+            Some(key) if capabilities.tty() => {
+                if visible_width(key) > key_width {
+                    lines.push(format!(
+                        "  {}",
+                        theme::style(key, Tone::Secondary, capabilities.color)
+                    ));
+                    for value in wrap_words(&row.value, capabilities.width.saturating_sub(5).max(8))
+                    {
+                        lines.push(format!(
+                            "    {}",
+                            theme::style(&value, row.tone, capabilities.color)
+                        ));
+                    }
+                    continue;
+                }
+                let marker = if let Some(marker) = &row.marker {
+                    theme::style(marker, row.tone, capabilities.color)
+                } else if row.tone == Tone::Neutral {
+                    " ".to_string()
+                } else {
+                    theme::style(
+                        theme::glyph(row.tone, capabilities.unicode),
+                        row.tone,
+                        capabilities.color,
+                    )
+                };
+                let key = theme::style(
+                    &format!("{key:key_width$}"),
+                    Tone::Secondary,
+                    capabilities.color,
+                );
+                let prefix = format!("{marker} {key}  ");
+                let available = capabilities
+                    .width
+                    .saturating_sub(visible_width(&prefix) + 1)
+                    .max(8);
+                for (index, value) in wrap_words(&row.value, available).into_iter().enumerate() {
+                    let value = theme::style(&value, row.tone, capabilities.color);
+                    lines.push(if index == 0 {
+                        format!("{prefix}{value}")
+                    } else {
+                        format!("{}{value}", " ".repeat(visible_width(&prefix)))
+                    });
+                }
+            }
+            Some(key) => {
+                let prefix = format!("{key}: ");
+                let available = capabilities
+                    .width
+                    .saturating_sub(visible_width(&prefix) + 1)
+                    .max(8);
+                for (index, value) in wrap_words(&row.value, available).into_iter().enumerate() {
+                    lines.push(if index == 0 {
+                        format!("{prefix}{value}")
+                    } else {
+                        format!("{}{value}", " ".repeat(visible_width(&prefix)))
+                    });
+                }
+            }
+            None if capabilities.tty() => {
+                for value in wrap_words(&row.value, capabilities.width.saturating_sub(3).max(8)) {
+                    let value = theme::style(&value, row.tone, capabilities.color);
+                    lines.push(format!("  {value}"));
+                }
+            }
+            None => lines.extend(wrap_words(
+                &row.value,
+                capabilities.width.saturating_sub(1).max(8),
+            )),
+        }
+    }
+}
+
+fn wrap_words(value: &str, width: usize) -> Vec<String> {
+    if value.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for mut word in value.split_whitespace() {
+        let separator = usize::from(!line.is_empty());
+        if visible_width(&line) + separator + visible_width(word) <= width {
+            if separator == 1 {
+                line.push(' ');
+            }
+            line.push_str(word);
+        } else {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            while visible_width(word) > width {
+                let split = visible_prefix_end(word, width);
+                lines.push(word[..split].to_string());
+                word = &word[split..];
+            }
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn visible_prefix_end(value: &str, max_width: usize) -> usize {
+    let mut width = 0;
+    let mut end = 0;
+    for (index, ch) in value.char_indices() {
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > max_width {
+            break;
+        }
+        width += ch_width;
+        end = index + ch.len_utf8();
+    }
+    end.max(value.chars().next().map(char::len_utf8).unwrap_or(0))
+}
+
+fn write_lines(out: &mut impl Write, lines: &[String], width: usize) -> io::Result<()> {
+    for line in lines {
+        writeln!(
+            out,
+            "{}",
+            clamp_visible(line, width.saturating_sub(1).max(1))
+        )?;
+    }
+    out.flush()
+}
+
+pub(crate) fn visible_width(value: &str) -> usize {
+    let mut width = 0;
+    let mut escape = 0_u8;
+    for ch in value.chars() {
+        match escape {
+            1 if ch == '[' => escape = 2,
+            1 => escape = 0,
+            2 if ('@'..='~').contains(&ch) => escape = 0,
+            2 => {}
+            _ if ch == '\x1b' => escape = 1,
+            _ => width += ch.width().unwrap_or(0),
+        }
+    }
+    width
+}
+
+pub(crate) fn clamp_visible(value: &str, max_width: usize) -> String {
+    if visible_width(value) <= max_width {
+        return value.to_string();
+    }
+    let ellipsis = if value.is_ascii() { "..." } else { "…" };
+    let ellipsis_width = visible_width(ellipsis).min(max_width);
+    let target = max_width.saturating_sub(ellipsis_width);
+    let mut out = String::new();
+    let mut width = 0;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            out.push(ch);
+            if let Some(next) = chars.next() {
+                out.push(next);
+                if next == '[' {
+                    for parameter in chars.by_ref() {
+                        out.push(parameter);
+                        if ('@'..='~').contains(&parameter) {
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        let ch_width = ch.width().unwrap_or(0);
+        if width + ch_width > target {
+            break;
+        }
+        width += ch_width;
+        out.push(ch);
+    }
+    out.push_str(ellipsis);
+    if value.contains('\x1b') {
+        out.push_str("\x1b[0m");
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TtyScreen {
@@ -26,6 +477,7 @@ pub enum TtyScreen {
 }
 
 pub async fn run(
+    console: &Console,
     app_root: &Path,
     explicit_project: Option<&Path>,
     screen: TtyScreen,
@@ -34,17 +486,37 @@ pub async fn run(
     let operator_problem = resolve_operator(app_root);
     let remote_url = remote_daemon_url();
 
-    let rendered_lines = render(&loading_projection(screen, &project), 0)?;
-
+    let mut loading_frame = 0;
+    let mut rendered_lines = render(
+        console,
+        &loading_projection(screen, &project, loading_frame),
+        0,
+    )?;
     let live = build_live_projection(
         app_root,
         &project,
         operator_problem.as_deref(),
         screen,
         remote_url.as_deref(),
-    )
-    .await;
-    render(&live, rendered_lines)?;
+    );
+    tokio::pin!(live);
+    let mut ticker = tokio::time::interval(theme::SPINNER_TICK_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    let live = loop {
+        tokio::select! {
+            live = &mut live => break live,
+            _ = ticker.tick() => {
+                loading_frame = loading_frame.wrapping_add(1);
+                rendered_lines = render(
+                    console,
+                    &loading_projection(screen, &project, loading_frame),
+                    rendered_lines,
+                )?;
+            }
+        }
+    };
+    render(console, &live, rendered_lines)?;
 
     Ok(())
 }
@@ -142,9 +614,14 @@ fn remote_daemon_url() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn loading_projection(screen: TtyScreen, project: &ProjectDisplay) -> TtyHomeFile {
+fn loading_projection(
+    screen: TtyScreen,
+    project: &ProjectDisplay,
+    loading_frame: usize,
+) -> TtyHomeFile {
     TtyHomeFile {
         screen,
+        loading_frame: Some(loading_frame),
         sections: TtyHomeSections {
             node: TtyNodeSummary {
                 status: "loading".to_string(),
@@ -177,18 +654,21 @@ async fn build_live_projection(
     let snapshot = crate::node_descriptors::load_verified_snapshot(app_root);
     let (command_count, has_tui_command, verified_items) = match snapshot {
         Ok(snapshot) => {
-            let descriptors =
-                crate::node_descriptors::load_command_descriptors_from_snapshot(&snapshot);
-            let has_tui_command = descriptors
-                .iter()
-                .any(|command| command.tokens.len() == 1 && command.tokens[0] == "tui");
+            let rows = crate::help::command_rows(
+                &snapshot,
+                app_root,
+                project.key.as_deref().unwrap_or("."),
+            );
+            let has_tui_command = rows.iter().any(|command| command.tokens == "tui");
             (
                 Some(
                     snapshot.commands.len()
                         + crate::lifecycle_commands::local_command_descriptors().len(),
                 ),
                 has_tui_command,
-                verified_command_items(descriptors),
+                rows.into_iter()
+                    .map(|row| command_item(vec![row.tokens], row.description))
+                    .collect(),
             )
         }
         Err(_) => (
@@ -207,6 +687,7 @@ async fn build_live_projection(
 
     TtyHomeFile {
         screen,
+        loading_frame: None,
         sections: TtyHomeSections {
             node,
             project: Some(TtyProjectSummary::from_project(project)),
@@ -219,19 +700,6 @@ async fn build_live_projection(
             items: screen_items(screen, has_tui_command, verified_items),
         },
     }
-}
-
-fn verified_command_items(
-    descriptors: Vec<crate::node_descriptors::LoadedCommandDescriptor>,
-) -> Vec<TtyItem> {
-    let mut items = descriptors
-        .into_iter()
-        .filter(|command| !(command.tokens.len() == 1 && command.tokens[0].len() <= 1))
-        .map(|command| command_item(command.tokens, command.description))
-        .collect::<Vec<_>>();
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-    items.dedup_by(|a, b| a.label == b.label);
-    items
 }
 
 async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
@@ -254,7 +722,7 @@ async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
             status: "stopped".to_string(),
             detail: Some(format!("app root: {}", app_root.display())),
         },
-        Ok(LifecycleStatus::Running { metadata }) => {
+        Ok(LifecycleStatus::Running { metadata, .. }) => {
             let mut detail = Vec::new();
             if let Some(pid) = metadata.pid {
                 detail.push(format!("pid {pid}"));
@@ -272,14 +740,31 @@ async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
             detail: Some(diagnostics.message),
         },
         Ok(LifecycleStatus::Unresponsive { diagnostics, .. }) => TtyNodeSummary {
-            status: "busy".to_string(),
+            status: "unresponsive".to_string(),
             detail: Some(diagnostics.message),
         },
         Ok(LifecycleStatus::Starting {
-            pid, started_at, ..
+            metadata, startup, ..
         }) => TtyNodeSummary {
             status: "starting".to_string(),
-            detail: Some(format!("pid {pid} · since {started_at}")),
+            detail: Some(format!(
+                "pid {} · {} · {}ms elapsed",
+                metadata.pid.unwrap_or_default(),
+                startup.phase.as_str(),
+                startup.elapsed_ms,
+            )),
+        },
+        Ok(LifecycleStatus::Failed { metadata, startup }) => TtyNodeSummary {
+            status: "failed".to_string(),
+            detail: Some(format!(
+                "pid {} · {} · {}",
+                metadata.pid.unwrap_or_default(),
+                startup.phase.as_str(),
+                startup
+                    .error
+                    .as_deref()
+                    .unwrap_or("unknown startup failure"),
+            )),
         },
         Err(err) => TtyNodeSummary {
             status: "status error".to_string(),
@@ -363,6 +848,7 @@ fn loading_command_detail(screen: TtyScreen) -> &'static str {
 #[derive(Debug, Clone)]
 struct TtyHomeFile {
     screen: TtyScreen,
+    loading_frame: Option<usize>,
     sections: TtyHomeSections,
 }
 
@@ -409,19 +895,8 @@ struct TtyItem {
     detail: Option<String>,
 }
 
-pub fn render_command_loading(command: &str, route: &str) -> io::Result<usize> {
-    let lines = command_frame_lines(CommandFrame {
-        title: "RYE OS COMMAND",
-        phase: "loading",
-        command,
-        status: "contacting daemon",
-        detail: Some(route),
-        payload: &[],
-    });
-    render_command_frame(&lines, 0)
-}
-
 pub fn render_command_result(
+    console: &Console,
     command: &str,
     payload: &Value,
     previous_lines: usize,
@@ -447,9 +922,34 @@ pub fn render_command_result(
     }
 
     let display_value = result.get("result").unwrap_or(result);
-    append_value_rows("result", display_value, &mut rows);
+    append_value_rows(
+        "result",
+        display_value,
+        &mut rows,
+        console.capabilities().width,
+    );
     if rows.is_empty() {
         rows.push(("result".to_string(), value_summary(display_value)));
+    }
+
+    let thread_id = result
+        .get("thread_id")
+        .or_else(|| display_value.get("thread_id"))
+        .and_then(Value::as_str);
+    let detached = result
+        .get("outcome_code")
+        .and_then(Value::as_str)
+        .is_some_and(|value| matches!(value, "accepted" | "detached"));
+    if detached || thread_id.is_some() {
+        if let Some(thread_id) = thread_id {
+            rows.push(("thread".to_string(), thread_id.to_string()));
+        }
+        rows.push((
+            "hint".to_string(),
+            thread_id
+                .map(|thread_id| format!("run `ryeos follow {thread_id}` to watch progress"))
+                .unwrap_or_else(|| "use the returned thread ID to follow progress".to_string()),
+        ));
     }
 
     let status = if result_indicates_failure(result) {
@@ -461,15 +961,23 @@ pub fn render_command_result(
         .iter()
         .map(|(label, value)| (label.as_str(), value.as_str()))
         .collect::<Vec<_>>();
-    let lines = command_frame_lines(CommandFrame {
-        title: "RYE OS COMMAND",
-        phase: "live",
-        command,
-        status,
-        detail: None,
-        payload: &row_refs,
-    });
-    render_command_frame(&lines, previous_lines)
+    let lines = command_frame_lines(
+        CommandFrame {
+            title: "RYEOS COMMAND",
+            phase: "live",
+            command,
+            status,
+            detail: None,
+            payload: &row_refs,
+        },
+        console.capabilities(),
+    );
+    render_command_frame(console, &lines, previous_lines)
+}
+
+pub(crate) fn structured_result_failure(payload: &Value) -> Option<String> {
+    let result = payload.get("result").unwrap_or(payload);
+    result_indicates_failure(result).then(|| stream_failure_reason(result, "command failed"))
 }
 
 /// Minimum gap between repaints for non-status-changing events, so a fast
@@ -479,6 +987,7 @@ pub fn render_command_result(
 const REPAINT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 pub struct TtyStreamPresenter {
+    console: Console,
     command: String,
     previous_lines: usize,
     thread_id: Option<String>,
@@ -488,12 +997,17 @@ pub struct TtyStreamPresenter {
 }
 
 impl TtyStreamPresenter {
-    pub fn new(command: impl Into<String>) -> io::Result<Self> {
-        Self::with_previous(command, 0)
+    pub fn new(console: Console, command: impl Into<String>) -> io::Result<Self> {
+        Self::with_previous(console, command, 0)
     }
 
-    pub fn with_previous(command: impl Into<String>, previous_lines: usize) -> io::Result<Self> {
+    pub fn with_previous(
+        console: Console,
+        command: impl Into<String>,
+        previous_lines: usize,
+    ) -> io::Result<Self> {
         let mut presenter = Self {
+            console,
             command: command.into(),
             previous_lines,
             thread_id: None,
@@ -589,15 +1103,18 @@ impl TtyStreamPresenter {
             .iter()
             .map(|(label, value)| (label.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        let lines = command_frame_lines(CommandFrame {
-            title: "RYE OS STREAM",
-            phase: "live",
-            command: &self.command,
-            status: &self.status,
-            detail: None,
-            payload: &refs,
-        });
-        self.previous_lines = render_command_frame(&lines, self.previous_lines)?;
+        let lines = command_frame_lines(
+            CommandFrame {
+                title: "RYEOS STREAM",
+                phase: "live",
+                command: &self.command,
+                status: &self.status,
+                detail: None,
+                payload: &refs,
+            },
+            self.console.capabilities(),
+        );
+        self.previous_lines = render_command_frame(&self.console, &lines, self.previous_lines)?;
         self.last_render = Some(std::time::Instant::now());
         Ok(())
     }
@@ -612,48 +1129,209 @@ struct CommandFrame<'a> {
     payload: &'a [(&'a str, &'a str)],
 }
 
-fn command_frame_lines(frame: CommandFrame<'_>) -> Vec<String> {
+fn command_frame_lines(frame: CommandFrame<'_>, capabilities: TerminalCapabilities) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(frame.title.to_string());
-    lines.push(format!("{:<9} {}", "phase", frame.phase));
-    lines.push(format!("{:<9} {}", "command", empty_dash(frame.command)));
-    lines.push(format!("{:<9} {}", "status", frame.status));
+    lines.push(theme::style(frame.title, Tone::Neutral, capabilities.color));
+    append_frame_row(
+        &mut lines,
+        "phase",
+        frame.phase,
+        Tone::Secondary,
+        capabilities,
+    );
+    append_frame_row(
+        &mut lines,
+        "command",
+        empty_dash(frame.command),
+        Tone::Neutral,
+        capabilities,
+    );
+    append_frame_row(
+        &mut lines,
+        "status",
+        frame.status,
+        frame_status_tone(frame.status),
+        capabilities,
+    );
     if let Some(detail) = frame.detail {
-        lines.push(format!("{:<9} {}", "detail", detail));
+        append_frame_row(&mut lines, "detail", detail, Tone::Secondary, capabilities);
     }
     if !frame.payload.is_empty() {
         lines.push(String::new());
-        for (label, value) in frame.payload.iter().take(16) {
-            lines.push(format!("{:<13} {}", label, value));
+        for (label, value) in frame.payload {
+            let tone = match *label {
+                "error" => Tone::Failure,
+                "hint" => Tone::Secondary,
+                _ => Tone::Neutral,
+            };
+            append_frame_row(&mut lines, label, value, tone, capabilities);
         }
     }
     lines.push(String::new());
     lines
 }
 
-fn render_command_frame(lines: &[String], previous_lines: usize) -> io::Result<usize> {
-    let width = terminal_width();
+fn append_frame_row(
+    lines: &mut Vec<String>,
+    label: &str,
+    value: &str,
+    tone: Tone,
+    capabilities: TerminalCapabilities,
+) {
+    const KEY_WIDTH: usize = 13;
+    let label = clamp_visible(label, KEY_WIDTH);
+    let label = format!("{label:<width$}", width = KEY_WIDTH);
+    let key = theme::style(&label, Tone::Secondary, capabilities.color);
+    let prefix = format!("  {key} ");
+    let available = capabilities
+        .width
+        .saturating_sub(visible_width(&prefix) + 1)
+        .max(8);
+    for (index, value) in wrap_words(value, available).into_iter().enumerate() {
+        let value = theme::style(&value, tone, capabilities.color);
+        lines.push(if index == 0 {
+            format!("{prefix}{value}")
+        } else {
+            format!("{}{value}", " ".repeat(visible_width(&prefix)))
+        });
+    }
+}
+
+fn frame_status_tone(status: &str) -> Tone {
+    match status {
+        "complete" | "completed" | "success" => Tone::Success,
+        "error" | "failed" | "cancelled" => Tone::Failure,
+        "opening stream" | "streaming" | "running" => Tone::Active,
+        _ => Tone::Neutral,
+    }
+}
+
+fn render_command_frame(
+    console: &Console,
+    lines: &[String],
+    previous_lines: usize,
+) -> io::Result<usize> {
+    let width = console.capabilities().width;
     let lines = lines
         .iter()
-        .map(|line| clamp_line(line, width))
+        .map(|line| clamp_visible(line, width.saturating_sub(1).max(1)))
         .collect::<Vec<_>>();
     write_frame(&mut io::stdout(), &lines, previous_lines)?;
     Ok(lines.len())
 }
 
-fn append_value_rows(prefix: &str, value: &Value, rows: &mut Vec<(String, String)>) {
+fn append_value_rows(prefix: &str, value: &Value, rows: &mut Vec<(String, String)>, width: usize) {
     match value {
         Value::Object(map) => {
-            for (key, value) in map.iter().take(12) {
-                rows.push((format!("{prefix}.{key}"), value_summary(value)));
+            if map.is_empty() {
+                rows.push((prefix.to_string(), "empty object".to_string()));
+            } else if map.values().all(|value| scalar_summary(value).is_some()) {
+                const FIELD_LIMIT: usize = 12;
+                for (key, value) in map.iter().take(FIELD_LIMIT) {
+                    rows.push((format!("{prefix}.{key}"), value_summary(value)));
+                }
+                if map.len() > FIELD_LIMIT {
+                    rows.push((
+                        prefix.to_string(),
+                        format!("… {} more field(s)", map.len() - FIELD_LIMIT),
+                    ));
+                }
+            } else {
+                let pretty =
+                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+                const LINE_LIMIT: usize = 32;
+                let pretty_lines = pretty.lines().collect::<Vec<_>>();
+                for (index, line) in pretty_lines.iter().take(LINE_LIMIT).enumerate() {
+                    rows.push((
+                        if index == 0 {
+                            prefix.to_string()
+                        } else {
+                            String::new()
+                        },
+                        (*line).to_string(),
+                    ));
+                }
+                if pretty_lines.len() > LINE_LIMIT {
+                    rows.push((
+                        String::new(),
+                        format!("… {} more line(s)", pretty_lines.len() - LINE_LIMIT),
+                    ));
+                }
             }
         }
         Value::Array(values) => {
+            if values.is_empty() {
+                rows.push((prefix.to_string(), "0 items · no results".to_string()));
+                return;
+            }
             rows.push((prefix.to_string(), format!("{} item(s)", values.len())));
-            for (idx, value) in values.iter().take(8).enumerate() {
-                rows.push((format!("{prefix}[{idx}]"), value_summary(value)));
+            let columns = values
+                .first()
+                .and_then(Value::as_object)
+                .map(|object| {
+                    object
+                        .iter()
+                        .filter(|(_, value)| scalar_summary(value).is_some())
+                        .map(|(key, _)| key.as_str())
+                        .take(3)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let tabular = !columns.is_empty()
+                && values.iter().all(|value| {
+                    value.as_object().is_some_and(|object| {
+                        columns
+                            .iter()
+                            .all(|column| object.get(*column).and_then(scalar_summary).is_some())
+                    })
+                });
+            if tabular {
+                let available = width.saturating_sub(18).max(12);
+                let column_width = available
+                    .saturating_sub((columns.len() - 1) * 3)
+                    .checked_div(columns.len())
+                    .unwrap_or(4)
+                    .max(4);
+                let format_cells = |cells: Vec<String>| {
+                    cells
+                        .into_iter()
+                        .map(|cell| clamp_visible(&cell, column_width))
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                };
+                rows.push((
+                    "".to_string(),
+                    format_cells(columns.iter().map(|v| (*v).to_string()).collect()),
+                ));
+                const ITEM_LIMIT: usize = 8;
+                for (index, value) in values.iter().take(ITEM_LIMIT).enumerate() {
+                    let object = value.as_object().expect("validated table row");
+                    let cells = columns
+                        .iter()
+                        .map(|column| value_summary(&object[*column]))
+                        .collect();
+                    rows.push((format!("[{index}]"), format_cells(cells)));
+                }
+                if values.len() > ITEM_LIMIT {
+                    rows.push((
+                        String::new(),
+                        format!("… {} more item(s)", values.len() - ITEM_LIMIT),
+                    ));
+                }
+            } else {
+                const ITEM_LIMIT: usize = 8;
+                for (idx, value) in values.iter().take(ITEM_LIMIT).enumerate() {
+                    rows.push((format!("{prefix}[{idx}]"), value_summary(value)));
+                }
+                if values.len() > ITEM_LIMIT {
+                    rows.push((
+                        prefix.to_string(),
+                        format!("… {} more item(s)", values.len() - ITEM_LIMIT),
+                    ));
+                }
             }
         }
+        Value::Null => rows.push((prefix.to_string(), "no result".to_string())),
         _ => rows.push((prefix.to_string(), value_summary(value))),
     }
 }
@@ -726,39 +1404,51 @@ fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
         .to_string()
 }
 
-fn render(home: &TtyHomeFile, previous_lines: usize) -> io::Result<usize> {
-    let width = terminal_width();
-    let lines = render_lines(home)
+fn render(console: &Console, home: &TtyHomeFile, previous_lines: usize) -> io::Result<usize> {
+    let capabilities = console.capabilities();
+    let width = capabilities.width;
+    let lines = render_lines(home, capabilities)
         .into_iter()
-        .map(|line| clamp_line(&line, width))
+        .map(|line| clamp_visible(&line, width.saturating_sub(1).max(1)))
         .collect::<Vec<_>>();
     write_frame(&mut io::stdout(), &lines, previous_lines)?;
     Ok(lines.len())
 }
 
-fn render_lines(home: &TtyHomeFile) -> Vec<String> {
+fn render_lines(home: &TtyHomeFile, capabilities: TerminalCapabilities) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push(match home.screen {
-        TtyScreen::Home => "RYE OS".to_string(),
-        TtyScreen::Help => "RYE OS HELP".to_string(),
-    });
-    lines.push(match home.screen {
+    let title = match home.screen {
+        TtyScreen::Home => "RYEOS".to_string(),
+        TtyScreen::Help => "RYEOS HELP".to_string(),
+    };
+    lines.push(theme::style(&title, Tone::Neutral, capabilities.color));
+    let subtitle = match home.screen {
         TtyScreen::Home => "portable verified execution".to_string(),
         TtyScreen::Help => "verified command surface".to_string(),
-    });
+    };
+    lines.push(theme::style(&subtitle, Tone::Secondary, capabilities.color));
     lines.push(String::new());
-    lines.push(format!(
-        "{:<9} {}{}",
+    let mut node_row = Row::key_value(
         "node",
-        home.sections.node.status,
-        detail_suffix(home.sections.node.detail.as_deref())
-    ));
+        format!(
+            "{}{}",
+            home.sections.node.status,
+            detail_suffix(home.sections.node.detail.as_deref())
+        ),
+    )
+    .with_tone(node_status_tone(&home.sections.node.status));
+    if let Some(frame) = home.loading_frame {
+        node_row = node_row.with_marker(theme::spinner(frame, capabilities.unicode));
+    }
+    let mut summary = vec![node_row];
     if let Some(project) = &home.sections.project {
-        lines.push(format!(
-            "{:<9} {}{}",
+        summary.push(Row::key_value(
             "project",
-            project.label,
-            detail_suffix(project.detail.as_deref().or(project.root.as_deref()))
+            format!(
+                "{}{}",
+                project.label,
+                detail_suffix(project.detail.as_deref().or(project.root.as_deref()))
+            ),
         ));
     }
     let command_label = home
@@ -767,50 +1457,72 @@ fn render_lines(home: &TtyHomeFile) -> Vec<String> {
         .count
         .map(|count| format!("{count} available"))
         .unwrap_or_else(|| "unavailable".to_string());
-    lines.push(format!(
-        "{:<9} {}{}",
+    summary.push(Row::key_value(
         "commands",
-        command_label,
-        detail_suffix(home.sections.commands.detail.as_deref())
+        format!(
+            "{}{}",
+            command_label,
+            detail_suffix(home.sections.commands.detail.as_deref())
+        ),
     ));
+    append_rows(&mut lines, &summary, capabilities);
     lines.push(String::new());
     match home.screen {
-        TtyScreen::Home => render_home_items(&home.sections.items, &mut lines),
-        TtyScreen::Help => render_help_items(&home.sections.items, &mut lines),
+        TtyScreen::Home => render_home_items(&home.sections.items, &mut lines, capabilities),
+        TtyScreen::Help => render_help_items(&home.sections.items, &mut lines, capabilities),
     }
     lines.push(String::new());
     lines
 }
 
-fn render_home_items(items: &[TtyItem], lines: &mut Vec<String>) {
-    lines.push("items".to_string());
-    for item in items {
-        lines.push(format!(
-            "  {:<24} {}",
-            item.label,
-            item.detail.as_deref().unwrap_or_default()
-        ));
+fn node_status_tone(status: &str) -> Tone {
+    match status {
+        "running" => Tone::Success,
+        "loading" | "starting" | "remote override" => Tone::Active,
+        "stale" | "unresponsive" | "not initialized" => Tone::Warning,
+        "failed" | "config error" | "status error" => Tone::Failure,
+        _ => Tone::Neutral,
     }
 }
 
-fn render_help_items(items: &[TtyItem], lines: &mut Vec<String>) {
-    lines.push("commands".to_string());
+fn render_home_items(
+    items: &[TtyItem],
+    lines: &mut Vec<String>,
+    capabilities: TerminalCapabilities,
+) {
+    lines.push(theme::style("items", Tone::Neutral, capabilities.color));
+    let rows = items
+        .iter()
+        .map(|item| Row::key_value(&item.label, item.detail.as_deref().unwrap_or_default()))
+        .collect::<Vec<_>>();
+    append_rows(lines, &rows, capabilities);
+}
+
+fn render_help_items(
+    items: &[TtyItem],
+    lines: &mut Vec<String>,
+    capabilities: TerminalCapabilities,
+) {
+    lines.push(theme::style("commands", Tone::Neutral, capabilities.color));
     let visible = items.iter().take(24).collect::<Vec<_>>();
     if visible.is_empty() {
-        lines.push("  no commands available".to_string());
+        append_rows(lines, &[Row::text("no commands available")], capabilities);
     } else {
-        for item in visible {
-            lines.push(format!(
-                "  {:<28} {}",
-                item.label,
-                item.detail.as_deref().unwrap_or_default()
-            ));
-        }
+        let rows = visible
+            .into_iter()
+            .map(|item| Row::key_value(&item.label, item.detail.as_deref().unwrap_or_default()))
+            .collect::<Vec<_>>();
+        append_rows(lines, &rows, capabilities);
         let remaining = items.len().saturating_sub(24);
         if remaining > 0 {
-            lines.push(format!(
-                "  ... {remaining} more · use `ryeos commands` for the full reference"
-            ));
+            append_rows(
+                lines,
+                &[Row::text(format!(
+                    "… {remaining} more · use `ryeos commands` for the full reference"
+                ))
+                .with_tone(Tone::Secondary)],
+                capabilities,
+            );
         }
     }
 }
@@ -832,35 +1544,6 @@ fn write_frame(out: &mut impl Write, lines: &[String], previous_lines: usize) ->
         }
     }
     out.flush()
-}
-
-fn terminal_width() -> usize {
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|width| *width >= 20)
-        .unwrap_or(DEFAULT_TERMINAL_WIDTH)
-}
-
-fn clamp_line(line: &str, width: usize) -> String {
-    let mut out = String::new();
-    let max_chars = width.saturating_sub(1).max(1);
-    let mut chars = line.chars();
-    for _ in 0..max_chars {
-        let Some(ch) = chars.next() else {
-            return line.to_string();
-        };
-        out.push(ch);
-    }
-    if chars.next().is_some() {
-        if max_chars > 1 {
-            out.pop();
-        }
-        out.push('…');
-        out
-    } else {
-        line.to_string()
-    }
 }
 
 fn detail_suffix(detail: Option<&str>) -> String {
@@ -886,5 +1569,133 @@ mod tests {
             "outcome_code": "success"
         })));
         assert!(!result_indicates_failure(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn large_results_report_omitted_items_without_hiding_following_rows() {
+        let value = Value::Array((0..10).map(Value::from).collect());
+        let mut rows = Vec::new();
+        append_value_rows("result", &value, &mut rows, 80);
+        assert!(rows.iter().any(|(_, value)| value == "… 2 more item(s)"));
+
+        rows.push(("hint".to_string(), "follow this thread".to_string()));
+        let refs = rows
+            .iter()
+            .map(|(label, value)| (label.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let lines = command_frame_lines(
+            CommandFrame {
+                title: "RYEOS COMMAND",
+                phase: "live",
+                command: "execute",
+                status: "complete",
+                detail: None,
+                payload: &refs,
+            },
+            TerminalCapabilities::plain(80),
+        );
+        assert!(lines.iter().any(|line| line.contains("follow this thread")));
+    }
+
+    #[test]
+    fn compact_help_wraps_descriptions_instead_of_truncating_them() {
+        let capabilities = TerminalCapabilities {
+            mode: capabilities::HumanOutputMode::Tty,
+            color: false,
+            unicode: true,
+            width: 60,
+        };
+        let home = TtyHomeFile {
+            screen: TtyScreen::Help,
+            loading_frame: None,
+            sections: TtyHomeSections {
+                node: TtyNodeSummary {
+                    status: "running".to_string(),
+                    detail: None,
+                },
+                project: None,
+                commands: TtyCommandSummary {
+                    count: Some(1),
+                    detail: None,
+                },
+                items: vec![TtyItem {
+                    label: "bundle install".to_string(),
+                    detail: Some(
+                        "Install or replace a downstream bundle while preserving verified metadata"
+                            .to_string(),
+                    ),
+                }],
+            },
+        };
+
+        let lines = render_lines(&home, capabilities);
+        assert!(lines.iter().any(|line| line.contains("preserving")));
+        assert!(lines.iter().any(|line| line.contains("metadata")));
+        assert!(!lines.iter().any(|line| line.contains("pack...")));
+        assert!(lines.iter().all(|line| visible_width(line) < 60));
+    }
+
+    #[test]
+    fn loading_projection_advances_its_node_spinner() {
+        let capabilities = TerminalCapabilities {
+            mode: capabilities::HumanOutputMode::Tty,
+            color: false,
+            unicode: true,
+            width: 80,
+        };
+        let project = ProjectDisplay {
+            key: None,
+            label: "none".to_string(),
+            detail: None,
+        };
+        let first = render_lines(
+            &loading_projection(TtyScreen::Help, &project, 0),
+            capabilities,
+        );
+        let second = render_lines(
+            &loading_projection(TtyScreen::Help, &project, 1),
+            capabilities,
+        );
+        let first_node = first
+            .iter()
+            .find(|line| line.contains("node"))
+            .expect("first loading frame has node row");
+        let second_node = second
+            .iter()
+            .find(|line| line.contains("node"))
+            .expect("second loading frame has node row");
+        assert_ne!(first_node, second_node);
+        assert!(first_node.starts_with('⠋'));
+        assert!(second_node.starts_with('⠙'));
+    }
+
+    #[test]
+    fn word_wrapping_preserves_long_error_tokens() {
+        let token = format!("vault:{}", "x".repeat(160));
+        let lines = wrap_words(&token, 24);
+        assert!(lines.iter().all(|line| visible_width(line) <= 24));
+        assert_eq!(lines.concat(), token);
+    }
+
+    #[test]
+    fn command_frame_status_uses_semantic_gruvbox_tone() {
+        assert_eq!(frame_status_tone("complete"), Tone::Success);
+        assert_eq!(frame_status_tone("streaming"), Tone::Active);
+        assert_eq!(frame_status_tone("error"), Tone::Failure);
+        assert_eq!(node_status_tone("running"), Tone::Success);
+        assert_eq!(node_status_tone("unresponsive"), Tone::Warning);
+    }
+
+    #[test]
+    fn visible_width_ignores_ansi_and_counts_wide_unicode() {
+        assert_eq!(visible_width("\x1b[31mred\x1b[0m"), 3);
+        assert_eq!(visible_width("◆界"), 3);
+    }
+
+    #[test]
+    fn visible_clamp_preserves_width_and_resets_ansi() {
+        let rendered = clamp_visible("\x1b[31mabcdef\x1b[0m", 4);
+        assert!(visible_width(&rendered) <= 4);
+        assert!(rendered.ends_with("\x1b[0m"));
     }
 }

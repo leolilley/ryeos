@@ -27,8 +27,14 @@ pub fn handle_key(core: &mut RyeOsCore, key: KeyEvent) -> Vec<RyeOsEffect> {
     let context = key_context(core);
     if no_mods && matches!(event.key, RyeOsKey::ArrowLeft | RyeOsKey::ArrowRight) {
         let expansion_wins = match event.key {
-            RyeOsKey::ArrowRight => context.focused_row_expandable && !context.focused_row_expanded,
-            RyeOsKey::ArrowLeft => context.focused_row_expandable && context.focused_row_expanded,
+            RyeOsKey::ArrowRight => {
+                (context.focused_tree_collapsible && context.focused_tree_collapsed)
+                    || (context.focused_row_expandable && !context.focused_row_expanded)
+            }
+            RyeOsKey::ArrowLeft => {
+                (context.focused_row_expandable && context.focused_row_expanded)
+                    || (context.focused_tree_collapsible && !context.focused_tree_collapsed)
+            }
             _ => false,
         };
         if !expansion_wins {

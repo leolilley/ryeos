@@ -6,13 +6,12 @@
 //! than a hardcoded kind list.
 //!
 //! A returned `thread_id` always reaches a terminal, inspectable state. Cheap
-//! route-level failures (terminal `executor_id`, invalid tool `requires`,
-//! missing method arg, direct-runtime caps, in-process, non-root-executable)
-//! are rejected synchronously before a `thread_id` is minted. Deeper failures
-//! after thread creation (method payload/corpus projection, managed launcher
-//! policy/trust) finalize the thread as `failed` via persistence-first
-//! dispatch plus the launch finalize-on-error net, so they never leave a
-//! phantom or a thread stuck at `created`.
+//! pre-handoff failures (terminal `executor_id`, invalid tool `requires`,
+//! missing method arg, direct-runtime caps, in-process, non-root-executable,
+//! projection, and trust policy) are rejected synchronously without exposing
+//! the pre-minted id. Once an id is returned, a scheduled subprocess task owns
+//! the durable row and exact execution request; later failures finalize that
+//! row, so accepted launch never returns a phantom or leaves `created` stuck.
 
 mod common;
 
@@ -20,7 +19,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use common::fast_fixture::{
-    register_standard_bundle, write_authorized_key_with_scopes, FastFixture,
+    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_with_scopes,
+    FastFixture,
 };
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
@@ -104,37 +104,6 @@ fn assert_completed(thread: &Value, expected_id: &str) {
         Some("completed"),
         "accepted-launch thread did not complete: {thread}"
     );
-}
-
-/// The accepted-launch invariant under a deeper (post-preflight) failure:
-/// either it rejects synchronously (4xx, no `thread_id`), or it returns 202
-/// and the thread reaches a terminal state within the deadline — never a
-/// phantom id and never a thread stuck at `created`.
-async fn assert_no_phantom_or_stuck(h: &DaemonHarness, status: reqwest::StatusCode, body: &Value) {
-    if status == reqwest::StatusCode::ACCEPTED {
-        let thread_id = body
-            .get("thread_id")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("202 with no thread_id: {body}"));
-        let thread = wait_for_terminal_thread(h, thread_id).await;
-        assert_eq!(
-            thread
-                .get("thread")
-                .and_then(|t| t.get("thread_id"))
-                .and_then(Value::as_str),
-            Some(thread_id),
-            "accepted-launch thread id mismatch: {thread}"
-        );
-    } else {
-        assert!(
-            status.is_client_error(),
-            "expected 202 or 4xx, got {status}; body={body}"
-        );
-        assert!(
-            body.get("thread_id").is_none(),
-            "synchronous rejection must not include thread_id: {body}"
-        );
-    }
 }
 
 /// Plant an UNSIGNED knowledge item (no signature line) so resolution yields
@@ -356,14 +325,14 @@ fn plant_model_routing(project: &Path, signer: &SigningKey) -> anyhow::Result<()
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_returns_inspectable_thread_id() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let project_path = h.user_space.path().to_string_lossy().into_owned();
 
     let (status, body) = h
         .post_json(
             "/execute/launch",
             json!({
                 "item_ref": "tool:ryeos/core/identity/public_key",
-                "project_path": project_path,
+                "ref_bindings": {},
+                "project_path": null,
                 "parameters": {},
                 "launch_mode": "accepted"
             }),
@@ -395,6 +364,7 @@ async fn execute_launch_admits_graph_ref() {
             "/execute/launch",
             json!({
                 "item_ref": "graph:smoke",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -414,19 +384,19 @@ async fn execute_launch_admits_directive_ref() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-execute-launch-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )
     };
-    // The mock provider config is planted in the project root; allow that
-    // (dev-only) since provider configs are otherwise restricted to user/bundle
-    // roots.
-    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
-    })
-    .await
-    .expect("start daemon with standard bundle");
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon with standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(project.path(), "test/launch", &fixture.publisher).expect("plant directive");
 
@@ -435,6 +405,7 @@ async fn execute_launch_admits_directive_ref() {
             "/execute/launch",
             json!({
                 "item_ref": "directive:test/launch",
+                "ref_bindings": { "model": "directive:test/launch" },
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -470,6 +441,7 @@ async fn execute_launch_admits_knowledge_query() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/fact",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "accepted" } },
                 "launch_mode": "accepted"
@@ -505,6 +477,7 @@ async fn execute_launch_method_missing_required_arg_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/fact",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": {} },
                 "launch_mode": "accepted"
@@ -520,11 +493,11 @@ async fn execute_launch_method_missing_required_arg_is_rejected() {
     );
 }
 
-/// A method launch whose root fails the projection trust gate (unsigned)
-/// must not leave a phantom or a stuck thread: persistence-first dispatch
-/// creates the row then finalizes it `failed`.
+/// Corpus method scope changes the projected data, not launch authority: an
+/// unsigned invoked root receives the same typed trust-policy rejection as an
+/// envelope root and never exposes its pre-minted id.
 #[tokio::test(flavor = "multi_thread")]
-async fn execute_launch_unsigned_knowledge_does_not_phantom_or_stick() {
+async fn execute_launch_unsigned_knowledge_is_rejected_by_trust_policy() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
         plant_vault_with_zen_key(state_path)?;
@@ -542,6 +515,7 @@ async fn execute_launch_unsigned_knowledge_does_not_phantom_or_stick() {
             "/execute/launch",
             json!({
                 "item_ref": "knowledge:test/unsigned",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "x" } },
                 "launch_mode": "accepted"
@@ -550,14 +524,14 @@ async fn execute_launch_unsigned_knowledge_does_not_phantom_or_stick() {
         .await
         .expect("post /execute/launch unsigned knowledge");
 
-    assert_no_phantom_or_stuck(&h, status, &body).await;
+    assert_trust_policy_rejection(status, &body);
 }
 
-/// A managed launch whose root fails the launcher trust gate (unsigned
-/// directive) must not leave a phantom or a thread stuck at `created`: the
-/// launch finalize-on-error net drives it terminal.
+/// An unsigned managed root is a typed trust-policy rejection, never an
+/// opaque internal failure. The route does not expose the pre-minted id when
+/// the launcher refuses the execution before subprocess handoff.
 #[tokio::test(flavor = "multi_thread")]
-async fn execute_launch_unsigned_directive_does_not_phantom_or_stick() {
+async fn execute_launch_unsigned_directive_is_rejected_by_trust_policy() {
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)
     };
@@ -573,6 +547,7 @@ async fn execute_launch_unsigned_directive_does_not_phantom_or_stick() {
             "/execute/launch",
             json!({
                 "item_ref": "directive:test/unsigned",
+                "ref_bindings": { "model": "directive:test/unsigned" },
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -581,20 +556,34 @@ async fn execute_launch_unsigned_directive_does_not_phantom_or_stick() {
         .await
         .expect("post /execute/launch unsigned directive");
 
-    assert_no_phantom_or_stuck(&h, status, &body).await;
+    assert_trust_policy_rejection(status, &body);
+}
+
+fn assert_trust_policy_rejection(status: reqwest::StatusCode, body: &Value) {
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "body={body}");
+    assert_eq!(
+        body.get("code").and_then(Value::as_str),
+        Some("effective_trust_unsigned"),
+        "body={body}"
+    );
+    assert_eq!(body.get("retryable").and_then(Value::as_bool), Some(false));
+    assert!(
+        body.get("thread_id").is_none(),
+        "trust rejection must not expose the pre-minted thread id: {body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_terminal_tool_without_executor_id_is_rejected() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let project_path = h.user_space.path().to_string_lossy().into_owned();
 
     let (status, body) = h
         .post_json(
             "/execute/launch",
             json!({
                 "item_ref": "tool:ryeos/core/subprocess/execute",
-                "project_path": project_path,
+                "ref_bindings": {},
+                "project_path": null,
                 "parameters": {},
                 "launch_mode": "accepted"
             }),
@@ -630,6 +619,7 @@ async fn execute_launch_terminal_tool_bad_manifest_requires_is_rejected() {
             "/execute/launch",
             json!({
                 "item_ref": "tool:test/wrapper",
+                "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
                 "launch_mode": "accepted"
@@ -651,14 +641,14 @@ async fn execute_launch_terminal_tool_bad_manifest_requires_is_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_in_process_service_is_rejected() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let project_path = h.user_space.path().to_string_lossy().into_owned();
 
     let (status, body) = h
         .post_json(
             "/execute/launch",
             json!({
                 "item_ref": "service:node/status",
-                "project_path": project_path,
+                "ref_bindings": {},
+                "project_path": null,
                 "parameters": {},
                 "launch_mode": "accepted"
             }),
@@ -669,8 +659,8 @@ async fn execute_launch_in_process_service_is_rejected() {
     assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "body={body}");
     let error = body.get("error").and_then(Value::as_str).unwrap_or("");
     assert!(
-        error.contains("in-process"),
-        "expected in-process rejection, got: {body}"
+        error.contains("pre-minted thread root") && error.contains("without --async"),
+        "expected accepted-launch persistence rejection, got: {body}"
     );
     assert!(
         body.get("thread_id").is_none(),
@@ -681,14 +671,14 @@ async fn execute_launch_in_process_service_is_rejected() {
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_non_root_executable_ref_does_not_return_phantom_thread_id() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let project_path = h.user_space.path().to_string_lossy().into_owned();
 
     let (status, body) = h
         .post_json(
             "/execute/launch",
             json!({
                 "item_ref": "config:some/thing",
-                "project_path": project_path,
+                "ref_bindings": {},
+                "project_path": null,
                 "parameters": {},
                 "launch_mode": "accepted"
             }),
@@ -711,14 +701,14 @@ async fn execute_launch_non_root_executable_ref_does_not_return_phantom_thread_i
 #[tokio::test(flavor = "multi_thread")]
 async fn execute_launch_invalid_item_does_not_return_phantom_thread_id() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
-    let project_path = h.user_space.path().to_string_lossy().into_owned();
 
     let (status, body) = h
         .post_json(
             "/execute/launch",
             json!({
                 "item_ref": "tool:no/such-tool",
-                "project_path": project_path,
+                "ref_bindings": {},
+                "project_path": null,
                 "parameters": {},
                 "launch_mode": "accepted"
             }),
@@ -754,13 +744,13 @@ async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
         .await
         .expect("start daemon with standard bundle");
 
-    let project = tempfile::tempdir().expect("project tempdir");
     let (status, body) = h
         .post_json(
             "/execute/launch",
             json!({
                 "item_ref": "runtime:directive-runtime",
-                "project_path": project.path().to_str().unwrap(),
+                "ref_bindings": {},
+                "project_path": null,
                 "parameters": {},
                 "launch_mode": "accepted"
             }),

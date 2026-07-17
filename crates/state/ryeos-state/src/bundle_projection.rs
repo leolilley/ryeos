@@ -1,9 +1,11 @@
 //! Rebuildable SQLite projection helpers for bundle events.
 
+use std::ffi::OsStr;
+use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 
 use crate::bundle_events::BundleEventRecord;
 use crate::objects::validate_bundle_identifier;
@@ -55,20 +57,149 @@ pub struct BundleProjectionSyncReport {
 
 pub struct BundleProjectionDb {
     conn: Connection,
+    _directory: lillux::PinnedDirectory,
+    _instance_file: fs::File,
+    _wal_file: fs::File,
+    _shm_file: fs::File,
 }
 
 impl BundleProjectionDb {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create projection dir {}", parent.display()))?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let filename = path.file_name().ok_or_else(|| {
+            anyhow::anyhow!("bundle projection path has no filename: {}", path.display())
+        })?;
+        let directory = lillux::PinnedDirectory::open_or_create(parent)
+            .with_context(|| format!("create projection dir {}", parent.display()))?;
+        Self::open_in_directory(directory, filename)
+    }
+
+    pub(crate) fn open_in_directory(
+        directory: lillux::PinnedDirectory,
+        filename: &OsStr,
+    ) -> anyhow::Result<Self> {
+        ensure_directory_path_still_pinned(&directory)?;
+        let directory_lock = directory
+            .lock_exclusive()
+            .context("lock bundle projection directory")?;
+        directory_lock.ensure_protects(&directory)?;
+        let path = directory.path().join(filename);
+        let wal_name = bundle_projection_sidecar_name(filename, "-wal");
+        let shm_name = bundle_projection_sidecar_name(filename, "-shm");
+        let wal_before = directory.open_regular(&wal_name, false)?;
+        let shm_before = directory.open_regular(&shm_name, false)?;
+        let existing_instance = directory.open_regular(filename, true)?;
+        if existing_instance.is_none() && (wal_before.is_some() || shm_before.is_some()) {
+            anyhow::bail!(
+                "orphan bundle projection sidecar exists without database: {}",
+                path.display()
+            );
         }
-        let conn = Connection::open(path)
+        let instance_file = match existing_instance {
+            Some(file) => file,
+            None => {
+                let file = directory
+                    .open_regular_create(filename, true, true, 0o600)
+                    .with_context(|| format!("create bundle projection db {}", path.display()))?;
+                directory.sync()?;
+                file
+            }
+        };
+        let descriptors_before = matching_open_descriptors(&instance_file)?;
+        let wal_descriptors_before = wal_before
+            .as_ref()
+            .map(matching_open_descriptors)
+            .transpose()?
+            .unwrap_or_default();
+        let shm_descriptors_before = shm_before
+            .as_ref()
+            .map(matching_open_descriptors)
+            .transpose()?
+            .unwrap_or_default();
+        ensure_directory_path_still_pinned(&directory)?;
+        ensure_current_regular_file(&directory, filename, &instance_file, &path)?;
+        let sqlite_path = directory.descriptor_child_path(filename)?;
+
+        // The database file was established without following links relative
+        // to the pinned directory. SQLite canonicalizes the intentional
+        // /proc/self/fd ancestor, so SQLITE_OPEN_NOFOLLOW cannot be combined
+        // with this descriptor-rooted path. Do not let SQLite create the main
+        // file; prove below that it retained the exact inode opened above.
+        let conn = Connection::open_with_flags(&sqlite_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .with_context(|| format!("open bundle projection db {}", path.display()))?;
+        ensure_directory_path_still_pinned(&directory)?;
+        ensure_current_regular_file(&directory, filename, &instance_file, &path)?;
+        ensure_sqlite_connection_uses_expected_file(
+            &instance_file,
+            &descriptors_before,
+            "bundle projection database",
+        )?;
         conn.execute_batch(META_SCHEMA_SQL)
             .context("create bundle projection metadata schema")?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
-        Ok(Self { conn })
+        let journal_mode: String = conn.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if journal_mode != "wal" {
+            anyhow::bail!(
+                "bundle projection journal mode mismatch in {}: stored={journal_mode}, expected=wal",
+                path.display()
+            );
+        }
+
+        // Eagerly establish and retain the exact sidecars before a later lazy
+        // SQLite open could observe a rebound ordinary pathname.
+        conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+        let wal_file = directory.open_regular(&wal_name, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "SQLite did not establish bundle projection WAL: {}",
+                directory.path().join(&wal_name).display()
+            )
+        })?;
+        let shm_file = directory.open_regular(&shm_name, false)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "SQLite did not establish bundle projection shared memory: {}",
+                directory.path().join(&shm_name).display()
+            )
+        })?;
+        if let Some(existing) = wal_before.as_ref() {
+            ensure_same_regular_file(existing, &wal_file, &directory.path().join(&wal_name))?;
+        }
+        if let Some(existing) = shm_before.as_ref() {
+            ensure_same_regular_file(existing, &shm_file, &directory.path().join(&shm_name))?;
+        }
+        drop(wal_before);
+        drop(shm_before);
+        ensure_sqlite_connection_uses_expected_file(
+            &wal_file,
+            &wal_descriptors_before,
+            "bundle projection WAL",
+        )?;
+        ensure_sqlite_connection_uses_expected_file(
+            &shm_file,
+            &shm_descriptors_before,
+            "bundle projection shared memory",
+        )?;
+        ensure_directory_path_still_pinned(&directory)?;
+        ensure_current_regular_file(&directory, filename, &instance_file, &path)?;
+        ensure_current_regular_file(
+            &directory,
+            &wal_name,
+            &wal_file,
+            &directory.path().join(&wal_name),
+        )?;
+        ensure_current_regular_file(
+            &directory,
+            &shm_name,
+            &shm_file,
+            &directory.path().join(&shm_name),
+        )?;
+        drop(directory_lock);
+        Ok(Self {
+            conn,
+            _directory: directory,
+            _instance_file: instance_file,
+            _wal_file: wal_file,
+            _shm_file: shm_file,
+        })
     }
 
     pub fn connection(&self) -> &Connection {
@@ -250,6 +381,117 @@ impl BundleProjectionDb {
     }
 }
 
+fn ensure_same_regular_file(left: &fs::File, right: &fs::File, path: &Path) -> anyhow::Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (left, right, path);
+        anyhow::bail!("bundle projection file identity is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let left = left.metadata()?;
+        let right = right.metadata()?;
+        if left.dev() != right.dev() || left.ino() != right.ino() {
+            anyhow::bail!(
+                "bundle projection path changed while opening: {}",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+}
+
+fn ensure_current_regular_file(
+    directory: &lillux::PinnedDirectory,
+    name: &OsStr,
+    held: &fs::File,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let current = directory
+        .open_regular(name, false)?
+        .ok_or_else(|| anyhow::anyhow!("bundle projection disappeared: {}", path.display()))?;
+    ensure_same_regular_file(held, &current, path)
+}
+
+fn ensure_directory_path_still_pinned(directory: &lillux::PinnedDirectory) -> anyhow::Result<()> {
+    let current = lillux::PinnedDirectory::open(directory.path())?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "bundle projection directory disappeared: {}",
+            directory.path().display()
+        )
+    })?;
+    if !directory.is_same_directory(&current)? {
+        anyhow::bail!(
+            "bundle projection directory path changed while opening: {}",
+            directory.path().display()
+        );
+    }
+    Ok(())
+}
+
+fn bundle_projection_sidecar_name(name: &OsStr, suffix: &str) -> std::ffi::OsString {
+    let mut sidecar = name.to_os_string();
+    sidecar.push(suffix);
+    sidecar
+}
+
+#[cfg(target_os = "linux")]
+fn matching_open_descriptors(file: &fs::File) -> anyhow::Result<std::collections::BTreeSet<i32>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let expected = file.metadata()?;
+    let mut descriptors = std::collections::BTreeSet::new();
+    for entry in fs::read_dir("/proc/self/fd").context("enumerate process descriptors")? {
+        let entry = entry.context("read process descriptor entry")?;
+        let Some(descriptor) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i32>().ok())
+        else {
+            continue;
+        };
+        let metadata = match fs::metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect process descriptor {}", entry.path().display())
+                });
+            }
+        };
+        if metadata.dev() == expected.dev() && metadata.ino() == expected.ino() {
+            descriptors.insert(descriptor);
+        }
+    }
+    Ok(descriptors)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn matching_open_descriptors(_file: &fs::File) -> anyhow::Result<std::collections::BTreeSet<i32>> {
+    Ok(std::collections::BTreeSet::new())
+}
+
+fn ensure_sqlite_connection_uses_expected_file(
+    file: &fs::File,
+    descriptors_before: &std::collections::BTreeSet<i32>,
+    label: &str,
+) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+
+        let mut descriptors_after = matching_open_descriptors(file)?;
+        descriptors_after.remove(&file.as_raw_fd());
+        if descriptors_after.is_subset(descriptors_before) {
+            anyhow::bail!("SQLite did not retain a descriptor for the pinned {label} inode");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (file, descriptors_before, label);
+    Ok(())
+}
+
 fn ensure_projection_meta(
     conn: &Connection,
     projection_name: &str,
@@ -345,7 +587,7 @@ fn validate_projection_name(value: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
-    use crate::signer::TestSigner;
+    use crate::signer::{Signer, TestSigner};
 
     fn append_request(chain_id: &str, event_type: &str) -> BundleEventAppendRequest {
         BundleEventAppendRequest {
@@ -361,7 +603,14 @@ mod tests {
             correlation_id: None,
             causation_id: None,
             attribution: Default::default(),
+            attachments: vec![],
         }
+    }
+
+    fn trust_store(signer: &TestSigner) -> crate::refs::TrustStore {
+        let mut trust = crate::refs::TrustStore::new();
+        trust.insert(signer.fingerprint().to_string(), signer.verifying_key());
+        trust
     }
 
     #[test]
@@ -372,23 +621,26 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
+        let trust = trust_store(&signer);
 
         let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
+            &trust,
         )
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        append_bundle_event(&cas_root, &refs_root, second_req, &signer, &trust).unwrap();
 
         let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
+            &trust,
         )
         .unwrap();
         let mut projection = BundleProjectionDb::open(&tmp.path().join("email.db")).unwrap();
@@ -457,11 +709,13 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
+        let trust = trust_store(&signer);
         let appended = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
+            &trust,
         )
         .unwrap();
 
@@ -495,22 +749,25 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
+        let trust = trust_store(&signer);
 
         let first = append_bundle_event(
             &cas_root,
             &refs_root,
             append_request("email_1", "email_planned"),
             &signer,
+            &trust,
         )
         .unwrap();
         let mut second_req = append_request("email_1", "email_approved");
         second_req.expected_chain_head_hash = Some(first.event_hash.clone());
-        append_bundle_event(&cas_root, &refs_root, second_req, &signer).unwrap();
+        append_bundle_event(&cas_root, &refs_root, second_req, &signer, &trust).unwrap();
         let records = crate::bundle_events::scan_bundle_events(
             &cas_root,
             &refs_root,
             "ryeos-email",
             "email_event",
+            &trust,
         )
         .unwrap();
 

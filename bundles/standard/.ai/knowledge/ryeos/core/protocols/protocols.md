@@ -1,11 +1,10 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:fe49f42ded5789667ee6cb4b7321d70af9d0488cd432c1286633ac92e46f869d:LS3P3IpGuKDMcCaI++Tu0MJp2lsjz97sUmlNSfhL4ADjblgeOSuGS348xZ/LiE6ixQIDrHJvAV4N9lXi0yiUAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:19Z:e33daacbc42ec9cc709bdc5fa15be6d45706f165679862ca15c4397534a11faf:TlyJulmQfCK1DodVnf44690vw0QqRN5oD8NxHPjdOmkl5BixBl8FTsgOBOX+W6/SO/M8M093GVTU3xGG24FJAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, protocols, wire, subprocess]
 version: "1.0.0"
 description: >
-  The three subprocess wire protocols — opaque, runtime_v1, and
-  tool_streaming_v1.
+  Signed subprocess wire protocols and schema-driven protocol selection.
 ---
 
 # Protocols
@@ -14,33 +13,48 @@ Protocols define how the daemon communicates with subprocess tools
 and runtimes. Each protocol specifies the stdin/stdout shapes,
 environment injections, capabilities, and lifecycle.
 
-## Opaque Protocol (`protocol:ryeos/core/opaque`)
+## Tool Callback V1 (`protocol:ryeos/core/tool_callback`)
 
-The simplest protocol, used by the `tool` kind.
+The default protocol selected by the `tool` kind. It retains opaque terminal
+output while making callback authority explicit in signed protocol data.
 
 | Aspect      | Value                         |
 |-------------|-------------------------------|
-| **stdin**   | `parameters_json` — JSON params |
+| **stdin**   | `opaque` — executor-plan-owned bytes |
 | **stdout**  | `opaque_bytes` — raw bytes, terminal mode |
-| **env**     | `RYE_THREAD_ID`, `RYE_PROJECT_PATH` |
+| **env**     | `RYE_THREAD_ID`, `RYE_PROJECT_PATH`, plus declared `RYEOSD_*` socket/token/thread/project/auth bindings |
 | **lifecycle** | `detached_ok` — process can outlive parent |
-| **callback**  | `none` — no callback channel |
+| **callback**  | `http` — authenticated daemon callback channel |
 
-The daemon writes params as JSON to stdin, reads opaque bytes from
-stdout. No structured communication during execution.
+The executor plan supplies stdin bytes and the daemon reads opaque bytes from
+stdout. Default wrappers normally serialize params as JSON, while explicit
+`input_data` remains opaque protocol data. The daemon mints callback and
+thread-auth credentials because the descriptor requests them. Effective
+capabilities still come only from verified item and manifest authority; an
+empty capability set denies capability-gated resource operations. Exact-thread
+and chain-local lifecycle methods still apply their documented token/access
+class.
 
-## Runtime V1 Protocol (`protocol:ryeos/core/runtime_v1`)
+## Opaque Protocol (`protocol:ryeos/core/opaque`)
+
+The callback-free form of terminal opaque execution. It has the same
+plan-owned opaque stdin and opaque terminal stdout, declares only
+`RYE_THREAD_ID` and `RYE_PROJECT_PATH`, and exposes no daemon socket. It is
+available for schemas that deliberately do not need callbacks, but is not the
+default `tool` protocol.
+
+## Runtime V1 Protocol (`protocol:ryeos/core/runtime`)
 
 Full-featured protocol for runtime spawns (directive-runtime,
 graph-runtime). Used by the `runtime` kind.
 
 | Aspect      | Value                         |
 |-------------|-------------------------------|
-| **stdin**   | `launch_envelope_v1` — structured launch payload |
-| **stdout**  | `runtime_result_v1` — structured result |
+| **stdin**   | `launch_envelope` — structured launch payload |
+| **stdout**  | `runtime_result` — structured result |
 | **env**     | `RYEOSD_SOCKET_PATH`, `RYEOSD_CALLBACK_TOKEN`, `RYEOSD_THREAD_ID`, `RYEOSD_PROJECT_PATH`, `RYEOSD_THREAD_AUTH_TOKEN` |
 | **lifecycle** | `managed` — daemon tracks process lifetime |
-| **callback**  | `http_v1` — HTTP callback channel for async |
+| **callback**  | `http` — HTTP callback channel for async |
 
 The runtime receives a `LaunchEnvelope` on stdin containing the
 composed item, context blocks, parameters, and execution config.
@@ -49,7 +63,28 @@ It returns a `RuntimeResult` on stdout.
 The HTTP callback channel allows the runtime to call back into the
 daemon for tool dispatch, event logging, and state persistence.
 
-## Streaming Tool Protocol (`protocol:ryeos/core/tool_streaming_v1`)
+## Method Runtime V1 (`protocol:ryeos/core/method_runtime`)
+
+The protocol selected by a kind schema's `execution.method_dispatch.protocol`
+for a runtime that implements declared item methods. The runtime registry still
+selects the signed implementation binary; it does not select or override this
+wire contract.
+
+| Aspect      | Value                         |
+|-------------|-------------------------------|
+| **stdin**   | `method_call_envelope` — verified item/corpus payload plus declared method and bound arguments |
+| **stdout**  | `method_call_result` — structured terminal method result |
+| **env**     | declared daemon callback bindings, including `RYEOSD_THREAD_AUTH_TOKEN` |
+| **lifecycle** | `managed` — daemon tracks process lifetime |
+| **callback**  | `http` — authenticated daemon callback channel |
+
+Accepted-launch preflight, boot validation, and live dispatch all require this
+exact contract, including the canonical `RYEOSD_THREAD_AUTH_TOKEN` binding. A runtime
+serving a method-dispatch-only kind is invoked through that kind's method
+surface; launching its `runtime:` item directly through `runtime` is
+rejected because the envelopes are not interchangeable.
+
+## Streaming Tool Protocol (`protocol:ryeos/core/tool_streaming`)
 
 Protocol for tools that emit streaming output. Used by the
 `streaming_tool` kind.
@@ -57,7 +92,7 @@ Protocol for tools that emit streaming output. Used by the
 | Aspect      | Value                         |
 |-------------|-------------------------------|
 | **stdin**   | `parameters_json` — JSON params |
-| **stdout**  | `streaming_chunks_v1` — length-prefixed JSON frames |
+| **stdout**  | `streaming_chunks` — length-prefixed JSON frames |
 | **env**     | `RYE_THREAD_ID`, `RYE_PROJECT_PATH` |
 | **lifecycle** | `managed` — daemon tracks process |
 | **callback**  | `none` |
@@ -72,9 +107,12 @@ The kind schema determines which protocol to use:
 
 | Kind            | Protocol                    |
 |-----------------|-----------------------------|
-| `tool`          | `opaque`                    |
-| `streaming_tool` | `tool_streaming_v1`        |
-| `runtime`       | `runtime_v1`                |
+| `tool`          | `tool_callback`          |
+| `streaming_tool` | `tool_streaming`        |
+| `runtime`       | `runtime`                |
+| method-bearing kind | its `execution.method_dispatch.protocol` (currently `method_runtime`) |
 
-You don't need to specify the protocol explicitly — it's wired into
-the kind schema.
+You don't specify the protocol on each item. The signed kind schema selects a
+signed protocol descriptor—through its subprocess terminator or method
+dispatch declaration—and the launcher follows that descriptor without a
+kind-name/protocol-name table in code.

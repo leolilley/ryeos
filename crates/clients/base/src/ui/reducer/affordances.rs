@@ -211,11 +211,7 @@ impl RyeOsCore {
         targets.extend(
             self.visible_dock_views()
                 .into_iter()
-                .filter(|(_, view_ref)| {
-                    self.views
-                        .get(view_ref)
-                        .is_some_and(|binding| binding_subscribes(binding))
-                }),
+                .filter(|(_, view_ref)| self.views.get(view_ref).is_some_and(&binding_subscribes)),
         );
         targets
             .into_iter()

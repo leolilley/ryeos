@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:e3a9464b99b2a25ed6ead6102213dc20afc1c47895e854bcc6121187942d67ba:gSisRaNWelkTj6BoJuAsEG1F3Bjv09nWUoQ8fzIm/No/ub7GF4ZktFIcG33IpVxfZHviUoRHtAyT70yqp5t2Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:11:07Z:8db03228da4ff356ad71ba8051ba4f69b115d8b366f08af821bdd50b093bb299:TzkkTdXR8D963+hcLu7SERPtBKXeUSywqEkiZwj944jNrYA5gy8E3ZzYZPbuaJe7aZEbDHwIQB2QpjXfwXi0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-principal"
@@ -9,7 +9,7 @@ description: "Create a central-auth principal with roles, capabilities, and opti
 config:
   command: "python3"
   args:
-    - "{tool_dir}/../../../bin/central_auth.py"
+    - "{tool_dir}/lib/central_auth.py"
     - "create-principal"
   input_data: "{params_json}"
   timeout_secs: 15

@@ -102,7 +102,18 @@ pub fn resolve_item_full(
         for ext_spec in &kind_schema.extensions {
             let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
             tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
-            if path.is_file() {
+            let is_file = match std::fs::metadata(&path) {
+                Ok(metadata) => metadata.is_file(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(source) => {
+                    return Err(EngineError::ItemResolutionUnavailable {
+                        canonical_ref: ref_.to_string(),
+                        path,
+                        source,
+                    });
+                }
+            };
+            if is_file {
                 if winner.is_none() {
                     winner = Some((
                         path,
@@ -360,6 +371,7 @@ mod tests {
                 terminator: None,
                 delegate: None,
                 thread_profile: None,
+                history_policy: None,
                 method_dispatch: None,
                 methods: std::collections::BTreeMap::new(),
                 launch_augmentations: Vec::new(),

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:e064200c1d998854d3cb14d15c37f575d764492a1ac9d69d4d3891fd1fa5e19e:uZiuoYEJdrusm+ElR3yJ8Ufui35qVaoN9TOdUNyQCdaZarzTz7ohjadE6NvnBvJ5JzJSFxwg8lCmCfmTPL6TCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:21:56Z:a087af8227248162fbf136cd2e015c2f7f4835a895c1b7cf7ed7f8f69b910e6c:9AJu/E7LLBl7R+KgGVCtr+j9odhT8l/seBVpPtwh4mKW+XgkJQ6N8yDx6Es+Fbs5m7RMLc+QbI6IgSjoOWYjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, install, setup, init, bundles, getting-started]
-version: "3.0.0"
+version: "3.2.0"
 description: >
   How to install and set up ryEOS from package to initialized local node.
   Covers ryeos-node init, bundle discovery, trust pinning, identity, and
@@ -18,7 +18,7 @@ description: >
 yay -S ryeos
 ryeos init
 ryeos start
-ryeos status
+ryeos node status
 ```
 
 For packaged installs, `ryeos init` is the required setup command. It
@@ -29,7 +29,7 @@ ryeos init`.
 ## Lifecycle surface
 
 The user lifecycle surface is exactly `ryeos init`, `ryeos start`,
-`ryeos stop`, and `ryeos status`. There is no restart, enable/disable,
+`ryeos stop`, and `ryeos node status`. There is no restart, enable/disable,
 init-system integration, or separate probe command. Lifecycle commands
 are local-node operations and ignore `RYEOSD_URL`.
 
@@ -39,7 +39,8 @@ are local-node operations and ignore `RYEOSD_URL`.
 operator-owned setup. It creates layout, user key, node key, self-trust,
 official/additional publisher trust, discovers and plans bundles,
 installs and registers bundles, creates vault key material, writes
-default ingest-ignore config, and verifies post-init trust.
+create-once node policies (including the disabled strict isolation policy), and
+verifies post-init trust.
 
 Daemon bootstrap can repair daemon-local artifacts after init, but it
 cannot install bundles or create operator trust artifacts and is not a
@@ -80,6 +81,7 @@ ryeos start
 <system-space>/.ai/node/vault/{private_key.pem,public_key.pem}
 <system-space>/.ai/node/auth/authorized_keys/<user>.toml
 <system-space>/.ai/node/config.yaml
+<system-space>/.ai/node/isolation.yaml
 <system-space>/.ai/node/bundles/<name>.yaml
 <system-space>/.ai/node/ingest/ignore.yaml
 <system-space>/.ai/state/{operator.lock,lifecycle-start.lock,runtime.sqlite3,scheduler.sqlite3,objects,refs}
@@ -90,6 +92,11 @@ After `ryeos init`, `ryeos start` spawns `ryeosd`. The daemon verifies
 initialization before writing runtime state, acquires the state lock
 before unlinking sockets, repairs only daemon-local artifacts, then loads
 registered bundles and starts listeners.
+
+No isolation backend is installed by default. Install an independently authored
+backend bundle and select it in `isolation.yaml` before choosing `mode: enforce`,
+validate with `ryeos node doctor`, and restart. See [Execution
+Isolation](node/execution-isolation.md).
 
 For details, see [Local Node Lifecycle](node/lifecycle.md), [Operator
 Init](node/operator-init.md), and [Identity Model](identity-model.md).

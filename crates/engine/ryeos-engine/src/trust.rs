@@ -1038,7 +1038,7 @@ fn sha256_hex(data: &[u8]) -> String {
 
 /// Patch the canonical_ref field into verification errors that were
 /// created with an empty string placeholder.
-fn patch_canonical_ref(err: EngineError, canonical_ref: &str) -> EngineError {
+pub(crate) fn patch_canonical_ref(err: EngineError, canonical_ref: &str) -> EngineError {
     match err {
         EngineError::SignatureVerificationFailed { reason, .. } => {
             EngineError::SignatureVerificationFailed {

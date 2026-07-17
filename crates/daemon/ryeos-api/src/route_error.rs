@@ -85,11 +85,12 @@ pub enum RouteDispatchError {
     /// Structured error with a pre-built JSON body.
     /// The stable code is carried through the route boundary for
     /// dispatchers/observability; the body is emitted as-is and should
-    /// include the public `error_code` field. Status is derived from
-    /// context (currently always 400).
+    /// include the public error code. The originating typed boundary carries
+    /// the exact HTTP status; it is never reconstructed from the message.
     #[error("structured error: {code}")]
     Structured {
         code: String,
+        status: u16,
         body: serde_json::Value,
     },
 }
@@ -98,10 +99,10 @@ impl axum::response::IntoResponse for RouteDispatchError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
         match self {
-            Self::Structured { body, .. } => {
-                // The body is a pre-built JSON object (always an object,
-                // never a bare string). Emit it as 400 Bad Request.
-                (StatusCode::BAD_REQUEST, axum::Json(body)).into_response()
+            Self::Structured { status, body, .. } => {
+                let status =
+                    StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                (status, axum::Json(body)).into_response()
             }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
@@ -169,6 +170,7 @@ mod tests {
 
         let response = RouteDispatchError::Structured {
             code: "contract_violation".into(),
+            status: StatusCode::BAD_REQUEST.as_u16(),
             body: body.clone(),
         }
         .into_response();

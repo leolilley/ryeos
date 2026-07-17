@@ -36,12 +36,12 @@ inputs:
 
 Return exactly one short sentence beginning with `CONTINUATION_HOOK_SUMMARY:`.
 
-Reason: `{input:reason}`
+Reason: `${inputs.reason ?? "unspecified"}`
 
-Live messages: `${inputs.live_messages|json}`
+Live messages: `${json(inputs.live_messages ?? [])}`
 
-Usage: `${inputs.usage|json}`
+Usage: `${json(inputs.usage ?? null)}`
 
-Budget remaining: `${inputs.budget_remaining|json}`
+Budget remaining: `${json(inputs.budget_remaining ?? null)}`
 
-Declared outputs: `${inputs.declared_outputs|json}`
+Declared outputs: `${json(inputs.declared_outputs ?? null)}`

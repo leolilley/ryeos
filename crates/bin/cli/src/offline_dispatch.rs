@@ -13,16 +13,19 @@
 //! loaded from the verified node-config snapshot. Unsigned, tampered, or untrusted
 //! node config fails before any offline execution path is selected.
 
+mod params;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItem;
-use ryeos_runtime::{CommandDef, CommandDispatch, CommandProjectResolution, CommandRegistry};
+use ryeos_runtime::{CommandDef, CommandDispatch, CommandRegistry};
 use serde_json::Value;
 
 use crate::error::CliError;
+use params::{bind_params_minimal, bind_params_with_schema, expand_template};
 
 #[derive(Debug)]
 pub enum OfflineDispatchOutcome {
@@ -44,11 +47,29 @@ pub async fn try_offline_dispatch(
     argv: &[String],
     app_root: &Path,
     project_path: &str,
-    snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
+    _snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
-    // 1. The verified node config comes from the caller, loaded once per
-    //    invocation in `dispatcher::run` from signed installed bundle
-    //    registrations.
+    // Freeze one registered generation before consuming command or bundle
+    // records. The caller's earlier snapshot is only a fast dispatch hint; a
+    // standalone execution re-verifies it with the retained trust snapshot.
+    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: Some(app_root.to_path_buf()),
+        ..Default::default()
+    })
+    .map_err(local_err)?;
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&node_config.app_root)
+        .map_err(|error| CliError::Local {
+            detail: format!("load node isolation policy: {error:#}"),
+        })?;
+    let node_trust = isolation
+        .registered_generation_node_trust()
+        .ok_or_else(|| CliError::Local {
+            detail: "retained isolation generation omitted node trust".to_string(),
+        })?;
+    let snapshot = crate::node_descriptors::load_verified_snapshot_with_trust(app_root, node_trust)
+        .map_err(local_err)?;
+
+    // 1. Consume bundle and command records from that same generation.
     let bundle_roots: Vec<PathBuf> = snapshot
         .bundles
         .iter()
@@ -84,12 +105,12 @@ pub async fn try_offline_dispatch(
     })?;
 
     // 4. Boot engine (lazy — only reached when we know we have a match)
-    let node_config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
-        app_root: Some(app_root.to_path_buf()),
-        ..Default::default()
-    })
-    .map_err(local_err)?;
-    let engine = boot_engine(&node_config, project_path, &bundle_roots)?;
+    let engine = boot_engine(
+        &node_config,
+        project_path,
+        &bundle_roots,
+        std::sync::Arc::clone(&isolation),
+    )?;
 
     // 5. Resolve once through the engine, then dispatch by composed fields.
     let item = effective_item(&engine, canonical, project_path, execute_ref)?;
@@ -116,7 +137,7 @@ pub async fn try_offline_dispatch(
             tail,
             app_root,
             project_path,
-            node_config.sandbox_enabled,
+            &isolation,
         );
     }
 
@@ -129,7 +150,7 @@ pub async fn try_offline_dispatch(
             params,
             app_root,
             project_path,
-            node_config.sandbox_enabled,
+            &isolation,
         )
         .map(|result| result.map(OfflineDispatchOutcome::Json));
     }
@@ -145,6 +166,7 @@ fn boot_engine(
     config: &ryeos_app::config::Config,
     project_path: &str,
     bundle_roots: &[PathBuf],
+    isolation: std::sync::Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<ryeos_engine::engine::Engine, CliError> {
     let project_root = if project_path == "." {
         None
@@ -152,11 +174,12 @@ fn boot_engine(
         Some(PathBuf::from(project_path))
     };
 
-    ryeos_app::engine_init::build_engine_for_roots(
+    ryeos_app::engine_init::build_registered_engine_for_roots(
         config,
         bundle_roots,
         project_root.as_deref(),
         None, // no trust overlay
+        isolation,
     )
     .map_err(local_err)
 }
@@ -281,7 +304,7 @@ async fn exec_client(
         bundle_root,
         |fp| {
             engine
-                .trust_store
+                .node_trust_store
                 .get(fp)
                 .map(|signer| signer.verifying_key)
         },
@@ -392,7 +415,7 @@ fn exec_tool(
     params: Value,
     app_root: &Path,
     project_path: &str,
-    sandbox_enabled: bool,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<Option<Value>, CliError> {
     // Check executor_id
     let executor_id = item
@@ -410,6 +433,16 @@ fn exec_tool(
             });
         }
     }
+
+    // Offline engine resolution may accept a cwd-relative spelling, but the
+    // enforced namespace contract uses one stable absolute destination for
+    // templates, cwd, and mount authority.
+    let project_path_buf =
+        std::fs::canonicalize(project_path).map_err(|error| CliError::Local {
+            detail: format!("resolve offline project path `{project_path}`: {error}"),
+        })?;
+    let project_path_owned = project_path_buf.to_string_lossy().into_owned();
+    let project_path = project_path_owned.as_str();
 
     let config = item
         .composed_value
@@ -452,7 +485,7 @@ fn exec_tool(
         bundle_root,
         |fp| {
             engine
-                .trust_store
+                .node_trust_store
                 .get(fp)
                 .map(|signer| signer.verifying_key)
         },
@@ -483,10 +516,15 @@ fn exec_tool(
         .map(|t| expand_template(t, &params_json, project_path))
         .transpose()?;
 
-    let cwd = match config.get("cwd").and_then(|v| v.as_str()) {
-        Some(cwd) => Some(expand_template(cwd, &params_json, project_path)?),
-        None => Some(project_path.to_string()),
+    let expanded_cwd = match config.get("cwd").and_then(|v| v.as_str()) {
+        Some(cwd) => expand_template(cwd, &params_json, project_path)?,
+        None => project_path.to_string(),
     };
+    let cwd = Some(resolve_offline_cwd(
+        tool_ref_str,
+        &expanded_cwd,
+        &project_path_buf,
+    )?);
 
     let inherit_stdio = config
         .get("inherit_stdio")
@@ -528,34 +566,69 @@ fn exec_tool(
         }
     }
 
-    let request = ryeos_engine::subprocess_spec::sandbox_lillux_request(
-        lillux::SubprocessRequest {
-            cmd: resolved.absolute_path.to_string_lossy().into_owned(),
-            args,
-            cwd,
-            envs,
-            stdin_data,
-            timeout: timeout as f64,
+    let isolation_verified_code = [
+        ryeos_engine::isolation::IsolationVerifiedCode {
+            source_path: item.source.path.clone(),
+            content_hash: item.source.content_hash.clone(),
         },
-        sandbox_enabled,
-        app_root,
-        Path::new(project_path),
-        tool_ref_str,
-        "offline-cli",
-    )
-    .map_err(|error| CliError::Local {
-        detail: format!("offline tool sandbox refused execution: {error}"),
-    })?;
+        ryeos_engine::isolation::IsolationVerifiedCode {
+            source_path: resolved.absolute_path.clone(),
+            content_hash: resolved.content_hash.clone(),
+        },
+    ];
+    let mut request = isolation
+        .apply(
+            lillux::SubprocessRequest {
+                cmd: resolved.absolute_path.to_string_lossy().into_owned(),
+                args,
+                cwd,
+                envs,
+                stdin_data,
+                timeout: timeout as f64,
+                limits: None,
+                inherited_fds: Vec::new(),
+                supervised_status: None,
+            },
+            ryeos_engine::isolation::IsolationLaunchContext {
+                project_path: Path::new(project_path),
+                project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+                state_root: None,
+                checkpoint_dir: None,
+                daemon_socket_path: None,
+                bundle_roots: std::slice::from_ref(bundle_root),
+                node_trusted_keys_dir: Some(
+                    &app_root
+                        .join(ryeos_engine::AI_DIR)
+                        .join("config/keys/trusted"),
+                ),
+                verified_code: &isolation_verified_code,
+                item_ref: tool_ref_str,
+                thread_id: "offline-cli",
+            },
+        )
+        .map_err(|error| CliError::Local {
+            detail: format!("offline tool isolation refused execution: {error}"),
+        })?;
 
     if inherit_stdio {
-        return exec_inherited(
-            tool_ref_str,
-            Path::new(&request.cmd),
-            &request.args,
-            request.cwd.as_deref(),
-            &request.envs,
-            false,
-        );
+        // Terminal streams are not retained by RyeOS, so captured-output byte
+        // limits are inapplicable. Lillux rejects them on inherited-stdio
+        // requests unless this composition root explicitly removes them;
+        // timeout, RLIMIT_NOFILE, target identity, and group cleanup remain.
+        if let Some(limits) = request.limits.as_mut() {
+            limits.max_stdout_bytes = None;
+            limits.max_stderr_bytes = None;
+        }
+        let result = lillux::run_inherited_stdio(request);
+        if !result.success {
+            return Err(CliError::Local {
+                detail: format!(
+                    "offline tool `{tool_ref_str}` failed with exit {:?}: {}",
+                    result.exit_code, result.stderr
+                ),
+            });
+        }
+        return Ok(Some(serde_json::json!({ "status": "ok" })));
     }
 
     let result = lillux::run(request);
@@ -586,7 +659,7 @@ fn dispatch_service(
     tail: &[String],
     app_root: &Path,
     project_path: &str,
-    sandbox_enabled: bool,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<Option<OfflineDispatchOutcome>, CliError> {
     // Check availability
     let availability = item
@@ -668,7 +741,7 @@ fn dispatch_service(
         params,
         app_root,
         project_path,
-        sandbox_enabled,
+        isolation,
     )
     .map(|result| result.map(OfflineDispatchOutcome::Json))
 }
@@ -719,7 +792,7 @@ fn run_standalone_service(
     match serde_json::from_str::<Value>(&stdout) {
         Ok(value) => Ok(OfflineDispatchOutcome::Json(value)),
         Err(_) => {
-            println!("{stdout}");
+            crate::tty::write_raw(&stdout)?;
             Ok(OfflineDispatchOutcome::Silent)
         }
     }
@@ -753,157 +826,8 @@ fn resolve_ryeosd_binary() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Parameter binding
-// ---------------------------------------------------------------------------
-
-fn bind_params_minimal(
-    tail: &[String],
-    command: &CommandDef,
-    project_path: &str,
-) -> Result<Value, CliError> {
-    // Shared with daemon dispatch so the two paths cannot drift:
-    // `--input` is only honored when the descriptor declares an input
-    // flag (clean cut from the old always-on offline behavior), and
-    // declared single-JSON-object binding now works offline too.
-    if let Some(input) = crate::arg_bind::bind_declared_shortcuts(tail, command)? {
-        return Ok(input);
-    }
-
-    let mut params = ryeos_runtime::arg_binder::bind_argv_with_command(tail, Some(command))
-        .map_err(|e| CliError::Local { detail: e })?;
-
-    // Project resolution
-    let resolution = command_project_resolution(command);
-    if resolution != CommandProjectResolution::None {
-        let mut canonical_tail = params_to_tail(&params);
-        let default_project = (project_path != ".").then(|| Path::new(project_path));
-        match resolution {
-            CommandProjectResolution::None => {}
-            CommandProjectResolution::Optional => {
-                canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
-                    &canonical_tail,
-                    default_project,
-                )?;
-            }
-            CommandProjectResolution::Required => {
-                if canonical_tail.iter().any(|t| t == "--no-project") {
-                    return Err(CliError::Local {
-                        detail: "this command requires a project; do not pass --no-project".into(),
-                    });
-                }
-                canonical_tail = crate::project_resolve::rewrite_project_tail_with_default(
-                    &canonical_tail,
-                    default_project,
-                )?;
-                if canonical_tail.iter().any(|t| t == "--no-project") {
-                    return Err(CliError::Local {
-                        detail: format!(
-                            "this command requires a project; run it from a directory containing \
-                             {} or pass --project <path>",
-                            ryeos_engine::AI_DIR
-                        ),
-                    });
-                }
-            }
-        }
-        params = ryeos_runtime::bind_argv(&canonical_tail);
-    }
-
-    Ok(params)
-}
-
-fn bind_params_with_schema(
-    tail: &[String],
-    command: &CommandDef,
-    service_schema: &HashMap<String, String>,
-    project_path: &str,
-) -> Result<Value, CliError> {
-    let mut params = bind_params_minimal(tail, command, project_path)?;
-
-    // Normalize project → project_path
-    params = normalize_project_param(params, service_schema, project_path);
-
-    // Reject unknown flags
-    if let Some(obj) = params.as_object() {
-        for key in obj.keys() {
-            if key.starts_with('_') {
-                continue;
-            }
-            let normalized_key = key.replace('_', "-");
-            if !service_schema.contains_key(key.as_str())
-                && !service_schema.contains_key(&normalized_key)
-                && key != "input"
-            {
-                return Err(CliError::Local {
-                    detail: format!(
-                        "unknown parameter --{normalized_key} for this command{}",
-                        if service_schema.is_empty() {
-                            String::new()
-                        } else {
-                            format!(
-                                " (expected: {})",
-                                service_schema
-                                    .keys()
-                                    .map(|k| format!("--{}", k.replace('_', "-")))
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            )
-                        }
-                    ),
-                });
-            }
-        }
-    }
-
-    Ok(params)
-}
-
-fn normalize_project_param(
-    mut params: Value,
-    service_schema: &HashMap<String, String>,
-    default_project_path: &str,
-) -> Value {
-    let Some(obj) = params.as_object_mut() else {
-        return params;
-    };
-
-    if service_schema.contains_key("project_path") && !service_schema.contains_key("project") {
-        if let Some(project) = obj.remove("project") {
-            obj.entry("project_path".to_string()).or_insert(project);
-        }
-    }
-
-    if !obj.contains_key("project")
-        && !obj.contains_key("project_path")
-        && !obj.contains_key("no_project")
-    {
-        if service_schema.contains_key("project_path") {
-            obj.insert(
-                "project_path".to_string(),
-                Value::String(default_project_path.to_string()),
-            );
-        } else if service_schema.contains_key("project") {
-            obj.insert(
-                "project".to_string(),
-                Value::String(default_project_path.to_string()),
-            );
-        }
-    }
-
-    params
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn command_project_resolution(command: &CommandDef) -> CommandProjectResolution {
-    command
-        .project
-        .as_ref()
-        .map(|p| p.resolution)
-        .unwrap_or_default()
-}
 
 fn local_err(error: anyhow::Error) -> CliError {
     CliError::Local {
@@ -911,104 +835,38 @@ fn local_err(error: anyhow::Error) -> CliError {
     }
 }
 
-fn expand_template(
-    template: &str,
-    params_json: &str,
-    project_path: &str,
-) -> Result<String, CliError> {
-    let mut rest = template;
-    while let Some(start) = rest.find('{') {
-        if let Some(end) = rest[start + 1..].find('}') {
-            let token = &rest[start + 1..start + 1 + end];
-            if token != "params_json" && token != "project_path" && token != "triple" {
-                return Err(CliError::Local {
-                    detail: format!(
-                        "offline tool template references unsupported token {{{token}}}"
-                    ),
-                });
-            }
-            rest = &rest[start + 1 + end + 1..];
-        } else {
-            return Err(CliError::Local {
-                detail: "offline tool template contains an unterminated token".into(),
-            });
-        }
-    }
-
-    let mut out = template.replace("{params_json}", params_json);
-    out = out.replace("{project_path}", project_path);
-    Ok(out)
-}
-
-fn params_to_tail(params: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    let Some(obj) = params.as_object() else {
-        return out;
-    };
-    let mut keys: Vec<&String> = obj.keys().collect();
-    keys.sort();
-    for key in keys {
-        emit_param(&mut out, key, &obj[key]);
-    }
-    out
-}
-
-fn emit_param(out: &mut Vec<String>, key: &str, value: &Value) {
-    match value {
-        Value::Bool(true) => out.push(format!("--{}", key.replace('_', "-"))),
-        Value::Bool(false) | Value::Null => {}
-        Value::Array(values) => {
-            for v in values {
-                emit_param(out, key, v);
-            }
-        }
-        other => {
-            out.push(format!("--{}", key.replace('_', "-")));
-            out.push(match other {
-                Value::String(s) => s.clone(),
-                _ => other.to_string(),
-            });
-        }
-    }
-}
-
-fn exec_inherited(
+fn resolve_offline_cwd(
     tool_ref: &str,
-    cmd: &Path,
-    args: &[String],
-    cwd: Option<&str>,
-    envs: &[(String, String)],
-    inherit_env: bool,
-) -> Result<Option<Value>, CliError> {
-    let mut command = std::process::Command::new(cmd);
-    command.args(args);
-    if !inherit_env {
-        command.env_clear();
-    }
-    for (key, value) in envs {
-        command.env(key, value);
-    }
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
-    command
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit());
-
-    let status = command
-        .status()
-        .with_context(|| format!("run inherited offline tool `{tool_ref}`"))
-        .map_err(local_err)?;
-    if !status.success() {
+    expanded_cwd: &str,
+    project_root: &Path,
+) -> Result<String, CliError> {
+    let configured = Path::new(expanded_cwd);
+    let candidate = if configured.is_absolute() {
+        configured.to_path_buf()
+    } else {
+        project_root.join(configured)
+    };
+    let canonical = std::fs::canonicalize(&candidate).map_err(|error| CliError::Local {
+        detail: format!(
+            "offline tool `{tool_ref}` cwd `{expanded_cwd}` does not resolve to an existing directory: {error}"
+        ),
+    })?;
+    let metadata = std::fs::metadata(&canonical).map_err(|error| CliError::Local {
+        detail: format!(
+            "inspect offline tool `{tool_ref}` cwd `{}`: {error}",
+            canonical.display()
+        ),
+    })?;
+    if !metadata.is_dir() {
         return Err(CliError::Local {
             detail: format!(
-                "offline tool `{tool_ref}` failed with exit {:?}",
-                status.code()
+                "offline tool `{tool_ref}` cwd `{expanded_cwd}` resolves to `{}`, which is not a directory",
+                canonical.display()
             ),
         });
     }
-    Ok(Some(serde_json::json!({ "status": "ok" })))
+
+    Ok(canonical.to_string_lossy().into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,8 +876,77 @@ fn exec_inherited(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::{EncodePrivateKey, SigningKey};
+    use lillux::crypto::{DecodePrivateKey, EncodePrivateKey, SigningKey};
     use rand::rngs::OsRng;
+
+    #[test]
+    fn inherited_exec_rejects_invalid_limits_before_spawn() {
+        let limits = lillux::SubprocessLimits {
+            max_open_files: Some(u64::MAX),
+            ..lillux::SubprocessLimits::default()
+        };
+
+        let result = lillux::run_inherited_stdio(lillux::SubprocessRequest {
+            cmd: "unused".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: Some(limits),
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        });
+
+        assert!(result.stderr.contains("resource limits"));
+    }
+
+    #[test]
+    fn offline_cwd_resolves_relative_to_canonical_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+
+        let resolved = resolve_offline_cwd("tool:test/cwd", "nested", &project).unwrap();
+
+        assert_eq!(
+            PathBuf::from(resolved),
+            std::fs::canonicalize(nested).unwrap()
+        );
+    }
+
+    #[test]
+    fn offline_cwd_canonicalizes_absolute_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let nested = project.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+        let spelling = nested.join("..").join("nested");
+
+        let resolved =
+            resolve_offline_cwd("tool:test/cwd", spelling.to_str().unwrap(), &project).unwrap();
+
+        assert_eq!(
+            PathBuf::from(resolved),
+            std::fs::canonicalize(nested).unwrap()
+        );
+    }
+
+    #[test]
+    fn offline_cwd_rejects_non_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("file"), "not a directory").unwrap();
+        let project = std::fs::canonicalize(project).unwrap();
+
+        let error = resolve_offline_cwd("tool:test/cwd", "file", &project).unwrap_err();
+
+        assert!(error.to_string().contains("not a directory"));
+    }
 
     fn expect_json(outcome: OfflineDispatchOutcome) -> Value {
         match outcome {
@@ -1058,12 +985,14 @@ mod tests {
                 .join("identity");
             std::fs::create_dir_all(&node_identity_dir).unwrap();
             std::fs::write(
-                node_identity_dir.parent().unwrap().join("sandbox.yaml"),
-                "version: 1\nbackend_path: /usr/bin/bwrap\nallow_network: false\n\
-                 writable_paths:\n  - \"{project}\"\nallowed_env:\n  - \"*\"\n\
-                 max_open_files: 128\nmax_processes: 32\n",
+                node_identity_dir.parent().unwrap().join("isolation.yaml"),
+                "version: 1\nmode: disabled\nbackend: null\n\
+                 filesystem:\n  writable:\n    - \"{project}\"\n  readable:\n    - \"{node_public_identity}\"\n\
+                 network:\n  mode: isolated\nenvironment:\n  allow:\n    - \"*\"\n\
+                 limits:\n  open_files: 128\n  stdout_bytes: 8388608\n  stderr_bytes: 8388608\n  verified_artifact_file_bytes: 67108864\n  verified_artifact_total_bytes: 268435456\n  verified_artifact_files: 4096\n",
             )
             .unwrap();
+            std::fs::write(node_identity_dir.join("public-identity.json"), "{}").unwrap();
             let pem = key.to_pkcs8_pem(Default::default()).unwrap();
             std::fs::write(node_identity_dir.join("private_key.pem"), pem.as_bytes()).unwrap();
             let dev_trust = std::fs::read_to_string(
@@ -1075,6 +1004,16 @@ mod tests {
             let dev_trust = ryeos_engine::trust::PublisherTrustDoc::parse(&dev_trust).unwrap();
             let dev_key = dev_trust.decode_verifying_key().unwrap();
             ryeos_engine::trust::pin_key(&dev_key, "ryeos-dev", &trust_dir, None).unwrap();
+            let core_key_pem = std::fs::read_to_string(
+                workspace_root().join(".dev-keys").join("PUBLISHER_DEV.pem"),
+            )
+            .unwrap();
+            let core_key = SigningKey::from_pkcs8_pem(&core_key_pem).unwrap();
+            assert_eq!(
+                core_key.verifying_key(),
+                dev_key,
+                "fixture core signer must match the copied bundle's pinned publisher"
+            );
             std::env::set_var("RYEOS_APP_ROOT", &system);
 
             let bundle = system
@@ -1096,8 +1035,8 @@ mod tests {
                 bundle,
                 key,
             };
-            this.resign_node_commands(&core_bundle);
-            this.write_signed(
+            this.resign_node_commands(&core_bundle, &core_key);
+            this.write_signed_with(
                 &core_bundle
                     .join(ryeos_engine::AI_DIR)
                     .join("protocols")
@@ -1105,6 +1044,7 @@ mod tests {
                     .join("core")
                     .join("cli_exec.yaml"),
                 "kind: protocol\nname: cli_exec\ncategory: ryeos/core\nabi_version: v1\ndescription: Direct exec with argv flags and inherited stdio.\nstdin:\n  shape: opaque\nstdout:\n  shape: opaque_bytes\n  mode: terminal\nenv_injections:\n  - { name: RYEOS_PROJECT_PATH, source: project_path }\ncapabilities:\n  allows_pushed_head: false\n  allows_target_site: false\n  allows_detached: false\nlifecycle:\n  mode: managed\ncallback_channel: none\n",
+                &core_key,
             );
             this.write_manifest();
             this.write_command_registration_policy();
@@ -1120,6 +1060,7 @@ mod tests {
                     &core_bundle,
                     handler_bin,
                     fixture_handler_script().as_bytes(),
+                    &core_key,
                 );
             }
             this.write_echo_bin();
@@ -1127,7 +1068,7 @@ mod tests {
             this
         }
 
-        fn resign_node_commands(&self, bundle: &Path) {
+        fn resign_node_commands(&self, bundle: &Path, signer: &SigningKey) {
             let root = bundle
                 .join(ryeos_engine::AI_DIR)
                 .join("node")
@@ -1145,7 +1086,7 @@ mod tests {
                     } else if path.extension().and_then(|ext| ext.to_str()) == Some("yaml") {
                         let content = std::fs::read_to_string(&path).unwrap();
                         let body = lillux::signature::strip_signature_lines(&content);
-                        self.write_signed(&path, &body);
+                        self.write_signed_with(&path, &body, signer);
                     }
                 }
             }
@@ -1262,10 +1203,16 @@ mod tests {
         }
 
         fn write_bin(&self, name: &str, script: &[u8]) {
-            self.write_bin_in_bundle(&self.bundle, name, script);
+            self.write_bin_in_bundle(&self.bundle, name, script, &self.key);
         }
 
-        fn write_bin_in_bundle(&self, bundle: &Path, name: &str, script: &[u8]) {
+        fn write_bin_in_bundle(
+            &self,
+            bundle: &Path,
+            name: &str,
+            script: &[u8],
+            signer: &SigningKey,
+        ) {
             let triple = host_triple();
             let ai_dir = bundle.join(ryeos_engine::AI_DIR);
             let bin_path = ai_dir.join("bin").join(triple).join(name);
@@ -1280,16 +1227,22 @@ mod tests {
 
             let cas = lillux::CasStore::new(ai_dir.join("objects"));
             let content_blob_hash = lillux::sha256_hex(script);
+            let stored_blob_hash = cas.store_blob(script).unwrap();
+            assert_eq!(
+                stored_blob_hash, content_blob_hash,
+                "fixture CAS must address the exact installed binary bytes"
+            );
             let item_ref = format!("bin/{triple}/{name}");
             let item_source = serde_json::json!({
+                "kind": "item_source",
                 "item_ref": item_ref,
                 "content_blob_hash": content_blob_hash,
-                "signature_info": {
-                    "fingerprint": lillux::signature::compute_fingerprint(&self.key.verifying_key())
-                }
+                "integrity": format!("sha256:{content_blob_hash}"),
+                "signature_info": null,
+                "mode": 0o755,
             });
-            let sidecar_body = lillux::cas::canonical_json(&item_source);
-            let sidecar = lillux::signature::sign_content(&sidecar_body, &self.key, "#", None);
+            let sidecar_body = lillux::cas::canonical_json(&item_source).unwrap();
+            let sidecar = lillux::signature::sign_content(&sidecar_body, signer, "#", None);
             std::fs::write(
                 bin_path.with_file_name(format!("{name}.item_source.json")),
                 sidecar,
@@ -1298,22 +1251,57 @@ mod tests {
             let item_source_hash = cas.store_object(&item_source).unwrap();
             let ref_path = ai_dir.join("refs").join("bundles").join("manifest");
             let mut item_source_hashes = if ref_path.exists() {
-                let manifest_hash = std::fs::read_to_string(&ref_path).unwrap();
-                cas.get_object(manifest_hash.trim())
+                let signed_ref = std::fs::read_to_string(&ref_path).unwrap();
+                let trust_store = ryeos_engine::trust::TrustStore::load(
+                    None,
+                    &self.system.join(ryeos_engine::AI_DIR).join("config"),
+                )
+                .unwrap();
+                let verified_ref =
+                    ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
+                        &signed_ref,
+                        |candidate| {
+                            trust_store
+                                .get(candidate)
+                                .map(|signer| signer.verifying_key)
+                        },
+                        ryeos_engine::resolution::TrustClass::TrustedBundle,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    verified_ref.signer_fingerprint,
+                    lillux::signature::compute_fingerprint(&signer.verifying_key()),
+                    "fixture must not extend an executor manifest owned by another signer"
+                );
+                let manifest = cas
+                    .get_object(&verified_ref.manifest_hash)
                     .unwrap()
-                    .and_then(|manifest| manifest.get("item_source_hashes").cloned())
-                    .and_then(|value| {
-                        serde_json::from_value::<serde_json::Map<String, Value>>(value).ok()
-                    })
-                    .unwrap_or_default()
+                    .expect("fixture executor manifest object must exist in CAS");
+                ryeos_engine::executor_resolution::verify_executor_manifest_object(
+                    &manifest,
+                    &verified_ref.manifest_hash,
+                )
+                .unwrap()
             } else {
-                serde_json::Map::new()
+                HashMap::new()
             };
-            item_source_hashes.insert(item_ref, Value::String(item_source_hash));
-            let manifest = serde_json::json!({ "item_source_hashes": item_source_hashes });
+            item_source_hashes.insert(item_ref, item_source_hash);
+            let manifest = serde_json::json!({
+                "kind": "source_manifest",
+                "item_source_hashes": item_source_hashes,
+            });
             let manifest_hash = cas.store_object(&manifest).unwrap();
             std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
-            std::fs::write(ref_path, manifest_hash).unwrap();
+            let signed_ref = lillux::signature::sign_content(
+                &format!(
+                    "{}\n{manifest_hash}\n",
+                    ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN
+                ),
+                signer,
+                "#",
+                None,
+            );
+            std::fs::write(ref_path, signed_ref).unwrap();
         }
 
         fn write_client_kind_schema(&self) {
@@ -1348,8 +1336,12 @@ mod tests {
         }
 
         fn write_signed(&self, path: &Path, body: &str) {
+            self.write_signed_with(path, body, &self.key);
+        }
+
+        fn write_signed_with(&self, path: &Path, body: &str, signer: &SigningKey) {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            let signed = lillux::signature::sign_content(body, &self.key, "#", None);
+            let signed = lillux::signature::sign_content(body, signer, "#", None);
             std::fs::write(path, signed).unwrap();
         }
 
@@ -1389,8 +1381,31 @@ import sys
 req = json.load(sys.stdin)
 cmd = req.get("command")
 
-if cmd in ("validate_parser_config", "validate_composer_config"):
+if cmd == "validate_parser_config":
     print(json.dumps({"result": "validate_ok"}))
+elif cmd == "validate_composer_config":
+    config = req.get("composer_config")
+    requirements = req.get("field_requirements", [])
+    if config not in (None, {}):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer takes no config",
+        }))
+    elif any(not item.get("field") for item in requirements):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer field requirement must not be empty",
+        }))
+    elif any(item.get("semantics") != "root_verbatim" for item in requirements):
+        print(json.dumps({
+            "result": "validate_err",
+            "message": "identity composer only preserves root fields verbatim",
+        }))
+    else:
+        print(json.dumps({
+            "result": "validate_composer_ok",
+            "field_requirements": requirements,
+        }))
 elif cmd == "parse":
     try:
         import yaml

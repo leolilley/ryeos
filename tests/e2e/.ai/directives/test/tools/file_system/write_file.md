@@ -34,7 +34,7 @@ Simple single-step directive that writes a greeting message to a specified file 
 
 <process>
   <step name="write_message">
-    Write the greeting message "{input:message}" to `{input:output_path}`.
+    Write the greeting message "${inputs.message}" to `${inputs.output_path}`.
   </step>
   <step name="return_result">
     Return the path of the written file and the message that was written.

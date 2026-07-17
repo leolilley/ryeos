@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-05-31T08:15:56Z:617debe3f4e4bd7de361f63b9899ef8d02f8741d15bfe8344b36857f3d6a5e47:sNqKY81LQ/UMhUVIjQW4gWaSmzWfIN184DbYT4CVXkbuG0OUoKDeRvZxLSNWXl+Rdt0Xgj94trvmh/uNW1HbAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:18Z:0bc74194b09f10e788352e4bcd47328192c5dec934dae225e890d99683e6308d:ogbbkreASIOnZJ21QOQLtlI7bG9SjE8zA5MPbQ+bH9b0hXu9bMbxgS+UrIU/Vtwu1wRyfUQyaD3ywOrGBHY0Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/kinds
 tags: [kind, streaming-tool, subprocess]
@@ -12,7 +12,7 @@ Invariant: `streaming_tool` is a tool-like executable kind whose subprocess outp
 
 - Directory: `tools/`
 - Formats: same as `tool`
-- Protocol: `protocol:ryeos/core/tool_streaming_v1`
+- Protocol: `protocol:ryeos/core/tool_streaming`
 - Composer: identity
 - Alias: `@subprocess` → `tool:ryeos/core/subprocess/execute`
 

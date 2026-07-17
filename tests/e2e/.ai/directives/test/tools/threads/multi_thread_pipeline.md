@@ -35,26 +35,26 @@ Multi-thread orchestration pipeline that spawns multiple child directives in seq
   </inputs>
 
   <outputs>
-    <success>Pipeline complete — manifest, research, analysis, and summary written to {input:workspace_dir}/. All child threads completed successfully.</success>
-    <failure>Pipeline failed — check that test/tools/primary/search_and_report directive exists and {input:workspace_dir} is writable. Inspect manifest.json for stage statuses.</failure>
+    <success>Pipeline complete — manifest, research, analysis, and summary written to ${inputs.workspace_dir}/. All child threads completed successfully.</success>
+    <failure>Pipeline failed — check that test/tools/primary/search_and_report directive exists and ${inputs.workspace_dir} is writable. Inspect manifest.json for stage statuses.</failure>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="write_manifest">
-    Write a pipeline manifest JSON to `{input:workspace_dir}/manifest.json` listing all stages and their expected outputs.
+    Write a pipeline manifest JSON to `${inputs.workspace_dir}/manifest.json` listing all stages and their expected outputs.
   </step>
   <step name="spawn_research">
-    Spawn child directive `test/tools/primary/search_and_report` with topic "{input:topic}" and report path `{input:workspace_dir}/research.md`.
+    Spawn child directive `test/tools/primary/search_and_report` with topic "${inputs.topic}" and report path `${inputs.workspace_dir}/research.md`.
   </step>
   <step name="verify_research">
-    Read `{input:workspace_dir}/research.md` to verify the research stage completed and gather findings.
+    Read `${inputs.workspace_dir}/research.md` to verify the research stage completed and gather findings.
   </step>
   <step name="write_analysis">
-    Write an analysis document to `{input:workspace_dir}/analysis.md` synthesizing the research findings.
+    Write an analysis document to `${inputs.workspace_dir}/analysis.md` synthesizing the research findings.
   </step>
   <step name="write_summary">
-    Write a final pipeline summary to `{input:workspace_dir}/summary.md` combining all stage outputs.
+    Write a final pipeline summary to `${inputs.workspace_dir}/summary.md` combining all stage outputs.
   </step>
 </process>

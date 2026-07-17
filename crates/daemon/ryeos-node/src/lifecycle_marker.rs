@@ -12,6 +12,7 @@
 //!   daemon silently died" into a visible signal on the next `start`.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -41,6 +42,18 @@ fn marker_path(state_dir: &Path) -> PathBuf {
 pub fn read(state_dir: &Path) -> Option<LifecycleMarker> {
     let raw = std::fs::read_to_string(marker_path(state_dir)).ok()?;
     serde_json::from_str(&raw).ok()
+}
+
+/// Wall-clock age of the current marker file. The running marker is written
+/// immediately before startup listener publication, so this bounds how long a
+/// live marker may reasonably be treated as the narrow pre-control bootstrap
+/// window. A backwards clock jump yields no age rather than a false timeout.
+pub fn age(state_dir: &Path) -> Option<Duration> {
+    let modified = std::fs::metadata(marker_path(state_dir))
+        .ok()?
+        .modified()
+        .ok()?;
+    SystemTime::now().duration_since(modified).ok()
 }
 
 fn write(state_dir: &Path, marker: &LifecycleMarker) {
@@ -188,7 +201,7 @@ mod tests {
 
     #[test]
     fn running_marker_with_dead_pid_is_detectable() {
-        // A pid that is essentially never alive in the test sandbox.
+        // A pid that is essentially never alive in the test isolation.
         let tmp = tempfile::tempdir().unwrap();
         let marker = LifecycleMarker::Running {
             pid: u32::MAX - 1,

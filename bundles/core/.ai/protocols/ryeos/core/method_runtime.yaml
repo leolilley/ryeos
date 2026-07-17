@@ -1,0 +1,24 @@
+# ryeos:signed:2026-07-15T07:49:08Z:fcb85fb444b08f312f431cc012823d7fe767be519d81832f20f4d4b94557f9aa:Sy/RVkBPonooXL+j9CyN+J5p4qZao/NqWmsQdjaLx4jIzJJzc8rtWCDEjcJDLB7ydUyzxdiLLsKQdNqSQCMbDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: protocol
+name: method_runtime
+category: ryeos/core
+abi_version: v1
+description: Method runtime subprocess; MethodCallEnvelope on stdin and MethodCallResult on terminal stdout.
+stdin:
+  shape: method_call_envelope
+stdout:
+  shape: method_call_result
+  mode: terminal
+env_injections:
+  - { name: RYEOSD_SOCKET_PATH, source: callback_socket_path }
+  - { name: RYEOSD_CALLBACK_TOKEN, source: callback_token }
+  - { name: RYEOSD_THREAD_ID, source: thread_id }
+  - { name: RYEOSD_PROJECT_PATH, source: callback_project_path }
+  - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
+capabilities:
+  allows_pushed_head: false
+  allows_target_site: false
+  allows_detached: false
+lifecycle:
+  mode: managed
+callback_channel: http

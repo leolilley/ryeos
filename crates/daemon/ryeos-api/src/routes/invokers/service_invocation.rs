@@ -116,8 +116,8 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                     crate::handler_error::HandlerError::Internal(msg) => {
                         RouteDispatchError::Internal(msg)
                     }
-                    crate::handler_error::HandlerError::Structured { code, body } => {
-                        RouteDispatchError::Structured { code, body }
+                    crate::handler_error::HandlerError::Structured { code, status, body } => {
+                        RouteDispatchError::Structured { code, status, body }
                     }
                 }
             } else {

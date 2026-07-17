@@ -5,16 +5,22 @@
 
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$script_dir/lib/ryeos-terminal.sh"
+ryeos_term_init
+
 APP_ROOT="${RYEOS_SMOKE_APP_ROOT:-}"
 BUNDLE_SOURCE="${RYEOS_SMOKE_BUNDLE_SOURCE:-/usr/share/ryeos}"
 READY_TIMEOUT="${RYEOS_SMOKE_READY_TIMEOUT:-60}"
 STATE_TIMEOUT="${RYEOS_SMOKE_STATE_TIMEOUT:-30}"
 COMMAND_TIMEOUT="${RYEOS_SMOKE_COMMAND_TIMEOUT:-45}"
 KEEP="${RYEOS_SMOKE_KEEP:-0}"
+TRUST_FILE="${RYEOS_SMOKE_TRUST_FILE:-}"
 
 for command in ryeos python3 timeout; do
   command -v "$command" >/dev/null 2>&1 || {
-    echo "smoke-installed-resume: required command not found: $command" >&2
+    ryeos_term_fail "required command not found: $command"
     exit 2
   }
 done
@@ -29,12 +35,18 @@ export RYEOS_APP_ROOT="$APP_ROOT"
 cleanup() {
   timeout 15 ryeos stop --force >/dev/null 2>&1 || true
   if [[ "$KEEP" == "1" ]]; then
-    echo "smoke-installed-resume: retained artifacts at $WORK_ROOT" >&2
+    ryeos_term_note "retained smoke artifacts at $WORK_ROOT"
   else
     rm -rf "$WORK_ROOT"
   fi
 }
-trap cleanup EXIT INT TERM
+smoke_exit() {
+  local status="$1"
+  ryeos_term_handle_exit "$status"
+  cleanup
+  return "$status"
+}
+trap 'smoke_exit "$?"' EXIT
 
 bounded() {
   timeout "$COMMAND_TIMEOUT" "$@"
@@ -97,7 +109,7 @@ wait_ready() {
       return 0
     fi
     if (( SECONDS >= deadline )); then
-      echo "smoke-installed-resume: node did not become ready in ${READY_TIMEOUT}s" >&2
+      ryeos_term_fail "node did not become ready in ${READY_TIMEOUT}s"
       printf '%s\n' "$status" >&2
       return 1
     fi
@@ -123,21 +135,29 @@ wait_thread_active() {
     fi
     sleep 1
   done
-  echo "smoke-installed-resume: thread $thread_id did not reach an active state" >&2
+  ryeos_term_fail "thread $thread_id did not reach an active state"
   thread_json "$thread_id" >&2 || true
   return 1
 }
 
-echo "[smoke] initializing isolated app root"
-bounded ryeos init --source "$BUNDLE_SOURCE"
+ryeos_term_info "initializing isolated node"
+init_args=(init --source "$BUNDLE_SOURCE")
+if [[ -n "$TRUST_FILE" ]]; then
+  [[ -f "$TRUST_FILE" ]] || {
+    ryeos_term_fail "RYEOS_SMOKE_TRUST_FILE does not exist: $TRUST_FILE"
+    exit 2
+  }
+  init_args+=(--trust-file "$TRUST_FILE")
+fi
+bounded ryeos "${init_args[@]}"
 bounded ryeos start
 wait_ready
 
-echo "[smoke] launching deterministic resumable fixture"
+ryeos_term_begin VERIFY "launching resumable fixture"
 LAUNCH_JSON="$(bounded ryeos --project "$PROJECT_ROOT" execute --async graph:smoke/resume --json)"
 THREAD_ID="$(printf '%s' "$LAUNCH_JSON" | json_value thread_id:first)"
 if [[ -z "$THREAD_ID" ]]; then
-  echo "smoke-installed-resume: launch response contained no thread_id" >&2
+  ryeos_term_fail "launch response contained no thread ID"
   printf '%s\n' "$LAUNCH_JSON" >&2
   exit 1
 fi
@@ -145,33 +165,36 @@ fi
 BEFORE_JSON="$(wait_thread_active "$THREAD_ID")"
 CHAIN_ROOT="$(printf '%s' "$BEFORE_JSON" | json_value chain_root_id:first)"
 [[ -n "$CHAIN_ROOT" ]] || {
-  echo "smoke-installed-resume: thread detail contained no chain_root_id" >&2
+  ryeos_term_fail "thread detail contained no chain root ID"
   exit 1
 }
 
-echo "[smoke] restarting with active thread $THREAD_ID in chain $CHAIN_ROOT"
+ryeos_term_update "restarting active thread" "$THREAD_ID"
+ryeos_term_suspend
 bounded ryeos stop
 bounded ryeos start
 wait_ready
+ryeos_term_end success VERIFY "daemon restarted"
+ryeos_term_begin VERIFY "checking resumed thread"
 
 AFTER_JSON="$(wait_thread_active "$THREAD_ID")"
 AFTER_THREAD="$(printf '%s' "$AFTER_JSON" | json_value thread_id:first)"
 AFTER_CHAIN="$(printf '%s' "$AFTER_JSON" | json_value chain_root_id:first)"
 [[ "$AFTER_THREAD" == "$THREAD_ID" ]] || {
-  echo "smoke-installed-resume: durable thread identity changed after restart" >&2
+  ryeos_term_fail "durable thread identity changed after restart"
   exit 1
 }
 [[ "$AFTER_CHAIN" == "$CHAIN_ROOT" ]] || {
-  echo "smoke-installed-resume: durable chain identity changed after restart" >&2
+  ryeos_term_fail "durable chain identity changed after restart"
   exit 1
 }
 
 PROOF_JSON="$(bounded ryeos thread chain --thread-id "$THREAD_ID" --json)"
 if ! grep -Fq "$THREAD_ID" <<<"$PROOF_JSON" || ! grep -Fq "$CHAIN_ROOT" <<<"$PROOF_JSON"; then
-  echo "smoke-installed-resume: chain proof does not contain durable identities" >&2
+  ryeos_term_fail "chain proof does not contain durable identities"
   printf '%s\n' "$PROOF_JSON" >&2
   exit 1
 fi
 
-echo "[smoke] OK: thread $THREAD_ID resumed in durable chain $CHAIN_ROOT"
+ryeos_term_end success "VERIFY COMPLETE" "thread $THREAD_ID resumed in chain $CHAIN_ROOT"
 printf '%s\n' "$PROOF_JSON"

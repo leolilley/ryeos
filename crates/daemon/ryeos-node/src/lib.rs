@@ -4,6 +4,7 @@ mod control;
 pub mod init;
 pub mod init_check;
 pub mod lifecycle_marker;
+pub mod lifecycle_wire;
 pub mod metadata;
 pub mod start;
 pub mod status;
@@ -16,19 +17,40 @@ use std::time::Duration;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use init::{run_init, InitOptions, InitReport};
+pub use init::{
+    run_init, run_init_with_progress, InitOptions, InitPhase, InitProgress, InitReport,
+};
 pub use init_check::{require_initialized, InitDiagnostics, InitState};
+pub use lifecycle_wire::{
+    LifecycleIdentity, LifecycleResponse, LifecycleWireState, StartupPhase, StartupSnapshot,
+    LIFECYCLE_FRAME_MAX_BYTES, LIFECYCLE_PROTOCOL_VERSION,
+};
 pub use metadata::DaemonMetadata;
 pub use start::{LifecycleStartLock, StartReport};
-pub use status::{LifecycleStatus, StaleDiagnostics};
+pub use status::{is_ready, LifecycleStatus, StaleDiagnostics};
 pub use stop::{StopOptions, StopReport};
+
+/// Synchronous observer for local lifecycle transitions. Implementations must
+/// return quickly: startup and shutdown publish their latest authoritative
+/// status after each lifecycle probe on the command's own task.
+pub trait LifecycleProgressObserver {
+    fn observe(&mut self, status: &LifecycleStatus);
+}
+
+impl<F> LifecycleProgressObserver for F
+where
+    F: FnMut(&LifecycleStatus),
+{
+    fn observe(&mut self, status: &LifecycleStatus) {
+        self(status);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub app_root: PathBuf,
     pub bind: SocketAddr,
     pub uds_path: PathBuf,
-    pub sandbox_enabled: bool,
 }
 
 impl NodeConfig {
@@ -45,7 +67,6 @@ impl NodeConfig {
             app_root,
             bind,
             uds_path: runtime_root.join("ryeosd.sock"),
-            sandbox_enabled: false,
         })
     }
 
@@ -74,7 +95,6 @@ impl NodeConfig {
             app_root: config.app_root.clone(),
             bind: config.bind,
             uds_path: config.uds_path.clone(),
-            sandbox_enabled: config.sandbox_enabled,
         }
     }
 }
@@ -230,14 +250,32 @@ impl LifecycleController {
     }
 
     pub async fn start(&self) -> Result<StartReport> {
-        // First startup after an incompatible projection schema epoch bump may
-        // rebuild projection.sqlite3 from CAS/refs before the daemon opens its
-        // lifecycle socket. Keep this longer than ordinary process startup so
-        // a healthy one-time rebuild is not reported as a failed `ryeos start`.
+        // First startup after a recovery generation/schema epoch bump may build
+        // a new selected projection instance from CAS/refs. The lifecycle
+        // socket remains responsive and reports progress throughout.
         start::start(&self.env, Duration::from_secs(900)).await
+    }
+
+    /// Start the node while publishing every observed lifecycle state to a
+    /// caller-owned presentation surface.
+    pub async fn start_with_progress(
+        &self,
+        observer: &mut dyn LifecycleProgressObserver,
+    ) -> Result<StartReport> {
+        start::start_with_progress(&self.env, Duration::from_secs(900), Some(observer)).await
     }
 
     pub async fn stop(&self, opts: StopOptions) -> Result<StopReport> {
         stop::stop(&self.env, opts).await
+    }
+
+    /// Stop the node while publishing every observed lifecycle state to a
+    /// caller-owned presentation surface.
+    pub async fn stop_with_progress(
+        &self,
+        opts: StopOptions,
+        observer: &mut dyn LifecycleProgressObserver,
+    ) -> Result<StopReport> {
+        stop::stop_with_progress(&self.env, opts, Some(observer)).await
     }
 }

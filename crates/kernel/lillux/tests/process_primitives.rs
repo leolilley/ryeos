@@ -10,7 +10,11 @@
 
 #![cfg(unix)]
 
-use lillux::{is_alive, kill, run, spawn, spawn_detached, SubprocessRequest};
+use lillux::{
+    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_memfd, spawn,
+    spawn_detached, supervised_launcher_status_pipe, validate_subprocess_limits,
+    OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
+};
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
 /// empty (authoritative) environment.
@@ -22,6 +26,9 @@ fn sh(args: &[&str]) -> SubprocessRequest {
         envs: vec![],
         stdin_data: None,
         timeout: 30.0,
+        limits: None,
+        inherited_fds: Vec::new(),
+        supervised_status: None,
     }
 }
 
@@ -56,6 +63,68 @@ fn run_writes_stdin_to_child() {
     let r = run(request);
     assert!(r.success, "stderr: {}", r.stderr);
     assert_eq!(r.stdout, "piped-input");
+}
+
+#[test]
+fn run_installs_max_open_files_before_exec() {
+    let mut request = sh(&["-c", "ulimit -n"]);
+    request.limits = Some(SubprocessLimits {
+        max_open_files: Some(64),
+        ..SubprocessLimits::default()
+    });
+
+    let result = run(request);
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.stdout.trim(), "64");
+}
+
+#[test]
+fn configure_limits_applies_to_an_arbitrary_command() {
+    let limits = SubprocessLimits {
+        max_open_files: Some(64),
+        ..SubprocessLimits::default()
+    };
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args(["-c", "ulimit -n"]);
+
+    configure_subprocess_limits(&mut command, Some(&limits)).unwrap();
+    let output = command.output().unwrap();
+
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "64");
+}
+
+#[test]
+fn validation_is_side_effect_free_and_rejects_an_unbounded_limit() {
+    let limits = SubprocessLimits {
+        max_open_files: Some(u64::MAX),
+        ..SubprocessLimits::default()
+    };
+
+    let error = validate_subprocess_limits(Some(&limits)).unwrap_err();
+
+    assert!(error.contains("max_open_files"), "{error}");
+}
+
+#[test]
+fn spawn_rejects_an_unbounded_open_file_limit_before_fork() {
+    let mut request = sh(&["-c", "true"]);
+    request.limits = Some(SubprocessLimits {
+        max_open_files: Some(u64::MAX),
+        ..SubprocessLimits::default()
+    });
+
+    let Err(result) = spawn(request) else {
+        panic!("an invalid resource limit must prevent spawn");
+    };
+
+    assert_eq!(result.pid, 0);
+    assert!(
+        result.stderr.contains("max_open_files"),
+        "{}",
+        result.stderr
+    );
 }
 
 // ── env_clear: the secret-scoping contract ─────────────────────────────
@@ -104,6 +173,324 @@ fn run_times_out_and_terminates() {
         r.stderr.contains("timed out"),
         "stderr must explain the timeout; got: {}",
         r.stderr
+    );
+}
+
+#[test]
+fn normal_completion_cleans_up_background_group_members() {
+    let mut request = sh(&["-c", "sleep 30 & printf %s $!"]);
+    request.envs = path_env();
+
+    let result = run(request);
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    let background_pid: u32 = result.stdout.parse().expect("background pid");
+    for _ in 0..50 {
+        if !is_alive(background_pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(background_pid),
+        "background group member survived synchronous completion"
+    );
+}
+
+// ── bounded daemon-side output retention ──────────────────────────────
+
+#[test]
+fn stdout_limit_is_an_explicit_failed_outcome() {
+    let mut request = sh(&["-c", "printf 0123456789"]);
+    request.limits = Some(SubprocessLimits {
+        max_stdout_bytes: Some(5),
+        ..SubprocessLimits::default()
+    });
+
+    let result = run(request);
+
+    assert!(!result.success);
+    assert!(!result.timed_out);
+    assert_eq!(
+        result.output_limit_exceeded,
+        Some(OutputLimitExceeded::Stdout)
+    );
+    assert!(result.stdout_truncated);
+    assert!(!result.stderr_truncated);
+    assert_eq!(result.stdout, "01234");
+    assert!(result.stderr.contains("output retention limit"));
+}
+
+#[test]
+fn output_overflow_terminates_a_continuously_writing_group() {
+    let mut request = sh(&["-c", "while :; do printf 0123456789; done"]);
+    request.timeout = 10.0;
+    request.limits = Some(SubprocessLimits {
+        max_stdout_bytes: Some(1024),
+        ..SubprocessLimits::default()
+    });
+    let started = std::time::Instant::now();
+
+    let result = run(request);
+
+    assert_eq!(
+        result.output_limit_exceeded,
+        Some(OutputLimitExceeded::Stdout)
+    );
+    assert!(result.stdout_truncated);
+    assert_eq!(result.stdout.len(), 1024);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "output overflow must terminate before the ordinary timeout"
+    );
+}
+
+// ── immutable descriptor-backed protocol data ─────────────────────────
+
+#[test]
+#[cfg(target_os = "linux")]
+fn sealed_memfd_is_rewound_cloexec_and_immutable() {
+    use std::io::{Read as _, Seek as _, Write as _};
+    use std::os::fd::AsRawFd as _;
+
+    let file = sealed_memfd(c"lillux-test", b"sealed protocol bytes").expect("sealed memfd");
+    let fd = file.as_raw_fd();
+    assert!(fd > libc::STDERR_FILENO);
+
+    let descriptor_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert!(descriptor_flags >= 0);
+    assert_ne!(descriptor_flags & libc::FD_CLOEXEC, 0);
+
+    let required_seals =
+        libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+    let observed_seals = unsafe { libc::fcntl(fd, libc::F_GET_SEALS) };
+    assert_eq!(observed_seals & required_seals, required_seals);
+
+    let mut view = file.try_clone().expect("clone sealed memfd");
+    assert_eq!(view.stream_position().expect("position"), 0);
+    let mut bytes = Vec::new();
+    view.read_to_end(&mut bytes).expect("read sealed memfd");
+    assert_eq!(bytes, b"sealed protocol bytes");
+
+    let error = view.write_all(b"mutation").unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+}
+
+#[test]
+#[cfg(not(target_os = "linux"))]
+fn sealed_memfd_fails_closed_off_linux() {
+    let error = sealed_memfd(c"lillux-test", b"payload").unwrap_err();
+    assert!(error.contains("only on Linux"), "{error}");
+}
+
+// ── trusted-launcher target identity supervision ──────────────────────
+
+#[cfg(target_os = "linux")]
+fn supervised_launcher_protocol_shell(script: &str, timeout: f64) -> SubprocessRequest {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    // Like the real isolation launch, the mock target inherits the retained
+    // wrapper's Lillux-owned session/process group. The status PID identifies
+    // the target for accounting, while the wrapper keeps the shared PGID owned.
+    let wrapper_script = format!(
+        "/bin/sh -c 'exec /bin/sh -c \"$1\"' \
+         ryeos-target '{script}' & target=$!; \
+         printf '{{\"child-pid\":%s}}\\n' \"$target\" >&{status_fd}; wait \"$target\""
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.timeout = timeout;
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+    request
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn reported_target_group_is_exposed_and_killed_on_timeout() {
+    let running = spawn(supervised_launcher_protocol_shell("sleep 30", 0.25)).expect("spawn");
+    let target_pid = running.pid;
+
+    assert_ne!(running.pgid, target_pid as i64);
+    assert_eq!(
+        unsafe { libc::getpgid(target_pid as libc::pid_t) } as i64,
+        running.pgid
+    );
+    let result = running.wait();
+
+    assert!(result.timed_out, "stderr: {}", result.stderr);
+    assert_eq!(result.pid, target_pid);
+    for _ in 0..50 {
+        if !is_alive(target_pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(target_pid),
+        "reported target survived timeout cleanup"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn inherited_stdio_retains_supervised_target_identity_and_cleanup() {
+    let mut request = supervised_launcher_protocol_shell("sleep 30", 0.25);
+    request.limits = Some(SubprocessLimits {
+        max_open_files: Some(64),
+        max_stdout_bytes: None,
+        max_stderr_bytes: None,
+    });
+    let result = run_inherited_stdio(request);
+
+    assert!(result.timed_out, "stderr: {}", result.stderr);
+    assert_ne!(result.pid, 0);
+    for _ in 0..50 {
+        if !is_alive(result.pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(result.pid),
+        "inherited-stdio target survived supervised timeout cleanup"
+    );
+}
+
+#[test]
+fn inherited_stdio_refuses_captured_output_limits() {
+    let mut request = sh(&["-c", "exit 0"]);
+    request.limits = Some(SubprocessLimits {
+        max_stdout_bytes: Some(1),
+        ..SubprocessLimits::default()
+    });
+
+    let result = run_inherited_stdio(request);
+
+    assert!(!result.success);
+    assert!(result.stderr.contains("captured-output byte limits"));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn reported_target_exit_still_cleans_up_same_group_descendants() {
+    let running = spawn(supervised_launcher_protocol_shell(
+        "sleep 30 & printf %s $!",
+        2.0,
+    ))
+    .expect("spawn");
+    let target_pid = running.pid;
+    let retained_pgid = running.pgid;
+
+    let result = running.wait();
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.pid, target_pid);
+    let background_pid: u32 = result.stdout.parse().expect("background pid");
+    assert_ne!(retained_pgid, target_pid as i64);
+    for _ in 0..50 {
+        if !is_alive(background_pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(
+        !is_alive(background_pid),
+        "same-group descendant survived after the reported target exited"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn malformed_launcher_status_fails_closed_and_kills_wrapper() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!("printf 'not-json\\n' >&{status_fd}; sleep 30");
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("malformed trusted-launcher status must refuse the spawn");
+    };
+
+    assert!(
+        result.stderr.contains("invalid JSON status document"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn duplicate_launcher_status_keys_fail_closed() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script =
+        format!("printf '%s\\n' '{{\"child-pid\":123,\"child-pid\":124}}' >&{status_fd}; sleep 30");
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("duplicate trusted-launcher status keys must refuse the spawn");
+    };
+    assert!(
+        result.stderr.contains("duplicate JSON object key"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn nested_duplicate_launcher_status_keys_fail_closed() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!(
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"one\",\"code\":\"two\"}}}}' >&{status_fd}; sleep 30"
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.envs = path_env();
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("nested duplicate status keys must refuse the spawn");
+    };
+    assert!(
+        result.stderr.contains("duplicate JSON object key"),
+        "{}",
+        result.stderr
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn typed_launcher_refusal_is_retained_without_starting_a_target() {
+    let status = supervised_launcher_status_pipe().expect("status pipe");
+    let status_fd = status.writer_fd();
+    let wrapper_script = format!(
+        "printf '%s\\n' '{{\"refused\":{{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{{}}}}}}' >&{status_fd}"
+    );
+    let mut request = sh(&["-c", &wrapper_script]);
+    request.inherited_fds.push(status.writer);
+    request.supervised_status = Some(status.reader);
+
+    let Err(result) = spawn(request) else {
+        panic!("a launcher refusal must prevent target execution");
+    };
+
+    assert_eq!(
+        result.launcher_refusal.as_deref(),
+        Some("{\"code\":\"launch_refused\",\"message\":\"policy refused\",\"details\":{}}")
+    );
+    assert!(
+        result.stderr.contains("launcher refused"),
+        "{}",
+        result.stderr
     );
 }
 

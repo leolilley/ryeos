@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:0d6f7ea67c8f4c77017054e25e3cd7812a55f2a87496e140c867c25ea28b8bd1:9BKwtoks+YFQkXW8BWCf3UpvoHcBI7hOROgbgsrBsoB76ZCYfnBCs6JwsWProrKH2sOUumVrMZS60xKq1+ZDBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:38:07Z:e0d1800d74209ad73df002eada1523a4d0d6cf9568075c9fc2ff7de33f7baa34:DFQVrBf6GL4YDGLZmgUu2dQL++RzMpQYd8nqTciH7HCAsuPOPYydMv8eN5NsYepP4hcVSDAiBodvNMBsU/oUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [architecture, properties, emergent, design, reference]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   A catalogue of the architectural properties that emerge from Rye OS's
   foundation of content-addressed, signed, capability-gated execution.
@@ -106,7 +106,15 @@ environment-dependent behavior.
 
 → [Execution Isolation](engine/isolation.md)
 
-### 10. Signed Configuration as Compilation
+### 10. Node-Owned Executable Isolation
+
+Authorized tool and runtime processes can be wrapped by a selected signed
+backend under an immutable node-owned policy. Items cannot activate the boundary or broaden its
+filesystem, network, environment, or resource controls.
+
+→ [Execution Isolation](node/execution-isolation.md)
+
+### 11. Signed Configuration as Compilation
 
 Signing gives you what a compiler gives you (integrity, structural
 validation, cross-reference checks) plus provenance, trust gating, and
@@ -116,7 +124,7 @@ same verification as any third-party extension.
 
 → [Signing and Trust](signing.md), [Route System](node/routes.md)
 
-### 11. Capability System with Canonical Wire Format
+### 12. Capability System with Canonical Wire Format
 
 Four-slot wire format `ryeos.<verb>.<kind>.<subject>` validated at
 write, load, and check time. AND-of-ORs authorization policies.
@@ -124,7 +132,7 @@ Directional wildcards. No auto-prefixing — prevents inert auth.
 
 → [Permissions](permissions.md)
 
-### 12. Callback Capability Propagation
+### 13. Callback Capability Propagation
 
 `effective_caps` compose from the kind's permission model, propagate to
 callback tokens, and survive daemon restart via `ResumeContext`. Children
@@ -133,7 +141,7 @@ cannot escalate beyond their parent's caps.
 → [Execution Isolation](engine/isolation.md),
   [Callback Authentication](protocols/callback-auth.md)
 
-### 13. Sealed Envelope Vault
+### 14. Sealed Envelope Vault
 
 X25519 + XChaCha20-Poly1305 with a two-layer construction (AEAD data
 encryption + DEK-wrap to vault key). Per-remote key pinning. Vault key
@@ -141,7 +149,7 @@ rotation does not affect sealed secrets.
 
 → [Identity Model](identity-model.md)
 
-### 14. SQLite Schema Ownership
+### 15. SQLite Schema Ownership
 
 Every database is stamped with a `PRAGMA application_id`. On open,
 exhaustive verification checks tables, columns, types, primary keys, and

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum CallbackChannel {
     None,
-    HttpV1,
+    Http,
 }
 
 #[cfg(test)]
@@ -13,7 +13,7 @@ mod tests {
 
     #[test]
     fn round_trip_all_variants() {
-        for ch in [CallbackChannel::None, CallbackChannel::HttpV1] {
+        for ch in [CallbackChannel::None, CallbackChannel::Http] {
             let yaml = serde_yaml::to_string(&ch).unwrap();
             let parsed: CallbackChannel = serde_yaml::from_str(&yaml).unwrap();
             assert_eq!(parsed, ch);

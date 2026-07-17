@@ -43,6 +43,7 @@
 //! anything serializable). The envelope itself is opaque bytes-in,
 //! bytes-out.
 
+use std::io::Read;
 use std::path::Path;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -131,6 +132,9 @@ impl VaultPublicKey {
 
 const SECRET_TAG: &str = "x25519-secret:";
 const PUBLIC_TAG: &str = "x25519-public:";
+/// Key files are one short tagged base64 line. Keep a generous ceiling while
+/// preventing a replaced or corrupt path from becoming an unbounded read.
+pub const MAX_VAULT_KEY_FILE_BYTES: u64 = 64 * 1024;
 
 /// Encode a vault secret key to a single-line `x25519-secret:<b64>` string.
 /// `Zeroizing` so the encoded secret is wiped when the buffer drops.
@@ -194,10 +198,10 @@ pub fn decode_public_key(s: &str) -> Result<VaultPublicKey> {
 
 /// Read a secret key from a file written by [`write_secret_key`].
 pub fn read_secret_key(path: &Path) -> Result<VaultSecretKey> {
-    let raw = zeroize::Zeroizing::new(
-        std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?,
-    );
-    decode_secret_key(&raw).with_context(|| format!("parse {}", path.display()))
+    let raw = zeroize::Zeroizing::new(read_bounded_key_file(path)?);
+    let raw = std::str::from_utf8(&raw)
+        .with_context(|| format!("vault key {} is not UTF-8", path.display()))?;
+    decode_secret_key(raw).with_context(|| format!("parse {}", path.display()))
 }
 
 /// Atomically write a vault secret key. File mode 0600 on Unix.
@@ -217,8 +221,39 @@ pub fn write_public_key(path: &Path, pk: &VaultPublicKey) -> Result<()> {
 
 /// Read a public key from a file.
 pub fn read_public_key(path: &Path) -> Result<VaultPublicKey> {
-    let raw = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-    decode_public_key(&raw).with_context(|| format!("parse {}", path.display()))
+    let raw = read_bounded_key_file(path)?;
+    let raw = std::str::from_utf8(&raw)
+        .with_context(|| format!("vault key {} is not UTF-8", path.display()))?;
+    decode_public_key(raw).with_context(|| format!("parse {}", path.display()))
+}
+
+fn read_bounded_key_file(path: &Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("stat {}", path.display()))?
+        .len();
+    if file_len > MAX_VAULT_KEY_FILE_BYTES {
+        bail!(
+            "vault key {} is {file_len} bytes; maximum is {MAX_VAULT_KEY_FILE_BYTES}",
+            path.display()
+        );
+    }
+    let mut bytes = Vec::with_capacity(
+        usize::try_from(file_len)
+            .unwrap_or(0)
+            .min(MAX_VAULT_KEY_FILE_BYTES as usize),
+    );
+    file.take(MAX_VAULT_KEY_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() as u64 > MAX_VAULT_KEY_FILE_BYTES {
+        bail!(
+            "vault key {} exceeds the {MAX_VAULT_KEY_FILE_BYTES}-byte maximum",
+            path.display()
+        );
+    }
+    Ok(bytes)
 }
 
 // ── Sealed envelope ─────────────────────────────────────────────────
@@ -503,6 +538,18 @@ mod tests {
         write_secret_key(&path, &sk).unwrap();
         let loaded = read_secret_key(&path).unwrap();
         assert_eq!(sk.to_bytes(), loaded.to_bytes());
+    }
+
+    #[test]
+    fn key_readers_reject_oversized_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("oversized.pem");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_VAULT_KEY_FILE_BYTES + 1)
+            .unwrap();
+        assert!(read_secret_key(&path).is_err());
+        assert!(read_public_key(&path).is_err());
     }
 
     #[test]

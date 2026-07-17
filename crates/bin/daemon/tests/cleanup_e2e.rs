@@ -121,7 +121,7 @@ async fn cli_initialized_but_stopped_suggests_start() {
 async fn offline_only_service_errors_when_daemon_up() {
     let (h, _fixture) = DaemonHarness::start_fast().await.expect("start daemon");
     let (status, body) = h
-        .post_execute("service:rebuild", ".", serde_json::json!({}))
+        .post_execute("service:projection/rebuild", ".", serde_json::json!({}))
         .await
         .expect("post /execute");
     assert!(
@@ -526,9 +526,13 @@ async fn symlinked_node_config_rejected_at_startup() {
         Ok(_) => panic!("daemon should reject symlinked node config items in bundles dir"),
         Err(e) => {
             let err_msg = format!("{:#}", e);
+            let rejected_symlink = err_msg.contains("symlink")
+                || err_msg.contains("not a regular file")
+                || err_msg.contains("Too many levels of symbolic links")
+                || err_msg.contains("os error 40");
             assert!(
-                err_msg.contains("symlink") || err_msg.contains("not a regular file"),
-                "error should mention symlink rejection, got: {err_msg}"
+                rejected_symlink,
+                "error should report the fail-closed symlink rejection, got: {err_msg}"
             );
         }
     }

@@ -126,7 +126,14 @@ pub(crate) fn seed_service_route(core: &mut RyeOsCore) {
         crate::ui::seat::KEY_INPUT_ROUTE,
         serde_json::json!({
             "invoke": { "type": "service", "ref": "service:threads/input" },
-            "params": { "directive": "directive:demo/base" }
+            "params": {
+                "target": {
+                    "kind": "fresh",
+                    "item_ref": "directive:demo/base",
+                    "project_path": "/tmp/project",
+                    "ref_bindings": { "model": "directive:demo/base" }
+                }
+            }
         }),
     );
 }

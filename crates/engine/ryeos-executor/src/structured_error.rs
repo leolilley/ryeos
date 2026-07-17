@@ -23,6 +23,9 @@ pub struct StructuredErrorPayload {
     pub code: String,
     /// Human-readable error message. Always present.
     pub error: String,
+    /// Whether retrying the same request may succeed without an authored or
+    /// configuration change.
+    pub retryable: bool,
     /// Required-secret-missing fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
@@ -35,6 +38,11 @@ pub struct StructuredErrorPayload {
     /// Cap-denial field (existing `MissingCap` surface).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub required_cap: Option<String>,
+    /// Generic launch-preparation fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
     /// Contract-violation details: per-field errors and warnings.
     /// Matches the `items.effective` `contract_violation` envelope shape.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,11 +64,14 @@ impl StructuredErrorPayload {
         Self {
             code: code.into(),
             error: error.into(),
+            retryable: false,
             env_var: None,
             source_kind: None,
             source_name: None,
             remediation: None,
             required_cap: None,
+            classification: None,
+            binding: None,
             details: None,
             item_ref: None,
             installed_bundles: None,
@@ -137,7 +148,7 @@ impl StructuredErrorPayload {
 impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
     fn from(e: &crate::dispatch_error::DispatchError) -> Self {
         use crate::dispatch_error::DispatchError;
-        match e {
+        let mut payload = match e {
             DispatchError::RequiredSecretMissing {
                 env_var,
                 source_kind,
@@ -166,8 +177,30 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
             DispatchError::ComposedValueContractViolation { details, .. } => {
                 Self::contract_violation(e.to_string(), details.clone())
             }
+            DispatchError::LaunchPreparationFailed {
+                code,
+                classification,
+                binding,
+                details,
+                ..
+            } => Self {
+                classification: Some(classification.clone()),
+                binding: binding.clone(),
+                details: (!details.is_empty()).then(|| {
+                    serde_json::to_value(details)
+                        .expect("launch diagnostic scalar map always serializes")
+                }),
+                ..Self::generic(code, e.to_string())
+            },
+            DispatchError::LaunchPolicyForbidden { code, binding, .. }
+            | DispatchError::LaunchResourceNotFound { code, binding, .. } => Self {
+                binding: binding.clone(),
+                ..Self::generic(code, e.to_string())
+            },
             _ => Self::generic(e.code(), e.to_string()),
-        }
+        };
+        payload.retryable = e.retryable();
+        payload
     }
 }
 
@@ -199,7 +232,7 @@ mod tests {
             warnings: vec![],
         };
         let p = StructuredErrorPayload::contract_violation(
-            "contract violation: `directive:x` (1 error, 0 warnings)",
+            "contract violation: `work:x` (1 error, 0 warnings)",
             details,
         );
         let v = p.to_value();
@@ -228,7 +261,7 @@ mod tests {
             }],
         };
         let de = crate::dispatch_error::DispatchError::ComposedValueContractViolation {
-            canonical_ref: "directive:foo/bar".to_string(),
+            canonical_ref: "work:foo/bar".to_string(),
             error_count: 1,
             warning_count: 1,
             details,

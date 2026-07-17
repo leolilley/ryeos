@@ -425,6 +425,7 @@ mod tests {
             parsers,
             kinds,
             trust_store: trust,
+            node_trust_store: trust,
             project_root: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,

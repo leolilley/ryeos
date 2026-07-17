@@ -2482,6 +2482,10 @@ mod kind_contract_regressions {
                 ("offline_execute", ft_string()),
                 ("required_caps", ft_sequence_of(ft_string())),
                 ("description", ft_string()),
+                (
+                    "state_access",
+                    ft_string_enum(&["read_write", "read_only_existing"]),
+                ),
                 ("schema", ft_mapping()),
             ],
         )
@@ -2628,7 +2632,7 @@ mod kind_contract_regressions {
             "serves": "ryeos/core/python",
             "binary_ref": "bin/x",
             "abi_version": "v1",
-            "schema": { "envelope": "launch_envelope_v1", "result": "runtime_result_v1" }
+            "schema": { "envelope": "launch_envelope", "result": "runtime_result" }
         });
         let report = validate(&runtime_shape(), &value);
         assert!(report.is_ok(), "runtime with schema should pass: {report}");
@@ -2802,7 +2806,7 @@ pub struct ResolvedSourceFormat {
 
 /// The resolution space where an item was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum ItemSpace {
     Project,
     Bundle,
@@ -2905,6 +2909,10 @@ pub struct ResolvedItem {
     /// Lower-priority candidates that were shadowed by the winner
     pub shadowed: Vec<ShadowedCandidate>,
     pub materialized_project_root: Option<PathBuf>,
+    /// SHA-256 of the signature-stripped bytes that runtimes parse. Unlike
+    /// `content_hash`, this excludes the signature envelope and therefore
+    /// matches `LaunchEnvelope.resolution.root.raw_content_digest`.
+    pub raw_content_digest: String,
     pub content_hash: String,
     pub signature_header: Option<SignatureHeader>,
     pub source_format: ResolvedSourceFormat,
@@ -3065,13 +3073,9 @@ pub struct ExecutionArtifact {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FinalCost {
-    #[serde(default)]
-    pub turns: i64,
-    #[serde(default)]
-    pub input_tokens: i64,
-    #[serde(default)]
-    pub output_tokens: i64,
-    #[serde(default)]
+    pub turns: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
     pub spend: f64,
     #[serde(default)]
     pub provider: Option<String>,
@@ -3083,6 +3087,37 @@ pub struct FinalCost {
     pub basis: Option<String>,
     #[serde(default)]
     pub metadata: Option<Value>,
+}
+
+#[cfg(test)]
+mod final_cost_tests {
+    use super::FinalCost;
+    use serde_json::json;
+
+    #[test]
+    fn final_cost_wire_rejects_negative_and_oversized_counters() {
+        let valid = json!({
+            "turns": 1,
+            "input_tokens": 2,
+            "output_tokens": 3,
+            "spend": 0.01,
+        });
+        assert!(serde_json::from_value::<FinalCost>(valid.clone()).is_ok());
+
+        for (field, value) in [
+            ("turns", json!(-1)),
+            ("input_tokens", json!(-1)),
+            ("output_tokens", json!(-1)),
+            ("turns", json!(u64::from(u32::MAX) + 1)),
+        ] {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            assert!(
+                serde_json::from_value::<FinalCost>(invalid).is_err(),
+                "invalid `{field}` must be rejected at the contract boundary"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

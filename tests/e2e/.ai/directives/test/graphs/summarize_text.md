@@ -39,12 +39,12 @@ Takes text content and writes a concise summary to a file.
     Here is the text to summarize:
 
     ```
-    {input:text}
+    ${inputs.text}
     ```
 
     Write a concise 2-3 sentence summary of this text. Count the words in the original text.
 
-    Write the summary to `{input:output_path}`.
+    Write the summary to `${inputs.output_path}`.
   </step>
 
   <step name="return_result">

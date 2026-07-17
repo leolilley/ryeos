@@ -8,6 +8,7 @@ license.workspace = true
 anyhow = { workspace = true }
 lillux = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

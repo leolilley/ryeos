@@ -16,8 +16,8 @@
 //!   * `ComposerRegistry::from_kinds` walks loaded kind schemas and
 //!     binds each kind name to its declared handler PLUS the
 //!     handler-validated config blob. The `compose()` call spawns
-//!     the handler binary as a subprocess (env-cleared via
-//!     `lillux::exec::lib_run`) and decodes the wire response into a
+//!     the handler binary through the immutable node isolation and decodes the
+//!     wire response into a
 //!     `KindComposedView`.
 //!
 //! The engine code never names a kind in Rust string literals — the
@@ -28,17 +28,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ryeos_handler_protocol::{
-    ComposeInput, ComposeItemContext, ComposeRequest, ComposeSuccess, HandlerRequest,
-    HandlerResponse, ResolutionStepNameWire, TrustClassWire,
+    ComposeInput, ComposeItemContext, ComposeRequest, ComposeSuccess, ComposerFieldRequirement,
+    ComposerFieldSemantics, HandlerRequest, HandlerResponse, ResolutionStepNameWire,
+    TrustClassWire,
 };
 use serde_json::Value;
 
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
 use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
-use crate::kind_registry::KindRegistry;
+use crate::kind_registry::{KindRegistry, KindSchema};
 use crate::resolution::{
-    KindComposedView, ResolutionError, ResolutionStepName, ResolvedAncestor, TrustClass,
+    KindComposedView, ResolutionError, ResolutionFailureClass, ResolutionStepDecl,
+    ResolutionStepName, ResolvedAncestor, TrustClass,
 };
 
 const COMPOSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -56,6 +58,7 @@ const COMPOSE_TIMEOUT: Duration = Duration::from_secs(30);
 struct BoundComposer {
     handler: Arc<VerifiedHandler>,
     config: Value,
+    field_requirements: Vec<ComposerFieldRequirement>,
 }
 
 /// Registry of kind composers, one per kind name.
@@ -72,6 +75,7 @@ struct BoundComposer {
 #[derive(Debug, Clone)]
 pub struct ComposerRegistry {
     composers: HashMap<String, BoundComposer>,
+    launch_runtime: Arc<crate::handlers::subprocess::HandlerLaunchRuntime>,
 }
 
 impl ComposerRegistry {
@@ -80,6 +84,7 @@ impl ComposerRegistry {
     pub fn new() -> Self {
         Self {
             composers: HashMap::new(),
+            launch_runtime: Arc::new(crate::handlers::subprocess::HandlerLaunchRuntime::disabled()),
         }
     }
 
@@ -119,6 +124,7 @@ impl ComposerRegistry {
                         BoundComposer {
                             handler: Arc::new(handler.clone()),
                             config: schema.composer_config.clone(),
+                            field_requirements: field_requirements_for_schema(schema),
                         },
                     );
                 }
@@ -160,15 +166,26 @@ impl ComposerRegistry {
             });
         }
 
-        Ok(Self { composers })
+        Ok(Self {
+            composers,
+            launch_runtime: Arc::clone(handlers.launch_runtime()),
+        })
     }
 
-    /// Test/escape-hatch registration. Production code goes through
-    /// `from_kinds`; this exists so test setups can install or
-    /// override a composer for a synthetic kind.
-    pub fn register(&mut self, kind: &str, handler: Arc<VerifiedHandler>, config: Value) {
-        self.composers
-            .insert(kind.to_string(), BoundComposer { handler, config });
+    /// Test-only registration for synthetic cross-registry fixtures.
+    /// Production has no registration escape hatch: every bound composer and
+    /// exact-value requirement comes from the verified kind registry and every
+    /// production registry retains the immutable node isolation snapshot.
+    #[cfg(test)]
+    pub(crate) fn register(&mut self, kind: &str, handler: Arc<VerifiedHandler>, config: Value) {
+        self.composers.insert(
+            kind.to_string(),
+            BoundComposer {
+                handler,
+                config,
+                field_requirements: Vec::new(),
+            },
+        );
     }
 
     /// True iff a composer is bound for `kind`.
@@ -192,7 +209,7 @@ impl ComposerRegistry {
     }
 
     /// Run the composer for `kind`. Spawns the handler subprocess
-    /// (env-cleared via `lillux::exec::lib_run`), serializes
+    /// through the immutable node isolation, serializes
     /// `(root, ancestors)` as a slim `ComposeRequest`, and decodes
     /// the response into a `KindComposedView`.
     ///
@@ -212,6 +229,7 @@ impl ComposerRegistry {
             .get(kind)
             .ok_or_else(|| ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
                     "no composer bound for kind `{kind}` — production paths must \
                      bind every kind via ComposerRegistry::from_kinds"
@@ -221,6 +239,7 @@ impl ComposerRegistry {
         if ancestors.len() != ancestor_parsed.len() {
             return Err(ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
                     "ancestors ({}) / ancestor_parsed ({}) length mismatch — \
                      caller must keep them parallel",
@@ -240,17 +259,33 @@ impl ComposerRegistry {
                 .collect(),
         });
 
-        let resp = run_handler_subprocess(&bound.handler, &request, COMPOSE_TIMEOUT)
-            .map_err(engine_to_resolution_error)?;
+        let resp = run_handler_subprocess(
+            &bound.handler,
+            &request,
+            COMPOSE_TIMEOUT,
+            &self.launch_runtime,
+        )
+        .map_err(engine_to_resolution_error)?;
 
         match resp {
-            HandlerResponse::ComposeOk(success) => Ok(success_to_view(success)),
+            HandlerResponse::ComposeOk(success) => {
+                validate_composed_field_requirements(
+                    kind,
+                    &bound.field_requirements,
+                    root_parsed,
+                    ancestor_parsed,
+                    &success.composed,
+                )?;
+                Ok(success_to_view(success))
+            }
             HandlerResponse::ComposeErr { step, reason } => Err(ResolutionError::StepFailed {
                 step: wire_step_to_engine(step),
+                class: ResolutionFailureClass::InvalidDefinition,
                 reason,
             }),
             other => Err(ResolutionError::StepFailed {
                 step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
                 reason: format!(
                     "composer handler `{}` returned unexpected response: {other:?}",
                     bound.handler.canonical_ref()
@@ -258,6 +293,71 @@ impl ComposerRegistry {
             }),
         }
     }
+}
+
+/// Derive exact-value composer requirements from one verified kind schema.
+///
+/// The contract is entirely schema-shaped: no kind name, item ref, composer
+/// handler, or handler-private strategy appears here.
+pub(crate) fn field_requirements_for_schema(schema: &KindSchema) -> Vec<ComposerFieldRequirement> {
+    let Some(declaration) = schema
+        .execution
+        .as_ref()
+        .and_then(|execution| execution.history_policy.as_ref())
+    else {
+        return Vec::new();
+    };
+    let semantics = if schema
+        .resolution
+        .iter()
+        .any(|step| matches!(step, ResolutionStepDecl::ResolveExtendsChain { .. }))
+    {
+        ComposerFieldSemantics::InheritOrReplace
+    } else {
+        ComposerFieldSemantics::RootVerbatim
+    };
+    vec![ComposerFieldRequirement {
+        field: declaration.composed_path.clone(),
+        semantics,
+    }]
+}
+
+/// Defense in depth after every compose: verify the handler actually emitted
+/// the exact value it acknowledged at boot. This catches handler regressions
+/// independently of config validation and keeps destructive policy fields from
+/// being partially merged or reinterpreted at runtime.
+fn validate_composed_field_requirements(
+    kind: &str,
+    requirements: &[ComposerFieldRequirement],
+    root: &Value,
+    ancestors: &[Value],
+    composed: &Value,
+) -> Result<(), ResolutionError> {
+    for requirement in requirements {
+        let expected = match requirement.semantics {
+            ComposerFieldSemantics::RootVerbatim => root.get(&requirement.field),
+            ComposerFieldSemantics::InheritOrReplace => {
+                root.get(&requirement.field).or_else(|| {
+                    ancestors
+                        .iter()
+                        .rev()
+                        .find_map(|ancestor| ancestor.get(&requirement.field))
+                })
+            }
+        };
+        let actual = composed.get(&requirement.field);
+        if actual != expected {
+            return Err(ResolutionError::StepFailed {
+                step: ResolutionStepName::PipelineInit,
+                class: ResolutionFailureClass::InternalInvariant,
+                reason: format!(
+                    "composer for kind `{kind}` violated {:?} semantics for exact-value field `{}`",
+                    requirement.semantics, requirement.field
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 impl Default for ComposerRegistry {
@@ -303,8 +403,15 @@ fn success_to_view(s: ComposeSuccess) -> KindComposedView {
 }
 
 fn engine_to_resolution_error(e: EngineError) -> ResolutionError {
+    let class = match &e {
+        EngineError::HandlerBinaryMissing { .. } | EngineError::HandlerSpawnFailed { .. } => {
+            ResolutionFailureClass::DependencyUnavailable
+        }
+        _ => ResolutionFailureClass::InternalInvariant,
+    };
     ResolutionError::StepFailed {
         step: ResolutionStepName::PipelineInit,
+        class,
         reason: format!("composer handler subprocess failed: {e}"),
     }
 }
@@ -460,10 +567,12 @@ composer: {composer}
             requested_id: "directive:test".into(),
             resolved_ref: "directive:test".into(),
             source_path: root.join("directive/test.directive.md"),
+            source_space: crate::contracts::ItemSpace::Bundle,
             trust_class: TrustClass::TrustedBundle,
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: String::new(),
+            source_content_digest: String::new(),
             raw_content_digest: String::new(),
         };
         let view = reg.compose("directive", &anc, &parsed, &[], &[]).unwrap();
@@ -489,5 +598,44 @@ composer: {composer}
             msg.contains("handler:totally/made/up") && msg.contains("alpha"),
             "expected unknown-handler error naming both kind and handler, got: {msg}"
         );
+    }
+
+    #[test]
+    fn exact_value_guard_rejects_partial_merge_and_preserves_null() {
+        let requirements = vec![ComposerFieldRequirement {
+            field: "policy".into(),
+            semantics: ComposerFieldSemantics::InheritOrReplace,
+        }];
+        let root = json!({"other": true});
+        let ancestors = vec![
+            json!({"policy": {"base": true}}),
+            json!({"policy": {"nearest": true}}),
+        ];
+        validate_composed_field_requirements(
+            "synthetic",
+            &requirements,
+            &root,
+            &ancestors,
+            &json!({"policy": {"nearest": true}}),
+        )
+        .unwrap();
+        assert!(validate_composed_field_requirements(
+            "synthetic",
+            &requirements,
+            &root,
+            &ancestors,
+            &json!({"policy": {"base": true, "nearest": true}}),
+        )
+        .is_err());
+
+        let root_null = json!({"policy": null});
+        validate_composed_field_requirements(
+            "synthetic",
+            &requirements,
+            &root_null,
+            &ancestors,
+            &json!({"policy": null}),
+        )
+        .unwrap();
     }
 }

@@ -2,7 +2,10 @@
 
 > _In Linux, everything is a file. In RyeOS, everything is data._
 
-RyeOS is portable verified execution.
+RyeOS is portable verified execution. That portability describes signed
+execution data moving between compatible nodes; the current production
+distribution is Linux x86-64. See the
+[platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md).
 
 (_RYE Your Execution_.)
 
@@ -19,8 +22,9 @@ another node carries its trust with it instead of borrowing the machine's.
 That is the whole idea. Everything in this repository is that one property
 at a different layer:
 
-- **Signed items and bundles** — behavior you can install and trust,
-  because what runs is exactly what was signed.
+- **Signed items and bundles** — behavior you can install and trust because
+  resolution verifies its signature and content identity. Enforced isolationing
+  additionally pins verified entry bytes through execution.
 - **Threads** — every execution has an identity and a durable event log.
   The log _is_ the run: tail it live, replay it, resume it, cancel it.
 - **Keys** — the only actors. An operator, a node, an agent: each is a
@@ -145,6 +149,14 @@ authority lives in the target node's authorized-key store.
 
 ## Install
 
+The supported production target is Linux 6.9 or newer on x86-64 with glibc.
+The kernel floor supplies the pidfd process-group and authenticated Unix-peer
+primitives used for durable cancellation and lifecycle control. Official
+container images are currently `linux/amd64`, and packaged bundle executables target
+`x86_64-unknown-linux-gnu`. Other targets are tracked in the
+[platform support matrix](bundles/standard/.ai/knowledge/ryeos/core/platform-support.md) and must not silently bypass
+the isolation or durability contracts.
+
 ### Arch Linux / AUR
 
 AUR packages (`ryeos`, `ryeos-mcp`) are coming soon. Once published:
@@ -158,11 +170,13 @@ ryeos node status
 
 `ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
 into the system space, creates operator and node keys, initializes trust and
-vault material, and writes node configuration. The package installs Bubblewrap,
-which RyeOS requires for fail-closed subprocess sandboxing on Linux. `ryeos
-start` launches `ryeosd`. See the
-[execution sandbox contract](docs/security/execution-sandbox.md) before
-tightening the node-owned policy.
+vault material, and writes node configuration. The isolation policy defaults
+to `mode: disabled` with no backend selected. Isolation backends are ordinary,
+separately installed bundles; RyeOS distributions do not include one by
+default. `ryeos start`
+launches `ryeosd`. See the
+[execution isolation contract](bundles/standard/.ai/knowledge/ryeos/core/node/execution-isolation.md) before
+enabling or tightening the node-owned policy.
 
 The user lifecycle surface is intentionally small:
 
@@ -185,46 +199,61 @@ docker pull ghcr.io/leolilley/ryeos-standard:latest
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
 entrypoint runs `ryeos init` on every boot (idempotent) before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
-so keys, trust, and runtime state survive redeploys. Bubblewrap needs namespace
-operations that Docker's default profile blocks. Run the image with the
-documented capability and seccomp settings, and keep `/data` on a named volume:
+so keys, trust, and runtime state survive redeploys. Release containers rely
+only on the official publisher key compiled into `ryeos`; the entrypoint does
+not infer trust from files baked into the image. The initialized isolation policy
+defaults to disabled with no backend selected, so the normal container profile
+needs no extra namespace capabilities. Release images do not include an
+isolation backend. Keep `/data` on a named volume:
 
 ```bash
 docker volume create ryeos-data
 docker run -d --name ryeos \
-  --cap-add SYS_ADMIN \
-  --security-opt seccomp=unconfined \
   -p 8000:8000 \
   -v ryeos-data:/data \
   ghcr.io/leolilley/ryeos-standard:latest
 docker exec ryeos ryeos node status
 ```
 
-The release gate exercises init, daemon readiness, an actual sandboxed signed
-tool, and restart recovery with this deployment profile. Back up the
-`ryeos-data` volume before upgrades; it contains node identity, trust, vault,
-and durable execution state.
+A locally built image signed by a development or custom publisher requires an
+explicit trust acknowledgement at startup:
+
+```bash
+docker run -e RYEOS_TRUST_BAKED_PUBLISHERS=1 ryeosd-full:dev
+```
+
+That switch pins the image's `PUBLISHER_TRUST.toml` files before preflight. Do
+not use it for release images. See the
+[official publisher trust contract](bundles/standard/.ai/knowledge/ryeos/core/node/operator-init.md#official-publisher-trust)
+for the complete operator contract.
+
+The release gate exercises default-disabled startup and signed execution
+without extra capabilities or an isolation backend. Back up the `ryeos-data`
+volume before upgrades; it contains node identity, trust, vault, and durable
+execution state.
 
 ### From source
 
-Source installs require Bubblewrap (`bwrap`) for fail-closed subprocess
-sandboxing. Install it before running the installer, for example `sudo pacman
--S bubblewrap` on Arch, `sudo apt install bubblewrap` on Debian/Ubuntu, or
-`sudo dnf install bubblewrap` on Fedora. The installer checks this prerequisite
-before building or changing the installed node.
+Source installs do not stage an isolation implementation. Backend bundles are
+authored and installed separately when an operator chooses to use one.
 
 ```bash
 git clone https://github.com/leolilley/ryeos.git
 cd ryeos
 cargo build
-./scripts/pkg/install-local-direct.sh
+./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
 `scripts/pkg/install-local-direct.sh` installs the current built artifacts into
 the local packaged layout and initializes the user system space. It does not
-refresh bundle artifacts by default. Use
-`scripts/pkg/install-local-direct.sh --populate` only when bundle-owned binaries,
-CAS manifests, or signed bundle outputs actually need to be regenerated.
+refresh bundle artifacts by default. Checkout bundles are normally signed by
+the development publisher, so the example makes that trust decision explicit.
+Without `--trust-source-publishers`, the installer accepts only the official
+publisher compiled into `ryeos` and rejects any source-supplied publisher
+document whose decoded key is non-official before changing the installed node. Use
+`scripts/pkg/install-local-direct.sh --populate --trust-source-publishers` only
+when bundle-owned binaries, CAS manifests, or signed bundle outputs actually
+need to be regenerated.
 
 ## Five-minute first run
 
@@ -370,8 +399,8 @@ Use the repository scripts rather than hand-editing derived bundle state.
 ```bash
 ./scripts/gate.sh                         # run workspace tests without refreshing bundles
 ./scripts/gate.sh --refresh-bundles       # explicit expensive bundle refresh, then tests
-./scripts/pkg/install-local-direct.sh      # install current built artifacts into packaged layout
-./scripts/pkg/install-local-direct.sh --populate  # expensive: refresh bundles first
+./scripts/pkg/install-local-direct.sh --trust-source-publishers  # install dev-signed artifacts
+./scripts/pkg/install-local-direct.sh --populate --trust-source-publishers  # refresh, then install
 ```
 
 Common loops:
@@ -382,8 +411,8 @@ Common loops:
 | Rust affecting bundled binaries            | Targeted `cargo build --release -p <owner>`, then explicit bundle refresh only if needed.             |
 | Bundle YAML, schemas, tools, or runtimes   | Targeted signing/publish flow; use `./scripts/gate.sh --refresh-bundles` only for release validation. |
 | Browser UI assets                          | `./scripts/dev-ui-assets.sh --background --open`; no bundle refresh.                                  |
-| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh` after building touched user-facing binaries.                  |
-| Packaged layout repair                     | `./scripts/pkg/install-local-direct.sh --populate` only when artifacts must be regenerated.           |
+| Daemon/CLI behavior with installed bundles | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` after building touched binaries.    |
+| Packaged layout repair                     | Add `--populate --trust-source-publishers` only when artifacts must be regenerated.                   |
 
 Hard rules for contributors and agents:
 

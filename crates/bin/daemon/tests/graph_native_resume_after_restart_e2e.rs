@@ -1,17 +1,13 @@
-//! End-to-end resume invariants for the **graph runtime** under V5.5
-//! D6 / D10.
+//! End-to-end checkpoint storage invariants for the graph runtime.
 //!
 //! Mirrors `native_resume_after_restart_e2e.rs` (which pins the
 //! generic native-resume wire format) but specifically for the graph
-//! runtime's checkpoint+replay precedence:
+//! runtime's fail-closed checkpoint policy:
 //!
-//!   1. `RYEOS_RESUME=1` + local `CheckpointWriter` payload → checkpoint
-//!      wins (D10 step 1; carries cursor + state both).
-//!   2. `RYEOS_RESUME=1` + no local checkpoint → replay-events fallback
-//!      (D10 step 2; cursor only, state empty per v1 limitation).
-//!   3. `RYEOS_RESUME=1` + neither source → fail loud (D10 step 3; the
-//!      graph runtime binary `bail!`s rather than silent cold-start).
-//!   4. `RYEOS_RESUME` unset → cold start.
+//!   1. `RYEOS_RESUME=1` + an identity-bearing local checkpoint resumes.
+//!   2. `RYEOS_RESUME=1` + no local checkpoint fails without replay or cold
+//!      start fallback.
+//!   3. `RYEOS_RESUME` unset starts cold.
 //!
 //! The full daemon-restart-then-respawn loop is exercised at the OS
 //! level by `native_resume_after_restart_e2e.rs`. This file pins the
@@ -20,7 +16,7 @@
 //! - `CheckpointWriter::load_latest` round-trips a graph checkpoint
 //!   payload (the shape `walker.rs::write_checkpoint` writes — note
 //!   `current_node` is the NEXT cursor, R4 fix).
-//! - The four resume-precedence variants stay distinct.
+//! - An empty checkpoint directory stays distinguishable from a valid cursor.
 
 use std::path::PathBuf;
 
@@ -42,7 +38,7 @@ fn unique_checkpoint_dir() -> PathBuf {
 /// through `CheckpointWriter::load_latest` and back into a parsable
 /// `ResumeState`-shaped value.
 ///
-/// V5.5 R4: `current_node` MUST be the NEXT cursor (the node to resume
+/// `current_node` MUST be the NEXT cursor (the node to resume
 /// *into*), not the just-completed node. The walker writes the
 /// checkpoint AFTER `graph_step_completed` is appended.
 ///
@@ -59,10 +55,17 @@ fn graph_checkpoint_roundtrips_next_cursor_through_writer() {
     // step count for that node, plus the graph state at the time
     // `graph_step_completed` was appended for the just-completed node.
     let payload = serde_json::json!({
+        "schema_version": 1,
+        "definition_ref": "graph:test/e2e",
+        "definition_hash": "sha256:e2e-definition",
+        "expression_language": "rye-expr/1",
         "graph_run_id": "gr-e2e-1",
         "current_node": "step3",
         "step_count": 2,
         "state": {"counter": 7, "name": "alice"},
+        "accounting": {"total": null, "nodes": [], "hooks": []},
+        "suppressed_errors": [],
+        "retry_attempt": 0,
         "written_at": "2026-04-28T12:00:00Z",
     });
     writer.write(&payload).expect("write checkpoint");
@@ -83,17 +86,17 @@ fn graph_checkpoint_roundtrips_next_cursor_through_writer() {
 
 /// Pin that `load_latest` returns `None` when the checkpoint
 /// directory is empty. The graph runtime binary's main.rs flow uses
-/// this as the trigger to fall back to replay-events resume (D10
-/// step 2).
+/// this to reject an explicitly requested resume; it never reconstructs a
+/// weaker cursor from events or silently starts cold.
 #[test]
-fn empty_checkpoint_dir_returns_none_so_replay_fallback_triggers() {
+fn empty_checkpoint_dir_remains_absent_for_strict_resume_failure() {
     let dir = tempfile::TempDir::new().unwrap();
     let reader = CheckpointWriter::new(dir.path().to_path_buf());
     let loaded = reader.load_latest().expect("load_latest does not error");
     assert!(
         loaded.is_none(),
-        "empty checkpoint dir must return None so main.rs trips the \
-         replay-events fallback path (V5.5 D10 step 2)"
+        "empty checkpoint dir must remain absent so main.rs rejects the \
+         explicitly requested resume"
     );
 }
 

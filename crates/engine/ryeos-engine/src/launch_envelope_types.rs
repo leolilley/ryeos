@@ -3,13 +3,14 @@
 //!
 //! Moved from `crates/engine/ryeos-runtime/src/envelope.rs` so the protocol vocabulary
 //! module (in this crate) can reference them without creating a dependency
-//! cycle. `ryeos-runtime` re-exports these types for compatibility.
+//! cycle. `ryeos-runtime` re-exports these engine-owned protocol types for
+//! runtime consumers.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use crate::resolution::ResolutionOutput;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 // `ItemDescriptor` is defined in the engine (where it's produced by
@@ -59,15 +60,10 @@ pub struct LaunchEnvelope {
     /// `ToolSchema`).
     #[serde(default)]
     pub inventory: HashMap<String, Vec<ItemDescriptor>>,
-    /// Daemon-resolved, frozen provider snapshot. The daemon resolves
-    /// the provider config once at preflight, validates it, and embeds
-    /// the result here. Runtimes deserialize into their own typed
-    /// `ResolvedProviderSnapshot` — the engine cannot depend on
-    /// `ryeos-runtime` so this is an opaque JSON value here.
-    ///
-    /// Absent for non-directive runtimes that don't need provider config.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider_snapshot: Option<Value>,
+    /// Runtime-owned, launch-prepared data. Keys and value shapes are declared
+    /// by the serving runtime's signed launch contract; the engine treats both
+    /// as opaque and only enforces the declared key set.
+    pub runtime_data: BTreeMap<String, Value>,
 }
 
 /// Builder for [`LaunchEnvelope`].
@@ -88,6 +84,7 @@ pub struct LaunchEnvelope {
 ///     EnvelopeCallback::new(socket, token),
 ///     resolution,
 /// )
+/// .runtime_data(runtime_data)
 /// .inventory(inv)
 /// .build();
 /// ```
@@ -101,7 +98,7 @@ pub struct LaunchEnvelopeBuilder {
     callback: EnvelopeCallback,
     resolution: ResolutionOutput,
     inventory: HashMap<String, Vec<ItemDescriptor>>,
-    provider_snapshot: Option<Value>,
+    runtime_data: BTreeMap<String, Value>,
 }
 
 impl LaunchEnvelopeBuilder {
@@ -124,19 +121,19 @@ impl LaunchEnvelopeBuilder {
             callback,
             resolution,
             inventory: HashMap::new(),
-            provider_snapshot: None,
+            runtime_data: BTreeMap::new(),
         }
+    }
+
+    /// Set runtime-owned data prepared for the serving runtime.
+    pub fn runtime_data(mut self, runtime_data: BTreeMap<String, Value>) -> Self {
+        self.runtime_data = runtime_data;
+        self
     }
 
     /// Set the pre-baked inventory map.
     pub fn inventory(mut self, inventory: HashMap<String, Vec<ItemDescriptor>>) -> Self {
         self.inventory = inventory;
-        self
-    }
-
-    /// Set the daemon-resolved provider snapshot for directive runtimes.
-    pub fn provider_snapshot(mut self, snapshot: Value) -> Self {
-        self.provider_snapshot = Some(snapshot);
         self
     }
 
@@ -151,7 +148,7 @@ impl LaunchEnvelopeBuilder {
             callback: self.callback,
             resolution: self.resolution,
             inventory: self.inventory,
-            provider_snapshot: self.provider_snapshot,
+            runtime_data: self.runtime_data,
         }
     }
 }
@@ -192,10 +189,10 @@ impl EnvelopeCallback {
 pub struct EnvelopeRoots {
     pub project_root: PathBuf,
     pub bundle_roots: Vec<PathBuf>,
-    /// Operator trusted-keys dir (`<app_root>/.ai/config/keys/trusted`).
+    /// Node trusted-keys dir (`<app_root>/.ai/config/keys/trusted`).
     /// The runtime's `VerifiedLoader` takes its trust context from here
     /// and the project root — never from bundle roots, never from env.
-    pub operator_trusted_keys_dir: PathBuf,
+    pub node_trusted_keys_dir: PathBuf,
     /// Deliberate runtime state-root override (`/execute` `state_root`).
     /// Item resolution stays anchored at `project_root`; runtime-state
     /// writes (thread state, transcripts, thread knowledge) should target
@@ -281,12 +278,61 @@ pub struct EnvelopeCallback {
     pub token: String,
 }
 
+/// Closed terminal status domain for a runtime process result.
+///
+/// Kind-specific outcomes belong in [`RuntimeResult::result`]. For example, a
+/// graph may report `completed_with_errors` or `max_steps_exceeded` in its
+/// typed graph result, while the runtime envelope settles as `completed` or
+/// `failed`. Keeping this field terminal-only lets the executor map it to the
+/// thread lifecycle without aliases or an unknown-status fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum RuntimeResultStatus {
+    Completed,
+    Failed,
+    Cancelled,
+    Continued,
+    Killed,
+    TimedOut,
+}
+
+impl RuntimeResultStatus {
+    /// Canonical spelling at text-only persistence and process boundaries.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Continued => "continued",
+            Self::Killed => "killed",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
+    /// Whether this status represents a successfully completed runtime.
+    pub const fn is_success(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+}
+
+impl From<crate::contracts::ThreadTerminalStatus> for RuntimeResultStatus {
+    fn from(status: crate::contracts::ThreadTerminalStatus) -> Self {
+        match status {
+            crate::contracts::ThreadTerminalStatus::Completed => Self::Completed,
+            crate::contracts::ThreadTerminalStatus::Failed => Self::Failed,
+            crate::contracts::ThreadTerminalStatus::Cancelled => Self::Cancelled,
+            crate::contracts::ThreadTerminalStatus::Continued => Self::Continued,
+            crate::contracts::ThreadTerminalStatus::Killed => Self::Killed,
+        }
+    }
+}
+
 /// Intentionally open payload — the runtime's final output is kind-defined.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeResult {
     pub success: bool,
-    pub status: String,
+    pub status: RuntimeResultStatus,
     pub thread_id: String,
     /// Terminal payload from the runtime. `Value` (not `String`) so
     /// runtimes that produce structured terminal output (graph
@@ -299,7 +345,6 @@ pub struct RuntimeResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
     /// Intentionally open — same as result.
-    #[serde(default)]
     pub outputs: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost: Option<RuntimeCost>,
@@ -309,8 +354,49 @@ pub struct RuntimeResult {
     /// no longer terminate the runtime, but they MUST appear here so
     /// the daemon and operator can see what was dropped. Empty when
     /// no warnings.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecodedRuntimeResult {
+    success: bool,
+    status: RuntimeResultStatus,
+    thread_id: String,
+    result: Option<Value>,
+    outputs: Value,
+    cost: Option<RuntimeCost>,
+    warnings: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for RuntimeResult {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let decoded = DecodedRuntimeResult::deserialize(deserializer)?;
+        let expected_success = decoded.status.is_success();
+        if decoded.success != expected_success {
+            return Err(serde::de::Error::custom(format!(
+                "runtime result `success`={} contradicts `status` `{}`; expected `success`={expected_success}",
+                decoded.success,
+                decoded.status.as_str(),
+            )));
+        }
+        if let Some(cost) = decoded.cost.as_ref() {
+            cost.validate().map_err(serde::de::Error::custom)?;
+        }
+
+        Ok(Self {
+            success: decoded.success,
+            status: decoded.status,
+            thread_id: decoded.thread_id,
+            result: decoded.result,
+            outputs: decoded.outputs,
+            cost: decoded.cost,
+            warnings: decoded.warnings,
+        })
+    }
 }
 
 /// `RuntimeCost::basis` value for an aggregate of child threads' costs.
@@ -319,20 +405,98 @@ pub struct RuntimeResult {
 /// double-counts. Absent basis = cost this thread itself incurred.
 pub const COST_BASIS_ROLLUP: &str = "rollup";
 
+/// A runtime cost failed the shared accounting contract.
+///
+/// Cost is security- and billing-sensitive data: callers must never wrap token
+/// counters, admit negative/non-finite spend, or silently reinterpret an
+/// unknown aggregation basis.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RuntimeCostError {
+    #[error("runtime cost total_usd must be finite")]
+    NonFiniteTotalUsd,
+    #[error("runtime cost total_usd must be non-negative")]
+    NegativeTotalUsd,
+    #[error("runtime cost input token count overflow")]
+    InputTokensOverflow,
+    #[error("runtime cost output token count overflow")]
+    OutputTokensOverflow,
+    #[error("runtime cost input_tokens exceeds the settlement storage maximum")]
+    InputTokensOutOfRange,
+    #[error("runtime cost output_tokens exceeds the settlement storage maximum")]
+    OutputTokensOutOfRange,
+    #[error("runtime cost basis `{0}` is invalid; expected `rollup` or null")]
+    InvalidBasis(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeCost {
-    #[serde(default)]
     pub input_tokens: u64,
-    #[serde(default)]
     pub output_tokens: u64,
-    #[serde(default)]
     pub total_usd: f64,
     /// How this figure relates to the thread: `None` = incurred by the
     /// thread's own provider calls; [`COST_BASIS_ROLLUP`] = aggregated
     /// from children it dispatched.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basis: Option<String>,
+}
+
+impl RuntimeCost {
+    /// Validate one independently reported cost before it can enter accounting
+    /// or SQLite-backed settlement. Token counters use `u64` in memory, but the
+    /// durable projection is signed-integer SQLite; the accepted wire domain is
+    /// therefore capped at `i64::MAX` at this earliest shared boundary.
+    pub fn validate(&self) -> Result<(), RuntimeCostError> {
+        if !self.total_usd.is_finite() {
+            return Err(RuntimeCostError::NonFiniteTotalUsd);
+        }
+        if self.total_usd < 0.0 {
+            return Err(RuntimeCostError::NegativeTotalUsd);
+        }
+        if self.input_tokens > i64::MAX as u64 {
+            return Err(RuntimeCostError::InputTokensOutOfRange);
+        }
+        if self.output_tokens > i64::MAX as u64 {
+            return Err(RuntimeCostError::OutputTokensOutOfRange);
+        }
+        match self.basis.as_deref() {
+            None | Some(COST_BASIS_ROLLUP) => {}
+            Some(basis) => return Err(RuntimeCostError::InvalidBasis(basis.to_string())),
+        }
+        Ok(())
+    }
+
+    /// Add `cost` transactionally. On failure, `self` is unchanged.
+    pub fn checked_accumulate(&mut self, cost: &Self) -> Result<(), RuntimeCostError> {
+        self.validate()?;
+        cost.validate()?;
+        let input_tokens = self
+            .input_tokens
+            .checked_add(cost.input_tokens)
+            .ok_or(RuntimeCostError::InputTokensOverflow)?;
+        let output_tokens = self
+            .output_tokens
+            .checked_add(cost.output_tokens)
+            .ok_or(RuntimeCostError::OutputTokensOverflow)?;
+        if input_tokens > i64::MAX as u64 {
+            return Err(RuntimeCostError::InputTokensOutOfRange);
+        }
+        if output_tokens > i64::MAX as u64 {
+            return Err(RuntimeCostError::OutputTokensOutOfRange);
+        }
+        let total_usd = self.total_usd + cost.total_usd;
+        if !total_usd.is_finite() {
+            return Err(RuntimeCostError::NonFiniteTotalUsd);
+        }
+        if total_usd < 0.0 {
+            return Err(RuntimeCostError::NegativeTotalUsd);
+        }
+
+        self.input_tokens = input_tokens;
+        self.output_tokens = output_tokens;
+        self.total_usd = total_usd;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -347,7 +511,7 @@ mod tests {
             roots: EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
-                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
                 state_root: None,
             },
             request: EnvelopeRequest {
@@ -367,16 +531,20 @@ mod tests {
                 token: "cbt-test".to_string(),
             },
             inventory: HashMap::new(),
-            provider_snapshot: None,
+            runtime_data: BTreeMap::new(),
             resolution: ResolutionOutput {
                 root: crate::resolution::ResolvedAncestor {
                     requested_id: "directive:my/agent".to_string(),
                     resolved_ref: "directive:my/agent".to_string(),
                     source_path: PathBuf::from("/project/.ai/directives/my/agent.directive.md"),
+                    source_space: crate::contracts::ItemSpace::Project,
                     trust_class: crate::resolution::TrustClass::Unsigned,
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
                     raw_content: String::new(),
+                    source_content_digest:
+                        "0000000000000000000000000000000000000000000000000000000000000000"
+                            .to_string(),
                     raw_content_digest:
                         "0000000000000000000000000000000000000000000000000000000000000000"
                             .to_string(),
@@ -405,7 +573,7 @@ mod tests {
     fn runtime_result_round_trip() {
         let result = RuntimeResult {
             success: true,
-            status: "completed".to_string(),
+            status: RuntimeResultStatus::Completed,
             thread_id: "T-test".to_string(),
             result: Some(serde_json::json!("Done")),
             outputs: serde_json::json!({"answer": "42"}),
@@ -418,9 +586,151 @@ mod tests {
             warnings: Vec::new(),
         };
         let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"warnings\":[]"));
         let parsed: RuntimeResult = serde_json::from_str(&json).unwrap();
         assert!(parsed.success);
+        assert_eq!(parsed.status, RuntimeResultStatus::Completed);
         assert_eq!(parsed.cost.unwrap().input_tokens, 100);
+    }
+
+    #[test]
+    fn runtime_result_rejects_unknown_status() {
+        let json = serde_json::json!({
+            "success": false,
+            "status": "errored",
+            "thread_id": "T-test",
+            "outputs": null,
+            "warnings": [],
+        });
+
+        let error = serde_json::from_value::<RuntimeResult>(json).unwrap_err();
+        assert!(error.to_string().contains("unknown variant `errored`"));
+    }
+
+    #[test]
+    fn runtime_result_requires_outputs_and_warnings() {
+        let complete = serde_json::json!({
+            "success": true,
+            "status": "completed",
+            "thread_id": "T-test",
+            "outputs": null,
+            "warnings": [],
+        });
+        let mut missing_outputs = complete.clone();
+        missing_outputs
+            .as_object_mut()
+            .expect("runtime result object")
+            .remove("outputs");
+        let mut missing_warnings = complete;
+        missing_warnings
+            .as_object_mut()
+            .expect("runtime result object")
+            .remove("warnings");
+
+        assert!(serde_json::from_value::<RuntimeResult>(missing_outputs).is_err());
+        assert!(serde_json::from_value::<RuntimeResult>(missing_warnings).is_err());
+    }
+
+    #[test]
+    fn runtime_result_rejects_success_status_contradictions() {
+        for (success, status) in [
+            (false, RuntimeResultStatus::Completed),
+            (true, RuntimeResultStatus::Failed),
+            (true, RuntimeResultStatus::Cancelled),
+            (true, RuntimeResultStatus::Continued),
+            (true, RuntimeResultStatus::Killed),
+            (true, RuntimeResultStatus::TimedOut),
+        ] {
+            let json = serde_json::json!({
+                "success": success,
+                "status": status,
+                "thread_id": "T-test",
+                "outputs": null,
+                "warnings": [],
+            });
+
+            let error = serde_json::from_value::<RuntimeResult>(json).unwrap_err();
+            assert!(error.to_string().contains("contradicts `status`"));
+        }
+    }
+
+    #[test]
+    fn runtime_result_rejects_invalid_cost_before_finalization() {
+        for cost in [
+            serde_json::json!({
+                "input_tokens": 1,
+                "total_usd": 0.01,
+            }),
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": -0.01,
+            }),
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": 0.01,
+                "basis": "estimated",
+            }),
+            serde_json::json!({
+                "input_tokens": i64::MAX as u64 + 1,
+                "output_tokens": 2,
+                "total_usd": 0.01,
+            }),
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": i64::MAX as u64 + 1,
+                "total_usd": 0.01,
+            }),
+        ] {
+            let value = serde_json::json!({
+                "success": true,
+                "status": "completed",
+                "thread_id": "T-test",
+                "outputs": null,
+                "warnings": [],
+                "cost": cost,
+            });
+
+            assert!(serde_json::from_value::<RuntimeResult>(value).is_err());
+        }
+
+        let non_finite = r#"
+success: true
+status: completed
+thread_id: T-test
+outputs: null
+warnings: []
+cost:
+  input_tokens: 1
+  output_tokens: 2
+  total_usd: .nan
+"#;
+        let error = serde_yaml::from_str::<RuntimeResult>(non_finite).unwrap_err();
+        assert!(error.to_string().contains("must be finite"));
+    }
+
+    #[test]
+    fn checked_cost_accumulation_is_transactional() {
+        let mut total = RuntimeCost {
+            input_tokens: i64::MAX as u64,
+            output_tokens: 7,
+            total_usd: 1.5,
+            basis: Some(COST_BASIS_ROLLUP.to_string()),
+        };
+        let error = total
+            .checked_accumulate(&RuntimeCost {
+                input_tokens: 1,
+                output_tokens: 3,
+                total_usd: 0.5,
+                basis: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error, RuntimeCostError::InputTokensOutOfRange);
+        assert_eq!(total.input_tokens, i64::MAX as u64);
+        assert_eq!(total.output_tokens, 7);
+        assert_eq!(total.total_usd, 1.5);
     }
 
     #[test]
@@ -436,7 +746,7 @@ mod tests {
         let mut roots = EnvelopeRoots {
             project_root: PathBuf::from("/project"),
             bundle_roots: vec![],
-            operator_trusted_keys_dir: PathBuf::from("/keys"),
+            node_trusted_keys_dir: PathBuf::from("/keys"),
             state_root: None,
         };
         assert_eq!(roots.state_root(), Path::new("/project"));
@@ -451,7 +761,7 @@ mod tests {
         let roots: EnvelopeRoots = serde_json::from_value(serde_json::json!({
             "project_root": "/project",
             "bundle_roots": [],
-            "operator_trusted_keys_dir": "/keys",
+            "node_trusted_keys_dir": "/keys",
         }))
         .unwrap();
         assert!(roots.state_root.is_none());
@@ -465,10 +775,13 @@ mod tests {
                 requested_id: "directive:test".to_string(),
                 resolved_ref: "directive:test".to_string(),
                 source_path: PathBuf::from("/project/.ai/directives/test.directive.md"),
+                source_space: crate::contracts::ItemSpace::Project,
                 trust_class: crate::resolution::TrustClass::Unsigned,
                 alias_resolution: None,
                 added_by: crate::resolution::ResolutionStepName::PipelineInit,
                 raw_content: String::new(),
+                source_content_digest:
+                    "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
                 raw_content_digest:
                     "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
             },
@@ -486,7 +799,7 @@ mod tests {
             EnvelopeRoots {
                 project_root: PathBuf::from("/project"),
                 bundle_roots: vec![],
-                operator_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
+                node_trusted_keys_dir: PathBuf::from("/app-root/.ai/config/keys/trusted"),
                 state_root: None,
             },
             EnvelopeRequest::simple(serde_json::json!({"key": "value"})),

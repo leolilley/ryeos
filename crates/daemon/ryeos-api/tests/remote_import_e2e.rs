@@ -28,14 +28,17 @@ fn store_subject(state: &AppState) -> String {
 fn store_subject_with_root(state: &AppState, chain_root_id: &str) -> String {
     let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
     cas.store_object(&json!({
-        "kind": "chain_state",
+        "kind": "bundle_event",
         "schema": 1,
-        "chain_root_id": chain_root_id,
-        "prev_chain_state_hash": null,
-        "last_event_hash": null,
-        "last_chain_seq": 0,
-        "updated_at": "2026-05-30T00:00:00Z",
-        "threads": {}
+        "bundle_id": "remote-import",
+        "event_kind": "test_subject",
+        "event_type": "subject_created",
+        "schema_version": 1,
+        "chain_id": chain_root_id,
+        "chain_seq": 1,
+        "prev_chain_event_hash": null,
+        "created_at": "2026-05-30T00:00:00Z",
+        "payload": {}
     }))
     .unwrap()
 }
@@ -49,9 +52,11 @@ fn store_item_subject_with_blob_content(state: &AppState, content: &[u8]) -> Str
     let blob_hash = cas.store_blob(content).unwrap();
     cas.store_object(&json!({
         "kind": "item_source",
-        "item_ref": "directive:test/remote-import",
+        "item_ref": ".ai/directives/test/remote-import.md",
         "content_blob_hash": blob_hash,
-        "integrity": "none"
+        "integrity": "none",
+        "signature_info": null,
+        "mode": null
     }))
     .unwrap()
 }

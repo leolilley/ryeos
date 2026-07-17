@@ -14,16 +14,84 @@
 //! first, then `rename()`s into place. A crash during write therefore
 //! never leaves a partial `latest.json`.
 //!
-//! This primitive intentionally has no schema knowledge — `write`
-//! takes any `serde_json::Value`. Tools are responsible for their own
-//! payload shape and migration; the daemon never reads the file.
+//! Checkpoint payloads are schema-agnostic JSON, but they share the runtime
+//! expression language's depth/node/byte shape ceiling. That common boundary
+//! applies before persistence, after daemon-owned follow-result splicing, and
+//! while loading so every checkpoint path accepts the same bounded domain.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::{EvaluationContext, EvaluationLimits, EvaluationSession, ExpressionError};
+
 const LATEST_FILE: &str = "latest.json";
+
+/// Maximum serialized size of one checkpoint file. Checkpoints are written as
+/// compact JSON, so this is the same four-MiB ceiling enforced by the runtime
+/// JSON shape contract rather than a second, whitespace-dependent allowance.
+pub const MAX_CHECKPOINT_FILE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Runtime JSON limits with enough inspection fuel to visit every accepted
+/// node and byte once. Shape validation is not expression evaluation, so a
+/// checkpoint near the result ceiling must not fail merely because the normal
+/// expression-evaluation fuel budget is smaller.
+pub fn checkpoint_shape_limits() -> EvaluationLimits {
+    let defaults = EvaluationLimits::default();
+    let fuel = defaults
+        .max_result_bytes
+        .saturating_add(defaults.max_result_nodes)
+        .saturating_add(1);
+    EvaluationLimits { fuel, ..defaults }
+}
+
+/// Validate a borrowed checkpoint or checkpoint-bound envelope without
+/// cloning it. Graph persistence, graph resume, and daemon follow aggregation
+/// all call this contract so their accepted JSON domain cannot diverge.
+pub fn validate_checkpoint_shape(
+    value: &Value,
+    field: &str,
+) -> std::result::Result<(), ExpressionError> {
+    let context = EvaluationContext::new();
+    let limits = checkpoint_shape_limits();
+    EvaluationSession::with_context(&context, &limits).validate_value(value, field)
+}
+
+fn read_checkpoint_json(path: &Path) -> Result<Value> {
+    let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let declared_len = file
+        .metadata()
+        .with_context(|| format!("inspect {}", path.display()))?
+        .len();
+    if declared_len > MAX_CHECKPOINT_FILE_BYTES as u64 {
+        bail!(
+            "checkpoint {} is {declared_len} bytes; maximum is {MAX_CHECKPOINT_FILE_BYTES}",
+            path.display()
+        );
+    }
+
+    // The metadata check avoids an unnecessary read for an already-large file;
+    // `take(MAX + 1)` is the authoritative cap if the file grows after that
+    // check. Never reserve from attacker-controlled metadata above the limit.
+    let capacity = usize::try_from(declared_len)
+        .unwrap_or(MAX_CHECKPOINT_FILE_BYTES)
+        .min(MAX_CHECKPOINT_FILE_BYTES);
+    let mut bytes = Vec::with_capacity(capacity);
+    file.take(MAX_CHECKPOINT_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("read {}", path.display()))?;
+    if bytes.len() > MAX_CHECKPOINT_FILE_BYTES {
+        bail!(
+            "checkpoint {} exceeds the {MAX_CHECKPOINT_FILE_BYTES}-byte maximum",
+            path.display()
+        );
+    }
+
+    serde_json::from_slice(&bytes).with_context(|| format!("parse checkpoint {}", path.display()))
+}
 
 /// The top-level checkpoint field the follow machinery splices a followed child's
 /// terminal envelope into, and that a resuming graph walker reads to consume it.
@@ -32,6 +100,16 @@ const LATEST_FILE: &str = "latest.json";
 /// reads) depend on — so the wire key has ONE definition, not a literal duplicated
 /// across crates that cannot see each other.
 pub const FOLLOW_RESULT_KEY: &str = "follow_result";
+
+/// Closed status domain for one child in a daemon-built follow-fanout resume
+/// payload. The executor writes this shared wire type and the graph runtime
+/// deserializes the same type; neither side compares status strings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FanoutItemStatus {
+    Completed,
+    Failed,
+}
 
 #[derive(Debug, Clone)]
 pub struct CheckpointWriter {
@@ -90,19 +168,20 @@ impl CheckpointWriter {
         from_dir: &Path,
         to_dir: &Path,
         key: &str,
-        value: &Value,
+        value: Value,
     ) -> Result<bool> {
         let src = from_dir.join(LATEST_FILE);
         if !src.exists() {
             return Ok(false);
         }
-        let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
-        let mut payload: Value = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse checkpoint {}", src.display()))?;
+        let mut payload = read_checkpoint_json(&src)?;
         let obj = payload
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("checkpoint {} is not a JSON object", src.display()))?;
-        obj.insert(key.to_string(), value.clone());
+        obj.insert(key.to_string(), value);
+        validate_checkpoint_shape(&payload, "spliced checkpoint payload").map_err(|error| {
+            anyhow::anyhow!("spliced checkpoint payload exceeded runtime JSON bounds: {error}")
+        })?;
         // Atomic write into the successor's dir via the same tmp+rename path.
         Self::new(to_dir.to_path_buf()).write(&payload)?;
         Ok(true)
@@ -114,6 +193,9 @@ impl CheckpointWriter {
 
     /// Atomically replace `latest.json` with the serialized `state`.
     pub fn write(&self, state: &Value) -> Result<()> {
+        validate_checkpoint_shape(state, "checkpoint payload").map_err(|error| {
+            anyhow::anyhow!("checkpoint payload exceeded runtime JSON bounds: {error}")
+        })?;
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("create checkpoint dir {}", self.dir.display()))?;
         let final_path = self.dir.join(LATEST_FILE);
@@ -128,7 +210,13 @@ impl CheckpointWriter {
             std::process::id(),
             nanos
         ));
-        let bytes = serde_json::to_vec_pretty(state).context("serialize checkpoint payload")?;
+        let bytes = serde_json::to_vec(state).context("serialize checkpoint payload")?;
+        if bytes.len() > MAX_CHECKPOINT_FILE_BYTES {
+            bail!(
+                "serialized checkpoint is {} bytes; maximum is {MAX_CHECKPOINT_FILE_BYTES}",
+                bytes.len()
+            );
+        }
         std::fs::write(&tmp_path, &bytes)
             .with_context(|| format!("write {}", tmp_path.display()))?;
         std::fs::rename(&tmp_path, &final_path).with_context(|| {
@@ -149,9 +237,10 @@ impl CheckpointWriter {
         if !path.exists() {
             return Ok(None);
         }
-        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
-        let value: Value = serde_json::from_slice(&bytes)
-            .with_context(|| format!("parse checkpoint {}", path.display()))?;
+        let value = read_checkpoint_json(&path)?;
+        validate_checkpoint_shape(&value, "checkpoint payload").map_err(|error| {
+            anyhow::anyhow!("checkpoint payload exceeded runtime JSON bounds: {error}")
+        })?;
         Ok(Some(value))
     }
 }
@@ -199,7 +288,7 @@ mod tests {
             from.path(),
             to.path(),
             FOLLOW_RESULT_KEY,
-            &json!({"ignored": true})
+            json!({"ignored": true})
         )
         .unwrap());
 
@@ -213,7 +302,7 @@ mod tests {
             from.path(),
             to.path(),
             FOLLOW_RESULT_KEY,
-            &child_env
+            child_env.clone()
         )
         .unwrap());
 
@@ -246,9 +335,43 @@ mod tests {
             from.path(),
             to.path(),
             FOLLOW_RESULT_KEY,
-            &json!({})
+            json!({})
         )
         .is_err());
+    }
+
+    #[test]
+    fn load_latest_rejects_oversized_file_before_parsing() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join(LATEST_FILE);
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_CHECKPOINT_FILE_BYTES as u64 + 1).unwrap();
+
+        let error = CheckpointWriter::new(tmp.path()).load_latest().unwrap_err();
+        assert!(error.to_string().contains("maximum"));
+        assert!(error
+            .to_string()
+            .contains(&MAX_CHECKPOINT_FILE_BYTES.to_string()));
+    }
+
+    #[test]
+    fn splice_rejects_combined_payload_over_shape_limit() {
+        let from = TempDir::new().unwrap();
+        let to = TempDir::new().unwrap();
+        CheckpointWriter::new(from.path())
+            .write(&json!({"parts": vec![Value::Null; 99_990]}))
+            .unwrap();
+
+        let error = CheckpointWriter::copy_latest_with_splice(
+            from.path(),
+            to.path(),
+            FOLLOW_RESULT_KEY,
+            Value::Array(vec![Value::Null; 16]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("JSON node limit"));
+        assert!(!to.path().join(LATEST_FILE).exists());
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::binary_resolver::resolve_bundle_binary_ref;
 use crate::error::EngineError;
@@ -28,6 +29,9 @@ pub enum VerifiedHandler {
         bundle_root: PathBuf,
         descriptor_path: PathBuf,
         resolved_binary_path: PathBuf,
+        /// Raw SHA-256 of the exact executable bytes authorized by the
+        /// bundle's signed executor manifest.
+        resolved_binary_hash: String,
     },
     /// Binary not found on this node. Registered but not invocable.
     /// This is expected for user-tier handler descriptors pushed from
@@ -85,6 +89,9 @@ pub struct HandlerRegistry {
     /// SHA-256 of (sorted canonical refs ++ binary content hashes ++
     /// abi_versions); contributes to engine composite fingerprint.
     fingerprint: String,
+    /// Immutable node isolation snapshot and read-only bundle launch roots used
+    /// by every handler invocation issued through this registry.
+    launch_runtime: Arc<super::subprocess::HandlerLaunchRuntime>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -140,6 +147,7 @@ impl HandlerRegistry {
     pub fn load_base(
         roots: &[(PathBuf, TrustClass)],
         trust_store: &TrustStore,
+        isolation: Arc<crate::isolation::IsolationRuntime>,
     ) -> Result<Self, HandlerError> {
         let mut entries: HashMap<String, VerifiedHandler> = HashMap::new();
         let mut fingerprint_parts: Vec<String> = Vec::new();
@@ -165,10 +173,20 @@ impl HandlerRegistry {
                     });
                 }
 
+                let binary_identity = match &verified {
+                    VerifiedHandler::Resolved {
+                        resolved_binary_hash,
+                        ..
+                    } => format!("sha256:{resolved_binary_hash}"),
+                    VerifiedHandler::Unresolved { descriptor, .. } => {
+                        format!("unresolved:{}", descriptor.binary_ref)
+                    }
+                };
                 fingerprint_parts.push(format!(
-                    "{}|{}",
+                    "{}|{}|{}",
                     verified.canonical_ref(),
-                    verified.descriptor().abi_version
+                    verified.descriptor().abi_version,
+                    binary_identity,
                 ));
                 entries.insert(verified.canonical_ref().to_owned(), verified);
             }
@@ -180,7 +198,26 @@ impl HandlerRegistry {
         Ok(Self {
             entries,
             fingerprint,
+            launch_runtime: Arc::new(super::subprocess::HandlerLaunchRuntime::new(
+                isolation,
+                roots.iter().map(|(root, _)| root.clone()).collect(),
+            )),
         })
+    }
+
+    /// Load handlers for maintainer-only bundle authoring outside a running
+    /// node. The boundary is explicit: there is no node policy to inherit, so
+    /// the compiled disabled runtime still supplies output limits but does not
+    /// claim OS confinement.
+    pub fn load_base_for_authoring(
+        roots: &[(PathBuf, TrustClass)],
+        trust_store: &TrustStore,
+    ) -> Result<Self, HandlerError> {
+        Self::load_base(
+            roots,
+            trust_store,
+            Arc::new(crate::isolation::IsolationRuntime::default()),
+        )
     }
 
     /// Build an empty registry (for testing).
@@ -188,7 +225,12 @@ impl HandlerRegistry {
         Self {
             entries: HashMap::new(),
             fingerprint: "empty".to_owned(),
+            launch_runtime: Arc::new(super::subprocess::HandlerLaunchRuntime::disabled()),
         }
+    }
+
+    pub(crate) fn launch_runtime(&self) -> &Arc<super::subprocess::HandlerLaunchRuntime> {
+        &self.launch_runtime
     }
 
     /// Look up a handler by canonical ref.
@@ -343,6 +385,7 @@ fn load_and_verify_handler(
             bundle_root: bundle_root.to_owned(),
             descriptor_path: yaml_path.to_owned(),
             resolved_binary_path: res.absolute_path,
+            resolved_binary_hash: res.content_hash,
         }),
         Err(e)
             if trust_class == TrustClass::TrustedProject && is_unresolved_handler_absence(&e) =>
@@ -477,6 +520,7 @@ mod tests {
             resolved_binary_path: PathBuf::from(
                 "/tmp/bundle/.ai/bin/x86_64-unknown-linux-gnu/my_handler",
             ),
+            resolved_binary_hash: "00".repeat(32),
         };
 
         assert_eq!(handler.canonical_ref(), "handler:test/my_handler");

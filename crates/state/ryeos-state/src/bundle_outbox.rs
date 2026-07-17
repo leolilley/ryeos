@@ -337,7 +337,7 @@ fn select_outbox_message(
 mod tests {
     use super::*;
     use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
-    use crate::signer::TestSigner;
+    use crate::signer::{Signer, TestSigner};
 
     fn append_request(chain_id: &str) -> BundleEventAppendRequest {
         BundleEventAppendRequest {
@@ -353,7 +353,14 @@ mod tests {
             correlation_id: None,
             causation_id: None,
             attribution: Default::default(),
+            attachments: vec![],
         }
+    }
+
+    fn trust_store(signer: &TestSigner) -> crate::refs::TrustStore {
+        let mut trust = crate::refs::TrustStore::new();
+        trust.insert(signer.fingerprint().to_string(), signer.verifying_key());
+        trust
     }
 
     #[test]
@@ -364,8 +371,15 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_1"), &signer).unwrap();
+        let trust = trust_store(&signer);
+        let appended = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_1"),
+            &signer,
+            &trust,
+        )
+        .unwrap();
 
         let mut conn = Connection::open_in_memory().unwrap();
         ensure_bundle_outbox_schema(&conn).unwrap();
@@ -426,8 +440,15 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_2"), &signer).unwrap();
+        let trust = trust_store(&signer);
+        let appended = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_2"),
+            &signer,
+            &trust,
+        )
+        .unwrap();
 
         let mut conn = Connection::open_in_memory().unwrap();
         ensure_bundle_outbox_schema(&conn).unwrap();
@@ -487,8 +508,15 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_3"), &signer).unwrap();
+        let trust = trust_store(&signer);
+        let appended = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_3"),
+            &signer,
+            &trust,
+        )
+        .unwrap();
         let record = BundleEventRecord {
             event_hash: appended.event_hash.clone(),
             event: appended.event.clone(),
@@ -551,8 +579,15 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_4"), &signer).unwrap();
+        let trust = trust_store(&signer);
+        let appended = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_4"),
+            &signer,
+            &trust,
+        )
+        .unwrap();
         let record = BundleEventRecord {
             event_hash: appended.event_hash.clone(),
             event: appended.event.clone(),
@@ -614,8 +649,15 @@ mod tests {
         std::fs::create_dir_all(&cas_root).unwrap();
         std::fs::create_dir_all(&refs_root).unwrap();
         let signer = TestSigner::default();
-        let appended =
-            append_bundle_event(&cas_root, &refs_root, append_request("email_5"), &signer).unwrap();
+        let trust = trust_store(&signer);
+        let appended = append_bundle_event(
+            &cas_root,
+            &refs_root,
+            append_request("email_5"),
+            &signer,
+            &trust,
+        )
+        .unwrap();
         let record = BundleEventRecord {
             event_hash: appended.event_hash.clone(),
             event: appended.event.clone(),

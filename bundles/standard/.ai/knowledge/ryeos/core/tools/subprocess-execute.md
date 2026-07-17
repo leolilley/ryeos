@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-05T00:57:59Z:7c2c9cc7b1aab4fc5516ad7f67a04f34dced88bd7c9b09057c6dc2c497683d71:KYeS/gcxmlkITZ65coHjR4ECtr25+ZjddnAgbakMXwfQ7UVzB/4tMGMYmz/abxrNK4cZCfiWBpQqeRICMZZsBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T03:44:59Z:99ad8fc0610b5739130067017a56056dec0411b81a91148300bcf805a2240df9:xH4nqIrvxO279M/8xnBSvs1hI7NDIl2D8XMHHZHtEp6vnsvwpNYN0RWBPZ/odazPFKh2BrQBtXfvvsd2o9I1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/tools
 tags: [tool, subprocess, executor]
-version: "1.0.0"
+version: "1.1.1"
 description: Subprocess execute tool reference.
 ---
 
@@ -24,3 +24,7 @@ config:
 The `config_schema` on this terminal describes the wrapper `config:` block consumed by `@subprocess`; it is not a public caller-parameter schema for direct execution.
 
 It owns command construction, working directory, environment, timeout, process group, and native async/resume metadata for generic subprocess execution.
+
+After this terminal constructs the request, the engine applies the node's
+immutable isolation snapshot before Lillux spawn. Tools cannot override policy or
+activation. See [Execution Isolation](../node/execution-isolation.md).

@@ -83,6 +83,10 @@ pub struct RouteInvocationContext {
     /// Authenticated principal.
     /// `None` during auth verification; `Some(_)` during response handling.
     pub principal: Option<RoutePrincipal>,
+    /// Optional request-owned execution workspace guard. Invokers attach it to
+    /// execution provenance so blocking runtime work can outlive cancellation
+    /// of the request future without losing its workspace.
+    pub workspace_lifeline: Option<Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     /// Shared daemon state.
     pub state: AppState,
     /// Process-wide webhook delivery-id dedupe store. Read by HMAC

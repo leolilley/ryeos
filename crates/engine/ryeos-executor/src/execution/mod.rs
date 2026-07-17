@@ -8,9 +8,12 @@ pub mod arch_check;
 pub mod cache;
 pub mod ingest;
 pub mod launch;
+pub(crate) mod launch_claim;
 pub mod launch_envelope;
+pub mod launch_preparation;
 pub mod lillux_bridge;
 pub mod limits;
+pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
 pub mod runtime_dispatch;
@@ -22,13 +25,213 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use lillux::cas::{sha256_hex, CasStore};
+use lillux::cas::sha256_hex;
 use ryeos_state::objects::SourceManifest;
 use ryeos_state::signer::Signer;
 
 use self::cache::MaterializationCache;
+
+/// A descriptor-pinned CAS publication whose immutable objects are protected
+/// by durable recovery roots until a daemon-authoritative consumer is visible.
+/// The recovery lease remains live across asynchronous launch; each synchronous
+/// mutation phase acquires the shared guard before its write permit and holds
+/// both through durable staged-root publication.
+pub(crate) struct PendingCasPublication {
+    authority: ryeos_state::PinnedStateAuthority,
+    staged_roots: Option<ryeos_state::StagedCasRootLease>,
+}
+
+impl PendingCasPublication {
+    fn publish(mut self) -> Result<()> {
+        let guard = self.authority.acquire_shared_guard()?;
+        self.authority.ensure_guard(&guard)?;
+        self.staged_roots
+            .as_mut()
+            .expect("pending CAS publication always owns staged roots")
+            .finish_admitted(&guard)?;
+        self.staged_roots.take();
+        Ok(())
+    }
+}
+
+impl Drop for PendingCasPublication {
+    fn drop(&mut self) {
+        let Some(staged_roots) = self.staged_roots.as_mut() else {
+            return;
+        };
+        match self.authority.acquire_shared_guard() {
+            Ok(guard) => {
+                if let Err(error) = staged_roots.finish_admitted(&guard) {
+                    tracing::warn!(%error, "failed to discard staged CAS publication roots");
+                }
+            }
+            Err(error) => {
+                // Fail closed: keep the durable recovery roots and their lease
+                // record for GC rather than falling back to a path-rebound
+                // guard in `StagedCasRootLease::drop`.
+                tracing::warn!(%error, "abandoning staged CAS roots under pinned-authority failure");
+            }
+        }
+    }
+}
+
+pub(crate) struct PendingProjectManifest {
+    pub hash: String,
+    publication: PendingCasPublication,
+}
+
+pub(crate) struct PendingProjectSnapshot {
+    pub hash: String,
+    publication: PendingCasPublication,
+}
+
+impl PendingProjectSnapshot {
+    pub fn publish(self) -> Result<()> {
+        self.publication.publish()
+    }
+}
+
+pub(crate) fn pinned_state_authority(
+    state: &ryeos_app::state::AppState,
+) -> Result<ryeos_state::PinnedStateAuthority> {
+    state.state_store.with_state_db(|db| db.pinned_authority())
+}
+
+/// Capture a live project tree as an immutable CAS snapshot for durable
+/// runtime reconstruction. The caller decides whether snapshot pinning is
+/// required; once requested, any ingest/store failure is fail-closed.
+pub(crate) fn capture_live_project_snapshot(
+    state: &ryeos_app::state::AppState,
+    project_path: &Path,
+    source: &str,
+) -> Result<PendingProjectSnapshot> {
+    if !project_path.is_dir() {
+        anyhow::bail!(
+            "cannot snapshot missing project directory {}",
+            project_path.display()
+        );
+    }
+    let authority = pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let _permit = state
+        .write_barrier
+        .try_acquire()
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+    let cas = authority.cas_store()?;
+    let mut staged_roots = authority
+        .require_recovery()?
+        .begin_staged_cas_roots_admitted(&guard, source)?;
+    let items = ingest::ingest_directory(&authority, &guard, project_path, &state.ignore_matcher)?;
+    let manifest = SourceManifest {
+        item_source_hashes: items,
+    };
+    let manifest_hash = staged_roots.store_object_admitted(&guard, &cas, &manifest.to_value())?;
+    let hash = store_project_snapshot(&mut staged_roots, &guard, &cas, manifest_hash, source)?;
+    Ok(PendingProjectSnapshot {
+        hash,
+        publication: PendingCasPublication {
+            authority,
+            staged_roots: Some(staged_roots),
+        },
+    })
+}
+
+/// Capture a live project source manifest under a durable recovery root. The
+/// shared guard is acquired from the same descriptor-pinned authority before
+/// the first blob write and remains held until the staged root is durable.
+pub(crate) fn capture_live_project_manifest(
+    state: &ryeos_app::state::AppState,
+    project_path: &Path,
+    source: &str,
+) -> Result<PendingProjectManifest> {
+    if !project_path.is_dir() {
+        anyhow::bail!(
+            "cannot snapshot missing project directory {}",
+            project_path.display()
+        );
+    }
+    let authority = pinned_state_authority(state)?;
+    let guard = authority.acquire_shared_guard()?;
+    authority.ensure_guard(&guard)?;
+    let _permit = state
+        .write_barrier
+        .try_acquire()
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+    let cas = authority.cas_store()?;
+    let mut staged_roots = authority
+        .require_recovery()?
+        .begin_staged_cas_roots_admitted(&guard, source)?;
+    let items = ingest::ingest_directory(&authority, &guard, project_path, &state.ignore_matcher)?;
+    let manifest = SourceManifest {
+        item_source_hashes: items,
+    };
+    let hash = staged_roots.store_object_admitted(&guard, &cas, &manifest.to_value())?;
+    Ok(PendingProjectManifest {
+        hash,
+        publication: PendingCasPublication {
+            authority,
+            staged_roots: Some(staged_roots),
+        },
+    })
+}
+
+/// Promote an already-staged source manifest to a project snapshot under the
+/// same pinned runtime/CAS/recovery authority and durable recovery lease.
+pub(crate) fn capture_manifest_project_snapshot(
+    state: &ryeos_app::state::AppState,
+    manifest_hash: String,
+    source: &str,
+    mut publication: PendingCasPublication,
+) -> Result<PendingProjectSnapshot> {
+    let guard = publication.authority.acquire_shared_guard()?;
+    publication.authority.ensure_guard(&guard)?;
+    let _permit = state
+        .write_barrier
+        .try_acquire()
+        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+    let cas = publication.authority.cas_store()?;
+    if cas.get_object(&manifest_hash)?.is_none() {
+        anyhow::bail!("project source manifest {manifest_hash} is no longer present in CAS");
+    }
+    publication
+        .staged_roots
+        .as_mut()
+        .expect("pending CAS publication always owns staged roots")
+        .protect_object_hash_admitted(&guard, &manifest_hash)?;
+    let hash = store_project_snapshot(
+        publication
+            .staged_roots
+            .as_mut()
+            .expect("pending CAS publication always owns staged roots"),
+        &guard,
+        &cas,
+        manifest_hash,
+        source,
+    )?;
+    Ok(PendingProjectSnapshot { hash, publication })
+}
+
+fn store_project_snapshot(
+    staged_roots: &mut ryeos_state::StagedCasRootLease,
+    guard: &ryeos_state::CasMutationGuard,
+    cas: &lillux::cas::CasStore,
+    manifest_hash: String,
+    source: &str,
+) -> Result<String> {
+    let snapshot = ryeos_state::objects::ProjectSnapshot {
+        project_manifest_hash: manifest_hash,
+        user_manifest_hash: None,
+        message: None,
+        project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
+        parent_hashes: Vec::new(),
+        created_at: lillux::time::iso8601_now(),
+        source: source.to_string(),
+    };
+    staged_roots.store_object_admitted(guard, cas, &snapshot.to_value())
+}
 
 // ── Checkout ────────────────────────────────────────────────────────
 
@@ -41,12 +244,14 @@ use self::cache::MaterializationCache;
 ///
 /// Returns the target directory path.
 pub fn checkout_project(
-    cas_root: &Path,
+    authority: &ryeos_state::PinnedStateAuthority,
+    cas_mutation_guard: &ryeos_state::CasMutationGuard,
     manifest_hash: &str,
     target_dir: &Path,
     mat_cache: Option<&MaterializationCache>,
 ) -> Result<PathBuf> {
-    let cas = CasStore::new(cas_root.to_path_buf());
+    authority.ensure_guard(cas_mutation_guard)?;
+    let cas = authority.cas_store()?;
 
     // Layer 1: Check snapshot cache
     if let Some(cache) = mat_cache {
@@ -85,7 +290,7 @@ pub fn checkout_project(
         if let Some(parent) = target_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        self::ingest::materialize_item(cas_root, object_hash, &target_path)?;
+        self::ingest::materialize_item(authority, cas_mutation_guard, object_hash, &target_path)?;
     }
 
     // Layer 2: Atomic cache promotion (staging → final cache dir)
@@ -130,12 +335,14 @@ pub fn checkout_project(
 /// Returns the new manifest hash if there were changes, or None if
 /// the working directory is unchanged.
 pub fn fold_back_outputs(
-    cas_root: &Path,
+    authority: &ryeos_state::PinnedStateAuthority,
+    cas_mutation_guard: &ryeos_state::CasMutationGuard,
     working_dir: &Path,
     pre_manifest_hash: &str,
     ignore: &ryeos_app::ignore::IgnoreMatcher,
 ) -> Result<Option<String>> {
-    let cas = CasStore::new(cas_root.to_path_buf());
+    authority.ensure_guard(cas_mutation_guard)?;
+    let cas = authority.cas_store()?;
 
     // Load pre-execution manifest
     let pre_manifest_obj = cas
@@ -159,7 +366,8 @@ pub fn fold_back_outputs(
     let mut changed = false;
 
     walk_and_diff(
-        cas_root,
+        authority,
+        cas_mutation_guard,
         working_dir,
         working_dir,
         &pre_integrity,
@@ -204,16 +412,24 @@ pub fn fold_back_outputs(
 ///
 /// The `principal_key` is the raw fingerprint hex (from
 /// [`ryeos_state::refs::principal_storage_key`]).
+// Pinned authority, held CAS guard, signed head identity, and both snapshot
+// hashes remain explicit at the compare-and-swap fold-back boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn advance_after_foldback(
-    cas_root: &Path,
-    refs_root: &Path,
+    authority: &ryeos_state::PinnedStateAuthority,
+    cas_mutation_guard: &ryeos_state::CasMutationGuard,
+    state_db: &ryeos_state::StateDb,
     signer: &dyn Signer,
     principal_key: &str,
     project_path_hash: &str,
     new_manifest_hash: &str,
     current_snapshot_hash: &str,
 ) -> Result<String> {
-    let cas = CasStore::new(cas_root.to_path_buf());
+    authority.ensure_guard(cas_mutation_guard)?;
+    state_db
+        .pinned_authority()?
+        .ensure_guard(cas_mutation_guard)?;
+    let cas = authority.cas_store()?;
     let now = lillux::time::iso8601_now();
 
     let current_snapshot_obj = cas.get_object(current_snapshot_hash)?.ok_or_else(|| {
@@ -236,13 +452,13 @@ pub fn advance_after_foldback(
     };
     let new_snapshot_hash = cas.store_object(&snapshot.to_value())?;
 
-    ryeos_state::refs::advance_project_head_ref(
-        refs_root,
+    state_db.advance_project_head_ref(
         principal_key,
         project_path_hash,
         &new_snapshot_hash,
         current_snapshot_hash,
         signer,
+        cas_mutation_guard,
     )?;
 
     Ok(new_snapshot_hash)
@@ -250,8 +466,12 @@ pub fn advance_after_foldback(
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
+// The traversal's pinned authority, mutation guard, roots, integrity map, and
+// accumulators remain explicit because they share one guarded walk.
+#[allow(clippy::too_many_arguments)]
 fn walk_and_diff(
-    cas_root: &Path,
+    authority: &ryeos_state::PinnedStateAuthority,
+    cas_mutation_guard: &ryeos_state::CasMutationGuard,
     root: &Path,
     dir: &Path,
     pre_integrity: &HashMap<String, String>,
@@ -262,11 +482,22 @@ fn walk_and_diff(
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        let rel = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .to_string();
+        let relative = path.strip_prefix(root).with_context(|| {
+            format!(
+                "fold-back path '{}' escaped project root '{}'",
+                path.display(),
+                root.display()
+            )
+        })?;
+        let rel = relative
+            .to_str()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "fold-back project-relative path '{}' is not valid UTF-8",
+                    relative.display()
+                )
+            })?
+            .replace('\\', "/");
 
         // Always skip state/ (internal daemon state)
         if rel.starts_with("state/") || rel == "state" {
@@ -279,7 +510,16 @@ fn walk_and_diff(
         }
 
         if path.is_dir() {
-            walk_and_diff(cas_root, root, &path, pre_integrity, items, changed, ignore)?;
+            walk_and_diff(
+                authority,
+                cas_mutation_guard,
+                root,
+                &path,
+                pre_integrity,
+                items,
+                changed,
+                ignore,
+            )?;
         } else if path.is_file() {
             let bytes = fs::read(&path)?;
             let integrity = sha256_hex(&bytes);
@@ -292,7 +532,7 @@ fn walk_and_diff(
                 _ => {
                     // New or changed — ingest into items (canonical format).
                     let result: self::ingest::IngestResult =
-                        self::ingest::ingest_item(cas_root, &rel, &path)?;
+                        self::ingest::ingest_item(authority, cas_mutation_guard, &rel, &path)?;
                     tracing::trace!(
                         rel_path = %rel,
                         blob_hash = %result.blob_hash,

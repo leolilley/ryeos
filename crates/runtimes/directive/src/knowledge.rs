@@ -70,7 +70,7 @@ pub fn write_thread_transcript(
         }
     }
 
-    std::fs::write(&path, md)?;
+    lillux::atomic_write(&path, md.as_bytes())?;
     Ok(())
 }
 
@@ -105,7 +105,7 @@ pub fn write_capabilities(
         md.push_str("\n```\n");
     }
 
-    std::fs::write(&path, md)?;
+    lillux::atomic_write(&path, md.as_bytes())?;
     Ok(())
 }
 

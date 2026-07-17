@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:21f65233cd3ee48178f16e1bb7fc2a8c20e468623341a195e1b4893f24df68c6:pffwP34DgQiqx6yqUa24zLUUg4xzvlCsIguBVaVoUdb/i8IonA2W2p2a7C44UhG5t1hXZ3Ey6o/P65cbwA4eBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-14T23:11:07Z:e6bdbc19024672b9a4a1a578e228e0fdb9f29e3a8687c845ff2a314f9053e025:SXD90AyT3fuDLPUHhLJPAXuwDbVpOb2YFZLN3Da7QhdFhTzjBaBvxe/uJYY3yOFM7z53tc+7Bmb4pTuGWDf9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "check-capability"
@@ -9,7 +9,7 @@ description: "Verify a session token and check one required capability."
 config:
   command: "python3"
   args:
-    - "{tool_dir}/../../../bin/central_auth.py"
+    - "{tool_dir}/lib/central_auth.py"
     - "check-capability"
   input_data: "{params_json}"
   timeout_secs: 15

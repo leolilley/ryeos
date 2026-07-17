@@ -174,9 +174,7 @@ fn patch_thread_record(
     if map.get("thread_id").and_then(serde_json::Value::as_str) != Some(thread_id) {
         return false;
     }
-    let current = map
-        .get("updated_at")
-        .and_then(serde_json::Value::as_str);
+    let current = map.get("updated_at").and_then(serde_json::Value::as_str);
     if current.is_some_and(|current| current > updated_at) {
         return false;
     }
@@ -185,7 +183,10 @@ fn patch_thread_record(
     if unchanged {
         return false;
     }
-    map.insert("status".to_string(), serde_json::Value::String(status.to_string()));
+    map.insert(
+        "status".to_string(),
+        serde_json::Value::String(status.to_string()),
+    );
     map.insert(
         "updated_at".to_string(),
         serde_json::Value::String(updated_at.to_string()),
@@ -455,6 +456,11 @@ pub struct RyeOsDataState {
     /// system: open JSON, projected through view bindings).
     #[serde(default)]
     pub sources: HashMap<String, serde_json::Value>,
+    /// Latest failed source fetch per bound view instance. Errors are keyed
+    /// exactly like `sources`, cleared when a retry launches or newer data
+    /// lands, and rendered only when no usable response exists.
+    #[serde(default)]
+    pub source_errors: HashMap<String, String>,
     /// Transient projected timeline cache, keyed by the same source key as
     /// `sources`. Rebuilt only when source data lands so scroll keys do not
     /// re-project long transcripts on every frame.
@@ -854,7 +860,10 @@ impl RyeOsCore {
         let Some(status) = payload.get("status").and_then(serde_json::Value::as_str) else {
             return false;
         };
-        let Some(updated_at) = payload.get("updated_at").and_then(serde_json::Value::as_str) else {
+        let Some(updated_at) = payload
+            .get("updated_at")
+            .and_then(serde_json::Value::as_str)
+        else {
             return false;
         };
 
@@ -886,7 +895,10 @@ impl RyeOsCore {
                     }
                 }
             } else if is_thread_collection(
-                binding.source.as_ref().and_then(|source| source.collection.as_deref()),
+                binding
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.collection.as_deref()),
             ) {
                 let collection = binding
                     .source
@@ -1087,6 +1099,7 @@ impl RyeOsCore {
                 self.data.source_floor.insert(tile_id.clone(), effect.id);
                 if evict {
                     self.data.sources.remove(tile_id);
+                    self.data.source_errors.remove(tile_id);
                     self.data.source_stored_epoch.remove(tile_id);
                     self.data.timeline_sources.remove(tile_id);
                 }
@@ -1114,6 +1127,7 @@ impl RyeOsCore {
         });
         for key in keys {
             self.data.sources.remove(&key);
+            self.data.source_errors.remove(&key);
             self.data.source_epoch.remove(&key);
             self.data.source_stored_epoch.remove(&key);
             self.data.source_floor.remove(&key);
@@ -1151,6 +1165,7 @@ impl RyeOsCore {
         // (lens/filter/project): an older deferred hint must never refetch the
         // previous subject after the new request settles.
         self.deferred_source_fetches.remove(&source_key);
+        self.data.source_errors.remove(&source_key);
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.clone(),
             source_ref: source.item_ref.clone(),
@@ -1179,6 +1194,7 @@ impl RyeOsCore {
             return None;
         }
         let deferred = self.deferred_source_fetches.remove(source_key)?;
+        self.data.source_errors.remove(source_key);
         let effect = self.emit(RyeOsEffectKind::FetchSource {
             tile_id: source_key.to_string(),
             source_ref: deferred.source_ref,
@@ -1425,8 +1441,9 @@ impl RyeOsCore {
                 }
                 let signature = serde_json::to_string(entry).ok()?;
                 match previous_by_key.get(&source.key) {
-                    Some((old_signature, arrived)) if old_signature == &signature => arrived
-                        .filter(|at| self.runtime.now_ms.saturating_sub(*at) <= 2_000),
+                    Some((old_signature, arrived)) if old_signature == &signature => {
+                        arrived.filter(|at| self.runtime.now_ms.saturating_sub(*at) <= 2_000)
+                    }
                     _ => Some(self.runtime.now_ms),
                 }
             })
@@ -1635,6 +1652,8 @@ impl RyeOsCore {
         let input_can_accept_completion = slash_can_accept || mention_can_accept;
         let (focused_row_expandable, focused_row_expanded) =
             self.focused_row_expand_state().unwrap_or((false, false));
+        let (focused_tree_collapsible, focused_tree_collapsed) =
+            self.focused_tree_row_fold_state().unwrap_or((false, false));
 
         super::keymap::RyeOsKeyContext {
             overlay_open: self.ui.overlay.active.is_some(),
@@ -1667,6 +1686,8 @@ impl RyeOsCore {
                 .is_some_and(|head| self.head_thread_running(head)),
             focused_row_expandable,
             focused_row_expanded,
+            focused_tree_collapsible,
+            focused_tree_collapsed,
         }
     }
 
@@ -1744,9 +1765,8 @@ impl RyeOsCore {
             );
             changed = true;
         }
-        changed_rows.retain(|key, flash| {
-            live.contains(key) && now_ms.saturating_sub(flash.at_ms) <= 2_000
-        });
+        changed_rows
+            .retain(|key, flash| live.contains(key) && now_ms.saturating_sub(flash.at_ms) <= 2_000);
         if changed {
             self.bump_activity_pulse(0.35);
         }
@@ -1795,6 +1815,57 @@ impl RyeOsCore {
         }
     }
 
+    pub(crate) fn focused_tree_row_fold_state(&self) -> Option<(bool, bool)> {
+        let tile_id = self.workspace.focused_tile;
+        let tile = self.workspace.tiles.get(&tile_id)?;
+        let binding = self.views.get(&tile.view.view_ref)?;
+        super::content::table_hierarchy(binding)?;
+        let response = self.data.sources.get(&tile_id.0.to_string())?;
+        let records = super::content::source_collection(binding, response);
+        let (cursor, collapsed_tree_rows) = match &tile.local {
+            ViewLocalState::GenericList {
+                cursor,
+                collapsed_tree_rows,
+                ..
+            } => (*cursor, collapsed_tree_rows),
+            ViewLocalState::None => return None,
+        };
+        let rows = super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows)?;
+        let row = rows.get(cursor.min(rows.len().saturating_sub(1)))?;
+        Some((row.has_children, row.collapsed))
+    }
+
+    pub(crate) fn set_focused_tree_row_collapsed(&mut self, collapsed: bool) -> bool {
+        let tile_id = self.workspace.focused_tile;
+        let Some(tile) = self.workspace.tiles.get(&tile_id) else {
+            return false;
+        };
+        let Some(binding) = self.views.get(&tile.view.view_ref) else {
+            return false;
+        };
+        if super::content::table_hierarchy(binding).is_none() {
+            return false;
+        }
+        let Some((key, _)) = self.focused_row_key_and_record(tile_id, binding) else {
+            return false;
+        };
+        let Some(tile) = self.workspace.tiles.get_mut(&tile_id) else {
+            return false;
+        };
+        let ViewLocalState::GenericList {
+            collapsed_tree_rows,
+            ..
+        } = &mut tile.local
+        else {
+            return false;
+        };
+        if collapsed {
+            collapsed_tree_rows.insert(key)
+        } else {
+            collapsed_tree_rows.remove(&key)
+        }
+    }
+
     fn focused_row_key_and_record(
         &self,
         tile_id: crate::ids::TileId,
@@ -1807,9 +1878,32 @@ impl RyeOsCore {
         };
         let response = self.data.sources.get(&tile_id.0.to_string())?;
         match binding.widget.as_str() {
-            "rows" | "table" => super::content::source_collection(binding, response)
+            "rows" => super::content::source_collection(binding, response)
                 .get(cursor)
                 .map(|record| (row_key(record, cursor), record.clone())),
+            "table" => {
+                let records = super::content::source_collection(binding, response);
+                let collapsed_tree_rows = match &tile.local {
+                    ViewLocalState::GenericList {
+                        collapsed_tree_rows,
+                        ..
+                    } => collapsed_tree_rows,
+                    ViewLocalState::None => return None,
+                };
+                match super::content::table_hierarchy_rows(binding, records, collapsed_tree_rows) {
+                    Some(rows) => {
+                        rows.get(cursor.min(rows.len().saturating_sub(1)))
+                            .and_then(|row| {
+                                records
+                                    .get(row.source_index)
+                                    .map(|record| (row.key.clone(), record.clone()))
+                            })
+                    }
+                    None => records
+                        .get(cursor)
+                        .map(|record| (row_key(record, cursor), record.clone())),
+                }
+            }
             "timeline" => {
                 let (mut entries, mut indents, mut sources) = self
                     .data
@@ -1895,7 +1989,10 @@ fn projected_row_signatures(
                     "tone": record.tone,
                 })
                 .to_string();
-                (row_key(&record.raw, index), (signature, record.tone.clone()))
+                (
+                    row_key(&record.raw, index),
+                    (signature, record.tone.clone()),
+                )
             })
             .collect(),
         "table" => {
@@ -1912,7 +2009,10 @@ fn projected_row_signatures(
                         "tone": record.tone,
                     })
                     .to_string();
-                    (row_key(&record.raw, index), (signature, record.tone.clone()))
+                    (
+                        row_key(&record.raw, index),
+                        (signature, record.tone.clone()),
+                    )
                 })
                 .collect()
         }
@@ -2114,26 +2214,23 @@ mod tests {
         };
         let mut core = RyeOsCore::new(session, BrowserViewport::default(), 0);
 
-        let activity_fetches: Vec<String> = core
-            .effects_for_hint("activity")
+        let hint_fetches: Vec<String> = core
+            .effects_for_hints(&["activity".to_string(), "thread".to_string()])
             .iter()
             .filter_map(|effect| match &effect.kind {
                 RyeOsEffectKind::FetchSource { source_ref, .. } => Some(source_ref.clone()),
                 _ => None,
             })
             .collect();
-        assert_eq!(activity_fetches, vec!["service:ui/ryeos-ui/threads/list"]);
-
-        let thread_fetches: Vec<String> = core
-            .effects_for_hint("thread")
-            .iter()
-            .filter_map(|effect| match &effect.kind {
-                RyeOsEffectKind::FetchSource { source_ref, .. } => Some(source_ref.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(thread_fetches.contains(&"service:ui/ryeos-ui/threads/list".to_string()));
-        assert!(thread_fetches.contains(&"service:node/status".to_string()));
+        assert_eq!(
+            hint_fetches
+                .iter()
+                .filter(|source_ref| *source_ref == "service:ui/ryeos-ui/threads/list")
+                .count(),
+            1,
+            "one coalescing window deduplicates views matching multiple hints"
+        );
+        assert!(hint_fetches.contains(&"service:node/status".to_string()));
     }
 
     #[test]

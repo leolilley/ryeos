@@ -18,6 +18,21 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO="${CARGO:-cargo}"
+gate_tty=0
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$ROOT/scripts/lib/ryeos-terminal.sh"
+ryeos_term_init
+if ryeos_term_is_tty; then
+    gate_tty=1
+fi
+
+gate_info() {
+    if [[ "$gate_tty" == 1 ]]; then ryeos_term_info "$*"; else printf 'gate: %s\n' "$*"; fi
+}
+
+gate_fail() {
+    if [[ "$gate_tty" == 1 ]]; then ryeos_term_fail "$*"; else printf 'gate: %s\n' "$*" >&2; fi
+}
 
 # Default publisher signing key + owner — used by populate-bundles.sh.
 # Override with KEY=... OWNER=... if you have a different setup.
@@ -39,7 +54,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --bundle-set)
-            [[ $# -ge 2 ]] || { echo "gate: --bundle-set requires a value" >&2; exit 2; }
+            [[ $# -ge 2 ]] || { gate_fail "--bundle-set requires a value"; exit 2; }
             bundle_set="$2"
             shift 2
             ;;
@@ -52,17 +67,17 @@ done
 
 if [[ "$refresh_bundles" == "1" ]]; then
     if [[ ! -s "$KEY" ]]; then
-        echo "gate: signing key not found at $KEY" >&2
-        echo "gate: set KEY=/path/to/PUBLISHER.pem (or create $KEY)" >&2
+        gate_fail "signing key not found at $KEY"
+        gate_fail "set KEY=/path/to/PUBLISHER.pem (or create $KEY)"
         exit 2
     fi
-    echo "gate: explicitly refreshing bundles (bundle-set: $bundle_set)"
+    gate_info "explicitly refreshing bundles (bundle-set: $bundle_set)"
     # --all: gate is a deliberate full bundle-set refresh; populate-bundles.sh
     # refuses an implicit full build without it.
     "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --all
 elif [[ "$skip_tests" == "1" ]]; then
-    echo "gate: --no-tests without --refresh-bundles has nothing to do" >&2
-    echo "gate: pass --refresh-bundles --no-tests for the old populate-only behavior" >&2
+    gate_fail "--no-tests without --refresh-bundles has nothing to do"
+    gate_fail "pass --refresh-bundles --no-tests for the old populate-only behavior"
     exit 2
 fi
 
@@ -85,7 +100,6 @@ cargo_jobs_args=()
 test_threads_args=()
 [[ "$test_threads" != "0" ]] && test_threads_args=(--test-threads "$test_threads")
 
-echo "gate: cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
-RYEOS_TEST_SKIP_BUNDLE_REFRESH=1 \
-    "$CARGO" nextest run --workspace --no-fail-fast \
+gate_info "cargo nextest run --workspace --no-fail-fast (build_jobs=${build_jobs}, test_threads=${test_threads}) ${nextest_args[*]:-}"
+"$CARGO" nextest run --workspace --no-fail-fast \
     "${cargo_jobs_args[@]}" "${test_threads_args[@]}" "${nextest_args[@]:-}"

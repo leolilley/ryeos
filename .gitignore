@@ -13,6 +13,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!scripts/lib/
+!scripts/lib/ryeos-terminal.sh
 lib64/
 parts/
 sdist/
@@ -105,6 +107,7 @@ pip-delete-this-directory.txt
 local/
 scratch/
 debug_*.py
+.worktrees/
 
 ## Backup files
 *.bak
@@ -148,6 +151,10 @@ bundles/*/.ai/refs/
 bundles/*/.ai/bin/*/
 bundles/*/PUBLISHER_TRUST.toml
 !bundles/.ai/PUBLISHER_TRUST.toml
+
+# Persistent advisory flock anchors for atomic source-bundle publication.
+# Publisher coordination only: not bundle content, CAS state, or dependency locks.
+bundles/.publisher-locks/
 
 # Local daemon state from dev/test runs
 .local/

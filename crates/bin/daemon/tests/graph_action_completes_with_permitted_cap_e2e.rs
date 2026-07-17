@@ -90,6 +90,7 @@ config:
     greet:
       action:
         item_id: "tool:echo/echo"
+        ref_bindings: {}
         params:
           msg: "hello"
       assign:
@@ -117,6 +118,7 @@ config:
     greet:
       action:
         item_id: "tool:echo/echo"
+        ref_bindings: {}
         params:
           msg: "hello"
       assign:
@@ -262,9 +264,8 @@ fn receipt_metadata_for_node<'a>(
 }
 
 fn persisted_thread_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = common::selected_projection_path(state_path)
+        .expect("resolve selected projection generation");
     let conn =
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .unwrap_or_else(|e| panic!("open projection DB at {}: {e}", db_path.display()));
@@ -363,7 +364,10 @@ async fn graph_action_completes_with_permitted_cap() {
     let (status, body) =
         match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
             Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Ok(Err(e)) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("post /execute failed: {e:#}\n--- daemon stderr ---\n{stderr}")
+            }
             Err(_) => {
                 let stderr = h.drain_stderr_nonblocking().await;
                 panic!(

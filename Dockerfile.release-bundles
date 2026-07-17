@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+#
+# Produce the official, signed bundle archive consumed by native packages.
+# The private publisher key exists only as a BuildKit secret and is neither
+# copied into a layer nor included in the exported artifact.
+
+FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gzip openssl pkg-config libssl-dev tar xz-utils libcap-dev binutils && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY . .
+
+ARG VERSION
+ARG SOURCE_DATE_EPOCH
+ARG VCS_REF=unknown
+ARG BUILD_DATE=unknown
+ENV RYEOS_VCS_REF=$VCS_REF
+ENV RYEOS_BUILD_DATE=$BUILD_DATE
+
+RUN --mount=type=secret,id=publisher-key,required=true \
+    --mount=type=cache,id=ryeos-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=ryeos-cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=ryeos-cargo-target,target=/build/target-cache,sharing=locked \
+    test -n "$VERSION" && \
+    test -n "$SOURCE_DATE_EPOCH" && \
+    test -s /run/secrets/publisher-key && \
+    CARGO_TARGET_DIR=/build/target-cache \
+    ./scripts/populate-bundles.sh \
+      --key /run/secrets/publisher-key \
+      --owner ryeos-official \
+      --bundle-set full \
+      --all && \
+    mkdir -p /out && \
+    ./scripts/release/package-bundle-artifact.sh \
+      --version "$VERSION" \
+      --source /build/bundles \
+      --output "/out/ryeos-bundles-${VERSION}-x86_64.tar.gz" \
+      --source-date-epoch "$SOURCE_DATE_EPOCH" \
+      --ryeos-bin /build/target-cache/release/ryeos
+
+FROM scratch AS artifact
+COPY --from=builder /out/ /

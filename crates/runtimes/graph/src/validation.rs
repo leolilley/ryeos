@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::model::{EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType};
+use ryeos_runtime::ReferenceSegment;
+use serde_json::Value;
 
-/// The lifecycle events the walker fires authored hooks at. A hook targeting
-/// any other `event` never runs (validation warns). Node-level observation
-/// (incl. a failed node before `on_error` routing) rides `graph_step_completed`
-/// — the context carries the node's `status` so a hook can condition on it.
-pub const GRAPH_HOOK_EVENTS: &[&str] =
-    &["graph_started", "graph_step_completed", "graph_completed"];
+use crate::model::{
+    EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType, MAX_GRAPH_SEGMENT_STEPS,
+    MAX_GRAPH_STEPS, MAX_RETRY_BACKOFF_MS,
+};
+
+const MAX_NODE_CONCURRENCY: usize = 256;
 
 #[derive(Debug, Clone)]
 pub struct ValidationResult {
@@ -21,6 +22,27 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
         warnings: Vec::new(),
     };
     let cfg = &def.config;
+
+    if !(1..=MAX_GRAPH_STEPS).contains(&cfg.max_steps) {
+        result.errors.push(format!(
+            "config.max_steps must be between 1 and {MAX_GRAPH_STEPS} (got {})",
+            cfg.max_steps
+        ));
+    }
+    if let Some(segment_steps) = cfg.segment_steps {
+        if !(1..=MAX_GRAPH_SEGMENT_STEPS).contains(&segment_steps) {
+            result.errors.push(format!(
+                "config.segment_steps must be between 1 and {MAX_GRAPH_SEGMENT_STEPS} \
+                 (got {segment_steps})"
+            ));
+        }
+        if segment_steps > cfg.max_steps {
+            result.errors.push(format!(
+                "config.segment_steps ({segment_steps}) must not exceed config.max_steps ({})",
+                cfg.max_steps
+            ));
+        }
+    }
 
     // C3: config.start must exist and be non-empty
     if cfg.start.is_empty() {
@@ -47,20 +69,6 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
             .push("config.nodes is empty — at least one node is required".into());
     }
 
-    // Authored hooks fire at graph lifecycle events. A hook whose `event` is
-    // none of the graph fire points would never run — warn so a typo surfaces.
-    for hook in &cfg.hooks {
-        if !GRAPH_HOOK_EVENTS.contains(&hook.event.as_str()) {
-            result.warnings.push(format!(
-                "hook '{}' targets event '{}', which is not a graph hook event ({}); it will \
-                 never fire",
-                hook.id,
-                hook.event,
-                GRAPH_HOOK_EVENTS.join(", ")
-            ));
-        }
-    }
-
     // Bundle-event / vault capabilities are runtime authority: a signed manifest
     // mints them; a graph's `permissions:` cannot. Surface the SAME refusals the
     // daemon applies at cap-assembly time — both well-formed reserved grants AND
@@ -85,6 +93,54 @@ pub fn validate_graph(def: &GraphDefinition) -> ValidationResult {
 }
 
 fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut ValidationResult) {
+    let assign_keys = node
+        .assign
+        .as_ref()
+        .and_then(Value::as_object)
+        .map(|assign| assign.keys().map(String::as_str).collect::<HashSet<_>>())
+        .unwrap_or_default();
+    let follow_fanout = node.node_type == NodeType::Action && node.follow && node.over.is_some();
+
+    if node.parallel && node.assign.is_some() && !follow_fanout {
+        result.errors.push(format!(
+            "node '{name}' cannot combine 'parallel: true' with 'assign'; \
+             collect ordered results and derive aggregate state in a later node"
+        ));
+    }
+
+    if node.assign.is_some() && !matches!(node.node_type, NodeType::Action | NodeType::Foreach) {
+        result.errors.push(format!(
+            "node '{name}' declares 'assign' on a {:?} node; assignment is only valid on action and foreach nodes",
+            node.node_type
+        ));
+    }
+    if node.output.is_some() && node.node_type != NodeType::Return {
+        result.errors.push(format!(
+            "node '{name}' declares 'output' but is not a return node"
+        ));
+    }
+    if node.action.is_some() && matches!(node.node_type, NodeType::Gate | NodeType::Return) {
+        result.errors.push(format!(
+            "node '{name}' declares an action on a {:?} node",
+            node.node_type
+        ));
+    }
+    let iterates = node.node_type == NodeType::Foreach || follow_fanout;
+    if !iterates {
+        for (field, present) in [
+            ("over", node.over.is_some()),
+            ("as", node.r#as.is_some()),
+            ("collect", node.collect.is_some()),
+            ("parallel", node.parallel),
+        ] {
+            if present {
+                result.errors.push(format!(
+                    "node '{name}' declares '{field}' but is not a foreach or follow-fanout node"
+                ));
+            }
+        }
+    }
+
     // R-D: nodes that declare neither `action` nor an explicit
     // `node_type` (other than default Action) MUST be rejected.
     // The parser defaults to NodeType::Action, so a bare `{name: {}}`
@@ -108,6 +164,18 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                     .errors
                     .push(format!("foreach node '{name}' missing 'action'"));
             }
+            if node.is_cacheable() {
+                result.errors.push(format!(
+                    "foreach node '{name}' cannot declare 'cache_result'; foreach \
+                     dispatches and aggregation are not cacheable as one action"
+                ));
+            }
+            if !node.env_requires.is_empty() {
+                result.errors.push(format!(
+                    "foreach node '{name}' cannot declare 'env_requires'; per-node environment \
+                     preflight is only supported on action nodes"
+                ));
+            }
             // R-D: foreach nodes MUST declare `as` for the iteration
             // variable. Without it, the variable defaults to "item"
             // silently — a typo in the key goes unnoticed.
@@ -125,6 +193,20 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                     result.errors.push(format!(
                         "foreach node '{name}' uses '{collect}' for both 'collect' and 'as' — \
                          the collected results would be removed with the iteration variable"
+                    ));
+                }
+            }
+            if let Some(as_var) = &node.r#as {
+                if assign_keys.contains(as_var.as_str()) {
+                    result.errors.push(format!(
+                        "foreach node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
+                    ));
+                }
+            }
+            if let Some(collect) = &node.collect {
+                if assign_keys.contains(collect.as_str()) {
+                    result.errors.push(format!(
+                        "foreach node '{name}' uses '{collect}' as both its collect key and an assign key"
                     ));
                 }
             }
@@ -149,7 +231,13 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                 }
             }
         }
-        NodeType::Return => {}
+        NodeType::Return => {
+            if node.next.is_some() {
+                result.errors.push(format!(
+                    "return node '{name}' cannot declare 'next'; return is terminal"
+                ));
+            }
+        }
         NodeType::Action => {
             if node.action.is_none() && name != cfg.start {
                 // Already caught above — skip the redundant warning.
@@ -173,6 +261,12 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             ));
         }
         if node.over.is_some() {
+            if node.assign.is_some() {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' cannot declare 'assign'; collect ordered results \
+                     and derive aggregate state in a later node"
+                ));
+            }
             if node.r#as.is_none() {
                 result.errors.push(format!(
                     "follow fanout node '{name}' must declare 'as' for the iteration variable"
@@ -187,6 +281,20 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                 if collect == as_var {
                     result.errors.push(format!(
                         "follow fanout node '{name}' uses '{collect}' for both 'collect' and 'as'"
+                    ));
+                }
+            }
+            if let Some(as_var) = &node.r#as {
+                if assign_keys.contains(as_var.as_str()) {
+                    result.errors.push(format!(
+                        "follow fanout node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
+                    ));
+                }
+            }
+            if let Some(collect) = &node.collect {
+                if assign_keys.contains(collect.as_str()) {
+                    result.errors.push(format!(
+                        "follow fanout node '{name}' uses '{collect}' as both its collect key and an assign key"
                     ));
                 }
             }
@@ -248,16 +356,25 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
     }
 
     if let Some(width) = node.max_concurrency {
-        if width == 0 || u32::try_from(width).is_err() {
+        if width == 0 || width > MAX_NODE_CONCURRENCY {
             result.errors.push(format!(
-                "node '{name}' max_concurrency must be greater than zero and fit in u32"
+                "node '{name}' max_concurrency must be between 1 and {MAX_NODE_CONCURRENCY}"
+            ));
+        }
+        let used_by_parallel_foreach = node.node_type == NodeType::Foreach && node.parallel;
+        let used_by_detach_foreach = node.node_type == NodeType::Foreach && node.detach;
+        let used_by_follow_fanout = follow_fanout;
+        if !(used_by_parallel_foreach || used_by_detach_foreach || used_by_follow_fanout) {
+            result.errors.push(format!(
+                "node '{name}' declares 'max_concurrency' where it has no effect; it is only \
+                 valid on parallel foreach, detach foreach launch windows, and follow fanout"
             ));
         }
     }
 
     // Per-step retry is only meaningful for a dispatching node (a single
     // action or a foreach's per-item dispatch). It is a loud error to combine
-    // it with `follow` in v1: retrying a follow means minting a fresh
+    // it with `follow`: retrying a follow means minting a fresh
     // follow_key per attempt plus a waiter-lifecycle design that does not exist
     // yet — route a failed follow with `on_error` instead.
     if let Some(retry) = &node.retry {
@@ -271,7 +388,7 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         if node.follow {
             result.errors.push(format!(
                 "node '{name}' cannot combine 'retry' and 'follow' — retrying a follow needs a \
-                 fresh follow_key and waiter lifecycle per attempt (excluded in v1); route a \
+                 fresh follow_key and waiter lifecycle per attempt; route a \
                  failed follow with 'on_error' instead"
             ));
         }
@@ -286,11 +403,22 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                 "node '{name}' retry.backoff_ms must be greater than 0"
             ));
         }
+        if retry.backoff_ms > MAX_RETRY_BACKOFF_MS {
+            result.errors.push(format!(
+                "node '{name}' retry.backoff_ms ({}) exceeds the runtime maximum ({MAX_RETRY_BACKOFF_MS})",
+                retry.backoff_ms
+            ));
+        }
         if let Some(cap) = retry.max_backoff_ms {
             if cap < retry.backoff_ms {
                 result.errors.push(format!(
                     "node '{name}' retry.max_backoff_ms ({cap}) must be >= retry.backoff_ms ({})",
                     retry.backoff_ms
+                ));
+            }
+            if cap > MAX_RETRY_BACKOFF_MS {
+                result.errors.push(format!(
+                    "node '{name}' retry.max_backoff_ms ({cap}) exceeds the runtime maximum ({MAX_RETRY_BACKOFF_MS})"
                 ));
             }
         }
@@ -306,74 +434,6 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                 "on_error target '{on_err}' in node '{name}' does not exist"
             ));
         }
-    }
-
-    check_conditional_reads_own_assign(name, node, result);
-}
-
-/// Same-node stale-state footgun. A node's `assign` delta is merged into
-/// state in `commit_step`, which runs AFTER edge evaluation — so a conditional
-/// branch on `state.K` where the SAME node assigns `K` compares against the
-/// pre-assign value (unset on first visit; one iteration stale in a loop).
-/// The fresh outcome is in the condition context as `result.*`, so a same-node
-/// branch must read `result.K`. Warn (not error): `state.K` is valid syntax
-/// and reading a *different* node's assigned `K` is legitimate — only the
-/// same-node assign∩condition intersection is the footgun.
-fn check_conditional_reads_own_assign(name: &str, node: &GraphNode, result: &mut ValidationResult) {
-    let assigned: HashSet<&str> = match node.assign.as_ref() {
-        Some(Value::Object(map)) => map.keys().map(String::as_str).collect(),
-        _ => return,
-    };
-    if assigned.is_empty() {
-        return;
-    }
-    let Some(EdgeSpec::Conditional { branches }) = node.next.as_ref() else {
-        return;
-    };
-    let mut condition_keys: HashSet<String> = HashSet::new();
-    for ce in branches {
-        if let Some(when) = ce.when.as_ref() {
-            collect_condition_state_keys(when, &mut condition_keys);
-        }
-    }
-    for key in &condition_keys {
-        if assigned.contains(key.as_str()) {
-            result.warnings.push(format!(
-                "node '{name}' assigns '{key}' and a same-node conditional branch reads \
-                 'state.{key}', which sees the value from before this node's assign merges; \
-                 branch on 'result.{key}' to use this node's own outcome"
-            ));
-        }
-    }
-}
-
-/// Collect the first path segment of every bare `path: "state.<seg>…"` string
-/// anywhere in a `when` condition tree (recursing through and/or/not nesting).
-/// Condition paths are bare dotted strings, not `${…}` templates, so the
-/// interpolation collectors above never see them.
-fn collect_condition_state_keys(when: &Value, out: &mut HashSet<String>) {
-    match when {
-        Value::Object(map) => {
-            for (k, v) in map {
-                if k == "path" {
-                    if let Some(seg) = v
-                        .as_str()
-                        .and_then(|s| s.strip_prefix("state."))
-                        .and_then(|rest| rest.split('.').next())
-                        .filter(|seg| !seg.is_empty())
-                    {
-                        out.insert(seg.to_string());
-                    }
-                }
-                collect_condition_state_keys(v, out);
-            }
-        }
-        Value::Array(arr) => {
-            for v in arr {
-                collect_condition_state_keys(v, out);
-            }
-        }
-        _ => {}
     }
 }
 
@@ -404,7 +464,7 @@ fn validate_edges(
             // no `when`) terminates the graph when no condition matches.
             // That dead-end is usually a mistake — warn so authors add a
             // fallback if they didn't intend it.
-            if !edges.is_empty() && edges.iter().all(|ce| ce.when.is_some()) {
+            if !edges.is_empty() && edges.iter().all(|ce| !ce.when.is_absent()) {
                 result.warnings.push(format!(
                     "conditional 'next' in node '{node_name}' has no default branch — \
                      if no condition matches, the graph terminates here"
@@ -432,25 +492,6 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
     let mut referenced_inputs: HashSet<String> = HashSet::new();
 
     for node in cfg.nodes.values() {
-        for field in [
-            node.assign.as_ref(),
-            node.action.as_ref(),
-            node.output.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            collect_refs(field, "state", &mut referenced_state);
-            collect_refs(field, "inputs", &mut referenced_inputs);
-        }
-        if let Some(ref over) = node.over {
-            collect_path_refs(over, "state", &mut referenced_state);
-            collect_path_refs(over, "inputs", &mut referenced_inputs);
-        }
-        if let Some(ref next) = node.next {
-            collect_edge_refs(next, "state", &mut referenced_state);
-            collect_edge_refs(next, "inputs", &mut referenced_inputs);
-        }
         if let Some(Value::Object(map)) = node.assign.as_ref() {
             for k in map.keys() {
                 assigned_keys.insert(k.clone());
@@ -458,6 +499,24 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
         }
         if let Some(ref collect_var) = node.collect {
             assigned_keys.insert(collect_var.clone());
+        }
+    }
+
+    // Reference analysis comes from the same ASTs execution uses. This sees
+    // arithmetic, functions, ternaries, bracket access, and nested templates
+    // without a second regex grammar drifting away from rye-expr/1.
+    for reference in def.compiled.references() {
+        let Some(ReferenceSegment::Key(key)) = reference.segments().first() else {
+            continue;
+        };
+        match reference.root() {
+            "state" => {
+                referenced_state.insert(key.clone());
+            }
+            "inputs" => {
+                referenced_inputs.insert(key.clone());
+            }
+            _ => {}
         }
     }
 
@@ -469,68 +528,13 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
         }
     }
 
-    // `${inputs.*}` references must be declared in the graph's
-    // `config_schema.properties` (when a schema is declared) — otherwise
-    // the input is undocumented and unvalidated.
-    if let Some(props) = cfg
-        .config_schema
-        .as_ref()
-        .and_then(|s| s.get("properties"))
-        .and_then(|p| p.as_object())
-    {
-        for key in &referenced_inputs {
-            if !props.contains_key(key) {
-                result.warnings.push(format!(
-                    "input referenced as ${{inputs.{key}}} but '{key}' is not declared in config.config_schema.properties"
-                ));
-            }
-        }
-    }
+    // `CompiledGraph::compile` rejects undeclared static `inputs.*`
+    // references whenever config_schema.properties is present. Keep this set
+    // for analysis parity and future reporting, but do not downgrade a load
+    // error into the former warning-only contract.
+    let _ = referenced_inputs;
 
     result
-}
-
-/// Collect `${<prefix>.KEY}` references from any JSON value (recursing
-/// through objects and arrays). `prefix` is `state` or `inputs`.
-fn collect_refs(value: &serde_json::Value, prefix: &str, refs: &mut HashSet<String>) {
-    match value {
-        serde_json::Value::String(s) => collect_path_refs(s, prefix, refs),
-        serde_json::Value::Object(map) => {
-            for v in map.values() {
-                collect_refs(v, prefix, refs);
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_refs(v, prefix, refs);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn collect_path_refs(template: &str, prefix: &str, refs: &mut HashSet<String>) {
-    let re = regex::Regex::new(&format!(
-        r"\$\{{{}\.([a-zA-Z_][a-zA-Z0-9_]*)",
-        regex::escape(prefix)
-    ))
-    .unwrap();
-    for cap in re.captures_iter(template) {
-        refs.insert(cap[1].to_string());
-    }
-}
-
-fn collect_edge_refs(edge: &EdgeSpec, prefix: &str, refs: &mut HashSet<String>) {
-    match edge {
-        EdgeSpec::Conditional { branches: edges } => {
-            for ce in edges {
-                if let Some(ref when) = ce.when {
-                    collect_refs(when, prefix, refs);
-                }
-            }
-        }
-        EdgeSpec::Unconditional { .. } => {}
-    }
 }
 
 fn bfs_reachable(start: &str, nodes: &HashMap<String, GraphNode>) -> HashSet<String> {
@@ -570,8 +574,6 @@ pub fn edge_targets(edge: &EdgeSpec) -> Vec<String> {
     }
 }
 
-use serde_json::Value;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -596,7 +598,7 @@ config:
       node_type: return
     orphan:
       node_type: action
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
 "#;
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
@@ -649,6 +651,88 @@ config:
     }
 
     #[test]
+    fn graph_load_rejects_inert_top_level_max_concurrency() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  max_concurrency: 4
+  nodes:
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("max_concurrency"),
+            "the removed top-level field must fail strict parsing: {error:#}"
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_out_of_range_step_budgets() {
+        let base = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+__LIMITS__
+  nodes:
+    done: {node_type: return}
+"#;
+        let cases = [
+            (
+                "  max_steps: 0",
+                "config.max_steps must be between 1 and 500",
+            ),
+            (
+                "  max_steps: 501",
+                "config.max_steps must be between 1 and 500",
+            ),
+            (
+                "  segment_steps: 0",
+                "config.segment_steps must be between 1 and 500",
+            ),
+            (
+                "  max_steps: 500\n  segment_steps: 501",
+                "config.segment_steps must be between 1 and 500",
+            ),
+            (
+                "  max_steps: 10\n  segment_steps: 11",
+                "config.segment_steps (11) must not exceed config.max_steps (10)",
+            ),
+        ];
+
+        for (limits, expected) in cases {
+            let result = validate_graph(&make_graph(&base.replace("__LIMITS__", limits)));
+            assert!(
+                result.errors.iter().any(|error| error.contains(expected)),
+                "missing {expected:?} for {limits:?}: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn validate_graph_accepts_step_budget_boundaries() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  max_steps: 500
+  segment_steps: 500
+  nodes:
+    done: {node_type: return}
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result.errors.is_empty(),
+            "unexpected errors: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
     fn validate_graph_accepts_typed_hooks_on_graph_event() {
         // A well-formed hook targeting a real graph event parses and validates
         // cleanly (no error, no unrecognized-event warning).
@@ -660,7 +744,7 @@ config:
   hooks:
     - id: obs
       event: graph_completed
-      action: {item_id: "tool:test/echo", params: {}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {}}
   nodes:
     done:
       node_type: return
@@ -679,7 +763,7 @@ config:
     }
 
     #[test]
-    fn validate_graph_warns_hook_on_unrecognized_event() {
+    fn graph_load_rejects_hook_on_unrecognized_event() {
         let yaml = r#"
 version: "1.0.0"
 category: test
@@ -688,19 +772,39 @@ config:
   hooks:
     - id: typo
       event: graph_finishd
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
   nodes:
     done:
       node_type: return
 "#;
-        let result = validate_graph(&make_graph(yaml));
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
         assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("typo") && w.contains("never fire")),
-            "expected unrecognized-event warning, got: {:?}",
-            result.warnings
+            format!("{error:#}").contains("event has no HookContextSchema"),
+            "expected an unknown hook event compilation error, got: {error:#}"
+        );
+    }
+
+    #[test]
+    fn graph_load_rejects_hook_root_outside_event_schema() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  hooks:
+    - id: invalid-root
+      event: graph_started
+      action:
+        item_id: "tool:test/echo"
+        params: {value: "${result.value}"}
+  nodes:
+    done:
+      node_type: return
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("references undeclared root `result`"),
+            "expected the graph_started schema to reject result, got: {error:#}"
         );
     }
 
@@ -717,7 +821,7 @@ config:
     - id: bad
       event: graph_completed
       when: something
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
   nodes:
     done:
       node_type: return
@@ -737,7 +841,7 @@ config:
   start: nonexistent
   nodes:
     step1:
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
@@ -760,7 +864,7 @@ config:
     iterate:
       node_type: foreach
       over: "${state.items}"
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
       collect: "results"
       next:
         type: unconditional
@@ -778,6 +882,182 @@ config:
             "expected error for foreach without 'as', got: {:?}",
             result.errors
         );
+    }
+
+    #[test]
+    fn validate_graph_rejects_foreach_cache_fields() {
+        let base = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: item
+      action: {item_id: "tool:test/echo"}
+__CACHE__
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let field = "      cache_result: true";
+        let result = validate_graph(&make_graph(&base.replace("__CACHE__", field)));
+        assert!(
+            result.errors.iter().any(|error| {
+                error.contains("foreach node 'iterate'") && error.contains("not cacheable")
+            }),
+            "{field} must be rejected on foreach: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_inert_foreach_env_requires() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: iterate
+  nodes:
+    iterate:
+      node_type: foreach
+      over: "${state.items}"
+      as: item
+      env_requires: [EXAMPLE_TOKEN]
+      action: {item_id: "tool:test/echo"}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result.errors.iter().any(|error| {
+                error.contains("foreach node 'iterate'") && error.contains("env_requires")
+            }),
+            "inert foreach env_requires must be rejected: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_next_on_return() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: done
+  nodes:
+    done:
+      node_type: return
+      next: {type: unconditional, to: unreachable}
+    unreachable: {node_type: return}
+"#;
+        let result = validate_graph(&make_graph(yaml));
+        assert!(
+            result.errors.iter().any(|error| {
+                error.contains("return node 'done'") && error.contains("cannot declare 'next'")
+            }),
+            "terminal return next must be rejected: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn validate_graph_rejects_max_concurrency_without_a_consumer() {
+        let base = r#"
+version: "1.0.0"
+category: test
+config:
+  start: work
+  nodes:
+    work:
+__NODE__
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let cases = [
+            concat!(
+                "      node_type: action\n",
+                "      action: {item_id: \"tool:test/echo\"}\n",
+                "      max_concurrency: 2"
+            ),
+            concat!(
+                "      node_type: action\n",
+                "      action: {item_id: \"directive:test/child\"}\n",
+                "      follow: true\n",
+                "      max_concurrency: 2"
+            ),
+            concat!(
+                "      node_type: foreach\n",
+                "      over: \"${state.items}\"\n",
+                "      as: item\n",
+                "      action: {item_id: \"tool:test/echo\"}\n",
+                "      max_concurrency: 2"
+            ),
+        ];
+        for node in cases {
+            let result = validate_graph(&make_graph(&base.replace("__NODE__", node)));
+            assert!(
+                result.errors.iter().any(|error| {
+                    error.contains("max_concurrency") && error.contains("where it has no effect")
+                }),
+                "unused max_concurrency must be rejected for {node:?}: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn validate_graph_accepts_max_concurrency_with_each_consumer() {
+        let base = r#"
+version: "1.0.0"
+category: test
+config:
+  start: work
+  nodes:
+    work:
+__NODE__
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let cases = [
+            concat!(
+                "      node_type: foreach\n",
+                "      over: \"${state.items}\"\n",
+                "      as: item\n",
+                "      parallel: true\n",
+                "      action: {item_id: \"tool:test/echo\"}\n",
+                "      max_concurrency: 2"
+            ),
+            concat!(
+                "      node_type: foreach\n",
+                "      over: \"${state.items}\"\n",
+                "      as: item\n",
+                "      detach: true\n",
+                "      action: {item_id: \"directive:test/child\"}\n",
+                "      max_concurrency: 2"
+            ),
+            concat!(
+                "      node_type: action\n",
+                "      follow: true\n",
+                "      over: \"${state.items}\"\n",
+                "      as: item\n",
+                "      parallel: true\n",
+                "      action: {item_id: \"directive:test/child\"}\n",
+                "      max_concurrency: 2"
+            ),
+        ];
+        for node in cases {
+            let result = validate_graph(&make_graph(&base.replace("__NODE__", node)));
+            assert!(
+                !result
+                    .errors
+                    .iter()
+                    .any(|error| error.contains("max_concurrency")),
+                "used max_concurrency must be accepted for {node:?}: {:?}",
+                result.errors
+            );
+        }
     }
 
     // R-D: gate nodes MUST declare conditional `next`.
@@ -810,6 +1090,41 @@ config:
         );
     }
 
+    #[test]
+    fn graph_definition_rejects_non_expression_conditions() {
+        let cases = [
+            (
+                "structured",
+                "          - when: {path: state.ready, op: eq, value: true}\n",
+            ),
+            ("explicit null", "          - when: null\n"),
+            ("empty", "          - when: ''\n"),
+        ];
+        let base = r#"
+version: "1.0.0"
+category: test
+config:
+  start: check
+  nodes:
+    check:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+__BRANCH__            to: done
+    done:
+      node_type: return
+"#;
+
+        for (label, branch) in cases {
+            let yaml = base.replace("__BRANCH__", branch);
+            assert!(
+                GraphDefinition::from_yaml(&yaml, Some("test.yaml")).is_err(),
+                "{label} condition must be rejected"
+            );
+        }
+    }
+
     // R-D: nodes with no action and no explicit node_type must be rejected.
 
     #[test]
@@ -825,7 +1140,7 @@ config:
       over: "${state.items}"
       as: "results"
       collect: "results"
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
       next:
         type: unconditional
         to: done
@@ -858,7 +1173,7 @@ config:
       parallel: true
       collect: results
       max_concurrency: 3
-      action: {item_id: "directive:child", params: {value: "${item}"}}
+      action: {item_id: "directive:child", ref_bindings: {}, params: {value: "${item}"}}
     done: {node_type: return}
 "#;
         assert!(validate_graph(&make_graph(base)).errors.is_empty());
@@ -877,16 +1192,25 @@ config:
             (
                 "      max_concurrency: 3\n",
                 "      max_concurrency: 0\n",
-                "greater than zero",
+                "between 1 and 256",
             ),
             (
-                "      action: {item_id: \"directive:child\", params: {value: \"${item}\"}}\n",
-                "      retry: {attempts: 2, backoff_ms: 0}\n      action: {item_id: \"directive:child\"}\n",
+                "      max_concurrency: 3\n",
+                "      max_concurrency: 257\n",
+                "between 1 and 256",
+            ),
+            (
+                "      action: {item_id: \"directive:child\", ref_bindings: {}, params: {value: \"${item}\"}}\n",
+                "      retry: {attempts: 2, backoff_ms: 0}\n      action: {item_id: \"directive:child\", ref_bindings: {}}\n",
                 "cannot combine 'retry' and 'follow'",
             ),
         ];
         for (from, to, expected) in cases {
-            let graph = make_graph(&base.replacen(from, to, 1));
+            let mut yaml = base.replacen(from, to, 1);
+            if expected == "must declare 'as'" {
+                yaml = yaml.replace("${item}", "1");
+            }
+            let graph = make_graph(&yaml);
             let errors = validate_graph(&graph).errors;
             assert!(
                 errors.iter().any(|e| e.contains(expected)),
@@ -908,7 +1232,7 @@ config:
       next:
         type: conditional
         branches:
-          - when: {path: state.mode, op: eq, value: fast}
+          - when: 'state.mode == "fast"'
             to: done
     done:
       node_type: return
@@ -930,10 +1254,10 @@ config:
     }
 
     #[test]
-    fn analyze_graph_warns_same_node_conditional_on_assigned_state() {
-        // `recall` assigns `found`, then branches on `state.found` in the same
-        // node — the classic footgun: the assign merges after edge evaluation,
-        // so the branch reads the pre-assign value. Must warn toward `result.*`.
+    fn analyze_graph_allows_same_node_conditional_on_assigned_state() {
+        // Assignment and branch selection share the node's candidate state, so
+        // a same-node `state.found` reference is deliberate and must not be
+        // diagnosed as a stale read.
         let yaml = r#"
 version: "1.0.0"
 category: test
@@ -941,13 +1265,13 @@ config:
   start: recall
   nodes:
     recall:
-      action: {item_id: "tool:recall"}
+      action: {item_id: "tool:recall", ref_bindings: {}}
       assign:
         found: "${result.found}"
       next:
         type: conditional
         branches:
-          - when: {path: state.found, op: eq, value: "yes"}
+          - when: 'state.found == "yes"'
             to: warm
           - to: study
     warm:
@@ -962,11 +1286,11 @@ config:
             result.errors
         );
         assert!(
-            result
+            !result
                 .warnings
                 .iter()
-                .any(|w| w.contains("recall") && w.contains("result.found")),
-            "expected same-node stale-state warning, got: {:?}",
+                .any(|warning| warning.contains("before this node's assign")),
+            "same-node branches read candidate state: {:?}",
             result.warnings
         );
     }
@@ -983,13 +1307,13 @@ config:
   start: recall
   nodes:
     recall:
-      action: {item_id: "tool:recall"}
+      action: {item_id: "tool:recall", ref_bindings: {}}
       assign:
         found: "${result.found}"
       next:
         type: conditional
         branches:
-          - when: {path: result.found, op: eq, value: "yes"}
+          - when: 'result.found == "yes"'
             to: gate2
           - to: gate2
     gate2:
@@ -997,7 +1321,7 @@ config:
       next:
         type: conditional
         branches:
-          - when: {path: state.found, op: eq, value: "yes"}
+          - when: 'state.found == "yes"'
             to: warm
           - to: study
     warm:
@@ -1029,7 +1353,7 @@ config:
       next:
         type: conditional
         branches:
-          - when: {path: state.mode, op: eq, value: fast}
+          - when: 'state.mode == "fast"'
             to: done
           - to: done
     done:
@@ -1047,7 +1371,7 @@ config:
     }
 
     #[test]
-    fn analyze_graph_warns_undeclared_input() {
+    fn graph_load_rejects_undeclared_input() {
         let yaml = r#"
 version: "1.0.0"
 category: test
@@ -1059,29 +1383,21 @@ config:
       declared: {type: string}
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {a: "${inputs.declared}", b: "${inputs.missing}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {a: "${inputs.declared}", b: "${inputs.missing}"}}
       next:
         type: unconditional
         to: done
     done:
       node_type: return
 "#;
-        let result = analyze_graph(&make_graph(yaml));
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("missing") && w.contains("config_schema")),
-            "expected undeclared-input warning for 'missing', got: {:?}",
-            result.warnings
+        let error = format!(
+            "{:#}",
+            GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err()
         );
+        assert!(error.contains("missing"), "unexpected error: {error}");
         assert!(
-            !result
-                .warnings
-                .iter()
-                .any(|w| w.contains("inputs.declared")),
-            "declared input must not warn: {:?}",
-            result.warnings
+            error.contains("config_schema.properties"),
+            "unexpected error: {error}"
         );
     }
 
@@ -1095,7 +1411,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo", params: {a: "${inputs.anything}"}}
+      action: {item_id: "tool:test/echo", ref_bindings: {}, params: {a: "${inputs.anything}"}}
       next:
         type: unconditional
         to: done
@@ -1111,8 +1427,7 @@ config:
     }
 
     #[test]
-    fn analyze_graph_scans_return_output_for_undeclared_input() {
-        // `${inputs.*}` in a return node's `output` is also checked.
+    fn graph_load_rejects_undeclared_input_in_return_output() {
         let yaml = r#"
 version: "1.0.0"
 category: test
@@ -1128,14 +1443,14 @@ config:
       output:
         id: "${inputs.unknown}"
 "#;
-        let result = analyze_graph(&make_graph(yaml));
+        let error = format!(
+            "{:#}",
+            GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err()
+        );
+        assert!(error.contains("unknown"), "unexpected error: {error}");
         assert!(
-            result
-                .warnings
-                .iter()
-                .any(|w| w.contains("unknown") && w.contains("config_schema")),
-            "expected output ${{inputs.unknown}} to warn, got: {:?}",
-            result.warnings
+            error.contains("config_schema.properties"),
+            "unexpected error: {error}"
         );
     }
 
@@ -1177,7 +1492,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:x"}
+      action: {item_id: "tool:x", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -1203,9 +1518,9 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:x"}
+      action: {item_id: "tool:x", ref_bindings: {}}
       follow: true
-      cache: true
+      cache_result: true
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -1230,7 +1545,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:x"}
+      action: {item_id: "tool:x", ref_bindings: {}}
       follow: true
       parallel: true
       next: {type: unconditional, to: done}
@@ -1296,7 +1611,7 @@ config:
     #[test]
     fn validate_graph_accepts_valid_retry_on_action() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 30000}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result.errors.is_empty(),
@@ -1308,7 +1623,7 @@ config:
     #[test]
     fn validate_graph_rejects_retry_attempts_out_of_range() {
         let too_many = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 11, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 11, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             too_many
@@ -1319,7 +1634,7 @@ config:
             too_many.errors
         );
         let zero = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
         assert!(zero
             .errors
@@ -1330,7 +1645,7 @@ config:
     #[test]
     fn validate_graph_rejects_retry_zero_backoff() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 0}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 0}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result
@@ -1343,9 +1658,27 @@ config:
     }
 
     #[test]
+    fn validate_graph_rejects_retry_delays_above_runtime_maximum() {
+        let too_large = MAX_RETRY_BACKOFF_MS + 1;
+        let backoff = validate_graph(&retry_graph(&format!(
+            "      action: {{item_id: \"tool:x\"}}\n      retry: {{attempts: 2, backoff_ms: {too_large}}}\n      next: {{type: unconditional, to: done}}"
+        )));
+        assert!(backoff.errors.iter().any(|error| {
+            error.contains("retry.backoff_ms") && error.contains("runtime maximum")
+        }));
+
+        let cap = validate_graph(&retry_graph(&format!(
+            "      action: {{item_id: \"tool:x\"}}\n      retry: {{attempts: 2, backoff_ms: 1, max_backoff_ms: {too_large}}}\n      next: {{type: unconditional, to: done}}"
+        )));
+        assert!(cap.errors.iter().any(|error| {
+            error.contains("retry.max_backoff_ms") && error.contains("runtime maximum")
+        }));
+    }
+
+    #[test]
     fn validate_graph_rejects_retry_max_below_backoff() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 500}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 3, backoff_ms: 1000, max_backoff_ms: 500}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result
@@ -1375,7 +1708,7 @@ config:
     #[test]
     fn validate_graph_rejects_retry_plus_follow() {
         let result = validate_graph(&retry_graph(
-            "      action: {item_id: \"tool:x\"}\n      follow: true\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
+            "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      follow: true\n      retry: {attempts: 3, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             result
@@ -1390,7 +1723,7 @@ config:
     #[test]
     fn validate_graph_accepts_retry_on_foreach() {
         let result = validate_graph(&retry_graph(
-            "      node_type: foreach\n      over: \"${state.items}\"\n      as: item\n      action: {item_id: \"tool:x\"}\n      retry: {attempts: 2, backoff_ms: 50}\n      next: {type: unconditional, to: done}",
+            "      node_type: foreach\n      over: \"${state.items}\"\n      as: item\n      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 2, backoff_ms: 50}\n      next: {type: unconditional, to: done}",
         ));
         assert!(
             !result
@@ -1418,7 +1751,7 @@ config:
   start: step1
   nodes:
     step1:
-      action: {item_id: "tool:test/echo"}
+      action: {item_id: "tool:test/echo", ref_bindings: {}}
       next:
         type: unconditional
         to: done
@@ -1497,5 +1830,410 @@ config:
             "expected malformed grant to be rejected, got: {:?}",
             result.errors
         );
+    }
+
+    #[test]
+    fn parallel_foreach_rejects_assignment() {
+        let graph = make_graph(
+            r#"
+version: "1"
+category: test
+config:
+  start: fan
+  nodes:
+    fan:
+      node_type: foreach
+      over: "${state.items}"
+      as: item
+      parallel: true
+      collect: results
+      action: {item_id: "tool:test/noop"}
+      assign: {count: "${state.count + 1}"}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#,
+        );
+        let result = validate_graph(&graph);
+        assert!(result
+            .errors
+            .iter()
+            .any(|error| { error.contains("parallel: true") && error.contains("with 'assign'") }));
+    }
+
+    #[test]
+    fn foreach_state_keys_must_be_pairwise_disjoint() {
+        for (collect, assign) in [
+            ("item", "other"),
+            ("results", "results"),
+            ("results", "item"),
+        ] {
+            let graph = make_graph(&format!(
+                r#"
+version: "1"
+category: test
+config:
+  start: each
+  nodes:
+    each:
+      node_type: foreach
+      over: "${{state.items}}"
+      as: item
+      collect: {collect}
+      action: {{item_id: "tool:test/noop"}}
+      assign: {{{assign}: true}}
+      next: {{type: unconditional, to: done}}
+    done: {{node_type: return}}
+"#
+            ));
+            let result = validate_graph(&graph);
+            assert!(
+                !result.errors.is_empty(),
+                "expected collision error for collect={collect}, assign={assign}"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_load_enforces_action_result_root_contract() {
+        let invalid = r#"
+version: "1"
+category: test
+config:
+  start: call
+  nodes:
+    call:
+      action:
+        item_id: "tool:test/noop"
+        params: {value: "${result.value}"}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(invalid, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("node call.action: expression root `result`"),
+            "action fields must not observe a result that does not exist yet: {error:#}"
+        );
+
+        let valid = r#"
+version: "1"
+category: test
+config:
+  start: call
+  nodes:
+    call:
+      action: {item_id: "tool:test/noop"}
+      assign: {saved: "${result.value}"}
+      next:
+        type: conditional
+        branches:
+          - when: "state.saved == result.value"
+            to: done
+          - to: done
+    done: {node_type: return}
+"#;
+        GraphDefinition::from_yaml(valid, Some("test.yaml")).unwrap();
+    }
+
+    #[test]
+    fn graph_load_rejects_iteration_root_before_binding_or_after_collection() {
+        let over_uses_item = r#"
+version: "1"
+category: test
+config:
+  start: each
+  nodes:
+    each:
+      node_type: foreach
+      over: "${item.values}"
+      as: item
+      action: {item_id: "tool:test/noop"}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(over_uses_item, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("node each.over: expression root `item`"),
+            "the iteration variable is not bound while evaluating over: {error:#}"
+        );
+
+        let branch_uses_item = r#"
+version: "1"
+category: test
+config:
+  start: fan
+  nodes:
+    fan:
+      follow: true
+      parallel: true
+      over: "${state.items}"
+      as: item
+      action: {item_id: "directive:test/child"}
+      next:
+        type: conditional
+        branches:
+          - when: "item.ready"
+            to: done
+          - to: done
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(branch_uses_item, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expression root `item` is not available here"),
+            "a fanout branch runs after the temporary item binding is gone: {error:#}"
+        );
+    }
+
+    #[test]
+    fn graph_load_rejects_result_when_action_node_has_no_action() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: route
+  nodes:
+    route:
+      next:
+        type: conditional
+        branches:
+          - when: "result.ready"
+            to: done
+          - to: done
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expression root `result` is not available here"),
+            "an action-shaped routing node without an action has no result: {error:#}"
+        );
+    }
+
+    #[test]
+    fn graph_load_rejects_result_root_in_gate_condition() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: check
+  nodes:
+    check:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - when: "result.ready"
+            to: done
+          - to: done
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expression root `result` is not available here"),
+            "gate conditions have no action result: {error:#}"
+        );
+    }
+
+    #[test]
+    fn graph_load_enforces_return_output_root_contract() {
+        let valid = r#"
+version: "1"
+category: test
+config:
+  start: done
+  config_schema:
+    type: object
+    properties:
+      known: {type: string}
+  nodes:
+    done:
+      node_type: return
+      output:
+        state: "${state.value}"
+        input: "${inputs.known}"
+        execution: "${_execution.depth}"
+        run: "${_run.graph_run_id}"
+"#;
+        GraphDefinition::from_yaml(valid, Some("test.yaml")).unwrap();
+
+        let invalid = valid.replace("${state.value}", "${result.value}");
+        let error = GraphDefinition::from_yaml(&invalid, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("node done.output: expression root `result`"),
+            "return output has no action result: {error:#}"
+        );
+    }
+
+    #[test]
+    fn graph_load_validates_hook_input_paths_against_config_schema() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: done
+  config_schema:
+    type: object
+    properties:
+      known: {type: string}
+  hooks:
+    - id: observe-start
+      event: graph_started
+      action:
+        item_id: "tool:test/noop"
+        params: {value: "${inputs.missing}"}
+  nodes:
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("input `missing` is not declared"),
+            "hook expressions obey the graph input schema: {error:#}"
+        );
+    }
+
+    #[test]
+    fn graph_load_rejects_unknown_root_but_allows_dynamic_input_index() {
+        let unknown = r#"
+version: "1"
+category: test
+config:
+  start: call
+  nodes:
+    call:
+      action:
+        item_id: "tool:test/noop"
+        params: {value: "${ambient.value}"}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(unknown, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("expression root `ambient` is not available here"),
+            "unknown roots must fail graph loading: {error:#}"
+        );
+
+        let dynamic_input = r#"
+version: "1"
+category: test
+config:
+  start: call
+  config_schema:
+    type: object
+    properties:
+      known: {type: string}
+  nodes:
+    call:
+      action:
+        item_id: "tool:test/noop"
+        params: {value: "${inputs[state.input_name]}"}
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        GraphDefinition::from_yaml(dynamic_input, Some("test.yaml")).unwrap();
+    }
+
+    #[test]
+    fn graph_load_rejects_duplicate_default_branch() {
+        let yaml = r#"
+version: "1"
+category: test
+config:
+  start: check
+  nodes:
+    check:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - to: left
+          - to: right
+    left: {node_type: return}
+    right: {node_type: return}
+"#;
+        let error = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("more than one default branch"),
+            "duplicate defaults must fail graph loading: {error:#}"
+        );
+    }
+
+    #[test]
+    fn follow_fanout_rejects_assignment_and_state_key_collisions() {
+        let base = r#"
+version: "1"
+category: test
+config:
+  start: fan
+  nodes:
+    fan:
+      follow: true
+      over: "${state.items}"
+      as: item
+      parallel: true
+      collect: results
+      action: {item_id: "directive:test/child", params: {value: "${item}"}}
+__ASSIGN__
+    done: {node_type: return}
+"#;
+
+        for (assign, collision) in [
+            ("      assign: {}", None),
+            ("      assign: {count: 1}", None),
+            (
+                "      assign: {item: 1}",
+                Some("both its iteration variable and an assign key"),
+            ),
+            (
+                "      assign: {results: 1}",
+                Some("both its collect key and an assign key"),
+            ),
+        ] {
+            let graph = make_graph(&base.replace("__ASSIGN__", assign));
+            let errors = validate_graph(&graph).errors;
+            assert!(
+                errors.iter().any(|error| {
+                    error.contains("follow fanout") && error.contains("cannot declare 'assign'")
+                }),
+                "follow fanout assignment must be rejected: {errors:?}"
+            );
+            if let Some(collision) = collision {
+                assert!(
+                    errors.iter().any(|error| error.contains(collision)),
+                    "missing collision diagnostic {collision:?}: {errors:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn graph_load_rejects_invalid_and_reserved_iteration_variables() {
+        for (variable, expected) in [
+            ("bad-name", "must match [A-Za-z_][A-Za-z0-9_]*"),
+            ("9item", "must match [A-Za-z_][A-Za-z0-9_]*"),
+            ("state", "reserved by rye-expr/1"),
+            ("result", "reserved by rye-expr/1"),
+            ("_run", "reserved by rye-expr/1"),
+        ] {
+            let yaml = format!(
+                r#"
+version: "1"
+category: test
+config:
+  start: each
+  nodes:
+    each:
+      node_type: foreach
+      over: "${{state.items}}"
+      as: "{variable}"
+      collect: results
+      action: {{item_id: "tool:test/noop"}}
+      next: {{type: unconditional, to: done}}
+    done: {{node_type: return}}
+"#
+            );
+            let error = GraphDefinition::from_yaml(&yaml, Some("test.yaml")).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected),
+                "iteration variable {variable:?} should fail with {expected:?}: {error:#}"
+            );
+        }
     }
 }

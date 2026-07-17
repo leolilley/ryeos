@@ -58,23 +58,37 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
         let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
         let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
         let state_store = Arc::new(
-            ryeos_app::state_store::StateStore::new(
+            ryeos_app::state_store::StateStore::new_with_head_trust(
+                tmpdir.path().to_path_buf(),
                 runtime_state_dir,
                 runtime_db_path,
                 signer,
                 write_barrier.clone(),
+                Arc::new(head_trust),
             )
             .unwrap(),
         );
+        let engine = Arc::new(ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        ));
         let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
         let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
             state_store.clone(),
@@ -83,6 +97,7 @@ mod tests {
         let threads = Arc::new(
             ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
                 state_store.clone(),
+                engine.clone(),
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
@@ -94,14 +109,6 @@ mod tests {
             kind_profiles,
             events.clone(),
         ));
-        let engine = ryeos_engine::engine::Engine::new(
-            ryeos_engine::kind_registry::KindRegistry::empty(),
-            ryeos_engine::parsers::ParserDispatcher::new(
-                ryeos_engine::parsers::ParserRegistry::empty(),
-                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-            ),
-            Vec::new(),
-        );
         let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
             bundles: vec![],
             routes: vec![],
@@ -115,8 +122,9 @@ mod tests {
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
+            isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
             state_store,
-            engine: Arc::new(engine),
+            engine,
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -139,6 +147,9 @@ mod tests {
             services: Arc::new(crate::registry::build_service_registry()),
             service_descriptors: crate::handlers::ALL,
             node_config: Arc::new(snapshot.clone()),
+            node_history_policy: Arc::new(
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            ),
             vault: Arc::new(ryeos_app::vault::EmptyVault),
             command_registry: test_command_registry,
             authorizer: test_auth,
@@ -164,6 +175,7 @@ mod tests {
             body_raw: vec![],
             input: serde_json::Value::Null,
             principal: None,
+            workspace_lifeline: None,
             state,
             webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         };

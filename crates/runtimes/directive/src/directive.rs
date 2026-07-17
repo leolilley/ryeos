@@ -3,11 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// Re-export types now canonically owned by the shared model-resolution
-// module in ryeos-runtime. Existing `use crate::directive::*` imports
-// in the directive-runtime continue to resolve these names.
+// Re-export directive-domain types from the directive-owned shared crate.
+// The launch preparer and runtime consume this one strict schema.
 #[allow(unused_imports)]
-pub use ryeos_runtime::model_resolution::{
+pub use ryeos_directive_core::{
     AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig,
     ProtocolFamily, ProviderConfig, ProviderProfile, SamplingConfig, SchemasConfig, StreamPaths,
     SystemMessageConfig, SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode,
@@ -19,7 +18,7 @@ pub use ryeos_runtime::model_resolution::{
 /// `KindComposedView::ExtendsChain(...).composed`.
 ///
 /// The runtime owns the typed shape of the fields it **consumes**
-/// (`model`, `permissions`, `limits`, `outputs`, `context`, `hooks`,
+/// (`permissions`, `limits`, `outputs`, `context`, `hooks`,
 /// `extends`, `name`).  `deny_unknown_fields` is mandatory — relaxing
 /// it once already masked a routing-config regression by accepting
 /// fields the runtime quietly ignored.
@@ -41,15 +40,13 @@ pub struct DirectiveHeader {
     #[serde(default)]
     pub extends: Option<String>,
     #[serde(default)]
-    pub model: Option<ModelSpec>,
-    #[serde(default)]
     pub limits: Option<LimitsSpec>,
     #[serde(default)]
     pub outputs: Option<Vec<OutputSpec>>,
     #[serde(default)]
     pub context: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
-    pub hooks: Option<Vec<Value>>,
+    pub hooks: Option<Vec<ryeos_runtime::HookDefinition>>,
     #[serde(default)]
     pub continuation: ContinuationConfig,
     /// Opt-in corrective turn: when the directive declares `outputs` and a
@@ -72,7 +69,6 @@ pub struct DirectiveHeader {
 pub const DIRECTIVE_HEADER_RUNTIME_KEYS: &[&str] = &[
     "name",
     "extends",
-    "model",
     "limits",
     "outputs",
     "context",
@@ -364,15 +360,16 @@ impl Default for ExecutionConfig {
 #[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
     pub execution: ExecutionConfig,
-    pub model_routing: Option<ModelRoutingConfig>,
-    pub provider: Option<ProviderConfig>,
     pub tools: Vec<ToolSchema>,
     pub system_prompt: Option<String>,
     pub user_prompt: String,
     pub context_before: Option<String>,
     pub context_after: Option<String>,
     pub context_positions: HashMap<String, Vec<String>>,
-    pub hooks: Vec<ryeos_runtime::HookDefinition>,
+    /// Execution-ready hooks. Source hook definitions are merged and compiled
+    /// during bootstrap and never reach the runner.
+    #[serde(skip)]
+    pub hooks: Vec<ryeos_runtime::CompiledHook>,
     pub outputs: Option<Vec<OutputSpec>>,
     #[serde(default)]
     pub return_nudge: ReturnNudge,
@@ -555,6 +552,43 @@ mod tests {
             .return_nudge
             .message(&outs)
             .contains("directive_return"));
+    }
+
+    #[test]
+    fn directive_header_hooks_use_the_typed_scalar_condition_grammar() {
+        let header: DirectiveHeader = serde_yaml::from_str(
+            r#"
+hooks:
+  - id: selected
+    event: after_step
+    condition: "turn >= 2"
+    action: {item_id: "tool:test/hook"}
+"#,
+        )
+        .unwrap();
+        let hooks = header.hooks.unwrap();
+        assert_eq!(hooks.len(), 1);
+        assert!(matches!(
+            &hooks[0].condition,
+            ryeos_runtime::ExpressionCondition::Expression(source) if source == "turn >= 2"
+        ));
+
+        let error = serde_yaml::from_str::<DirectiveHeader>(
+            r#"
+hooks:
+  - id: legacy
+    event: after_step
+    condition: {path: turn, op: gte, value: 2}
+    action: {item_id: "tool:test/hook"}
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("structured path/op/value conditions are not supported"),
+            "expected the structured condition to be rejected, got: {error}"
+        );
     }
 
     // A config that omits the retry knobs must inherit the same sane values

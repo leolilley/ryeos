@@ -1,19 +1,31 @@
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+
 use anyhow::{anyhow, Context, Result};
+use arc_swap::{ArcSwap, ArcSwapOption};
 use serde_json::json;
+#[cfg(test)]
+use serde_json::Value;
 use tokio::net::UnixListener;
+use tokio::sync::Semaphore;
 
 #[cfg(test)]
 use crate::uds::protocol::{RpcRequest, RpcResponse};
 use ryeos_app::bundle_event_service::{
-    BundleEventAppendParams, BundleEventReadChainParams, BundleEventScanParams, BundleEventService,
+    BundleEventAppendParams, BundleEventMaterializeAttachmentParams, BundleEventReadChainParams,
+    BundleEventScanParams, BundleEventService,
 };
 use ryeos_app::command_service::{CommandClaimParams, CommandCompleteParams, CommandSubmitParams};
 use ryeos_app::event_store_service::{
     EventAppendBatchParams, EventAppendParams, EventReplayParams,
 };
+use ryeos_app::live_input_queue::MAX_LIVE_INPUT_POLL_RESPONSE_BYTES;
 use ryeos_app::runtime_item_author_service::{RuntimeAuthorItemParams, RuntimeItemAuthorService};
+use ryeos_app::runtime_project_snapshot_service::{
+    RuntimeProjectSnapshotRequest, RuntimeProjectSnapshotService,
+};
 use ryeos_app::runtime_vault_service::{
     RuntimeVaultListParams, RuntimeVaultPutParams, RuntimeVaultRefParams, RuntimeVaultService,
 };
@@ -22,23 +34,202 @@ use ryeos_app::thread_lifecycle::{
     ArtifactPublishParams, ThreadAttachProcessParams, ThreadContinuationParams, ThreadGetParams,
     ThreadMarkRunningParams,
 };
+use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 
 mod routing;
 mod transport;
 
+#[cfg(test)]
 pub(crate) use routing::dispatch;
 
-pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
-    loop {
-        let (stream, _) = listener.accept().await.context("uds accept failed")?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(err) = transport::handle_connection(stream, state).await {
-                tracing::warn!(error = %err, "uds connection error");
-            }
-        });
+struct DynamicServerInner {
+    lifecycle: ArcSwap<ryeos_node::LifecycleResponse>,
+    application: ArcSwapOption<AppState>,
+}
+
+/// Request-level UDS publication state. The listener can begin serving with
+/// only lifecycle identity/progress, then publish AppState once callbacks are
+/// safe. Each frame reloads this state, so a connection accepted during boot
+/// observes later application and Ready publication.
+#[derive(Clone)]
+pub struct DynamicServerState {
+    inner: Arc<DynamicServerInner>,
+}
+
+impl DynamicServerState {
+    pub fn bootstrap(lifecycle: ryeos_node::LifecycleResponse) -> Result<Self> {
+        lifecycle
+            .validate()
+            .map_err(|message| anyhow!("invalid initial lifecycle response: {message}"))?;
+        Ok(Self {
+            inner: Arc::new(DynamicServerInner {
+                lifecycle: ArcSwap::from_pointee(lifecycle),
+                application: ArcSwapOption::empty(),
+            }),
+        })
+    }
+
+    pub fn publish_application(&self, state: Arc<AppState>) {
+        self.inner.application.store(Some(state));
+    }
+
+    pub fn unpublish_application(&self) {
+        self.inner.application.store(None);
+    }
+
+    pub fn publish_lifecycle(&self, lifecycle: ryeos_node::LifecycleResponse) -> Result<()> {
+        lifecycle
+            .validate()
+            .map_err(|message| anyhow!("invalid lifecycle response: {message}"))?;
+        let current = self.lifecycle();
+        if lifecycle.identity != current.identity {
+            anyhow::bail!("lifecycle identity cannot change after listener publication");
+        }
+        if current.status != ryeos_node::LifecycleWireState::Starting {
+            anyhow::bail!("terminal lifecycle state cannot be republished");
+        }
+        if lifecycle.startup.sequence <= current.startup.sequence {
+            anyhow::bail!("lifecycle publication sequence must increase");
+        }
+        if lifecycle.ready && self.inner.application.load().is_none() {
+            anyhow::bail!("cannot publish Ready before application state");
+        }
+        self.inner.lifecycle.store(Arc::new(lifecycle));
+        Ok(())
+    }
+
+    pub fn lifecycle(&self) -> Arc<ryeos_node::LifecycleResponse> {
+        self.inner.lifecycle.load_full()
+    }
+
+    pub fn application_is_published(&self) -> bool {
+        self.inner.application.load().is_some()
+    }
+
+    fn application(&self) -> Option<Arc<AppState>> {
+        self.inner.application.load_full()
     }
 }
+
+pub async fn serve(listener: UnixListener, state: Arc<AppState>) -> Result<()> {
+    let dynamic = DynamicServerState::bootstrap(ready_lifecycle_response(&state))?;
+    dynamic.publish_application(state);
+    serve_dynamic(listener, dynamic).await
+}
+
+pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) -> Result<()> {
+    let mut connections = tokio::task::JoinSet::new();
+    let connection_slots = Arc::new(Semaphore::new(MAX_UDS_CONNECTIONS));
+    let frame_bytes = Arc::new(Semaphore::new(MAX_UDS_IN_FLIGHT_FRAME_BYTES));
+    let mut shutdown_rx = crate::subscribe_shutdown();
+    let shutdown = async move {
+        // Subscribe before checking the flag so a request racing listener startup
+        // is observed either through the durable process-local flag or the channel.
+        if crate::shutdown_requested() {
+            return;
+        }
+        match shutdown_rx.as_mut() {
+            Some(receiver) => {
+                let _ = receiver.recv().await;
+            }
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(shutdown);
+
+    let listener_result = loop {
+        tokio::select! {
+            biased;
+            _ = &mut shutdown => break Ok(()),
+            permit = Arc::clone(&connection_slots).acquire_owned() => {
+                let connection_permit = permit.context("UDS connection semaphore closed")?;
+                let accepted = tokio::select! {
+                    biased;
+                    _ = &mut shutdown => break Ok(()),
+                    accepted = listener.accept() => accepted,
+                };
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => break Err(error).context("uds accept failed"),
+                };
+                let state = state.clone();
+                let frame_bytes = Arc::clone(&frame_bytes);
+                connections.spawn(async move {
+                    let _connection_permit = connection_permit;
+                    transport::handle_connection(stream, state, frame_bytes).await
+                });
+            }
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(joined) = joined {
+                    report_connection_exit(joined);
+                }
+            }
+        }
+    };
+
+    // No connection may outlive the supervised UDS listener. In particular,
+    // shutdown must cancel frames already blocked in reads or runtime dispatch.
+    connections.abort_all();
+    while let Some(joined) = connections.join_next().await {
+        report_connection_exit(joined);
+    }
+
+    listener_result
+}
+
+fn report_connection_exit(joined: std::result::Result<Result<()>, tokio::task::JoinError>) {
+    match joined {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "uds connection error"),
+        Err(error) if error.is_cancelled() => {}
+        Err(error) => tracing::error!(%error, "uds connection task failed"),
+    }
+}
+
+fn ready_lifecycle_response(state: &AppState) -> ryeos_node::LifecycleResponse {
+    let ready_at = lillux::time::iso8601_now();
+    let build = ryeos_app::build_info::get();
+    let identity = ryeos_node::LifecycleIdentity {
+        pid: std::process::id(),
+        bind: state.config.bind.to_string(),
+        uds_path: state.config.uds_path.clone(),
+        app_root: state.config.app_root.clone(),
+        started_at: state.started_at_iso.clone(),
+        version: build.version.to_string(),
+        revision: Some(build.revision.to_string()),
+        build_date: Some(build.build_date.to_string()),
+    };
+    let mut startup = ryeos_node::StartupSnapshot::bootstrapping(&state.started_at_iso);
+    startup.phase_started_at = ready_at.clone();
+    startup.elapsed_ms = state.started_at.elapsed().as_millis() as u64;
+    let mut response = ryeos_node::LifecycleResponse::running(identity, ready_at, startup);
+    response.thread_projection =
+        serde_json::to_value(state.state_store.projection_health_snapshot()).ok();
+    response
+}
+
+/// Kernel-authenticated identity of the process that opened this Unix stream.
+/// The pidfd, not the reusable numeric PID, remains authoritative for the
+/// connection lifetime.
+pub(crate) struct AuthenticatedUnixPeer {
+    pid: i64,
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+}
+
+impl AuthenticatedUnixPeer {
+    fn pid(&self) -> i64 {
+        self.pid
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pidfd(&self) -> BorrowedFd<'_> {
+        self.pidfd.as_fd()
+    }
+}
+
+const MAX_UDS_CONNECTIONS: usize = 32;
+const MAX_UDS_IN_FLIGHT_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 const TRANSPORT_FIELDS: &[&str] = &["callback_token", "thread_auth_token"];
 
@@ -56,10 +247,11 @@ fn strip_transport_fields(params: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-pub async fn dispatch_runtime_method(
+pub(crate) async fn dispatch_runtime_method(
     method: &str,
     params: &serde_json::Value,
     state: &AppState,
+    peer: Option<&AuthenticatedUnixPeer>,
 ) -> Result<serde_json::Value> {
     // Validate the callback token on ALL runtime.* methods, by access class:
     //
@@ -89,7 +281,10 @@ pub async fn dispatch_runtime_method(
             .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
         state.thread_auth.validate(tat, thread_id)?;
         None
-    } else if matches!(method, "runtime.poll_input" | "runtime.author_item") {
+    } else if matches!(
+        method,
+        "runtime.poll_input" | "runtime.author_item" | "runtime.project_snapshot"
+    ) {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
         // runtime holds: the per-request thread_auth_token (like dispatch_action)
@@ -106,7 +301,7 @@ pub async fn dispatch_runtime_method(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         let thread_auth = state.thread_auth.validate(tat, thread_id)?;
-        if method == "runtime.author_item" {
+        if matches!(method, "runtime.author_item" | "runtime.project_snapshot") {
             validated_thread_auth = Some(thread_auth);
         }
         let token = params
@@ -142,6 +337,8 @@ pub async fn dispatch_runtime_method(
         )
     };
 
+    enforce_runtime_callback_admission(method, params, state)?;
+
     // Strip transport-level fields before typed deserialization so
     // deny_unknown_fields on the RPC param structs doesn't reject
     // callback_token.
@@ -166,6 +363,9 @@ pub async fn dispatch_runtime_method(
         "runtime.bundle_events_scan" => {
             handle_bundle_events_scan(&clean_params, state, callback_cap.as_ref())
         }
+        "runtime.bundle_events_materialize_attachment" => {
+            handle_bundle_events_materialize_attachment(&clean_params, state, callback_cap.as_ref())
+        }
         "runtime.vault_put" => {
             handle_runtime_vault_put(&clean_params, state, callback_cap.as_ref())
         }
@@ -179,6 +379,12 @@ pub async fn dispatch_runtime_method(
             handle_runtime_vault_list(&clean_params, state, callback_cap.as_ref())
         }
         "runtime.author_item" => handle_runtime_author_item(
+            &clean_params,
+            state,
+            callback_cap.as_ref(),
+            validated_thread_auth.as_ref(),
+        ),
+        "runtime.project_snapshot" => handle_runtime_project_snapshot(
             &clean_params,
             state,
             callback_cap.as_ref(),
@@ -202,21 +408,91 @@ pub async fn dispatch_runtime_method(
         }
         "runtime.mark_running" => handle_mark_running(&clean_params, state),
         "runtime.request_continuation" => {
-            let result = handle_request_continuation(&clean_params, state)?;
-            spawn_machine_continuation_launch(state, &result);
+            let (result, prepared) = handle_request_continuation(&clean_params, state).await?;
+            spawn_machine_continuation_launch(state, &result, prepared);
             Ok(result)
         }
         "runtime.publish_artifact" => handle_publish_artifact(&clean_params, state),
         "runtime.get_facets" => handle_get_facets(&clean_params, state),
         "runtime.get_thread" => handle_get(&clean_params, state),
-        "runtime.submit_command" => handle_submit_command(&clean_params, state),
+        "runtime.submit_command" => handle_submit_command(&clean_params, state).await,
         "runtime.claim_commands" => handle_claim_commands(&clean_params, state),
         "runtime.complete_command" => handle_complete_command(&clean_params, state),
         "runtime.get_thread_events" => handle_replay_events(&clean_params, state),
-        "runtime.attach_process" => handle_attach_process(&clean_params, state),
+        "runtime.attach_process" => handle_attach_process(&clean_params, state, peer).await,
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
+}
+
+/// Fence callback mutations once a durable stop (or daemon shutdown) has
+/// closed authoring. Cooperative cancellation retains only the narrow surface
+/// needed to settle already-issued commands and finalize.
+fn enforce_runtime_callback_admission(
+    method: &str,
+    params: &serde_json::Value,
+    state: &AppState,
+) -> Result<()> {
+    if is_unrestricted_runtime_read_method(method) || method == "runtime.attach_process" {
+        return Ok(());
+    }
+    let thread_id = params
+        .get("thread_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow!("missing thread_id on {method}"))?;
+
+    if is_running_runtime_mutation(method) || is_sensitive_runtime_read_method(method) {
+        state
+            .state_store
+            .ensure_running_runtime_mutation_allowed(thread_id)?;
+        return Ok(());
+    }
+    state
+        .state_store
+        .ensure_runtime_callback_mutation_allowed(thread_id, is_stop_completion_method(method))
+}
+
+fn is_running_runtime_mutation(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.append_event"
+            | "runtime.append_events"
+            | "runtime.dispatch_action"
+            | "runtime.spawn_follow_child"
+            | "runtime.request_continuation"
+            | "runtime.author_item"
+            | "runtime.vault_put"
+            | "runtime.vault_delete"
+            | "runtime.bundle_events_append"
+            | "runtime.bundle_events_materialize_attachment"
+            | "runtime.publish_artifact"
+            | "runtime.submit_command"
+            | "runtime.poll_input"
+    )
+}
+
+fn is_stop_completion_method(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.finalize_thread" | "runtime.claim_commands" | "runtime.complete_command"
+    )
+}
+
+fn is_unrestricted_runtime_read_method(method: &str) -> bool {
+    is_chain_read_method(method) || method == "runtime.get_facets"
+}
+
+/// Reads that expose bundle state or vault material are live authority, not
+/// post-run inspection. Stop/shutdown/terminal therefore revoke them at the
+/// same running-thread boundary as authoring.
+fn is_sensitive_runtime_read_method(method: &str) -> bool {
+    matches!(
+        method,
+        "runtime.bundle_events_read_chain"
+            | "runtime.bundle_events_scan"
+            | "runtime.vault_get"
+            | "runtime.vault_list"
+    )
 }
 
 /// Runtime methods that carry a per-request `thread_auth_token`. The prelude
@@ -283,36 +559,86 @@ fn handle_mark_running(params: &serde_json::Value, state: &AppState) -> Result<s
         .context("failed to encode runtime.mark_running result")
 }
 
-fn handle_attach_process(
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeAttachProcessParams {
+    thread_id: String,
+    pid: i64,
+}
+
+async fn handle_attach_process(
     params: &serde_json::Value,
     state: &AppState,
+    peer: Option<&AuthenticatedUnixPeer>,
 ) -> Result<serde_json::Value> {
-    let mut params: ThreadAttachProcessParams =
+    let wire: RuntimeAttachProcessParams =
         serde_json::from_value(params.clone()).context("invalid runtime.attach_process params")?;
-    // The runtime self-reports its pid only; ALWAYS derive the process group
-    // daemon-side — never trust a runtime-supplied pgid. This gives reconcile's
-    // liveness check (and the live-pgid guard / shutdown drain) a real pgid to
-    // probe instead of treating the thread as dead.
-    params.pgid = ryeos_app::process::pgid_of(params.pid);
+    let peer = verify_attaching_peer_pid(wire.pid, peer)?;
+    // The runtime reports its own PID, which must match the accepted stream's
+    // kernel credential above. Derive and pin both the target and group leader
+    // daemon-side; never trust a runtime-supplied PGID or identity. The durable
+    // boot/start-time tuple is required for every later signal.
+    let process_identity = {
+        #[cfg(target_os = "linux")]
+        {
+            ryeos_app::process::capture_execution_process_identity_from_pidfd(
+                wire.pid,
+                None,
+                peer.pidfd(),
+            )
+            .context("capture runtime process identity from Unix peer pidfd")?
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("runtime.attach_process requires Linux SO_PEERPIDFD support");
+        }
+    };
+    let params = ThreadAttachProcessParams {
+        thread_id: wire.thread_id,
+        pid: wire.pid,
+        pgid: process_identity.pgid(),
+        process_identity: Some(process_identity),
+        metadata: None,
+        launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+    };
     let attached = match state.threads.attach_process(&params) {
         Ok(thread) => thread,
         Err(error) => {
-            if params.pgid > 0 {
-                let _ = ryeos_app::process::hard_kill_process_group(params.pgid);
+            if let Some(identity) = params.process_identity.clone() {
+                if let Err(join_error) = tokio::task::spawn_blocking(move || {
+                    ryeos_app::process::kill_by_action(
+                        &identity,
+                        ryeos_app::process::ShutdownAction::Hard,
+                    )
+                })
+                .await
+                {
+                    tracing::warn!(
+                        thread_id = %params.thread_id,
+                        error = %join_error,
+                        "runtime.attach_process cleanup worker failed"
+                    );
+                }
             }
             return Err(error)
-                .context("runtime.attach_process refused; spawned process group killed");
+                .context("runtime.attach_process refused; spawned process-group kill attempted");
         }
     };
     if state
         .state_store
         .launch_window_is_cancelled(&attached.chain_root_id)?
     {
-        let report = ryeos_app::cascade::signal_thread(
-            &state.state_store,
-            &attached.thread_id,
-            ryeos_app::cascade::CascadeMode::Graceful,
-        );
+        let stop_state = state.clone();
+        let stop_thread_id = attached.thread_id.clone();
+        let report = tokio::task::spawn_blocking(move || {
+            ryeos_app::cascade::signal_thread(
+                &stop_state.state_store,
+                &stop_thread_id,
+                ryeos_app::cascade::CascadeMode::Graceful,
+            )
+        })
+        .await
+        .context("late attachment cancellation worker failed")?;
         tracing::info!(
             thread_id = %attached.thread_id,
             report = %report,
@@ -322,121 +648,188 @@ fn handle_attach_process(
     serde_json::to_value(attached).context("failed to encode runtime.attach_process result")
 }
 
+fn verify_attaching_peer_pid(
+    reported_pid: i64,
+    peer: Option<&AuthenticatedUnixPeer>,
+) -> Result<&AuthenticatedUnixPeer> {
+    let peer = peer.ok_or_else(|| {
+        anyhow!("runtime.attach_process requires a kernel-authenticated Unix peer pidfd")
+    })?;
+    let peer_pid = peer.pid();
+    if reported_pid != peer_pid {
+        anyhow::bail!(
+            "runtime.attach_process PID mismatch: reported {reported_pid}, Unix peer {peer_pid}"
+        );
+    }
+    Ok(peer)
+}
+
 /// Runtime-supplied terminal completion received on `runtime.finalize_thread`.
 ///
 /// `cost` is the runtime's own cost JSON (`{input_tokens, output_tokens,
 /// total_usd}`); it is mapped into a [`FinalCost`] before finalization.
-#[derive(serde::Deserialize)]
+#[derive(Debug)]
 struct RuntimeFinalizeParams {
     thread_id: String,
-    status: String,
-    #[serde(default)]
+    status: ryeos_engine::contracts::ThreadTerminalStatus,
     outcome_code: Option<String>,
-    #[serde(default)]
     result: Option<serde_json::Value>,
-    #[serde(default)]
     error: Option<serde_json::Value>,
-    #[serde(default)]
-    cost: Option<serde_json::Value>,
+    cost: Option<RuntimeFinalizeCost>,
     /// The runtime's structured outputs + warnings. Preserved into the canonical
     /// managed envelope so a detached follow child's return data survives to the
-    /// parent's resume. Absent from older runtimes → degraded (empty).
-    #[serde(default)]
+    /// parent's resume.
     outputs: serde_json::Value,
-    #[serde(default)]
     warnings: Vec<String>,
 }
 
-/// Map a runtime self-reported terminal status. Timeout is daemon-owned — the
-/// launch supervisor finalizes timed-out runs via the fallback path — so a
-/// runtime never self-reports `timed_out` here, and any unrecognized status is
-/// rejected rather than guessed.
-fn terminal_status_from_str(status: &str) -> Result<ryeos_engine::contracts::ThreadTerminalStatus> {
-    use ryeos_engine::contracts::ThreadTerminalStatus;
-    Ok(match status {
-        "completed" => ThreadTerminalStatus::Completed,
-        "failed" => ThreadTerminalStatus::Failed,
-        "cancelled" => ThreadTerminalStatus::Cancelled,
-        "continued" => ThreadTerminalStatus::Continued,
-        "killed" => ThreadTerminalStatus::Killed,
-        other => anyhow::bail!("invalid terminal status: {other}"),
-    })
+struct RequiredNullable<T>(Option<T>);
+
+impl<'de, T> serde::Deserialize<'de> for RequiredNullable<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+        serde_json::from_value(value)
+            .map(Self)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
-fn final_cost_from_runtime_json(cost: &serde_json::Value) -> ryeos_engine::contracts::FinalCost {
-    ryeos_engine::contracts::FinalCost {
-        turns: 0,
-        input_tokens: cost
-            .get("input_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        output_tokens: cost
-            .get("output_tokens")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        spend: cost
-            .get("total_usd")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0),
-        provider: None,
-        basis: cost
-            .get("basis")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        metadata: None,
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeFinalizeParamsWire {
+    thread_id: String,
+    status: ryeos_engine::contracts::ThreadTerminalStatus,
+    outcome_code: RequiredNullable<String>,
+    result: RequiredNullable<serde_json::Value>,
+    error: RequiredNullable<serde_json::Value>,
+    cost: RequiredNullable<RuntimeFinalizeCost>,
+    outputs: serde_json::Value,
+    warnings: Vec<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for RuntimeFinalizeParams {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = RuntimeFinalizeParamsWire::deserialize(deserializer)?;
+        Ok(Self {
+            thread_id: wire.thread_id,
+            status: wire.status,
+            outcome_code: wire.outcome_code.0,
+            result: wire.result.0,
+            error: wire.error.0,
+            cost: wire.cost.0,
+            outputs: wire.outputs,
+            warnings: wire.warnings,
+        })
     }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeFinalizeCost {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_usd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    basis: Option<String>,
+}
+
+fn final_cost_from_runtime(
+    cost: &RuntimeFinalizeCost,
+) -> std::result::Result<
+    ryeos_engine::contracts::FinalCost,
+    ryeos_runtime::envelope::RuntimeCostError,
+> {
+    let runtime_cost = ryeos_runtime::envelope::RuntimeCost {
+        input_tokens: cost.input_tokens,
+        output_tokens: cost.output_tokens,
+        total_usd: cost.total_usd,
+        basis: cost.basis.clone(),
+    };
+    runtime_cost.validate()?;
+    Ok(ryeos_engine::contracts::FinalCost {
+        turns: 0,
+        input_tokens: runtime_cost.input_tokens,
+        output_tokens: runtime_cost.output_tokens,
+        spend: runtime_cost.total_usd,
+        provider: None,
+        basis: runtime_cost.basis,
+        metadata: None,
+    })
 }
 
 fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
+    let final_cost = params
+        .cost
+        .as_ref()
+        .map(final_cost_from_runtime)
+        .transpose()
+        .context("invalid runtime.finalize_thread cost")?;
+    let raw_cost = params
+        .cost
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()
+        .context("failed to encode validated runtime.finalize_thread cost")?;
     // Build the canonical managed envelope from the RAW runtime fields (raw cost,
     // outputs, warnings) BEFORE `completion` moves result/error, so a followed
     // child's structured return survives to the parent's resume.
     let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
-        &params.status,
+        params.status.as_str(),
         params.result.as_ref(),
         params.error.as_ref(),
-        params.cost.as_ref(),
+        raw_cost.as_ref(),
         &params.outputs,
         &params.warnings,
     );
     let completion = ryeos_engine::contracts::ExecutionCompletion {
-        status: terminal_status_from_str(&params.status)?,
+        status: params.status,
         outcome_code: params.outcome_code,
         result: params.result,
         error: params.error,
         artifacts: Vec::new(),
-        final_cost: params.cost.as_ref().map(final_cost_from_runtime_json),
+        final_cost,
         continuation_request: None,
         metadata: None,
     };
-    serde_json::to_value(state.threads.finalize_from_completion(
+    let finalized = state.threads.finalize_from_runtime_completion(
         &params.thread_id,
         &completion,
         Some(managed_envelope),
-    )?)
-    .context("failed to encode runtime.finalize_thread result")
+    )?;
+    // Terminal state is authoritative even while the wrapper remains alive.
+    // Revoke both in-memory credential classes immediately; an already-admitted
+    // concurrent request is still bounded by the StateStore lifecycle check.
+    state
+        .callback_tokens
+        .invalidate_for_thread(&params.thread_id);
+    state.thread_auth.invalidate_for_thread(&params.thread_id);
+    serde_json::to_value(finalized).context("failed to encode runtime.finalize_thread result")
 }
 
 fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: ThreadGetParams =
         serde_json::from_value(params.clone()).context("invalid runtime.get_thread params")?;
     match state.threads.get_thread(&params.thread_id)? {
-        Some(thread) => {
-            let facets = state.state_store.get_facets(&params.thread_id)?;
-            let facets_map: std::collections::HashMap<&str, &str> = facets
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            serde_json::to_value(json!({
-                "thread": thread,
-                "result": state.threads.get_thread_result(&params.thread_id)?,
-                "artifacts": state.threads.list_thread_artifacts(&params.thread_id)?,
-                "facets": facets_map,
-            }))
-            .context("failed to encode runtime.get_thread result")
-        }
+        // This chain-rehydration surface is intentionally slim. Artifacts and
+        // facets have their own bounded APIs; embedding their complete
+        // collections here made a tiny predecessor lookup allocate an
+        // arbitrarily large response.
+        Some(thread) => serde_json::to_value(json!({
+            "thread": thread,
+            "result": state.threads.get_thread_result(&params.thread_id)?,
+        }))
+        .context("failed to encode runtime.get_thread result"),
         None => Ok(serde_json::Value::Null),
     }
 }
@@ -446,13 +839,18 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
 /// Autonomous machine continuation is always-on: the chain-depth cap enforced at
 /// create time (`create_machine_continuation`) bounds an autonomous run, so an
 /// unbounded chain can no longer form and there is nothing to gate. The successor
-/// row + chain link are recorded by `request_continuation`; this fires the launch.
+/// row, chain link, and authoritative audit are recorded by the continuation
+/// lifecycle; this moves the exact prepared authority into the launch task.
 ///
 /// Spawned daemon-side (NOT from the dying runtime — a lifecycle hazard) after
 /// the source is settled `continued` and the state-store write lock has dropped.
-/// `launch_successor` claims the launch lease, so a concurrent reconcile cannot
-/// double-launch the same successor.
-fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Value) {
+/// The prepared launcher claims the launch lease, so a concurrent reconcile
+/// cannot double-launch the same successor.
+fn spawn_machine_continuation_launch(
+    state: &AppState,
+    result: &serde_json::Value,
+    prepared: ryeos_executor::execution::launch::PreparedMachineSuccessorLaunch,
+) {
     let Some(successor_id) = result
         .get("successor_thread_id")
         .and_then(|v| v.as_str())
@@ -464,7 +862,13 @@ fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Valu
     let st = state.clone();
     tokio::spawn(async move {
         use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
-        match ryeos_executor::execution::launch::launch_successor(st, &successor_id).await {
+        match ryeos_executor::execution::launch::launch_prepared_machine_successor(
+            st,
+            &successor_id,
+            prepared,
+        )
+        .await
+        {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
             Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
                 tracing::debug!(
@@ -484,14 +888,44 @@ fn spawn_machine_continuation_launch(state: &AppState, result: &serde_json::Valu
     });
 }
 
-fn handle_request_continuation(
+async fn handle_request_continuation(
     params: &serde_json::Value,
     state: &AppState,
-) -> Result<serde_json::Value> {
+) -> Result<(
+    serde_json::Value,
+    ryeos_executor::execution::launch::PreparedMachineSuccessorLaunch,
+)> {
     let params: ThreadContinuationParams = serde_json::from_value(params.clone())
         .context("invalid runtime.request_continuation params")?;
-    serde_json::to_value(state.threads.request_continuation(&params)?)
-        .context("failed to encode runtime.request_continuation result")
+    let resume_context = state
+        .state_store
+        .get_launch_metadata(&params.thread_id)?
+        .and_then(|metadata| metadata.resume_context)
+        .ok_or_else(|| {
+            anyhow!(
+                "source thread {} has no captured ResumeContext",
+                params.thread_id
+            )
+        })?;
+    let successor_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let prepared = ryeos_executor::execution::launch::prepare_machine_successor_launch(
+        state,
+        &successor_thread_id,
+        &resume_context,
+        &params.thread_id,
+    )
+    .await?;
+    let initial_events = prepared.initial_audit_events()?;
+    let result = state.threads.request_continuation_with_events(
+        &params,
+        &successor_thread_id,
+        &resume_context,
+        prepared.launch_metadata(),
+        initial_events,
+    )?;
+    let encoded = serde_json::to_value(result)
+        .context("failed to encode runtime.request_continuation result")?;
+    Ok((encoded, prepared.with_persisted_birth_audit()))
 }
 
 fn handle_append_event(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
@@ -524,6 +958,12 @@ fn handle_append_event_batch(
 fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let params: EventReplayParams =
         serde_json::from_value(params.clone()).context("invalid events.replay params")?;
+    if params.limit == 0 || params.limit > MAX_RUNTIME_REPLAY_PAGE_LIMIT {
+        anyhow::bail!(
+            "runtime events.replay limit must be between 1 and {}",
+            MAX_RUNTIME_REPLAY_PAGE_LIMIT
+        );
+    }
     serde_json::to_value(state.events.replay(&params)?)
         .context("failed to encode events.replay result")
 }
@@ -567,6 +1007,20 @@ fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<ser
             return Err(anyhow::Error::new(e).context("failed to encode poll_input inputs"));
         }
     };
+    let response = json!({ "inputs": inputs_value });
+    let response_bytes = match serde_json::to_vec(&response) {
+        Ok(bytes) => bytes.len(),
+        Err(error) => {
+            state.live_input.restore_front(thread_id, pending);
+            return Err(anyhow::Error::new(error).context("failed to size poll_input response"));
+        }
+    };
+    if response_bytes > MAX_LIVE_INPUT_POLL_RESPONSE_BYTES {
+        state.live_input.restore_front(thread_id, pending);
+        anyhow::bail!(
+            "runtime.poll_input response is {response_bytes} bytes; maximum is {MAX_LIVE_INPUT_POLL_RESPONSE_BYTES}"
+        );
+    }
 
     // A `cognition_in` carries only `content` — the intent is a delivery concern,
     // not part of the braid. Indexed (durable) so resume folds it in order.
@@ -587,7 +1041,7 @@ fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<ser
         // back for the loop to fold.
         Ok(Some(_persisted)) => {
             state.live_input.ack_drained(thread_id, n);
-            Ok(json!({ "inputs": inputs_value }))
+            Ok(response)
         }
         // Not running (terminal) — discard and release the reservation. The
         // queue close at finalize already cleared queued items; this drops
@@ -653,6 +1107,23 @@ fn handle_bundle_events_scan(
         params,
     )?)
     .context("failed to encode bundle_events.scan result")
+}
+
+fn handle_bundle_events_materialize_attachment(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let params: BundleEventMaterializeAttachmentParams = serde_json::from_value(params.clone())
+        .context("invalid bundle_events.materialize_attachment params")?;
+    serde_json::to_value(BundleEventService::materialize_attachment(
+        &state.state_store,
+        &state.authorizer,
+        cap,
+        params,
+    )?)
+    .context("failed to encode bundle_events.materialize_attachment result")
 }
 
 fn handle_runtime_vault_put(
@@ -743,7 +1214,20 @@ fn handle_runtime_author_item(
     .context("failed to encode runtime.author_item result")
 }
 
-fn handle_submit_command(
+fn handle_runtime_project_snapshot(
+    params: &serde_json::Value,
+    state: &AppState,
+    cap: Option<&ryeos_app::callback_token::CallbackCapability>,
+    thread_auth: Option<&ryeos_app::callback_token::ThreadAuthState>,
+) -> Result<serde_json::Value> {
+    let cap = cap.ok_or_else(|| anyhow::anyhow!("missing callback capability"))?;
+    let thread_auth = thread_auth.ok_or_else(|| anyhow::anyhow!("missing thread auth state"))?;
+    let params: RuntimeProjectSnapshotRequest = serde_json::from_value(params.clone())
+        .context("invalid runtime.project_snapshot params")?;
+    RuntimeProjectSnapshotService::execute(state, cap, thread_auth, params)
+}
+
+async fn handle_submit_command(
     params: &serde_json::Value,
     state: &AppState,
 ) -> Result<serde_json::Value> {
@@ -763,19 +1247,31 @@ fn handle_submit_command(
         _ => None,
     };
     if let Some(mode) = stop_mode {
-        match ryeos_app::cascade::stop_thread_and_descendants(state, &thread_id, mode) {
-            Ok((report, cancelled_roots)) => {
+        let stop_state = state.clone();
+        let stop_thread_id = thread_id.clone();
+        let stop_result = tokio::task::spawn_blocking(move || {
+            ryeos_app::cascade::stop_thread_and_descendants(&stop_state, &stop_thread_id, mode)
+        })
+        .await;
+        match stop_result {
+            Ok(Ok((report, cancelled_roots))) => {
                 for root in cancelled_roots {
                     ryeos_executor::execution::launch::kick_follow_resume_if_ready(state, &root);
                 }
                 tracing::info!(thread_id = %thread_id, command_type = %command_type,
                     report = %report, "cancel/kill signalled target and descendants");
             }
-            Err(e) => tracing::warn!(
+            Ok(Err(e)) => tracing::warn!(
                 thread_id = %thread_id,
                 command_type = %command_type,
                 error = %e,
                 "cancel/kill stop failed on runtime submit_command"
+            ),
+            Err(e) => tracing::warn!(
+                thread_id = %thread_id,
+                command_type = %command_type,
+                error = %e,
+                "cancel/kill stop worker failed on runtime submit_command"
             ),
         }
     }
@@ -876,9 +1372,9 @@ mod tests {
     use ryeos_app::event_store_service::EventStoreService;
     use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
     use ryeos_app::identity::NodeIdentity;
-    use ryeos_app::kind_profiles::KindProfileRegistry;
+    use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
-    use ryeos_app::state_store::StateStore;
+    use ryeos_app::state_store::{NewThreadRecord, StateStore};
     use ryeos_app::thread_lifecycle::{
         ThreadCreateParams, ThreadFinalizeParams, ThreadLifecycleService,
     };
@@ -886,6 +1382,33 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
     use tempfile::TempDir;
+
+    #[test]
+    fn runtime_attach_requires_matching_unix_peer_pid() {
+        fn peer(pid: i64) -> AuthenticatedUnixPeer {
+            AuthenticatedUnixPeer {
+                pid,
+                #[cfg(target_os = "linux")]
+                pidfd: std::fs::File::open("/dev/null").unwrap().into(),
+            }
+        }
+
+        let matching = peer(42);
+        verify_attaching_peer_pid(42, Some(&matching)).unwrap();
+
+        let missing = verify_attaching_peer_pid(42, None)
+            .err()
+            .expect("missing authenticated Unix peer should be rejected");
+        assert!(format!("{missing:#}").contains("kernel-authenticated Unix peer pidfd"));
+
+        let other = peer(43);
+        let mismatched = verify_attaching_peer_pid(42, Some(&other))
+            .err()
+            .expect("mismatched authenticated Unix peer should be rejected");
+        let message = format!("{mismatched:#}");
+        assert!(message.contains("reported 42"), "got: {message}");
+        assert!(message.contains("Unix peer 43"), "got: {message}");
+    }
 
     type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
 
@@ -912,7 +1435,6 @@ mod tests {
             operator_signing_key_path: tmpdir.path().join("user-key.pem"),
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
-            sandbox_enabled: false,
             tool_env_passthrough: Vec::new(),
         };
 
@@ -924,16 +1446,50 @@ mod tests {
         let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
             &identity,
         ));
+        let mut head_trust = ryeos_state::refs::TrustStore::new();
+        head_trust.insert(
+            identity.fingerprint().to_string(),
+            *identity.verifying_key(),
+        );
         let write_barrier = WriteBarrier::new();
         let state_store = Arc::new(
-            StateStore::new(runtime_state_dir, runtime_db_path, signer, write_barrier).unwrap(),
+            StateStore::new_with_head_trust(
+                tmpdir.path().to_path_buf(),
+                runtime_state_dir,
+                runtime_db_path,
+                signer,
+                write_barrier,
+                Arc::new(head_trust),
+            )
+            .unwrap(),
         );
-        let kind_profiles = Arc::new(KindProfileRegistry::build(None));
+        let engine = Arc::new(ryeos_engine::engine::Engine::new(
+            ryeos_engine::kind_registry::KindRegistry::empty(),
+            ryeos_engine::parsers::ParserDispatcher::new(
+                ryeos_engine::parsers::ParserRegistry::empty(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        ));
+        // Most rows in this minimal harness use the daemon-internal
+        // `system_task` profile. Follow-reconciliation fixtures truthfully use
+        // the standard bundle's `graph_run` profile without teaching the
+        // production registry any hardcoded schema kinds.
+        let kind_profiles = Arc::new(KindProfileRegistry::build(None).with_test_profile(
+            "graph_run",
+            ThreadKindProfile {
+                root_executable: true,
+                supports_interrupt: false,
+                supports_continuation: true,
+                supports_operator_followup: false,
+            },
+        ));
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
             ThreadLifecycleService::new(
                 state_store.clone(),
+                engine.clone(),
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
@@ -946,14 +1502,6 @@ mod tests {
             events.clone(),
         ));
 
-        let engine = ryeos_engine::engine::Engine::new(
-            ryeos_engine::kind_registry::KindRegistry::empty(),
-            ryeos_engine::parsers::ParserDispatcher::new(
-                ryeos_engine::parsers::ParserRegistry::empty(),
-                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-            ),
-            Vec::new(),
-        );
         let test_command_registry = Arc::new(
             ryeos_runtime::CommandRegistry::from_records(&[], &Default::default()).unwrap(),
         );
@@ -961,8 +1509,9 @@ mod tests {
 
         let state = AppState {
             config: Arc::new(config),
+            isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
             state_store,
-            engine: Arc::new(engine),
+            engine,
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),
@@ -991,6 +1540,9 @@ mod tests {
                 hosted_node_policies: vec![],
                 command_registration_policy: Default::default(),
             }),
+            node_history_policy: Arc::new(
+                ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+            ),
             vault: Arc::new(ryeos_app::vault::SealedEnvelopeVault::new(
                 tmpdir.path().join("vault-store.toml"),
                 lillux::vault::VaultSecretKey::generate(),
@@ -1008,11 +1560,26 @@ mod tests {
     }
 
     fn make_create_params(thread_id: &str, chain_root_id: &str) -> ThreadCreateParams {
+        let captured_history_policy = (thread_id == chain_root_id).then(|| {
+            let hash = "a".repeat(64);
+            ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: "directive:test/directive".to_string(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                },
+            }
+        });
         ThreadCreateParams {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
             kind: "system_task".to_string(),
-            item_ref: "test/directive".to_string(),
+            item_ref: "directive:test/directive".to_string(),
             executor_ref: "test/executor".to_string(),
             launch_mode: "inline".to_string(),
             current_site_id: "site:test".to_string(),
@@ -1022,7 +1589,50 @@ mod tests {
             project_root: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
+            captured_history_policy,
         }
+    }
+
+    /// Construct the authoritative root shape written for a detached follow
+    /// child before its first launch. The sealed fixture is the source of truth
+    /// for every identity field; mixing it with the generic system-task fixture
+    /// would correctly make reconciliation refuse to relaunch the row.
+    fn make_pending_follow_child_params(thread_id: &str) -> ThreadCreateParams {
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        ThreadCreateParams {
+            thread_id: thread_id.to_string(),
+            chain_root_id: thread_id.to_string(),
+            kind: "graph_run".to_string(),
+            item_ref: sealed.item_ref().to_string(),
+            executor_ref: sealed.executor_ref().to_string(),
+            launch_mode: "detached".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            upstream_thread_id: None,
+            requested_by: Some("session:test".to_string()),
+            project_root: None,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+            captured_history_policy: Some(sealed.captured_history_policy().clone()),
+        }
+    }
+
+    fn ensure_test_root(state: &AppState, thread_id: &str) {
+        if state.threads.get_thread(thread_id).unwrap().is_none() {
+            state
+                .threads
+                .create_thread_for_test(&make_create_params(thread_id, thread_id))
+                .unwrap();
+        }
+    }
+
+    fn create_running_test_thread(state: &AppState, thread_id: &str) {
+        state
+            .threads
+            .create_thread_for_test(&make_create_params(thread_id, thread_id))
+            .unwrap();
+        state.threads.mark_running(thread_id).unwrap();
     }
 
     fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {
@@ -1041,6 +1651,23 @@ mod tests {
         resp.error.as_ref().expect("expected error")
     }
 
+    fn bootstrap_lifecycle(tmp: &TempDir) -> ryeos_node::LifecycleResponse {
+        let started_at = "2026-07-14T00:00:00Z";
+        ryeos_node::LifecycleResponse::starting(
+            ryeos_node::LifecycleIdentity {
+                pid: 42,
+                bind: "127.0.0.1:7400".into(),
+                uds_path: tmp.path().join("ryeosd.sock"),
+                app_root: tmp.path().to_path_buf(),
+                started_at: started_at.into(),
+                version: "test".into(),
+                revision: None,
+                build_date: None,
+            },
+            ryeos_node::StartupSnapshot::bootstrapping(started_at),
+        )
+    }
+
     // ── system methods ──────────────────────────────────────────────
 
     #[tokio::test]
@@ -1057,6 +1684,61 @@ mod tests {
         let resp = dispatch(rpc("lifecycle.status", json!({})), &state).await;
         assert!(resp.error.is_none());
         assert_eq!(rpc_ok(&resp)["status"], "running");
+        assert_eq!(rpc_ok(&resp)["schema"], 1);
+        assert_eq!(rpc_ok(&resp)["ready"], true);
+        assert_eq!(rpc_ok(&resp)["startup"]["phase"], "ready");
+        assert!(rpc_ok(&resp)["ready_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn dynamic_bootstrap_serves_status_and_classified_not_ready() {
+        let tmp = TempDir::new().unwrap();
+        let state = DynamicServerState::bootstrap(bootstrap_lifecycle(&tmp)).unwrap();
+
+        let status =
+            routing::dispatch_dynamic(rpc("lifecycle.status", json!({})), &state, None).await;
+        assert_eq!(rpc_ok(&status)["status"], "starting");
+        assert_eq!(rpc_ok(&status)["ready"], false);
+        assert_eq!(rpc_ok(&status)["startup"]["sequence"], 0);
+
+        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
+        assert_eq!(rpc_err(&health).code, "node_starting");
+
+        let runtime =
+            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
+        let error = rpc_err(&runtime);
+        assert_eq!(error.code, "node_starting");
+        assert!(error.retryable);
+        assert_eq!(error.details["phase"], "bootstrapping");
+        assert_eq!(error.details["sequence"], 0);
+
+        // Application publication is a separate boundary from Ready. Once it
+        // lands, token-gated recovery callbacks enter the runtime dispatcher
+        // while ordinary external admission is still closed. A missing token
+        // therefore fails at callback authentication, not at startup gating.
+        let (_app_tmp, app) = setup_app_state();
+        state.publish_application(Arc::new(app));
+        let health = routing::dispatch_dynamic(rpc("system.health", json!({})), &state, None).await;
+        assert_eq!(rpc_err(&health).code, "node_starting");
+        let callback =
+            routing::dispatch_dynamic(rpc("runtime.get_thread", json!({})), &state, None).await;
+        let callback_error = rpc_err(&callback);
+        assert_eq!(callback_error.code, "request_failed");
+        assert!(callback_error.message.contains("missing callback_token"));
+    }
+
+    #[tokio::test]
+    async fn dynamic_state_refuses_ready_before_application_publication() {
+        let tmp = TempDir::new().unwrap();
+        let starting = bootstrap_lifecycle(&tmp);
+        let state = DynamicServerState::bootstrap(starting.clone()).unwrap();
+        let ready = ryeos_node::LifecycleResponse::running(
+            starting.identity,
+            "2026-07-14T00:00:01Z",
+            starting.startup,
+        );
+        let error = state.publish_lifecycle(ready).unwrap_err();
+        assert!(error.to_string().contains("before application state"));
     }
 
     #[tokio::test]
@@ -1137,13 +1819,46 @@ mod tests {
 
     // ── thread lifecycle (runtime-internal, via runtime.*) ──────────
 
+    #[test]
+    fn runtime_finalize_requires_every_exact_wire_key() {
+        let complete = json!({
+            "thread_id": "T-exact",
+            "status": "completed",
+            "outcome_code": null,
+            "result": null,
+            "error": null,
+            "cost": null,
+            "outputs": null,
+            "warnings": [],
+        });
+        assert!(serde_json::from_value::<RuntimeFinalizeParams>(complete.clone()).is_ok());
+
+        for key in [
+            "thread_id",
+            "status",
+            "outcome_code",
+            "result",
+            "error",
+            "cost",
+            "outputs",
+            "warnings",
+        ] {
+            let mut incomplete = complete.clone();
+            incomplete.as_object_mut().unwrap().remove(key);
+            assert!(
+                serde_json::from_value::<RuntimeFinalizeParams>(incomplete).is_err(),
+                "omitting `{key}` must violate runtime.finalize_thread's exact wire"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn runtime_finalize_thread_works() {
         let (_tmp, state) = setup_app_state();
         let params = make_create_params("T-1", "T-1");
 
         // threads.create is internal — call service directly
-        state.threads.create_thread(&params).unwrap();
+        state.threads.create_thread_for_test(&params).unwrap();
 
         let cbt = state.callback_tokens.generate(
             "T-1",
@@ -1151,6 +1866,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
 
         let resp = dispatch(
@@ -1162,7 +1878,10 @@ mod tests {
                     "status": "completed",
                     "outcome_code": "success",
                     "result": "4",
+                    "error": null,
                     "cost": {"input_tokens": 10, "output_tokens": 2, "total_usd": 0.01},
+                    "outputs": null,
+                    "warnings": [],
                 }),
             ),
             &state,
@@ -1179,6 +1898,114 @@ mod tests {
             .expect("thread result row present after finalize");
         assert_eq!(persisted.outcome_code.as_deref(), Some("success"));
         assert_eq!(persisted.result, Some(json!("4")));
+        let authority = state
+            .threads
+            .get_thread_terminal_authority("T-1")
+            .unwrap()
+            .expect("terminal authority present");
+        let envelope = authority
+            .managed_envelope
+            .expect("managed runtime envelope persisted in signed snapshot");
+        assert_eq!(envelope["result"], "4");
+        assert_eq!(envelope["outputs"], Value::Null);
+        assert_eq!(envelope["warnings"], json!([]));
+    }
+
+    #[test]
+    fn runtime_finalize_uses_closed_terminal_status_enum() {
+        for status in ["timed_out", "running", "done"] {
+            let value = json!({
+                "thread_id": "T-test",
+                "status": status,
+                "outputs": null,
+                "warnings": [],
+            });
+            assert!(serde_json::from_value::<RuntimeFinalizeParams>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_finalize_requires_outputs_and_warnings() {
+        let complete = json!({
+            "thread_id": "T-test",
+            "status": "completed",
+            "outputs": null,
+            "warnings": [],
+        });
+        let mut missing_outputs = complete.clone();
+        missing_outputs
+            .as_object_mut()
+            .expect("runtime finalize object")
+            .remove("outputs");
+        let mut missing_warnings = complete;
+        missing_warnings
+            .as_object_mut()
+            .expect("runtime finalize object")
+            .remove("warnings");
+
+        assert!(serde_json::from_value::<RuntimeFinalizeParams>(missing_outputs).is_err());
+        assert!(serde_json::from_value::<RuntimeFinalizeParams>(missing_warnings).is_err());
+    }
+
+    #[test]
+    fn runtime_finalize_cost_shape_is_strict() {
+        for cost in [
+            json!({"input_tokens": 1, "total_usd": 0.01}),
+            json!({"input_tokens": -1, "output_tokens": 2, "total_usd": 0.01}),
+            json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": 0.01,
+                "unexpected": true,
+            }),
+        ] {
+            let value = json!({
+                "thread_id": "T-test",
+                "status": "completed",
+                "cost": cost,
+                "outputs": null,
+                "warnings": [],
+            });
+            assert!(serde_json::from_value::<RuntimeFinalizeParams>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn runtime_finalize_cost_rejects_invalid_values_and_storage_overflow() {
+        for cost in [
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_usd: -0.01,
+                basis: None,
+            },
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_usd: f64::INFINITY,
+                basis: None,
+            },
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: 2,
+                total_usd: 0.01,
+                basis: Some("estimate".to_string()),
+            },
+            RuntimeFinalizeCost {
+                input_tokens: i64::MAX as u64 + 1,
+                output_tokens: 2,
+                total_usd: 0.01,
+                basis: None,
+            },
+            RuntimeFinalizeCost {
+                input_tokens: 1,
+                output_tokens: i64::MAX as u64 + 1,
+                total_usd: 0.01,
+                basis: None,
+            },
+        ] {
+            assert!(final_cost_from_runtime(&cost).is_err());
+        }
     }
 
     // ── runtime.spawn_follow_child: auth + admission rejections ──────────
@@ -1194,8 +2021,9 @@ mod tests {
     fn setup_follow_parent(state: &AppState, caps: Vec<String>) -> (String, String) {
         state
             .threads
-            .create_thread(&make_create_params("P", "P"))
+            .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
+        state.threads.mark_running("P").unwrap();
         state
             .state_store
             .seed_launch_metadata(
@@ -1215,6 +2043,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             caps,
             test_provenance(state, "/proj"),
+            "0".repeat(64),
         );
         let tat = state.thread_auth.mint(
             "P",
@@ -1238,8 +2067,20 @@ mod tests {
             "graph_run_id": "gr-1",
             "follow_node": "node-a",
             "step_count": 0,
-            "child_item_ref": child,
-            "child_parameters": {},
+            "children": [{
+                "item_ref": child,
+                "ref_bindings": {},
+                "parameters": {},
+            }],
+            "completion": {
+                "status": "continued",
+                "outcome_code": "continued",
+                "result": null,
+                "error": null,
+                "cost": null,
+                "outputs": null,
+                "warnings": [],
+            },
         })
     }
 
@@ -1264,20 +2105,36 @@ mod tests {
         chain_root_id: &str,
         upstream: Option<&str>,
     ) -> ryeos_app::state_store::NewThreadRecord {
+        let captured_history_policy = (thread_id == chain_root_id).then(|| {
+            let hash = "a".repeat(64);
+            ryeos_state::objects::CapturedThreadHistoryPolicy {
+                retention: ryeos_state::objects::ThreadHistoryRetention::Durable,
+                canonical_item_ref: "graph:test/graph".to_string(),
+                item_content_hash: hash.clone(),
+                item_signer_fingerprint: Some(hash.clone()),
+                item_trust_class: ryeos_state::objects::CapturedItemTrustClass::Trusted,
+                kind_schema_content_hash: hash,
+                resolved_from: ryeos_state::objects::CapturedPolicyProvenance::NodeDefault {
+                    node_policy:
+                        ryeos_state::objects::CapturedNodeHistoryPolicyProvenance::MissingConfig,
+                },
+            }
+        });
         ryeos_app::state_store::NewThreadRecord {
             thread_id: thread_id.to_string(),
             chain_root_id: chain_root_id.to_string(),
             kind: "graph".to_string(),
-            item_ref: "test/graph".to_string(),
+            item_ref: "graph:test/graph".to_string(),
             executor_ref: "test/executor".to_string(),
             launch_mode: "detached".to_string(),
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: upstream.map(Into::into),
             requested_by: Some("user:test".to_string()),
-            project_root: None,
+            project_root: Some(std::path::PathBuf::from("/tmp/p")),
             usage_subject: None,
             usage_subject_asserted_by: None,
+            captured_history_policy,
         }
     }
 
@@ -1289,37 +2146,39 @@ mod tests {
         use ryeos_engine::contracts::{
             EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
         };
-        state
-            .threads
-            .create_thread(&make_create_params("P", "P"))
-            .unwrap();
+        let mut parent = make_create_params("P", "P");
+        parent.project_root = Some(std::path::PathBuf::from("/tmp/p"));
+        state.threads.create_thread_for_test(&parent).unwrap();
         state.threads.mark_running("P").unwrap();
         state
             .state_store
             .seed_launch_metadata(
                 "P",
-                &RuntimeLaunchMetadata::default().with_resume_context(ResumeContext {
-                    kind: "graph".into(),
-                    item_ref: "test/graph".into(),
-                    launch_mode: "detached".into(),
-                    parameters: json!({}),
-                    project_context: ProjectContext::LocalPath {
-                        path: std::path::PathBuf::from("/tmp/p"),
-                    },
-                    original_snapshot_hash: None,
-                    original_pushed_head_ref: None,
-                    state_root: None,
-                    current_site_id: "site:test".into(),
-                    origin_site_id: "site:test".into(),
-                    requested_by: EffectivePrincipal::Local(Principal {
-                        fingerprint: "fp".into(),
-                        scopes: vec![],
+                &RuntimeLaunchMetadata::default()
+                    .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                    .with_resume_context(ResumeContext {
+                        kind: "graph".into(),
+                        item_ref: "graph:test/graph".into(),
+                        ref_bindings: std::collections::BTreeMap::new(),
+                        launch_mode: "detached".into(),
+                        parameters: json!({}),
+                        project_context: ProjectContext::LocalPath {
+                            path: std::path::PathBuf::from("/tmp/p"),
+                        },
+                        original_snapshot_hash: None,
+                        original_pushed_head_ref: None,
+                        state_root: None,
+                        current_site_id: "site:test".into(),
+                        origin_site_id: "site:test".into(),
+                        requested_by: EffectivePrincipal::Local(Principal {
+                            fingerprint: "fp".into(),
+                            scopes: vec![],
+                        }),
+                        execution_hints: ExecutionHints::default(),
+                        effective_caps: vec![],
+                        executor_ref: None,
+                        runtime_ref: None,
                     }),
-                    execution_hints: ExecutionHints::default(),
-                    effective_caps: vec![],
-                    executor_ref: None,
-                    runtime_ref: None,
-                }),
             )
             .unwrap();
         state
@@ -1338,6 +2197,10 @@ mod tests {
     /// a single test arms MORE than one waiter — `follow_waiter.parent_successor_thread_id`
     /// is UNIQUE (a successor belongs to exactly one follow), so each must differ.
     fn arm_waiting_follow_succ(state: &AppState, wk: &str, child: &str, successor: &str) {
+        // Follow mutations pin the authoritative parent chain. Model the real
+        // suspended-parent shape instead of relying on runtime rows without a
+        // signed state head.
+        ensure_test_root(state, "P");
         state
             .state_store
             .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
@@ -1361,11 +2224,65 @@ mod tests {
     }
 
     fn set_test_follow_child(state: &AppState, follow_key: &str, child: &str) {
-        let item_ref = "graph:test";
-        let hash = ryeos_app::runtime_db::follow_child_spec_hash(item_ref, &json!(null), None);
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let item_ref = sealed.item_ref();
+        let hash = ryeos_app::runtime_db::follow_child_spec_hash(
+            item_ref,
+            &std::collections::BTreeMap::new(),
+            &json!(null),
+            None,
+        )
+        .unwrap();
         state
             .state_store
-            .set_follow_child(follow_key, 0, item_ref, &hash, child, child)
+            .set_follow_child(follow_key, 0, item_ref, &hash, child, child, &sealed)
+            .unwrap();
+    }
+
+    /// Persist the complete pre-launch authority reconciliation requires for a
+    /// fresh follow child. This deliberately mirrors the production birth
+    /// boundary: resume identity, sealed request, and parent context are one
+    /// coherent record and agree with the waiter slot installed above.
+    fn seed_pending_follow_child_metadata(state: &AppState, child: &str) {
+        use ryeos_app::launch_metadata::{
+            PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
+        };
+        use ryeos_engine::contracts::{EffectivePrincipal, Principal, ProjectContext};
+
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let mut metadata = RuntimeLaunchMetadata::default()
+            .with_resume_context(ResumeContext {
+                kind: "graph_run".to_string(),
+                item_ref: sealed.item_ref().to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
+                launch_mode: "detached".to_string(),
+                parameters: json!({}),
+                project_context: ProjectContext::None,
+                original_snapshot_hash: None,
+                original_pushed_head_ref: None,
+                state_root: None,
+                current_site_id: "site:test".to_string(),
+                origin_site_id: "site:test".to_string(),
+                requested_by: EffectivePrincipal::Local(Principal {
+                    fingerprint: "session:test".to_string(),
+                    scopes: Vec::new(),
+                }),
+                execution_hints: Default::default(),
+                effective_caps: Vec::new(),
+                executor_ref: Some(sealed.executor_ref().to_string()),
+                runtime_ref: Some(sealed.runtime_ref().to_string()),
+            })
+            .with_sealed_root_request(sealed);
+        metadata.follow_parent_context = Some(PersistedParentExecutionContext {
+            parent_thread_id: "P".to_string(),
+            hard_limits: serde_json::Value::Null,
+            depth: 0,
+        });
+        state
+            .state_store
+            .seed_launch_metadata(child, &metadata)
             .unwrap();
     }
 
@@ -1394,6 +2311,13 @@ mod tests {
     #[tokio::test]
     async fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
         let (_tmp, state) = setup_app_state();
+        for child in ["CW", "CR", "CX"] {
+            state
+                .threads
+                .create_thread_for_test(&make_create_params(child, child))
+                .unwrap();
+        }
+        state.threads.mark_running("CW").unwrap();
         // A still-waiting waiter: its child chain has not been recorded terminal, so
         // the parent resume is not yet drivable — no intent. (Distinct successors:
         // parent_successor_thread_id is UNIQUE.)
@@ -1450,9 +2374,10 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cpre", "Cpre"))
+            .create_thread_for_test(&make_pending_follow_child_params("Cpre"))
             .unwrap();
         arm_waiting_follow(&state, "wk-pre", "Cpre");
+        seed_pending_follow_child_metadata(&state, "Cpre");
         assert_eq!(
             state.threads.get_thread("Cpre").unwrap().unwrap().status,
             ryeos_state::objects::ThreadStatus::Created.as_str(),
@@ -1483,7 +2408,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Catt", "Catt"))
+            .create_thread_for_test(&make_create_params("Catt", "Catt"))
             .unwrap();
         state
             .threads
@@ -1491,6 +2416,14 @@ mod tests {
                 thread_id: "Catt".to_string(),
                 pid: 424242,
                 pgid: 424242,
+                process_identity: Some(ryeos_app::process::ExecutionProcessIdentity {
+                    schema_version: ryeos_app::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+                    boot_id: "test-boot".to_string(),
+                    target_pid: 424242,
+                    target_start_time_ticks: 10,
+                    group_leader_pid: 424242,
+                    group_leader_start_time_ticks: 10,
+                }),
                 metadata: None,
                 launch_metadata: Default::default(),
             })
@@ -1514,7 +2447,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Crun", "Crun"))
+            .create_thread_for_test(&make_create_params("Crun", "Crun"))
             .unwrap();
         state.threads.mark_running("Crun").unwrap();
         arm_waiting_follow(&state, "wk-run", "Crun");
@@ -1539,7 +2472,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cnr", "Cnr"))
+            .create_thread_for_test(&make_create_params("Cnr", "Cnr"))
             .unwrap();
         state.threads.mark_running("Cnr").unwrap();
         arm_waiting_follow(&state, "wk-nr", "Cnr");
@@ -1549,7 +2482,8 @@ mod tests {
             "Cnr",
             "Cnr",
             json!({ "error": "resume rebuild failed" }),
-        );
+        )
+        .unwrap();
 
         // The finalize half readied the waiter (synchronous; the kick is a detached
         // spawn that hasn't run yet). A hung waiter here == the bug Oracle flagged.
@@ -1575,7 +2509,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Ssucc", "Ssucc"))
+            .create_thread_for_test(&make_create_params("Ssucc", "Ssucc"))
             .unwrap();
         // Exhaust the per-successor auto-launch budget.
         for _ in 0..ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS {
@@ -1617,7 +2551,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cterm", "Cterm"))
+            .create_thread_for_test(&make_create_params("Cterm", "Cterm"))
             .unwrap();
         state.threads.mark_running("Cterm").unwrap();
         // RAW state-store finalize bypasses record_follow_child_terminal, leaving the
@@ -1633,6 +2567,7 @@ mod tests {
                     error_json: None,
                     artifacts: vec![],
                     final_cost: None,
+                    managed_envelope: None,
                 },
             )
             .unwrap();
@@ -1701,7 +2636,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Ccancel", "Ccancel"))
+            .create_thread_for_test(&make_create_params("Ccancel", "Ccancel"))
             .unwrap();
         state.threads.mark_running("Ccancel").unwrap();
         arm_waiting_follow(&state, "wk-cancel", "Ccancel");
@@ -1746,7 +2681,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cfollow", "Cfollow"))
+            .create_thread_for_test(&make_create_params("Cfollow", "Cfollow"))
             .unwrap();
         state.threads.mark_running("Cfollow").unwrap();
         arm_waiting_follow(&state, "wk-aux", "Cfollow");
@@ -1754,7 +2689,7 @@ mod tests {
         // Auxiliary run riding the child's chain: own thread id, child's chain root.
         state
             .threads
-            .create_thread(&make_create_params("Kaux", "Cfollow"))
+            .create_thread_for_test(&make_create_params("Kaux", "Cfollow"))
             .unwrap();
         state.threads.mark_running("Kaux").unwrap();
         finalize_child(&state, "Kaux", "completed", Some(json!({ "positions": 1 })));
@@ -1809,8 +2744,9 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("Cres", "Cres"))
+            .create_thread_for_test(&make_pending_follow_child_params("Cres"))
             .unwrap();
+        ensure_test_root(&state, "P");
         state
             .state_store
             .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
@@ -1826,6 +2762,7 @@ mod tests {
             })
             .unwrap();
         set_test_follow_child(&state, "wk-res", "Cres");
+        seed_pending_follow_child_metadata(&state, "Cres");
         state
             .state_store
             .set_follow_parent_successor("wk-res", "S")
@@ -1866,6 +2803,7 @@ mod tests {
         // Reserved, child recorded, but no successor and parent not continued → the
         // parent's own native resume re-drives spawn_follow_child; leave it.
         let (_tmp, state) = setup_app_state();
+        ensure_test_root(&state, "Pnc");
         state
             .state_store
             .reserve_follow(&ryeos_app::runtime_db::NewFollowWaiter {
@@ -1917,7 +2855,7 @@ mod tests {
         assert!(matches!(
             state
                 .state_store
-                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .claim_thread_launch("S", "other-claim", "other:test")
                 .unwrap(),
             ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
         ));
@@ -1949,7 +2887,7 @@ mod tests {
         // A raw running "S" with no follow-resume marker (upstream None ≠ parent "P").
         state
             .threads
-            .create_thread(&make_create_params("S", "S"))
+            .create_thread_for_test(&make_create_params("S", "S"))
             .unwrap();
         state.threads.mark_running("S").unwrap();
         arm_waiting_follow(&state, "wk-unmarked", "C");
@@ -1964,7 +2902,7 @@ mod tests {
         assert!(matches!(
             state
                 .state_store
-                .claim_thread_launch("S", "other-claim", "other:test", 300_000)
+                .claim_thread_launch("S", "other-claim", "other:test")
                 .unwrap(),
             ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
         ));
@@ -1994,9 +2932,28 @@ mod tests {
         // waiter must be left intact (suspected corruption is for inspection).
         let (_tmp, state) = setup_app_state();
         // "S" links upstream to the parent "P" but carries NO follow-resume edge.
-        let mut params = make_create_params("S", "S");
+        ensure_test_root(&state, "P");
+        let mut params = make_create_params("S", "P");
         params.upstream_thread_id = Some("P".to_string());
-        state.threads.create_thread(&params).unwrap();
+        state
+            .state_store
+            .create_thread_for_test(&NewThreadRecord {
+                thread_id: params.thread_id,
+                chain_root_id: params.chain_root_id,
+                kind: params.kind,
+                item_ref: params.item_ref,
+                executor_ref: params.executor_ref,
+                launch_mode: params.launch_mode,
+                current_site_id: params.current_site_id,
+                origin_site_id: params.origin_site_id,
+                upstream_thread_id: params.upstream_thread_id,
+                requested_by: params.requested_by,
+                project_root: params.project_root,
+                usage_subject: params.usage_subject,
+                usage_subject_asserted_by: params.usage_subject_asserted_by,
+                captured_history_policy: params.captured_history_policy,
+            })
+            .unwrap();
         arm_waiting_follow(&state, "wk-nomarker", "C");
         state
             .state_store
@@ -2033,7 +2990,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-degraded", "C");
@@ -2067,7 +3024,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-mgd", "C");
@@ -2093,7 +3050,15 @@ mod tests {
                     error: None,
                     metadata: None,
                     artifacts: vec![],
-                    final_cost: None,
+                    final_cost: Some(ryeos_engine::contracts::FinalCost {
+                        turns: 0,
+                        input_tokens: 5,
+                        output_tokens: 1,
+                        spend: 0.001,
+                        provider: None,
+                        basis: None,
+                        metadata: None,
+                    }),
                     summary_json: None,
                 },
                 envelope,
@@ -2120,7 +3085,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-cont", "C");
@@ -2143,7 +3108,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("C", "C"))
             .unwrap();
         state.threads.mark_running("C").unwrap();
         arm_waiting_follow(&state, "wk-out", "C");
@@ -2157,6 +3122,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             vec![],
             test_provenance(&state, "/proj"),
+            "0".repeat(64),
         );
         let resp = dispatch(
             rpc(
@@ -2165,7 +3131,9 @@ mod tests {
                     "callback_token": cbt.token,
                     "thread_id": "C",
                     "status": "completed",
+                    "outcome_code": "success",
                     "result": "directive_return",
+                    "error": null,
                     "outputs": { "recommendations": ["a", "b"] },
                     "warnings": ["w1"],
                     "cost": { "input_tokens": 10, "output_tokens": 2, "total_usd": 0.01 },
@@ -2280,14 +3248,16 @@ mod tests {
         // seeded) → refused: follow needs a checkpoint-resumable parent.
         state
             .threads
-            .create_thread(&make_create_params("P", "P"))
+            .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
+        state.threads.mark_running("P").unwrap();
         let cbt = state.callback_tokens.generate(
             "P",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
             vec!["ryeos.execute.tool.*".into()],
             test_provenance(&state, "/proj"),
+            "0".repeat(64),
         );
         let tat = state.thread_auth.mint(
             "P",
@@ -2331,7 +3301,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-pub", "T-pub"))
+            .create_thread_for_test(&make_create_params("T-pub", "T-pub"))
             .unwrap();
 
         // A subscriber attached before finalization must receive the
@@ -2370,7 +3340,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-cancel", "T-cancel"))
+            .create_thread_for_test(&make_create_params("T-cancel", "T-cancel"))
             .unwrap();
         state.threads.mark_running("T-cancel").unwrap();
 
@@ -2406,7 +3376,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-seat", "T-seat"))
+            .create_thread_for_test(&make_create_params("T-seat", "T-seat"))
             .unwrap();
         state.threads.mark_running("T-seat").unwrap();
 
@@ -2439,7 +3409,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-Bad", "T-Bad"))
+            .create_thread_for_test(&make_create_params("T-Bad", "T-Bad"))
             .unwrap();
 
         let resp = dispatch(
@@ -2460,21 +3430,17 @@ mod tests {
     // ── events (via runtime.* token-gated) ──────────────────────────
 
     #[tokio::test]
-    async fn runtime_events_replay_after_thread_lifecycle() {
+    async fn runtime_finalize_revokes_callback_but_events_remain_replayable() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-events-1");
         let cbt = state.callback_tokens.generate(
             "T-events-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
-
-        state
-            .threads
-            .create_thread(&make_create_params("T-events-1", "T-events-1"))
-            .unwrap();
-
         let finalize_resp = dispatch(
             rpc(
                 "runtime.finalize_thread",
@@ -2483,6 +3449,11 @@ mod tests {
                     "thread_id": "T-events-1",
                     "status": "completed",
                     "outcome_code": "test",
+                    "result": null,
+                    "error": null,
+                    "cost": null,
+                    "outputs": null,
+                    "warnings": [],
                 }),
             ),
             &state,
@@ -2507,12 +3478,23 @@ mod tests {
         )
         .await;
         assert!(
-            replay_resp.error.is_none(),
-            "replay failed: {:?}",
-            replay_resp.error
+            rpc_err(&replay_resp)
+                .message
+                .contains("invalid callback capability"),
+            "terminal finalization must revoke the runtime callback: {:?}",
+            replay_resp.error,
         );
-        let result = rpc_ok(&replay_resp);
-        let events = result["events"].as_array().unwrap();
+
+        let replay = state
+            .events
+            .replay(&EventReplayParams {
+                chain_root_id: None,
+                thread_id: Some("T-events-1".to_string()),
+                after_chain_seq: None,
+                limit: 10,
+            })
+            .unwrap();
+        let events = replay.events;
         assert!(
             events.len() >= 2,
             "expected >= 2 events, got {}",
@@ -2520,7 +3502,7 @@ mod tests {
         );
         let types: Vec<&str> = events
             .iter()
-            .map(|e| e["event_type"].as_str().unwrap())
+            .map(|event| event.event_type.as_str())
             .collect();
         assert!(types.contains(&"thread_created"));
         assert!(types.contains(&"thread_completed"));
@@ -2533,18 +3515,15 @@ mod tests {
         // publish the same PersistedEventRecord into the per-thread
         // hub so SSE subscribers tail in real time.
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-stream-1");
         let cbt = state.callback_tokens.generate(
             "T-stream-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread(&make_create_params("T-stream-1", "T-stream-1"))
-            .unwrap();
-
         // Subscribe BEFORE the callback fires so the event lands in
         // the live broadcast.
         let mut rx = state.event_streams.subscribe("T-stream-1");
@@ -2583,17 +3562,15 @@ mod tests {
     #[tokio::test]
     async fn ephemeral_append_event_bridges_without_replay_persistence() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-ephemeral-1");
         let cbt = state.callback_tokens.generate(
             "T-ephemeral-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread(&make_create_params("T-ephemeral-1", "T-ephemeral-1"))
-            .unwrap();
         let mut rx = state.event_streams.subscribe("T-ephemeral-1");
 
         let resp = dispatch(
@@ -2645,18 +3622,15 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_event_cannot_be_ephemeral() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-ephemeral-bad");
         let cbt = state.callback_tokens.generate(
             "T-ephemeral-bad",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread(&make_create_params("T-ephemeral-bad", "T-ephemeral-bad"))
-            .unwrap();
-
         let resp = dispatch(
             rpc(
                 "runtime.append_event",
@@ -2688,17 +3662,15 @@ mod tests {
         // persisted (chain_seq) order so SSE consumers reconstruct
         // the runtime's emission sequence verbatim.
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-stream-2");
         let cbt = state.callback_tokens.generate(
             "T-stream-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
-        state
-            .threads
-            .create_thread(&make_create_params("T-stream-2", "T-stream-2"))
-            .unwrap();
         let mut rx = state.event_streams.subscribe("T-stream-2");
 
         let resp = dispatch(rpc("runtime.append_events", json!({
@@ -2749,17 +3721,26 @@ mod tests {
     #[tokio::test]
     async fn runtime_bundle_events_use_callback_bundle_identity_and_caps() {
         let (_tmp, state) = setup_app_state();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join("models")).unwrap();
+        std::fs::write(
+            project.path().join("models/checkpoint.bin"),
+            b"learner-checkpoint",
+        )
+        .unwrap();
+        create_running_test_thread(&state, "T-bundle-1");
         let cbt = state.callback_tokens.generate_with_context(
             "T-bundle-1",
-            std::path::PathBuf::from("/test"),
+            project.path().to_path_buf(),
             std::time::Duration::from_secs(300),
             vec![
                 "ryeos.append.bundle-events.example-bundle/example_event".to_string(),
                 "ryeos.scan.bundle-events.example-bundle/example_event".to_string(),
             ],
-            test_provenance(&state, "/test"),
+            test_provenance(&state, project.path().to_str().unwrap()),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -2775,7 +3756,12 @@ mod tests {
                     "event_type": "example_planned",
                     "schema_version": 1,
                     "payload": {"example_id": "example_1"},
-                    "idempotency_key": "record:example_1"
+                    "idempotency_key": "record:example_1",
+                    "attachments": [{
+                        "name": "checkpoint",
+                        "source_path": "models/checkpoint.bin",
+                        "media_type": "application/octet-stream"
+                    }]
                 }),
             ),
             &state,
@@ -2787,6 +3773,35 @@ mod tests {
         assert_eq!(
             rpc_ok(&append)["event"]["attribution"]["tool"],
             "tool:example-bundle/send"
+        );
+        assert_eq!(
+            rpc_ok(&append)["event"]["attachments"][0]["name"],
+            "checkpoint"
+        );
+
+        let materialize = dispatch(
+            rpc(
+                "runtime.bundle_events_materialize_attachment",
+                json!({
+                    "callback_token": cbt.token,
+                    "thread_id": "T-bundle-1",
+                    "event_kind": "example_event",
+                    "event_hash": event_hash,
+                    "attachment_name": "checkpoint",
+                    "destination_path": "models/restored/checkpoint.bin"
+                }),
+            ),
+            &state,
+        )
+        .await;
+        assert!(
+            materialize.error.is_none(),
+            "materialize failed: {:?}",
+            materialize.error
+        );
+        assert_eq!(
+            std::fs::read(project.path().join("models/restored/checkpoint.bin")).unwrap(),
+            b"learner-checkpoint"
         );
 
         let scan = dispatch(
@@ -2809,6 +3824,8 @@ mod tests {
     #[tokio::test]
     async fn runtime_bundle_events_reject_bundle_id_input_and_missing_cap() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-bundle-deny");
+        create_running_test_thread(&state, "T-bundle-deny-2");
         let cbt = state.callback_tokens.generate_with_context(
             "T-bundle-deny",
             std::path::PathBuf::from("/test"),
@@ -2817,6 +3834,7 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -2853,6 +3871,7 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/send".to_string()),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -2883,6 +3902,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-vault-1");
         let cbt = state.callback_tokens.generate_with_context(
             "T-vault-1",
             std::path::PathBuf::from("/test"),
@@ -2896,6 +3916,7 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -2974,6 +3995,9 @@ mod tests {
     #[tokio::test]
     async fn runtime_vault_rejects_bundle_id_input_missing_cap_and_other_bundle_ref() {
         let (_tmp, state) = setup_app_state();
+        create_running_test_thread(&state, "T-vault-deny");
+        create_running_test_thread(&state, "T-vault-deny-2");
+        create_running_test_thread(&state, "T-vault-deny-3");
         let cbt = state.callback_tokens.generate_with_context(
             "T-vault-deny",
             std::path::PathBuf::from("/test"),
@@ -2982,6 +4006,7 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -3017,6 +4042,7 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -3050,6 +4076,7 @@ mod tests {
             test_provenance(&state, "/test"),
             Some("example-bundle".to_string()),
             Some("tool:example-bundle/oauth/connect".to_string()),
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -3079,7 +4106,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-cmd-1", "T-cmd-1"))
+            .create_thread_for_test(&make_create_params("T-cmd-1", "T-cmd-1"))
             .unwrap();
 
         let cbt = state.callback_tokens.generate(
@@ -3088,6 +4115,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
 
         // Mark running first — cancel is only allowed on running threads
@@ -3161,7 +4189,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-tat-missing", "T-tat-missing"))
+            .create_thread_for_test(&make_create_params("T-tat-missing", "T-tat-missing"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-missing",
@@ -3169,6 +4197,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             vec!["*".to_string()],
             test_provenance(&state, "/p"),
+            "0".repeat(64),
         );
 
         // Note: `thread_auth_token` field intentionally absent.
@@ -3181,6 +4210,7 @@ mod tests {
                     "project_path": "/p",
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -3201,7 +4231,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-tat-wrong", "T-tat-wrong"))
+            .create_thread_for_test(&make_create_params("T-tat-wrong", "T-tat-wrong"))
             .unwrap();
         let cbt = state.callback_tokens.generate(
             "T-tat-wrong",
@@ -3209,6 +4239,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             vec!["*".to_string()],
             test_provenance(&state, "/p"),
+            "0".repeat(64),
         );
 
         // Use a syntactically plausible but unminted tat — must not be
@@ -3220,6 +4251,7 @@ mod tests {
                 "thread_auth_token": "tat-deadbeef0000000000000000000000000000000000000000000000000000",
                 "action": {
                     "item_id": "directive:ryeos/agent/core/base",
+                    "ref_bindings": {},
                     "thread": "inline",
                 },
             })),
@@ -3237,16 +4269,14 @@ mod tests {
     #[tokio::test]
     async fn dispatch_action_with_correct_token_uses_server_side_principal() {
         let (_tmp, state) = setup_app_state();
-        state
-            .threads
-            .create_thread(&make_create_params("T-tat-ok", "T-tat-ok"))
-            .unwrap();
+        create_running_test_thread(&state, "T-tat-ok");
         let cbt = state.callback_tokens.generate(
             "T-tat-ok",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             vec!["*".to_string()],
             test_provenance(&state, "/p"),
+            "0".repeat(64),
         );
         // Mint a tat for a SPECIFIC principal — this is the value the
         // daemon must use, not anything caller-controllable.
@@ -3274,6 +4304,7 @@ mod tests {
                     "acting_principal": "fp:attacker-spoofed-principal",
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -3306,6 +4337,7 @@ mod tests {
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -3325,16 +4357,14 @@ mod tests {
     #[tokio::test]
     async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
         let (_tmp, state) = setup_app_state();
-        state
-            .threads
-            .create_thread(&make_create_params("T-caps-empty", "T-caps-empty"))
-            .unwrap();
+        create_running_test_thread(&state, "T-caps-empty");
         let cbt = state.callback_tokens.generate(
             "T-caps-empty",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/p"),
+            "0".repeat(64),
         );
         let tat = state.thread_auth.mint(
             "T-caps-empty",
@@ -3353,6 +4383,7 @@ mod tests {
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -3373,16 +4404,14 @@ mod tests {
     #[tokio::test]
     async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
         let (_tmp, state) = setup_app_state();
-        state
-            .threads
-            .create_thread(&make_create_params("T-caps-wild", "T-caps-wild"))
-            .unwrap();
+        create_running_test_thread(&state, "T-caps-wild");
         let cbt = state.callback_tokens.generate(
             "T-caps-wild",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
             vec!["ryeos.*".to_string()],
             test_provenance(&state, "/p"),
+            "0".repeat(64),
         );
         let tat = state.thread_auth.mint(
             "T-caps-wild",
@@ -3401,6 +4430,7 @@ mod tests {
                     "thread_auth_token": tat.token,
                     "action": {
                         "item_id": "directive:ryeos/agent/core/base",
+                        "ref_bindings": {},
                         "thread": "inline",
                     },
                 }),
@@ -3426,7 +4456,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-facets-1", "T-facets-1"))
+            .create_thread_for_test(&make_create_params("T-facets-1", "T-facets-1"))
             .unwrap();
 
         let cbt = state.callback_tokens.generate(
@@ -3435,6 +4465,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(&state, "/test"),
+            "0".repeat(64),
         );
         let resp = dispatch(
             rpc(
@@ -3465,13 +4496,13 @@ mod tests {
     fn chain_with_successor(state: &AppState) -> ryeos_app::callback_token::CallbackCapability {
         state
             .threads
-            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-pred", "T-pred"))
             .unwrap();
         state.threads.mark_running("T-pred").unwrap();
         // Successor shares the predecessor's chain root.
         state
             .threads
-            .create_thread(&make_create_params("T-succ", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-succ", "T-pred"))
             .unwrap();
         state.callback_tokens.generate(
             "T-succ",
@@ -3479,6 +4510,7 @@ mod tests {
             std::time::Duration::from_secs(300),
             Vec::new(),
             test_provenance(state, "/test"),
+            "0".repeat(64),
         )
     }
 
@@ -3553,7 +4585,7 @@ mod tests {
         // A thread in a DIFFERENT chain.
         state
             .threads
-            .create_thread(&make_create_params("T-other", "T-other"))
+            .create_thread_for_test(&make_create_params("T-other", "T-other"))
             .unwrap();
 
         let resp = dispatch(
@@ -3588,7 +4620,7 @@ mod tests {
         // Completed `system_task` predecessor owned by `user:test`.
         state
             .threads
-            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-pred", "T-pred"))
             .unwrap();
         state.threads.mark_running("T-pred").unwrap();
         state
@@ -3607,8 +4639,11 @@ mod tests {
             .unwrap();
 
         let ctx = HandlerContext::new("user:test".to_string(), Vec::new(), true);
-        let req: ryeos_api::handlers::threads_input::Request =
-            serde_json::from_value(json!({"input": "again", "thread": "T-pred"})).unwrap();
+        let req: ryeos_api::handlers::threads_input::Request = serde_json::from_value(json!({
+            "input": "again",
+            "target": {"kind": "thread", "thread_id": "T-pred"},
+        }))
+        .unwrap();
         let resp = ryeos_api::handlers::threads_input::handle(req, ctx, state.clone())
             .await
             .expect("a non-continuable kind is a refusal, not an error");
@@ -3633,8 +4668,8 @@ mod tests {
     // `execution.supports_continuation` the client gates on, and the list rows
     // carry the chain-head edges (`upstream_thread_id` / `successor_thread_id`).
     //
-    // The harness builds `KindProfileRegistry::build(None)`, whose only kinds are
-    // the internal non-continuable profiles, so the value here is always `false`.
+    // These rows use the harness's internal non-continuable `system_task`
+    // profile, so the value here is always `false`.
     // That is the right thing to assert at this layer: `supports_continuation`'s
     // true/false value is the kind profile's concern (covered in
     // `kind_profiles`), while the risk THIS change introduces is whether every
@@ -3650,7 +4685,7 @@ mod tests {
         use ryeos_app::state_store::NewThreadRecord;
         state
             .threads
-            .create_thread(&make_create_params("T-pred", "T-pred"))
+            .create_thread_for_test(&make_create_params("T-pred", "T-pred"))
             .unwrap();
         state.threads.mark_running("T-pred").unwrap();
         state
@@ -3669,12 +4704,12 @@ mod tests {
             .unwrap();
         state
             .state_store
-            .create_continuation(
+            .create_continuation_for_test(
                 &NewThreadRecord {
                     thread_id: "T-succ".to_string(),
                     chain_root_id: "T-pred".to_string(),
                     kind: "system_task".to_string(),
-                    item_ref: "test/directive".to_string(),
+                    item_ref: "directive:test/directive".to_string(),
                     executor_ref: "test/executor".to_string(),
                     launch_mode: "inline".to_string(),
                     current_site_id: "site:test".to_string(),
@@ -3684,6 +4719,7 @@ mod tests {
                     project_root: None,
                     usage_subject: None,
                     usage_subject_asserted_by: None,
+                    captured_history_policy: None,
                 },
                 "T-pred",
                 "T-pred",
@@ -3697,7 +4733,7 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-1", "T-1"))
+            .create_thread_for_test(&make_create_params("T-1", "T-1"))
             .unwrap();
 
         let view = state
@@ -3771,13 +4807,13 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread(&make_create_params("T-parent", "T-parent"))
+            .create_thread_for_test(&make_create_params("T-parent", "T-parent"))
             .unwrap();
         // A child is a thread whose `upstream_thread_id` points at the parent
         // (edges are derived from that link).
         let mut child = make_create_params("T-child", "T-parent");
         child.upstream_thread_id = Some("T-parent".to_string());
-        state.threads.create_thread(&child).unwrap();
+        state.threads.create_thread_for_test(&child).unwrap();
 
         let children = state.threads.list_children("T-parent").unwrap();
         let v = serde_json::to_value(&children).unwrap();

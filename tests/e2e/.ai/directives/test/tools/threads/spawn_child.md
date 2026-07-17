@@ -32,23 +32,23 @@ Recursive directive spawning test. Parent writes a plan file, spawns child direc
   </inputs>
 
   <outputs>
-    <success>Parent orchestration complete — plan written, child spawned and verified, completion summary appended to {input:output_dir}/plan.md</success>
-    <failure>Spawn child pipeline failed — check that test/tools/file_system/write_file directive exists and {input:output_dir} is writable</failure>
+    <success>Parent orchestration complete — plan written, child spawned and verified, completion summary appended to ${inputs.output_dir}/plan.md</success>
+    <failure>Spawn child pipeline failed — check that test/tools/file_system/write_file directive exists and ${inputs.output_dir} is writable</failure>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="write_plan">
-    Write a plan file to `{input:output_dir}/plan.md` describing the parent's orchestration stages.
+    Write a plan file to `${inputs.output_dir}/plan.md` describing the parent's orchestration stages.
   </step>
   <step name="spawn_child">
-    Spawn the child directive `test/tools/file_system/write_file` with the greeting "{input:greeting}" and output path `{input:output_dir}/greeting.md`.
+    Spawn the child directive `test/tools/file_system/write_file` with the greeting "${inputs.greeting}" and output path `${inputs.output_dir}/greeting.md`.
   </step>
   <step name="verify_child_output">
-    Read `{input:output_dir}/greeting.md` to verify the child directive completed successfully.
+    Read `${inputs.output_dir}/greeting.md` to verify the child directive completed successfully.
   </step>
   <step name="append_completion">
-    Append a completion summary to `{input:output_dir}/plan.md` confirming the child executed and was verified.
+    Append a completion summary to `${inputs.output_dir}/plan.md` confirming the child executed and was verified.
   </step>
 </process>

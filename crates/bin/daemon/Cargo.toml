@@ -1,6 +1,6 @@
 [package]
 name = "ryeosd"
-version = "0.5.33"
+version = "0.5.34"
 edition = "2021"
 description = "ryeosd daemon - Rust control plane for Rye OS"
 license.workspace = true
@@ -59,6 +59,7 @@ url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-core-tools = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }

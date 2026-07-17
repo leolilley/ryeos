@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 license.workspace = true
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 anyhow = { workspace = true }
 arc-swap = { workspace = true }
@@ -18,6 +22,7 @@ regex = { workspace = true }
 rusqlite = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-isolation-protocol = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }

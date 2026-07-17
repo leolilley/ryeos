@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:ad447c109707950094c63a209fdd44f28c7eaa739f2303976420418296c3b27d:XdYwjE7Xul5LdNbMZqT1mbs4KHNn66nUBHegqWnFJsA+/fw+SaW92kKHUg/g0bub3LENHMwYazoc7PeqPIprDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T02:18:48Z:300251619ba335c25878744bc1d43dbe79934b15c7fbc3435e3d11ad99efde4e:0LGwSzZqGf16eBlMQGAzVQktYy4BgJW8pT/iN48ocKb4Zpxi3McTW3LZv+CVAomSwd0xci/RkoKOD9KMaZfNCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, spaces, resolution, bundles]
-version: "2.0.0"
+version: "2.1.0"
 description: >
   The two-tier space resolution system — project and system (bundle)
   spaces, how bundles are installed, and how items are found.
@@ -52,7 +52,8 @@ overridable via `RYEOS_APP_ROOT`. Created by `ryeos init`.
 ├── node/
 │   ├── identity/private_key.pem     ← daemon's Ed25519 signing key
 │   ├── vault/{private_key,public_key}.pem  ← X25519 sealed secrets
-│   ├── config/                      ← daemon config
+│   ├── config.yaml                  ← daemon config
+│   ├── isolation.yaml                 ← create-once node execution policy
 │   ├── bundles/
 │   │   ├── core.yaml                ← signed registration records
 │   │   └── standard.yaml
@@ -76,6 +77,11 @@ ryeos fetch tool:ryeos/core/sign --to project
 
 The copied item lives in project space and shadows the system
 version (first match wins).
+
+`isolation.yaml` is operator-owned mutable node policy rather than installed
+bundle content. It defaults to disabled, is loaded as an immutable snapshot at
+daemon startup, and is documented in [Execution
+Sandbox](node/execution-isolation.md).
 
 ## Installing Bundles
 

@@ -1,9 +1,8 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:9eef62c230a8c78ab399af15d1b83e1629f61179c452cb6027fa4c9ff5fd33d4:X+Umtw99fbufuxVvWygqU072J+GMaC3zNQMiHlQIs7Ulygq7m6UZcKU5ABjKKoqJ+OQZQPX/w6TlKX0f95aGAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
-# ryeos:signed:2026-06-07T05:37:38Z:31e05eb8a0b55e27535e2b575aa77476d56a869b845c84099f2a0860240b9706:VmlT8saN+g88+R/8uZ6XmTZQfy4wIMYDxc/dCyKaUq33gXWAflwolNeYdd2wzlDcjnKjpKROvkDE7gQEeglwAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+<!-- ryeos:signed:2026-07-16T02:18:47Z:b5fff22bd8716b64813c3b6a72c6b3ef4acaebc33e0fec28d5e5e054216c2192:w9pm3niJ7rfdTmhP1PuTs6qMAjtkVuoj4Dq/DuVmdpxdCGpNHtJ59rRzb6AwRJss/73hbOqO3JBRS1VzqzVBCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, directory, layout, filesystem]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   The exact .ai/ directory layout — bundle structure and the daemon
   state directory, and how they relate.
@@ -38,7 +37,9 @@ machine, not the LLM workflow layer:
 │   └── verbs/                           # core, bundle, remote, vault, maintenance verbs
 ├── parsers/ryeos/core/                  # javascript, markdown/frontmatter,
 │                                         # python/tool-header, yaml/yaml
-├── protocols/ryeos/core/                # opaque, runtime_v1, tool_streaming_v1
+├── protocols/ryeos/core/                # cli_exec, opaque, runtime,
+│                                         # method_runtime, tool_callback,
+│                                         # tool_streaming
 ├── services/                            # bundle, fetch, verify, objects,
 │                                         # remote, vault, system, health, etc.
 └── tools/ryeos/core/                    # fetch/sign/verify, identity,
@@ -94,6 +95,7 @@ Created by `ryeos init`. Lives in the system space
     │       └── trusted/<fp>.toml        # trusted publisher/operator/node keys
     ├── node/
     │   ├── config.yaml                  # daemon bind address, db_path, auth config
+    │   ├── isolation.yaml                 # create-once strict execution policy
     │   ├── identity/
     │   │   ├── private_key.pem          # node Ed25519 signing key (0600)
     │   │   └── public-identity.json     # node public identity document
@@ -112,6 +114,7 @@ Created by `ryeos init`. Lives in the system space
         ├── runtime.sqlite3             # thread/event database (WAL mode)
         ├── objects/                     # CAS object store
         ├── refs/                        # CAS refs
+        ├── cache/executions/            # request-owned materialized workspaces
         ├── secrets/
         │   └── store.enc               # encrypted vault (TOML)
         ├── audit/

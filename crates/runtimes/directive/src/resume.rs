@@ -351,6 +351,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
@@ -700,6 +701,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }
@@ -817,6 +819,15 @@ mod tests {
         );
         assert_eq!(state.turns_completed, 2);
         assert!(state.has_thread_usage_event);
+    }
+
+    #[tokio::test]
+    async fn zero_carry_still_preserves_cumulative_turn_coordinate() {
+        let inner: Arc<dyn RuntimeCallbackAPI> = Arc::new(PathMock);
+        let callback = CallbackClient::from_inner(inner, "T3", "/tmp/test", "tat-test");
+        let state = load_resume_state(&callback, "T2", 0).await.unwrap();
+        assert!(state.messages.is_empty());
+        assert_eq!(state.turns_completed, 2);
     }
 
     #[test]

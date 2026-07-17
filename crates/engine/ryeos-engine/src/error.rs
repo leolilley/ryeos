@@ -26,6 +26,14 @@ pub enum EngineError {
         searched_spaces: Vec<String>,
     },
 
+    #[error("item resolution unavailable for `{canonical_ref}` at `{path}`: {source}")]
+    ItemResolutionUnavailable {
+        canonical_ref: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
     #[error("ambiguous resolution for `{canonical_ref}`: multiple candidates in {space} ({candidates:?})")]
     AmbiguousResolution {
         canonical_ref: String,
@@ -178,6 +186,9 @@ pub enum EngineError {
     )]
     BinManifestMissing { bundle_root: String },
 
+    #[error("binary `{bin}` bundle executor manifest is invalid: {reason}")]
+    BinManifestInvalid { bin: String, reason: String },
+
     #[error("binary `{bin}` not in manifest (triple {triple})")]
     BinNotInManifest { bin: String, triple: String },
 
@@ -313,8 +324,8 @@ pub enum EngineError {
     #[error("invalid budget: {reason}")]
     InvalidBudget { reason: String },
 
-    #[error("sandbox policy refused execution: {reason}")]
-    SandboxPolicyRefused { reason: String },
+    #[error("isolation policy refused execution: {reason}")]
+    IsolationPolicyRefused { reason: String },
 
     // ── Lifecycle ────────────────────────────────────────────────────
     #[error("invalid state transition from `{from}` on event `{event}`")]
@@ -353,14 +364,6 @@ pub enum EngineError {
         defaults.join(", ")
     )]
     MultipleRuntimeDefaults { kind: String, defaults: Vec<String> },
-
-    #[error("runtime `{runtime}` serves kind `{kind}` whose terminator declares protocol `{found}`, expected `{expected}`")]
-    RuntimeProtocolMismatch {
-        runtime: String,
-        kind: String,
-        expected: String,
-        found: String,
-    },
 
     #[error("runtime `{runtime}` serves unknown kind `{kind}`")]
     RuntimeServesUnknownKind { kind: String, runtime: String },
@@ -422,6 +425,25 @@ pub enum EngineError {
 
     #[error("handler `{handler}` returned malformed response: {detail}")]
     HandlerProtocolViolation { handler: String, detail: String },
+
+    #[error("launch preparer `{handler}` is unavailable: {detail}")]
+    LaunchPreparerUnavailable { handler: String, detail: String },
+
+    #[error("launch preparer `{handler}` returned invalid protocol output: {detail}")]
+    LaunchPreparerProtocolInvalid { handler: String, detail: String },
+
+    #[error("launch preparer `{handler}` exceeded a protocol limit: {detail}")]
+    LaunchPreparerLimitExceeded { handler: String, detail: String },
+
+    #[error("launch config input `{input}` is missing: {detail}")]
+    LaunchConfigMissing { input: String, detail: String },
+
+    #[error("launch config input `{input}` is forbidden by signed policy ({code}): {detail}")]
+    LaunchConfigPolicyDenied {
+        code: String,
+        input: String,
+        detail: String,
+    },
 
     #[error(
         "handler binary missing: `{binary_ref}` for handler `{handler}` — {reason}. {remediation}"

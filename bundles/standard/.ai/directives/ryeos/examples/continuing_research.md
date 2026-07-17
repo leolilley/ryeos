@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-02T03:44:33Z:05994c198c37c4d4378aa223f3b3f6dac032fdb726f3aee6c7d6565000d93c76:Kd2W12LBNOLKm4gPMR21RLtywpNpqQUYKPtqrsRWUD7odm4RkpeqiO6uYbO0K2YTP+zCYn5gD/QvfTAE10vRCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:16Z:22e72c472f31f4e01ded3e2148d67f9aac09bd435d4c089938e7579a87333800:1BKZoHRdz2f2Go/m+xHu86O1WSJNASRcOJhL4o0VMrrHSsH+xxnbSuSN/rs99ySdeA8raGZAHk99Dx49+3zXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Example long-running directive that self-continues at the context boundary and seeds the successor with a summary hook."
 version: "1.0.0"
@@ -22,7 +22,7 @@ hooks:
       item_id: directive:ryeos/examples/summarize_continuation
       thread: inline
       params:
-        reason: ${event.limit}
+        reason: ${event.reason}
         live_messages: ${event.messages}
         usage: ${event.usage}
         budget_remaining: ${event.budget_remaining}

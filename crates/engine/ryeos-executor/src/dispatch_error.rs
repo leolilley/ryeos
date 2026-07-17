@@ -17,7 +17,10 @@
 //! unknown service handler → 502, materialization error → 502. Only
 //! truly unexpected internal errors are 500.
 
+use std::collections::BTreeMap;
+
 use axum::http::StatusCode;
+use ryeos_handler_protocol::LaunchDiagnosticScalarWire;
 
 /// Per-field violation details carried by
 /// `DispatchError::ComposedValueContractViolation`. Structured so the
@@ -150,9 +153,8 @@ pub enum DispatchError {
     },
     /// A declared required secret was not found in any source.
     /// Generic at the dispatch layer; the `source_kind`/`source_name`
-    /// fields attribute *which* subsystem demanded the secret (today
-    /// only `"provider"` from LLM preflight; future kinds e.g. `"tool"`
-    /// or `"runtime"` slot in without changing the wire shape). The
+    /// fields attribute which subsystem demanded the secret without
+    /// coupling this generic error to any executable kind. The
     /// secret resolves from sealed vault, daemon host env, or `.env`
     /// overlay; `remediation` carries the actionable string.
     #[error("required secret missing for '{item_ref}': `{env_var}` was not found in sealed vault, daemon host environment, or `.env` overlay (source: {source_kind}/{source_name})")]
@@ -163,6 +165,31 @@ pub enum DispatchError {
         source_name: String,
         remediation: String,
     },
+    /// Runtime launch-contract validation or its trusted preparer rejected the
+    /// request before spawn. The code/classification are protocol-owned and
+    /// remain generic at this layer.
+    #[error("launch preparation failed ({code}/{classification}): {message}")]
+    LaunchPreparationFailed {
+        code: String,
+        message: String,
+        classification: String,
+        binding: Option<String>,
+        details: Box<BTreeMap<String, LaunchDiagnosticScalarWire>>,
+    },
+    #[error("launch policy rejected request ({code}): {message}")]
+    LaunchPolicyForbidden {
+        code: String,
+        message: String,
+        binding: Option<String>,
+    },
+    #[error("launch resource was not found ({code}): {message}")]
+    LaunchResourceNotFound {
+        code: String,
+        message: String,
+        binding: Option<String>,
+    },
+    #[error("ref bindings are not applicable to the resolved {class} dispatch path")]
+    RefBindingNotApplicable { class: String },
     /// Project source push-first — the project has not been pushed to
     /// the daemon's CAS before execution was requested. The Display
     /// is the bare wording (e.g. `"no pushed HEAD for project '<path>' \
@@ -277,6 +304,12 @@ pub enum DispatchError {
         warning_count: usize,
         details: ContractViolationDetails,
     },
+    /// The daemon cannot prove that a previously reserved hook action is safe
+    /// to issue again, or the durable identity/response record drifted. This is
+    /// always fatal and non-retryable: retrying could duplicate an external
+    /// side effect.
+    #[error("hook dispatch integrity failure: {detail}")]
+    HookDispatchIntegrity { detail: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -304,10 +337,14 @@ impl DispatchError {
             | Self::CapabilityRejected { .. }
             | Self::SchemaMisconfigured { .. }
             | Self::RootExecutorMissing { .. } => StatusCode::BAD_REQUEST,
+            Self::RefBindingNotApplicable { .. } => StatusCode::BAD_REQUEST,
             Self::InsufficientCaps { .. }
             | Self::ServiceCapDenied { .. }
-            | Self::MissingCap { .. } => StatusCode::FORBIDDEN,
-            Self::NotFound | Self::ServiceNotInstalled { .. } => StatusCode::NOT_FOUND,
+            | Self::MissingCap { .. }
+            | Self::LaunchPolicyForbidden { .. } => StatusCode::FORBIDDEN,
+            Self::NotFound
+            | Self::ServiceNotInstalled { .. }
+            | Self::LaunchResourceNotFound { .. } => StatusCode::NOT_FOUND,
             Self::NotRootExecutable { .. } | Self::StreamingNotImplemented => {
                 StatusCode::NOT_IMPLEMENTED
             }
@@ -335,19 +372,33 @@ impl DispatchError {
             | Self::UnknownTargetSite { .. }
             | Self::TargetSiteUnsupported { .. }
             | Self::TargetSiteResolutionFailed { .. } => StatusCode::BAD_REQUEST,
+            Self::LaunchPreparationFailed { classification, .. } if classification == "caller" => {
+                StatusCode::BAD_REQUEST
+            }
+            Self::LaunchPreparationFailed { classification, .. }
+                if classification == "configuration" =>
+            {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
+            Self::LaunchPreparationFailed { classification, .. }
+                if classification == "unavailable" =>
+            {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::LaunchPreparationFailed { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::TargetSiteForwardConflict { .. } => StatusCode::CONFLICT,
             Self::ProtocolNotRegistered(_) | Self::TargetSiteForwardBadGateway { .. } => {
                 StatusCode::BAD_GATEWAY
             }
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
-            Self::Internal(_) | Self::TargetSiteForwardInternal { .. } => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::HookDispatchIntegrity { .. }
+            | Self::Internal(_)
+            | Self::TargetSiteForwardInternal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
     /// Stable machine-readable error code for structured error surfaces.
-    pub fn code(&self) -> &'static str {
+    pub fn code(&self) -> &str {
         match self {
             Self::InvalidRef(..) => "invalid_ref",
             Self::NotRootExecutable { .. } => "not_root_executable",
@@ -367,6 +418,10 @@ impl DispatchError {
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
             Self::RequiredSecretMissing { .. } => "required_secret_missing",
+            Self::LaunchPreparationFailed { code, .. } => code,
+            Self::LaunchPolicyForbidden { code, .. }
+            | Self::LaunchResourceNotFound { code, .. } => code,
+            Self::RefBindingNotApplicable { .. } => "ref_binding_not_applicable",
             Self::ProjectSourcePushFirst(_) => "project_source_push_first",
             Self::ProjectSourceCheckoutFailed(_) => "project_source_checkout_failed",
             Self::MissingCap { .. } => "missing_cap",
@@ -387,6 +442,9 @@ impl DispatchError {
             Self::TargetSiteForwardConflict { .. } => "target_site_forward_conflict",
             Self::TargetSiteForwardBadGateway { .. } => "target_site_forward_bad_gateway",
             Self::TargetSiteForwardInternal { .. } => "target_site_forward_internal",
+            Self::HookDispatchIntegrity { .. } => {
+                ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
+            }
             Self::Internal(_) => "internal",
         }
     }
@@ -395,7 +453,11 @@ impl DispatchError {
     /// configuration change. This is an explicit allowlist: unknown and newly
     /// added failures remain non-retryable until their safety is established.
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::ServiceUnavailable { .. })
+        match self {
+            Self::ServiceUnavailable { .. } => true,
+            Self::LaunchPreparationFailed { classification, .. } => classification == "unavailable",
+            _ => false,
+        }
     }
 }
 
@@ -407,10 +469,10 @@ mod tests {
     #[test]
     fn required_secret_missing_names_all_three_sources() {
         let err = DispatchError::RequiredSecretMissing {
-            item_ref: "directive:test/x".to_string(),
+            item_ref: "work:test/x".to_string(),
             env_var: "ZEN_API_KEY".to_string(),
-            source_kind: "provider".to_string(),
-            source_name: "zen".to_string(),
+            source_kind: "dependency".to_string(),
+            source_name: "example".to_string(),
             remediation: required_secret_remediation("ZEN_API_KEY"),
         };
         let msg = err.to_string();
@@ -464,6 +526,19 @@ mod tests {
     }
 
     #[test]
+    fn hook_integrity_is_internal_and_never_retryable() {
+        let error = DispatchError::HookDispatchIntegrity {
+            detail: "pending outcome unknown".to_string(),
+        };
+        assert_eq!(error.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            error.code(),
+            ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
+        );
+        assert!(!error.retryable());
+    }
+
+    #[test]
     fn service_not_installed_maps_to_404_with_code() {
         let e = DispatchError::ServiceNotInstalled {
             service_ref: "service:scheduler/register".to_string(),
@@ -486,7 +561,7 @@ mod tests {
     #[test]
     fn contract_violation_http_status_is_bad_request() {
         let e = DispatchError::ComposedValueContractViolation {
-            canonical_ref: "directive:foo/bar".to_string(),
+            canonical_ref: "work:foo/bar".to_string(),
             error_count: 1,
             warning_count: 0,
             details: sample_details(),
@@ -497,7 +572,7 @@ mod tests {
     #[test]
     fn contract_violation_code_is_contract_violation() {
         let e = DispatchError::ComposedValueContractViolation {
-            canonical_ref: "directive:foo/bar".to_string(),
+            canonical_ref: "work:foo/bar".to_string(),
             error_count: 1,
             warning_count: 0,
             details: sample_details(),
@@ -508,16 +583,13 @@ mod tests {
     #[test]
     fn contract_violation_display_includes_ref_and_counts() {
         let e = DispatchError::ComposedValueContractViolation {
-            canonical_ref: "directive:foo/bar".to_string(),
+            canonical_ref: "work:foo/bar".to_string(),
             error_count: 2,
             warning_count: 1,
             details: sample_details(),
         };
         let msg = e.to_string();
-        assert!(
-            msg.contains("directive:foo/bar"),
-            "must include ref, got: {msg}"
-        );
+        assert!(msg.contains("work:foo/bar"), "must include ref, got: {msg}");
         assert!(
             msg.contains("2 errors"),
             "must include error count, got: {msg}"

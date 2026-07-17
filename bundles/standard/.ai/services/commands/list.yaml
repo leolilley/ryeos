@@ -1,9 +1,10 @@
-# ryeos:signed:2026-07-14T02:18:23Z:cc9e6e8e848f81ed27a36aeb928ed0f3e4d39fe31c2f2db0d065600df39c7261:fja/G7j81JbsaYO0W6Oyrr3M5j5QtkQ8wE2F4spr+5I9ZenUSRaIgB1H7KYHboLujbD0vrjaEv1SKBx5qRJ0Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T00:08:43Z:27abe9c6d254ddb275f69833a9165e06318d51cac6878eed282bb66afba807a0:SarkYysN8gpg7dDrgvrZhB2L0YpKiR0TgR9T4rZV5CRZU6ZPQ0Eo35D+vRG5U0f66q5Q3EVKtFA4jA8ioK26CQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "commands"
 name: "list"
 kind: service
 endpoint: commands.list
 ui_read_only: true
+record_thread: false
 required_caps: []
 schema: {}
 description: "Node command records with per-session invocability (completion data: the grammar shown is the grammar held)"

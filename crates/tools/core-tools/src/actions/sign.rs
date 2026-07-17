@@ -93,33 +93,28 @@ pub fn run_sign(
         return parsed_target.map(|_| unreachable!());
     }
 
-    let bundle_roots = {
-        let app_root = match std::env::var("RYEOS_APP_ROOT") {
-            Ok(p) => PathBuf::from(p),
-            Err(_) => dirs::data_dir()
-                .map(|d| d.join("ryeos"))
-                .expect("could not determine XDG data directory"),
-        };
-        let bundles_dir = app_root.join(ryeos_engine::AI_DIR).join("bundles");
-        let mut additional: Vec<PathBuf> = Vec::new();
-        if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
-            for entry in entries.flatten() {
-                if entry.path().is_dir() {
-                    additional.push(entry.path());
-                }
-            }
-        }
-        roots::bundle_roots(&additional)
+    let app_root = match std::env::var("RYEOS_APP_ROOT") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => dirs::data_dir()
+            .map(|d| d.join("ryeos"))
+            .expect("could not determine XDG data directory"),
     };
-
-    let operator_config_root = roots::runtime_root().ok().map(|root| root.config());
-    let trust_store = TrustStore::load(
-        project_path,
-        operator_config_root
-            .as_deref()
-            .ok_or_else(|| anyhow!("cannot resolve app root"))?,
-    )
-    .with_context(|| "load trust store")?;
+    let isolation = ryeos_app::engine_init::load_locked_registered_isolation(&app_root)
+        .context("load retained node isolation generation")?;
+    let bundle_roots = isolation
+        .registered_generation_bundle_roots()
+        .context("retained isolation generation omitted bundle roots")?
+        .to_vec();
+    let node_trust_store = isolation
+        .registered_generation_node_trust()
+        .context("retained isolation generation omitted node trust")?;
+    let trust_store = match project_path {
+        Some(project_path) => node_trust_store
+            .with_project_keys(project_path)
+            .map(std::borrow::Cow::into_owned)
+            .with_context(|| "load project trust")?,
+        None => node_trust_store.clone(),
+    };
 
     let kinds = build_kind_registry(&bundle_roots, &trust_store)?;
 
@@ -146,7 +141,7 @@ pub fn run_sign(
         .get(&target.kind)
         .ok_or_else(|| anyhow!("unknown kind `{}` — no kind schema registered", target.kind))?;
 
-    let parsers = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store)?;
+    let parsers = build_parser_dispatcher(&bundle_roots, &kinds, &trust_store, isolation)?;
 
     let kind_dir = source_kind_dir(kind_schema, source, project_path)?;
     let ai_root = source_ai_root(source, project_path)?;
@@ -637,6 +632,7 @@ fn build_parser_dispatcher(
     bundle_roots: &[PathBuf],
     kinds: &KindRegistry,
     trust_store: &TrustStore,
+    isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
 ) -> Result<ParserDispatcher> {
     let search: Vec<PathBuf> = bundle_roots.to_vec();
     let tagged_search: Vec<(PathBuf, ryeos_engine::resolution::TrustClass)> = bundle_roots
@@ -650,7 +646,7 @@ fn build_parser_dispatcher(
         .collect();
     let (parser_tools, _duplicates) = ParserRegistry::load_base(&search, trust_store, kinds)
         .with_context(|| "load parser tool descriptors")?;
-    let handlers = HandlerRegistry::load_base(&tagged_search, trust_store)
+    let handlers = HandlerRegistry::load_base(&tagged_search, trust_store, isolation)
         .with_context(|| "load handler descriptors")?;
     Ok(ParserDispatcher::new(parser_tools, Arc::new(handlers)))
 }

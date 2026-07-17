@@ -19,10 +19,13 @@ pub use ryeos_vault::dotenv::read_dotenv_overlay;
 pub use ryeos_vault::paths::{
     default_sealed_store_path, default_vault_public_key_path, default_vault_secret_key_path,
 };
-pub use ryeos_vault::policy::{validate_decrypted_keys, validate_key_name, BLOCKED_NAMES};
+use ryeos_vault::policy::MAX_VAULT_ENVELOPE_BYTES;
+pub use ryeos_vault::policy::{
+    validate_decrypted_keys, validate_key_name, validate_secret_value, BLOCKED_NAMES,
+};
 pub use ryeos_vault::sealed::{
-    cleanup_staged_rewrap_files, prepare_rewrap, read_sealed_secrets, recover_rewrap,
-    with_store_lock, write_sealed_secrets,
+    cleanup_staged_rewrap_files, prepare_rewrap, read_bounded_file, read_sealed_secrets,
+    recover_rewrap, with_store_lock, write_sealed_secrets, MAX_VAULT_KEY_FILE_BYTES,
 };
 
 // ── Command options + reports ────────────────────────────────────────
@@ -104,6 +107,7 @@ pub fn run_put(opts: &PutOptions) -> Result<PutReport> {
     }
     for (k, v) in &opts.entries {
         validate_key_name(k)?;
+        validate_secret_value(v)?;
         if v.is_empty() {
             bail!("refusing to store empty value for vault key '{k}'");
         }
@@ -250,16 +254,28 @@ fn run_rewrap_locked(
 
     let activation = (|| -> std::result::Result<(), lillux::AtomicMutationError> {
         if rewrap_store {
-            let bytes = std::fs::read(&new_store_path)
-                .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+            let bytes = read_bounded_file(
+                &new_store_path,
+                MAX_VAULT_ENVELOPE_BYTES,
+                "staged sealed envelope",
+            )
+            .map_err(lillux::AtomicMutationError::BeforeCommit)?;
             lillux::atomic_write_private(&store_path, &bytes)?;
         }
-        let public_bytes = std::fs::read(&new_pub_path)
-            .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        let public_bytes = read_bounded_file(
+            &new_pub_path,
+            MAX_VAULT_KEY_FILE_BYTES,
+            "staged vault public key",
+        )
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?;
         lillux::atomic_write(&pub_path, &public_bytes)?;
         // Secret key last: once this changes, the current generation is complete.
-        let secret_bytes = std::fs::read(&new_key_path)
-            .map_err(|error| lillux::AtomicMutationError::BeforeCommit(error.into()))?;
+        let secret_bytes = read_bounded_file(
+            &new_key_path,
+            MAX_VAULT_KEY_FILE_BYTES,
+            "staged vault secret key",
+        )
+        .map_err(lillux::AtomicMutationError::BeforeCommit)?;
         lillux::atomic_write_private(&key_path, &secret_bytes)?;
         Ok(())
     })();

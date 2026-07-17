@@ -27,11 +27,17 @@ use crate::state::get_ui_state;
 pub struct Request {
     pub target: InvocationTarget,
     #[serde(default)]
+    pub ref_bindings: std::collections::BTreeMap<String, String>,
+    /// Source refreshes set this bit so the daemon, rather than the client,
+    /// proves the resolved descriptor is safe for the read-only lane.
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
     pub params: Value,
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum InvocationTarget {
     Ref {
         #[serde(rename = "ref")]
@@ -92,7 +98,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         .get_session(&session_id)
         .ok_or_else(|| HandlerError::Forbidden("session expired or invalid".into()))?;
 
-    let root_canonical = CanonicalRef::parse(&item_ref)
+    CanonicalRef::parse(&item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
     let project_path = session
         .project_root
@@ -136,6 +142,12 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     if session.read_only && !policy.read_only {
         return Err(HandlerError::Forbidden(
             "read-only session cannot dispatch protected invocations".into(),
+        )
+        .into());
+    }
+    if req.read_only && !policy.read_only {
+        return Err(HandlerError::Forbidden(
+            "source fetch target is not declared ui_read_only".into(),
         )
         .into());
     }
@@ -233,6 +245,7 @@ async fn execute_prepared_item_ref(
         target_site_id: None,
         validate_only: false,
         params: req.params.clone(),
+        ref_bindings: req.ref_bindings.clone(),
         acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
         project_path: &prepared.effective_path,
         provenance,
@@ -241,6 +254,7 @@ async fn execute_prepared_item_ref(
         usage_subject: None,
         usage_subject_asserted_by: None,
         previous_thread_id: None,
+        root_admission: None,
         parent_execution_context: None,
     };
 
@@ -254,7 +268,8 @@ async fn execute_prepared_item_ref(
     )
     .await
     .map_err(|e| HandlerError::Structured {
-        code: "dispatch_error".into(),
+        code: e.code().to_owned(),
+        status: e.http_status().as_u16(),
         body: ryeos_executor::structured_error::StructuredErrorPayload::from(&e).to_value(),
     })
     .map_err(Into::into)
@@ -317,5 +332,29 @@ mod tests {
         assert_eq!(invocation_ctx.fingerprint, "session:session-1");
         assert!(!invocation_ctx.verified);
         assert_eq!(invocation_ctx.scopes, vec!["ui.read".to_string()]);
+    }
+
+    #[test]
+    fn source_fetch_request_declares_read_only_lane() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "target": { "kind": "ref", "ref": "service:threads/list" },
+            "read_only": true,
+            "params": { "limit": 20 }
+        }))
+        .unwrap();
+
+        assert!(request.read_only);
+        assert!(request.ref_bindings.is_empty());
+    }
+
+    #[test]
+    fn ordinary_invocation_does_not_claim_read_only_lane() {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "target": { "kind": "ref", "ref": "service:commands/submit" }
+        }))
+        .unwrap();
+
+        assert!(!request.read_only);
+        assert!(request.ref_bindings.is_empty());
     }
 }

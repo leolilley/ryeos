@@ -8,7 +8,7 @@ use std::sync::Arc;
 use ryeos_app::handler_context::HandlerContext;
 
 mod test_state;
-use test_state::build_test_state;
+use test_state::{build_test_state, build_test_state_with_bundles};
 
 async fn call_effective(
     state: &ryeos_app::state::AppState,
@@ -21,7 +21,7 @@ async fn call_effective(
 
 #[tokio::test]
 async fn nonexistent_ref_returns_not_found() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, state) = build_test_state_with_bundles();
     let result = call_effective(
         &state,
         serde_json::json!({
@@ -84,9 +84,9 @@ async fn invalid_canonical_ref_returns_bad_request() {
 
 #[tokio::test]
 async fn same_kind_passes_validation_but_not_found() {
-    let (_tmp, state) = build_test_state();
+    let (_tmp, state) = build_test_state_with_bundles();
     // surface: ref with expected_kind=surface passes the kind check
-    // but fails at resolution (empty engine).
+    // but fails at resolution after the real registry establishes the kind.
     let result = call_effective(
         &state,
         serde_json::json!({

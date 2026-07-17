@@ -239,10 +239,9 @@ fn push_timeline_lines(
             | RyeOsTimelineEntryVm::Pair { tone, .. } => Some(*tone),
             RyeOsTimelineEntryVm::Separator { .. } => None,
         };
-        if let (Some(tone), Some(arrived_at_ms)) = (
-            tone,
-            arrived_at_ms.get(entry_index).copied().flatten(),
-        ) {
+        if let (Some(tone), Some(arrived_at_ms)) =
+            (tone, arrived_at_ms.get(entry_index).copied().flatten())
+        {
             let flash = tone_style(tone).fg;
             for line in &mut lines[first_line..] {
                 line.style = shimmer_style(line.style, Some(arrived_at_ms), flash, now_ms);
@@ -581,7 +580,7 @@ mod tests {
             w: 20,
             h: 4,
         };
-        draw_timeline(&mut surface, rect, &entries, EMPTY_META, None);
+        draw_timeline(&mut surface, rect, &entries, EMPTY_META, None, 0);
         // The bottom row shows the newest entry — the feed tails.
         assert!(
             row_text(&surface, 20, 3).contains("entry 9"),
@@ -601,7 +600,7 @@ mod tests {
             h: 4,
         };
         // Point on the oldest entry — far above the tail; the feed scrolls up.
-        draw_timeline(&mut surface, rect, &entries, EMPTY_META, Some(0));
+        draw_timeline(&mut surface, rect, &entries, EMPTY_META, Some(0), 0);
         assert!(
             row_text(&surface, 20, 0).contains("entry 0"),
             "scrolled to reveal the selected oldest entry: {:?}",
@@ -629,7 +628,7 @@ mod tests {
             w: 20,
             h: 5,
         };
-        draw_timeline(&mut surface, rect, &entries, EMPTY_META, Some(5));
+        draw_timeline(&mut surface, rect, &entries, EMPTY_META, Some(5), 0);
         assert!(
             row_text(&surface, 20, 2).contains("entry 5"),
             "selected midpoint row: {:?}",

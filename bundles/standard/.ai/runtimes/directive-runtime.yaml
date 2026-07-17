@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-18T05:07:21Z:3f745baec943bc34d9b40bb48f6c06194e421259c6f13558da64ed1adf2f17c5:FgiXz2jcSyFto0wScccwRKETww+TPIUoPsCy46zAtBgqCQLrho5QWFT3b02bRMLozAyeNxlPaBe84mngxPPdDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-16T09:08:17Z:147aa624bd479e3bb86b7bca4adad99b58307785427895bc95619c9ce5b8eed9:yxhTxdKllu69N5V+2p10HP8T7VMQEKRJWbiCZHIBDjvRb0lkgAb3ZhexkjwaCN7KfmKEDhQgQfdq3yeHcUSlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -6,6 +6,68 @@ binary_ref: bin/x86_64-unknown-linux-gnu/ryeos-directive-runtime
 abi_version: "v1"
 required_caps:
   - runtime.execute
-required_envelope_fields:
-  - provider_snapshot
+launch_contract:
+  primary_allowed_kinds:
+    - directive
+  primary_allowed_spaces:
+    - bundle
+    - project
+  primary_allowed_trust:
+    - trusted_bundle
+    - trusted_project
+  ref_bindings:
+    model:
+      required: true
+      allowed_kinds:
+        - directive
+      allowed_spaces:
+        - bundle
+        - project
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+  preparation:
+    kind: handler
+    handler: handler:ryeos/standard/directive-launch
+    config: {}
+  config_inputs:
+    model_routing:
+      kind: item
+      id: ryeos-runtime/model_routing
+      required: false
+      merge: deep_merge
+      allowed_spaces:
+        - bundle
+        - project
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+    model_providers:
+      kind: catalog
+      prefix: ryeos-runtime/model-providers
+      required: true
+      entry_merge: deep_merge
+      allowed_spaces:
+        - bundle
+      allowed_trust:
+        - trusted_bundle
+  secret_policy:
+    max_requirements: 4
+    allowed_names:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+      - OPENROUTER_API_KEY
+      - ZEN_API_KEY
+  required_runtime_data:
+    - provider_snapshot
+  runtime_facts:
+    provider_id: {required: true, kind: string, max_bytes: 128}
+    model_name: {required: true, kind: string, max_bytes: 256}
+    context_window: {required: true, kind: integer, max_bytes: 32}
+    sampling: {required: true, kind: json, max_bytes: 4096}
+    matched_profile: {required: false, kind: string, max_bytes: 128}
+    # Limits cover canonical JSON, including the two quotes around each 64-byte digest.
+    config_hash: {required: true, kind: string, max_bytes: 66}
+    config_value_digest: {required: true, kind: string, max_bytes: 66}
+    config_sources: {required: true, kind: json, max_bytes: 4096}
 description: "Interprets directive workflows by orchestrating LLM threads"

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T02:50:09Z:d61bcac6c0f98ea4820f731f30a0b4b7b14adfb0b6dfc7238d819ee0a0f3442e:UNGmRYxzDNQclKPMOH5kVxlHvYsmamXS+t0TK4S/shIwNs59K/I4Z6ABKCH825zhFgZOFCXM+6nQV1GtLpLLBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T07:49:21Z:c7b41d4fb8d19a7ecd5ef2d4b8b96aa6a8a33a49ab66e0e622afe8066c0d795b:4pLk4GpCkyKkgGrs8Pa4eCIJP4vgTWKq0SRp+wS4O8nMbh8rJXH5wHoTFQiKTJIetcfUJb59VsEFHMTYztMRAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.0.0"
@@ -41,20 +41,20 @@ context:
 <process>
   <step name="validate">
     <instruction>
-      Validate that {input:environment} is one of: staging, production.
+      Validate that ${inputs.environment} is one of: staging, production.
     </instruction>
   </step>
 
   <step name="deploy">
     <instruction>
       Deploy the project:
-      `rye_execute(item_id="tool:my/project/deploy", parameters={"env": "{input:environment}"})`
+      `rye_execute(item_id="tool:my/project/deploy", parameters={"env": "${inputs.environment}"})`
     </instruction>
   </step>
 
   <step name="confirm">
     <render>
-    Deployed to {input:environment} successfully.
+    Deployed to ${inputs.environment} successfully.
     </render>
   </step>
 </process>
@@ -79,7 +79,13 @@ Rules:
 - Output `<render>` blocks verbatim — do not summarize or rephrase
 - Follow `<instruction>` blocks silently — do not narrate the thinking
 - Steps run in order unless a `condition` is specified
-- Use `{input:name}` for input interpolation, `{env:VAR}` for environment variables
+- Use rye-expr/1 `${inputs.name}` expressions for input interpolation. Use
+  `${inputs.name ?? "default"}` for a nullish fallback and `${json(inputs.value)}`
+  when structured data must be embedded in text. Directive bodies expose only
+  the `inputs` root, and each reference must name one exact input. Dynamic
+  indexes such as `inputs[key]` are rejected (literal `inputs["name"]` is
+  accepted) so RyeOS can append every unreferenced input exactly once. `$${`
+  emits a literal `${`.
 
 ## Frontmatter Fields
 

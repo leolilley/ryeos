@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 
 use crate::directive::*;
+use ryeos_directive_core::ResolvedProviderSnapshot;
 use ryeos_engine::resolution::KindComposedView;
-use ryeos_runtime::provider_snapshot::ResolvedProviderSnapshot;
 use ryeos_runtime::verified_loader::VerifiedLoader;
 
 /// Conventional `derive_as` name on the directive kind's
@@ -54,7 +54,6 @@ pub fn bootstrap(
 
     tracing::info!(
         directive_name = ?header.name.as_deref(),
-        has_model = header.model.is_some(),
         has_limits = header.limits.is_some(),
         context_position_count = header.context.as_ref().map(|c| c.len()).unwrap_or(0),
         hooks_count = header.hooks.as_ref().map(|h| h.len()).unwrap_or(0),
@@ -85,14 +84,15 @@ pub fn bootstrap(
         "directive runtime: typed config metadata"
     );
 
-    // Provider config is consumed from the daemon-resolved snapshot
+    // Provider config is consumed from the launch-preparer snapshot
     // — the runtime never re-reads provider YAML from disk.
     tracing::info!(
         provider_id = %provider_snapshot.provider_id,
         model_name = %provider_snapshot.model_name,
         context_window = provider_snapshot.context_window,
         matched_profile = ?provider_snapshot.matched_profile,
-        source_root = %provider_snapshot.source_root,
+        config_value_digest = %provider_snapshot.config_value_digest,
+        config_source_count = provider_snapshot.config_sources.len(),
         config_hash = %provider_snapshot.config_hash,
         "directive runtime: provider snapshot resolved"
     );
@@ -107,24 +107,18 @@ pub fn bootstrap(
     // from the inventory is treated as "no such tool" by the
     // dispatcher's per-call resolution.
     let tools = project_tool_inventory(inventory);
-    let mut hooks = load_hooks(loader)?;
+    let mut directive_hooks = Vec::new();
 
-    // Merge directive-declared hooks (header.hooks) into the config hooks.
-    // Directive hooks are appended after config hooks with layer 1 so they
-    // execute before builtin hooks (layer 2) but after graph hooks.
+    // Parse directive-declared hooks (header.hooks) as the authored layer.
+    // Source ownership, not authored data, fixes their precedence before all
+    // configured layers.
     if let Some(ref header_hooks) = header.hooks {
         if !header_hooks.is_empty() {
             tracing::info!(
                 count = header_hooks.len(),
                 "directive runtime: merging directive-declared hooks"
             );
-            for (idx, hv) in header_hooks.iter().enumerate() {
-                let mut def = serde_json::from_value::<ryeos_runtime::HookDefinition>(hv.clone())
-                    .map_err(|e| {
-                    anyhow::anyhow!(
-                        "directive header hooks[{idx}]: malformed hook definition: {e:#}"
-                    )
-                })?;
+            for (idx, def) in header_hooks.iter().cloned().enumerate() {
                 // Dead-config: a directive-authored `continuation` hook can only
                 // fire when continuation is enabled. Validate here, before the
                 // merge loses header provenance, and fail loud rather than ship a
@@ -136,14 +130,15 @@ pub fn bootstrap(
                          Enable `continuation` or remove the hook."
                     ));
                 }
-                // Directive hooks default to layer 1 (before builtin layer 2)
-                if def.layer.is_none() {
-                    def.layer = Some(1);
-                }
-                hooks.push(def);
+                directive_hooks.push(def);
             }
         }
     }
+
+    // Source layers are ordered once, then compiled against the only context
+    // roots the directive runner actually supplies. No raw hook definition
+    // crosses the bootstrap boundary into execution.
+    let hooks = compile_directive_hooks(directive_hooks, loader)?;
 
     let risk_policy = load_risk_policy(loader)?;
 
@@ -240,8 +235,6 @@ pub fn bootstrap(
     Ok(BootstrapOutput {
         config: BootstrapConfig {
             execution,
-            model_routing: None, // snapshot replaces runtime re-resolution
-            provider: Some(resolved.provider.clone()),
             tools,
             system_prompt,
             user_prompt,
@@ -259,7 +252,7 @@ pub fn bootstrap(
         provider_id: resolved.provider_id.clone(),
         model_name: resolved.model_name.clone(),
         context_window: resolved.context_window,
-        sampling: header.model.as_ref().and_then(|m| m.sampling.clone()),
+        sampling: resolved.sampling.clone(),
     })
 }
 
@@ -275,7 +268,7 @@ pub fn bootstrap(
 /// only needs the model/permissions/limits/outputs/context/hooks
 /// surface, so we project explicitly and let `deny_unknown_fields`
 /// keep catching drift in the keys we *do* own.
-fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
+pub(super) fn parse_effective_header(view: &KindComposedView) -> Result<DirectiveHeader> {
     let projected = match view.composed.as_object() {
         Some(map) => {
             let mut out = serde_json::Map::with_capacity(DIRECTIVE_HEADER_RUNTIME_KEYS.len());
@@ -325,43 +318,29 @@ fn project_tool_inventory(
         .unwrap_or_default()
 }
 
-fn load_hooks(loader: &VerifiedLoader) -> Result<Vec<ryeos_runtime::HookDefinition>> {
-    // Use `load_config_strict` for correct project > bundle
-    // precedence with deep merge. The old code used `scan_kind` which
-    // gave bundle > project (first-found-wins), silently
-    // discarding project-level hook overrides.
-    let Some(config): Option<serde_yaml::Value> = loader
-        .load_config_strict("ryeos-runtime/hook_conditions")
-        .map_err(|e| anyhow!("load_hooks: loading config `ryeos-runtime/hook_conditions`: {e}"))?
-    else {
-        return Ok(Vec::new());
-    };
+fn compile_directive_hooks(
+    directive_hooks: Vec<ryeos_runtime::HookDefinition>,
+    loader: &VerifiedLoader,
+) -> Result<Vec<ryeos_runtime::CompiledHook>> {
+    let mut sources = ryeos_runtime::load_configured_hook_sources(loader)?;
+    sources.authored = directive_hooks;
+    sources.retain_configured_events(&["after_step", "continuation"]);
+    compile_directive_hook_sources(sources)
+}
 
-    let mut hooks = Vec::new();
-
-    // `builtin_hooks` is optional, but if present it MUST be a YAML
-    // sequence. The previous `.and_then(as_sequence)` silently
-    // skipped a malformed file — masking critical safety policy.
-    let hooks_value = match config.get("builtin_hooks") {
-        None | Some(serde_yaml::Value::Null) => return Ok(hooks),
-        Some(v) => v,
-    };
-    let hooks_arr = hooks_value.as_sequence().ok_or_else(|| {
-        anyhow!(
-            "load_hooks: `builtin_hooks` in `ryeos-runtime/hook_conditions` must be a YAML sequence, \
-             got {}",
-            yaml_kind(hooks_value)
-        )
-    })?;
-    for (idx, h) in hooks_arr.iter().enumerate() {
-        let hook =
-            serde_yaml::from_value::<ryeos_runtime::HookDefinition>(h.clone()).map_err(|e| {
-                anyhow!("load_hooks: malformed hook[{idx}] in `ryeos-runtime/hook_conditions`: {e}")
-            })?;
-        hooks.push(hook);
-    }
-
-    Ok(hooks)
+pub(super) fn compile_directive_hook_sources(
+    sources: ryeos_runtime::HookSources,
+) -> Result<Vec<ryeos_runtime::CompiledHook>> {
+    let schemas = [
+        ryeos_runtime::HookContextSchema::new("after_step", ["turn"]),
+        ryeos_runtime::HookContextSchema::new("continuation", ["event"]),
+    ];
+    ryeos_runtime::compile_hooks(
+        sources,
+        &schemas,
+        &ryeos_runtime::CompilationLimits::default(),
+    )
+    .context("compile directive hooks")
 }
 
 fn load_risk_policy(loader: &VerifiedLoader) -> Result<Option<crate::harness::RiskPolicy>> {
@@ -448,5 +427,68 @@ fn yaml_kind(v: &serde_yaml::Value) -> &'static str {
         serde_yaml::Value::Sequence(_) => "sequence",
         serde_yaml::Value::Mapping(_) => "mapping",
         serde_yaml::Value::Tagged(_) => "tagged",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryeos_runtime::{ExpressionCondition, HookDefinition, HookLayer, HookSources};
+    use serde_json::json;
+
+    fn hook(id: &str, event: &str, action: serde_json::Value) -> HookDefinition {
+        HookDefinition {
+            id: id.to_string(),
+            event: event.to_string(),
+            condition: ExpressionCondition::Absent,
+            action,
+        }
+    }
+
+    #[test]
+    fn directive_hooks_merge_then_compile_in_layer_order() {
+        let directive = hook(
+            "directive",
+            "after_step",
+            json!({"item_id": "tool:test/directive", "params": {"turn": "${turn}"}}),
+        );
+        let builtin = hook(
+            "builtin",
+            "continuation",
+            json!({"item_id": "tool:test/builtin", "params": {"event": "${event}"}}),
+        );
+
+        let compiled = compile_directive_hook_sources(HookSources {
+            authored: vec![directive],
+            builtin: vec![builtin],
+            ..HookSources::default()
+        })
+        .unwrap();
+
+        assert_eq!(compiled.len(), 2);
+        assert_eq!(compiled[0].id(), "directive");
+        assert_eq!(compiled[0].layer(), HookLayer::Authored);
+        assert_eq!(compiled[1].id(), "builtin");
+        assert_eq!(compiled[1].layer(), HookLayer::Builtin);
+    }
+
+    #[test]
+    fn directive_hook_rejects_root_outside_event_schema() {
+        let invalid = hook(
+            "invalid",
+            "after_step",
+            json!({"item_id": "tool:test/invalid", "params": {"value": "${state.value}"}}),
+        );
+
+        let error = compile_directive_hook_sources(HookSources {
+            authored: vec![invalid],
+            ..HookSources::default()
+        })
+        .unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("references undeclared root `state`"),
+            "expected the after_step schema to reject state, got: {error:#}"
+        );
     }
 }

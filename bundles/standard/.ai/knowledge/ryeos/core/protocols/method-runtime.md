@@ -1,0 +1,39 @@
+<!-- ryeos:signed:2026-07-15T07:49:19Z:59f1606ac651ee02cb43a4c0c94081b6cafe22eb2e65b9bbe9f20508c2a262b4:r7CngsnSfoHy4Pw0XJpKtbisuzS6oPvnUAhalv3qEnop+Yde8gwP2GX1AH8XukqCssdn1gOm1XgzDSHfm6R0Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+---
+category: ryeos/core/protocols
+tags: [protocol, method-runtime-v1, callbacks, methods]
+version: "1.0.0"
+description: Method runtime v1 protocol reference.
+---
+
+# Protocol: method_runtime
+
+Invariant: `method_runtime` is the signed subprocess wire selected by a
+method-bearing kind's `execution.method_dispatch.protocol`; the runtime
+registry selects only the signed implementation binary.
+
+The daemon sends a `MethodCallEnvelope` with `schema_version: 1`, containing
+the resolved kind and method, verified method payload, bound arguments, runtime
+configuration, project/state roots, child thread identity, and callback
+capability. The runtime returns one terminal `MethodCallResult` and must echo
+the dispatched kind and method.
+
+The descriptor-aware producer and the runtime reject any other envelope schema
+version; the field is an enforced wire discriminator, not advisory metadata.
+The result is also semantically strict: success contains output and no error;
+failure contains an error and no output. The runtime attaches and marks its
+thread running, but the daemon owns terminal publication after it validates the
+process outcome, result wire, echo fields, and any parent-view projection.
+
+Accepted-launch preflight, boot validation, and live dispatch require the same
+exact descriptor contract:
+`method_call_envelope` stdin, terminal `method_call_result` stdout,
+managed lifecycle, `http` callbacks, and the canonical
+`RYEOSD_THREAD_AUTH_TOKEN` binding from the `thread_auth_token` injection
+source. Normal method dispatch and method-based launch
+augmentations both use the descriptor-aware stdin builder and stdout decoder.
+
+This is deliberately distinct from `runtime`, whose wire is
+`LaunchEnvelope` to `RuntimeResult`. A runtime serving a
+method-dispatch-only kind cannot be launched directly through that ordinary
+runtime wire.

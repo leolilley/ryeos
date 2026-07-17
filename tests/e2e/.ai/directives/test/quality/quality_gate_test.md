@@ -48,9 +48,9 @@ End-to-end test for the quality gate tool — verifies gate execution, pass/fail
   </step>
 
   <step name="write_result">
-    Write the verification results to {input:output_dir|outputs}/quality_gate_test.txt.
+    Write the verification results to ${inputs.output_dir ?? "outputs"}/quality_gate_test.txt.
     Include: number of gates checked, pass/fail status, and whether the structured output matched expectations.
-    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "{input:output_dir|outputs}/quality_gate_test.txt", "content": "<verification summary>", "create_dirs": true})`
+    `rye_execute(item_type="tool", item_id="rye/file-system/write", parameters={"path": "${inputs.output_dir ?? 'outputs'}/quality_gate_test.txt", "content": "<verification summary>", "create_dirs": true})`
   </step>
 </process>
 

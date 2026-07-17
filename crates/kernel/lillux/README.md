@@ -72,7 +72,7 @@ lillux time after --ms 1000
 
 ## Architecture
 
-Lillux is intentionally minimal — a single static binary with no runtime dependencies. Objects are stored with sharded paths (`root/objects/ab/cd/<hash>.json`), blobs separately (`root/blobs/ab/cd/<hash>`). JSON objects are canonicalized before hashing to ensure deterministic content addressing across languages.
+Lillux is intentionally minimal — a single static binary with no runtime dependencies. Objects are stored with sharded paths (`root/objects/ab/cd/<hash>.json`), blobs separately (`root/blobs/ab/cd/<hash>`). JSON objects use the RyeOS canonical encoding before SHA-256 hashing: compact JSON, decoded object keys in lexicographic order, lowercase `\u` escapes for every non-ASCII scalar, and the exact `serde_json::Number` rendering. These bytes are an immutable persistence protocol, not RFC 8785/JCS; another implementation must reproduce them exactly rather than substituting its platform's default serializer.
 
 The Identity primitive includes sealed secret envelopes using single-use X25519 key agreement with HKDF-SHA256 key derivation and ChaCha20Poly1305 AEAD, with safety limits on env variable count, value size, and total payload. Reserved environment names and prefixes are rejected to prevent injection.
 

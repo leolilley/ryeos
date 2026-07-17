@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-06-10T04:17:44Z:ab6881a38e0f77390c234403875d3e7430842b43873317505ad54e28bc0a3eb3:wXAsj4nwg9MBfgko84Avg2qiRCjpwFV1jRatOg7F44oSk6je/L8TL+ccbv5EazTI5Q4oiqa9yCoLClmBV1DyCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-15T23:50:35Z:c3f327866b152bd1820414f9cd119684700dba1499b7afc65c14d5290aeb4bd5:LYzFX6eyT6Flr/LxUJgUqGXYN12rR+JwYSD9pRbt+d4o0v8o9bXN7J3qkx1b9AZSkWuwoL/+ECQWVPk+JqSTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
 tags: [service, maintenance, gc, cas, compact, sweep]
-version: "2.0.0"
+version: "2.2.0"
 description: >
   The two-phase garbage collector — compact (retention-based DAG
   pruning with topological rewrite) and sweep (mark-and-sweep of
@@ -14,7 +14,7 @@ description: >
 # Service: maintenance/gc
 
 Invariant: maintenance GC reclaims unreachable CAS state according to
-daemon policy, with dry-run and compact modes for safe operation.
+signed invocation data, with dry-run and compact modes for safe operation.
 
 Run GC as a maintenance task, not during request-critical paths.
 
@@ -40,6 +40,65 @@ Compact runs before sweep because compaction orphans snapshots by
 removing them from the DAG. Sweep then collects those newly-unreachable
 objects.
 
+## Operational History Retention
+
+Operational cleanup is data-driven. The service has no built-in age or count;
+omitting a parameter disables that cleanup bound, including for `deep` GC:
+
+| Parameter | Effect when present |
+| --- | --- |
+| `schedule_fire_max_age_days` | Drop terminal schedule-fire groups older than this age |
+| `schedule_fire_max_count` | Keep at most this many terminal fire groups per schedule |
+| `sync_job_retention_days` | Drop older terminal sync jobs and their attempt rows |
+| `seat_lease_grace_seconds` | Settle running seat sessions this long after lease expiry |
+| `durable_cas_upload_max_age_seconds` | Retire abandoned durable multi-request CAS upload stages older than this signed age |
+
+The signed maintenance schedule authors the node's values explicitly. Terminal
+execution-chain history is different: eligibility comes only from the policy
+captured on that chain root, and `deep` merely asks the daemon to evaluate those
+captured policies and generic recovery pins.
+
+Durable upload stages are GC roots until they are explicitly retired. There is
+no compiled-in upload timeout: omission preserves them indefinitely. A recurring
+schedule authors an age rather than a fixed timestamp so each invocation derives
+a fresh canonical cutoff while holding the exclusive CAS mutation guard.
+
+## Offline Full Thread-History Retirement
+
+Normal maintenance GC never deletes the chain-head namespace as a bulk
+operation. When an operator explicitly chooses to discard the entire local
+thread-history epoch, use the bootstrap-local command while the daemon is
+stopped:
+
+```bash
+# Inspect every participating store without deleting history.
+ryeos node gc --discard-thread-history --dry-run
+
+# Retire all thread history and publish empty current projections.
+ryeos node gc --discard-thread-history --confirm-discard-thread-history
+```
+
+This clears authoritative thread-chain heads and pending transitions, daemon
+execution rows, per-thread runtime files, scheduler fire journals/rows, and all
+superseded thread-projection databases. It preserves node identity and trust,
+node configuration, installed bundles, vault data, signed schedule definitions,
+project and bundle-event heads, and stable operational admission/sync state.
+Independently retained trace/log/cache data remains governed by the normal
+maintenance GC parameters; this recovery command does not silently broaden its
+deletion scope to those stores.
+
+The command publishes a durable discard marker before its first destructive
+step. Ordinary startup refuses while that marker exists; rerunning the same
+confirmed command resumes the idempotent cleanup. Physical CAS reclamation is
+separate: add `--sweep-cas` to the confirmed run, or allow normal maintenance GC
+to reclaim the now-unreachable objects later.
+
+On an interactive terminal the command renders its typed maintenance phases in
+one redrawn line. Head retirement reports the exact verified-head count and is
+throttled to terminal refresh speed rather than writing once per deletion.
+`--json` and redirected invocations remain stable, plain output and never emit
+ANSI cursor controls.
+
 ## Phase 1: Compact
 
 Compact operates per-project. For each project in the refs tree:
@@ -59,10 +118,14 @@ first). Retention is by timestamp, not traversal order.
 
 ```rust
 struct RetentionPolicy {
-    manual_pushes: usize,   // default: 10 — "push" and "manual" sources
-    auto_snapshots: usize,  // default: 30 — "fold_back" and other auto sources
+    manual_pushes: usize,   // authored limit for "push" and "manual" sources
+    auto_snapshots: usize,  // authored limit for "fold_back" and other auto sources
 }
 ```
+
+`compact: true` requires the complete nested `policy` object. Both fields are
+mandatory; RyeOS supplies no default or partial-policy fallback. The signed
+scheduled-maintenance declaration authors both values explicitly.
 
 HEAD is always kept regardless of policy. Then iterate newest-first:
 count per category, keep up to the policy limit for each. Everything
@@ -153,8 +216,8 @@ per line, append-only:
 # Dry run (preview only, no mutations)
 ryeos maintenance gc --dry-run
 
-# Compact + sweep
-ryeos maintenance gc --compact
+# Compact + sweep (both policy limits are required)
+ryeos maintenance gc --compact --policy '{"manual_pushes":10,"auto_snapshots":30}'
 
 # Sweep only (no snapshot pruning)
 ryeos maintenance gc

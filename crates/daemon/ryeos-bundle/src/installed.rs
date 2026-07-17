@@ -51,7 +51,7 @@ pub fn load_installed_bundle_records(app_root: &Path) -> Result<Vec<InstalledBun
     let operator_config_root =
         ryeos_engine::roots::RuntimeRoot::new(app_root.to_path_buf()).config();
     let trust_store = TrustStore::load(None, &operator_config_root)
-        .context("installed bundles: load operator trust store")?;
+        .context("installed bundles: load node trust store")?;
     load_installed_bundle_records_with_trust(app_root, &trust_store)
 }
 
@@ -106,7 +106,7 @@ pub fn load_installed_bundle_records_with_trust(
 
         if body.kind != "node" {
             bail!(
-                "node bundle registration {} declares kind {:?}, expected the current ryeos.bundle-registration/v1 kind 'node'",
+                "node bundle registration {} declares kind {:?}, expected kind 'node'",
                 path.display(),
                 body.kind
             );
@@ -160,6 +160,18 @@ pub fn load_installed_plan_inputs(app_root: &Path) -> Result<Vec<PlanInput>> {
     })
 }
 
+pub fn load_installed_plan_inputs_with_trust(
+    app_root: &Path,
+    trust_store: &TrustStore,
+) -> Result<Vec<PlanInput>> {
+    load_installed_bundle_records_with_trust(app_root, trust_store).map(|records| {
+        records
+            .into_iter()
+            .map(InstalledBundleRecord::into_plan_input)
+            .collect()
+    })
+}
+
 fn verify_installed_manifest(
     name: &str,
     bundle_root: &Path,
@@ -181,8 +193,8 @@ fn verify_installed_manifest(
     let content = fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed to read {}", manifest_path.display()))?;
     verify_signed_trusted_yaml(&content, &manifest_path, trust_store, &envelope)?;
-    let manifest = parse_manifest(bundle_root, name)?
-        .with_context(|| format!("installed bundle '{}' manifest is missing", name))?;
+    let manifest = parse_manifest(bundle_root, name)
+        .with_context(|| format!("parse installed bundle '{}' manifest", name))?;
     let mut expected_provides = derive_provides_kinds(&bundle_root.join(ryeos_engine::AI_DIR))?;
     let mut claimed_provides = manifest.provides_kinds.clone();
     expected_provides.sort();
@@ -377,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_registration_without_current_v1_kind() {
+    fn rejects_registration_without_kind() {
         let layout = Layout::new();
         let bundle = layout.write_bundle("core");
         let dir = layout.system.join(".ai/node/bundles");

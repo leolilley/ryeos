@@ -47,6 +47,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
@@ -57,8 +58,14 @@ use serde::{Deserialize, Serialize};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
 
+mod bundle_install;
 mod default_policy;
 
+#[cfg(test)]
+pub(crate) use bundle_install::copy_dir_recursive;
+use bundle_install::{
+    bundle_registration_value, install_bundle, replace_bundle, verify_bundle_structure,
+};
 use default_policy::materialize_node_defaults;
 
 /// SHA-256 fingerprint of the official publisher Ed25519 public key.
@@ -123,6 +130,26 @@ pub struct InitReport {
     pub next_steps: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitPhase {
+    PreparingLayout,
+    InitializingIdentity,
+    PinningTrust,
+    DiscoveringBundles,
+    VerifyingBundles,
+    InstallingBundles,
+    InitializingVault,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitProgress {
+    pub phase: InitPhase,
+    pub completed: Option<usize>,
+    pub total: Option<usize>,
+    pub detail: Option<String>,
+}
+
 /// Run `ryeos init` end-to-end (Model B).
 ///
 /// Order:
@@ -136,6 +163,22 @@ pub struct InitReport {
 ///   8. Vault X25519 keypair
 ///   9. Post-init trust verification
 pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
+    run_init_with_progress(opts, |_| Ok(()))
+}
+
+pub fn run_init_with_progress(
+    opts: &InitOptions,
+    mut observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    let mut progress = |phase, completed, total, detail: Option<String>| {
+        observe(&InitProgress {
+            phase,
+            completed,
+            total,
+            detail,
+        })
+    };
+    progress(InitPhase::PreparingLayout, None, None, None)?;
     // ── 0. Source exists? ──
     if !opts.source_dir.is_dir() {
         bail!(
@@ -165,6 +208,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         .with_context(|| format!("failed to create trust dir {}", trust_dir.display()))?;
 
     // ── 2. User key ──
+    progress(InitPhase::InitializingIdentity, None, None, None)?;
     let user_key_path = opts
         .app_root
         .join(ryeos_engine::AI_DIR)
@@ -215,6 +259,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     .map_err(|e| anyhow!("pin node trust doc: {e}"))?;
 
     // ── 5. Pin official publisher key ──
+    progress(InitPhase::PinningTrust, None, None, None)?;
     // Owner label must match the bundle pipeline (`populate-bundles.sh --owner
     // ryeos-official`, all release Dockerfiles). The label is informational, but
     // bundle preflight compares it, so a divergence used to brick boot (the
@@ -238,6 +283,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     }
 
     // ── 6. Discover bundles in source_dir ──
+    progress(InitPhase::DiscoveringBundles, None, None, None)?;
     let discovered = discover_bundles(&opts.source_dir)?;
     if discovered.is_empty() {
         bail!(
@@ -292,12 +338,65 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         "installation order determined"
     );
 
+    // A re-init inherits the existing immutable node policy. On first init the
+    // policy is materialized later in this transaction and its defined default
+    // is disabled, so authoring preflight uses the matching compiled snapshot.
+    let isolation_policy = opts
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);
+    let isolation = match fs::symlink_metadata(&isolation_policy) {
+        Ok(_) => ryeos_app::engine_init::load_registered_isolation(&opts.app_root)
+            .context("load existing node isolation policy for init preflight")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Arc::new(ryeos_engine::isolation::IsolationRuntime::default())
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "inspect existing node isolation policy {}",
+                    isolation_policy.display()
+                )
+            });
+        }
+    };
+
+    // Prove the complete source generation can become the next immutable
+    // runtime before the first installed bundle is touched. This privileged
+    // admission is mandatory even for test-only `skip_preflight`: that flag
+    // may skip ordinary candidate execution, never selected-backend capture or
+    // next-boot registry construction.
+    let prospective_roots = plan
+        .bundles
+        .values()
+        .map(|bundle| bundle.source.root_path().clone())
+        .collect::<Vec<_>>();
+    let prospective_isolation = ryeos_app::engine_init::admit_node_bundle_roots(
+        &opts.app_root,
+        &prospective_roots,
+        &seed_trust_store,
+    )
+    .context("prospective init source set would fail node boot")?;
+
     if !opts.skip_preflight {
-        for job in &plan.verification_jobs {
+        progress(
+            InitPhase::VerifyingBundles,
+            Some(0),
+            Some(plan.verification_jobs.len()),
+            None,
+        )?;
+        for (index, job) in plan.verification_jobs.iter().enumerate() {
+            progress(
+                InitPhase::VerifyingBundles,
+                Some(index),
+                Some(plan.verification_jobs.len()),
+                Some(job.subject.clone()),
+            )?;
             ryeos_bundle::preflight::preflight_verify_bundle_in_context(
                 &job.subject_root,
                 &job.dependency_roots,
                 &operator_config_root,
+                Arc::clone(&isolation),
             )
             .with_context(|| {
                 format!("verify {} source against pinned publisher key", job.subject)
@@ -306,8 +405,19 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     }
 
     // ── 7. Install each bundle (atomic stage → swap) ──
+    // Serialize the entire installed-set mutation. Each per-name transaction
+    // below is acquired through this guard, preserving global -> per-name lock
+    // order while dependency generations are activated in plan order.
+    let bundle_registry_lock =
+        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(&opts.app_root)?;
     let mut bundles_installed = Vec::new();
-    for name in &plan.install_order {
+    for (index, name) in plan.install_order.iter().enumerate() {
+        progress(
+            InitPhase::InstallingBundles,
+            Some(index),
+            Some(plan.install_order.len()),
+            Some(name.clone()),
+        )?;
         let planned = plan
             .bundles
             .get(name)
@@ -320,46 +430,121 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
             .join(ryeos_engine::AI_DIR)
             .join("bundles")
             .join(name);
-        let transaction =
-            ryeos_app::bundle_transaction::BundleTransaction::acquire(&opts.app_root, name)?;
+        let transaction = bundle_registry_lock.acquire_bundle(name)?;
         transaction.reconcile(&node_key)?;
         let grants = command_registration_grants
             .get(name)
             .cloned()
             .unwrap_or_default();
         let registration = bundle_registration_value(&target, &grants);
+        // Source-set preflight above validates the complete graph before init
+        // mutates any installed bundle. Re-verify each completed staging tree
+        // against the dependency generations already installed in plan order,
+        // so a source mutation racing the copy cannot reach activation.
+        let installed_dependency_roots: Vec<PathBuf> = plan
+            .install_order
+            .iter()
+            .filter(|dependency_name| {
+                planned
+                    .dependency_closure
+                    .contains(dependency_name.as_str())
+            })
+            .map(|dependency_name| {
+                opts.app_root
+                    .join(ryeos_engine::AI_DIR)
+                    .join("bundles")
+                    .join(dependency_name)
+            })
+            .collect();
 
         if target.exists() {
             // Bundle already installed. Registration continues to name the
             // same canonical path, so publish it before the atomic tree
             // exchange; every observable generation remains registered.
             verify_bundle_structure(&target)?;
-            replace_bundle(source_path, &target, &transaction, registration.clone()).with_context(
-                || {
-                    format!(
-                        "atomic replace {}: {} -> {}",
+            replace_bundle(
+                source_path,
+                &target,
+                &transaction,
+                registration.clone(),
+                |staging| {
+                    validate_selected_backend_staging(
+                        &opts.app_root,
                         name,
-                        source_path.display(),
-                        target.display()
+                        staging,
+                        &plan,
+                        &prospective_isolation,
+                        &seed_trust_store,
+                    )?;
+                    if opts.skip_preflight {
+                        return Ok(());
+                    }
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                        staging,
+                        name,
+                        &installed_dependency_roots,
+                        &operator_config_root,
+                        Arc::clone(&isolation),
                     )
+                    .with_context(|| {
+                        format!(
+                            "preflight verification refused completed {} replacement staging tree",
+                            name
+                        )
+                    })
                 },
-            )?;
+            )
+            .with_context(|| {
+                format!(
+                    "atomic replace {}: {} -> {}",
+                    name,
+                    source_path.display(),
+                    target.display()
+                )
+            })?;
         } else {
             install_bundle(
                 &opts.app_root,
                 name,
                 source_path,
-                true,
                 &transaction,
                 registration.clone(),
+                |staging| {
+                    validate_selected_backend_staging(
+                        &opts.app_root,
+                        name,
+                        staging,
+                        &plan,
+                        &prospective_isolation,
+                        &seed_trust_store,
+                    )?;
+                    if opts.skip_preflight {
+                        return Ok(());
+                    }
+                    ryeos_bundle::preflight::preflight_verify_bundle_staging_in_context(
+                        staging,
+                        name,
+                        &installed_dependency_roots,
+                        &operator_config_root,
+                        Arc::clone(&isolation),
+                    )
+                    .with_context(|| {
+                        format!(
+                            "preflight verification refused completed {} install staging tree",
+                            name
+                        )
+                    })
+                },
             )?;
         }
         transaction.commit_present(&node_key)?;
 
         bundles_installed.push(name.clone());
     }
+    drop(bundle_registry_lock);
 
     // ── 8. Vault X25519 keypair ──
+    progress(InitPhase::InitializingVault, None, None, None)?;
     let vault_dir = opts
         .app_root
         .join(ryeos_engine::AI_DIR)
@@ -388,6 +573,7 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
     materialize_node_defaults(&opts.app_root)?;
 
     // ── 9. Post-init trust verification ──
+    progress(InitPhase::Finalizing, None, None, None)?;
     let post_trust =
         TrustStore::load(None, &operator_config_root).context("load post-init trust store")?;
     if !post_trust.is_trusted(OFFICIAL_PUBLISHER_FP) {
@@ -426,6 +612,41 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
         bundles_installed,
         next_steps,
     })
+}
+
+fn validate_selected_backend_staging(
+    app_root: &Path,
+    bundle_name: &str,
+    staging: &Path,
+    plan: &ryeos_bundle::plan::BundlePlan,
+    prospective_isolation: &ryeos_engine::isolation::IsolationRuntime,
+    node_trust_store: &TrustStore,
+) -> Result<()> {
+    let selected_bundle = prospective_isolation
+        .inspection()
+        .backend
+        .selection
+        .as_ref()
+        .map(|selection| selection.bundle.as_str());
+    if !prospective_isolation.is_enforced() || selected_bundle != Some(bundle_name) {
+        return Ok(());
+    }
+    let roots = plan
+        .bundles
+        .iter()
+        .map(|(name, bundle)| {
+            if name == bundle_name {
+                staging.to_path_buf()
+            } else {
+                bundle.source.root_path().clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    ryeos_app::engine_init::load_prospective_isolation(app_root, &roots, node_trust_store)
+        .with_context(|| {
+            format!("selected isolation backend `{bundle_name}` staging tree would fail next boot")
+        })?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -723,7 +944,7 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
 }
 
-// ── Bundle manifest (v2: generated + signed) ───────────────────────
+// ── Bundle manifest (generated + signed) ───────────────────────────
 pub use ryeos_bundle::manifest::{
     derive_provides_kinds, materialize_manifest, parse_manifest, sort_bundles_by_dependency,
     validate_manifest_dependencies, BundleManifest, BundleManifestSource,
@@ -806,6 +1027,10 @@ fn create_layout(app_root: &Path) -> Result<()> {
         app_root
             .join(ryeos_engine::AI_DIR)
             .join("state")
+            .join("locators"),
+        app_root
+            .join(ryeos_engine::AI_DIR)
+            .join("state")
             .join("refs"),
         // Installed bundles directory
         app_root.join(ryeos_engine::AI_DIR).join("bundles"),
@@ -824,6 +1049,15 @@ fn create_layout(app_root: &Path) -> Result<()> {
     for d in &dirs {
         fs::create_dir_all(d).with_context(|| format!("create {}", d.display()))?;
     }
+    let runtime_state_path = app_root.join(ryeos_engine::AI_DIR).join("state");
+    let runtime_state = lillux::PinnedDirectory::open_or_create(&runtime_state_path)
+        .context("pin initialized runtime-state directory")?;
+    let recovery = runtime_state
+        .open_or_create_child(std::ffi::OsStr::new("recovery"), 0o700)
+        .context("create initialized recovery authority")?;
+    recovery
+        .open_or_create_child(std::ffi::OsStr::new("thread-projection"), 0o700)
+        .context("create initialized thread-projection recovery authority")?;
     Ok(())
 }
 
@@ -850,204 +1084,6 @@ fn load_or_create_key(path: &Path, force: bool) -> Result<SigningKey> {
     fs::write(path, pem.as_bytes())
         .with_context(|| format!("write generated key {}", path.display()))?;
     Ok(signing_key)
-}
-
-/// Verify that an existing bundle directory has the expected `.ai/` structure.
-fn verify_bundle_structure(target: &Path) -> Result<()> {
-    if !target.join(ryeos_engine::AI_DIR).is_dir() {
-        bail!(
-            "{} exists but is not a Rye bundle — refusing to clobber",
-            target.display()
-        );
-    }
-    Ok(())
-}
-
-/// Atomically replace an installed bundle with a new version.
-///
-/// Instead of copying on top (which leaves stale files), this:
-/// 1. Copies source to a staging directory
-/// 2. Atomically exchanges staging with the installed path
-/// 3. Removes the old generation now located at staging
-fn replace_bundle(
-    source: &Path,
-    target: &Path,
-    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
-    registration: serde_json::Value,
-) -> Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow!("bundle path has no parent"))?;
-    let name = target
-        .file_name()
-        .ok_or_else(|| anyhow!("bundle path has no name"))?
-        .to_string_lossy();
-
-    let staging = parent.join(format!(".{name}.staging"));
-    (|| {
-        if staging.exists() {
-            fs::remove_dir_all(&staging)
-                .with_context(|| format!("clean up stale staging {}", staging.display()))?;
-        }
-        copy_dir_recursive(source, &staging)
-            .with_context(|| format!("stage {} -> {}", source.display(), staging.display()))?;
-        lillux::sync_tree_durable(&staging)
-            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
-        transaction.begin_present(
-            ryeos_app::bundle_transaction::BundleOperation::Replace,
-            &staging,
-            registration,
-        )?;
-        lillux::atomic_exchange_paths(target, &staging).with_context(|| {
-            format!(
-                "atomically exchange installed bundle {} with {}",
-                target.display(),
-                staging.display()
-            )
-        })?;
-        transaction.mark_activated()?;
-        if let Err(error) = lillux::remove_dir_all_durable(&staging) {
-            tracing::warn!(
-                path = %staging.display(),
-                error = %error,
-                "bundle replacement committed but previous generation cleanup failed"
-            );
-        }
-        Ok(())
-    })()
-}
-
-/// Install a bundle by copy + signed `kind: node` registration.
-///
-/// Mirrors `service:bundle/install` semantics but runs in-process (no daemon
-/// required). The official publisher trust must already be pinned so
-/// preflight verification passes.
-///
-/// Returns the canonical path of the installed bundle.
-fn install_bundle(
-    app_root: &Path,
-    name: &str,
-    source: &Path,
-    skip_preflight: bool,
-    transaction: &ryeos_app::bundle_transaction::BundleTransaction,
-    registration: serde_json::Value,
-) -> Result<PathBuf> {
-    let operator_config_root = app_root.join(ryeos_engine::AI_DIR).join("config");
-    if !skip_preflight {
-        // Preflight: load trust store from operator config.
-        let trust_store =
-            TrustStore::load(None, &operator_config_root).context("preflight: load trust store")?;
-        if !trust_store.is_trusted(OFFICIAL_PUBLISHER_FP) {
-            bail!(
-                "internal error: official publisher key {} not in trust store \
-                 after `ryeos init` pinned it — trust dir at {}",
-                OFFICIAL_PUBLISHER_FP,
-                operator_config_root.join("keys").join("trusted").display()
-            );
-        }
-
-        // Verify every signable item in the source bundle against the trust store.
-        ryeos_bundle::preflight::preflight_verify_bundle_in_context(
-            source,
-            &[app_root.to_path_buf()],
-            &operator_config_root,
-        )
-        .with_context(|| format!("preflight verification of {} bundle", name))?;
-    }
-
-    // Copy bundle into <app_root>/.ai/bundles/<name>/
-    let target = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("bundles")
-        .join(name);
-    let parent = target
-        .parent()
-        .context("bundle install target has no parent")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("create bundles parent for {}", target.display()))?;
-    let staging = parent.join(format!(".{name}.staging"));
-    (|| {
-        if target.exists() {
-            bail!(
-                "bundle target appeared during install: {}",
-                target.display()
-            );
-        }
-        if staging.exists() {
-            fs::remove_dir_all(&staging)
-                .with_context(|| format!("remove stale staging {}", staging.display()))?;
-        }
-        copy_dir_recursive(source, &staging)
-            .with_context(|| format!("stage {} at {}", name, staging.display()))?;
-        lillux::sync_tree_durable(&staging)
-            .with_context(|| format!("flush staged bundle {}", staging.display()))?;
-        transaction.begin_present(
-            ryeos_app::bundle_transaction::BundleOperation::Install,
-            &staging,
-            registration,
-        )?;
-        lillux::rename_path_durable(&staging, &target)
-            .with_context(|| format!("activate {} at {}", name, target.display()))?;
-        transaction.mark_activated()
-    })()?;
-    let canonical = target
-        .canonicalize()
-        .with_context(|| format!("canonicalize {} install path", name))?;
-
-    Ok(canonical)
-}
-
-fn bundle_registration_value(
-    path: &Path,
-    command_registration_caps: &[String],
-) -> serde_json::Value {
-    let mut value = serde_json::json!({
-        "kind": "node",
-        "path": path,
-    });
-    if !command_registration_caps.is_empty() {
-        value["command_registration_caps"] = serde_json::json!(command_registration_caps);
-    }
-    value
-}
-
-/// Recursive directory copy with symlink preservation (Unix only).
-pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
-    for entry in fs::read_dir(src).with_context(|| format!("read {}", src.display()))? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else if file_type.is_symlink() {
-            let link_target = fs::read_link(&from)?;
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&link_target, &to)
-                .with_context(|| format!("symlink {}", to.display()))?;
-            #[cfg(not(unix))]
-            {
-                let _ = link_target;
-                bail!("symlinks unsupported on this platform: {}", from.display());
-            }
-        } else {
-            fs::copy(&from, &to)
-                .with_context(|| format!("copy {} -> {}", from.display(), to.display()))?;
-            // Preserve the source mtime (best-effort): bundle verification
-            // includes an mtime-based manifest-freshness check
-            // (manifest.yaml must not be older than manifest.source.yaml),
-            // and a copy stamping fresh mtimes in directory-iteration order
-            // can invert that relationship on the installed tree — a
-            // millisecond of copy-order skew then reads as a stale manifest.
-            if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                if let Ok(file) = fs::File::options().write(true).open(&to) {
-                    let _ = file.set_modified(modified);
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Sanity check helper exposed for tests.
@@ -1446,11 +1482,23 @@ mod tests {
 
     // ── Manifest tests ──────────────────────────────────────────────
 
+    fn materialize_test_manifest(bundle: &Path, name: &str) {
+        let ai_dir = bundle.join(ryeos_engine::AI_DIR);
+        let source: BundleManifestSource =
+            serde_yaml::from_str(&fs::read_to_string(ai_dir.join("manifest.source.yaml")).unwrap())
+                .unwrap();
+        let manifest = materialize_manifest(source, &ai_dir, name).unwrap();
+        fs::write(
+            ai_dir.join("manifest.yaml"),
+            serde_yaml::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn parse_manifest_reads_core() {
         let mf = parse_manifest(&workspace_root().join("bundles/core"), "core")
-            .expect("parse core manifest")
-            .expect("core has a manifest");
+            .expect("parse core manifest");
         assert_eq!(mf.name, "core");
         assert_eq!(mf.version, "0.5.0");
         assert!(!mf.provides_kinds.is_empty());
@@ -1471,8 +1519,7 @@ mod tests {
     #[test]
     fn parse_manifest_reads_standard() {
         let mf = parse_manifest(&workspace_root().join("bundles/standard"), "standard")
-            .expect("parse standard manifest")
-            .expect("standard has a manifest");
+            .expect("parse standard manifest");
         assert_eq!(mf.name, "standard");
         assert!(mf.provides_kinds.contains(&"directive".to_string()));
         assert!(mf.provides_kinds.contains(&"graph".to_string()));
@@ -1495,11 +1542,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_manifest_returns_none_when_missing() {
+    fn parse_manifest_fails_when_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("no-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        assert!(parse_manifest(&bundle, "no-manifest").unwrap().is_none());
+        let error = parse_manifest(&bundle, "no-manifest").unwrap_err();
+        assert!(error.to_string().contains("required generated"));
     }
 
     #[test]
@@ -1507,13 +1555,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bad-manifest");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
-        fs::write(bundle.join(".ai/manifest.source.yaml"), "not: [valid\nyaml").unwrap();
+        fs::write(bundle.join(".ai/manifest.yaml"), "not: [valid\nyaml").unwrap();
         assert!(parse_manifest(&bundle, "bad-manifest").is_err());
     }
 
     #[test]
     fn validate_dependencies_core_and_standard_ok() {
-        let bundles = discover_bundles(&workspace_root().join("bundles")).unwrap();
+        let root = workspace_root();
+        let bundles = vec![
+            ("core".to_string(), root.join("bundles/core")),
+            ("standard".to_string(), root.join("bundles/standard")),
+        ];
         assert!(
             validate_manifest_dependencies(&bundles).is_ok(),
             "all bundle dependencies should be satisfied"
@@ -1532,6 +1584,7 @@ mod tests {
             "name: needy\nversion: '1.0'\nrequires_kinds:\n  - magic\n",
         )
         .unwrap();
+        materialize_test_manifest(&needy, "needy");
 
         let bundles = vec![("needy".to_string(), needy)];
         let err = validate_manifest_dependencies(&bundles).unwrap_err();
@@ -1547,17 +1600,15 @@ mod tests {
     }
 
     #[test]
-    fn validate_dependencies_skips_bundles_without_manifest() {
+    fn validate_dependencies_rejects_bundles_without_manifest() {
         let tmp = tempfile::tempdir().unwrap();
-        // No manifest.yaml — should be fine
+        // No generated manifest: dependency validation must fail closed.
         let bare = tmp.path().join("bare");
         fs::create_dir_all(bare.join(".ai")).unwrap();
 
         let bundles = vec![("bare".to_string(), bare)];
-        assert!(
-            validate_manifest_dependencies(&bundles).is_ok(),
-            "bundles without manifests should pass"
-        );
+        let error = validate_manifest_dependencies(&bundles).unwrap_err();
+        assert!(format!("{error:#}").contains("required generated"));
     }
 
     #[test]
@@ -1576,6 +1627,7 @@ mod tests {
             "name: selfish\nversion: '1.0'\nrequires_kinds:\n  - foo\n",
         )
         .unwrap();
+        materialize_test_manifest(&selfish, "selfish");
 
         let bundles = vec![("selfish".to_string(), selfish)];
         assert!(
@@ -1601,6 +1653,7 @@ mod tests {
             "name: provider\nversion: '1.0'\nrequires_kinds: []\n",
         )
         .unwrap();
+        materialize_test_manifest(&provider, "provider");
 
         // Consumer bundle
         let consumer = tmp.path().join("consumer");
@@ -1610,6 +1663,7 @@ mod tests {
             "name: consumer\nversion: '1.0'\nrequires_kinds:\n  - alpha\n",
         )
         .unwrap();
+        materialize_test_manifest(&consumer, "consumer");
 
         let bundles = vec![
             ("consumer".to_string(), consumer),
@@ -1629,8 +1683,8 @@ mod tests {
         let bundle = tmp.path().join("real-name");
         fs::create_dir_all(bundle.join(".ai")).unwrap();
         fs::write(
-            bundle.join(".ai/manifest.source.yaml"),
-            "name: wrong-name\nversion: '1.0'\nrequires_kinds: []\n",
+            bundle.join(".ai/manifest.yaml"),
+            "name: wrong-name\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\n",
         )
         .unwrap();
 
@@ -1742,7 +1796,7 @@ typo_field: oops
         }
     }
 
-    // ── v2 tests: derive, materialize, source split ────────────────
+    // ── Generated-manifest tests: derive, materialize, source split ──
 
     #[test]
     fn derive_provides_kinds_scans_core_schemas() {
@@ -1817,6 +1871,7 @@ typo_field: oops
             runtime_authority: Default::default(),
             smoke: vec![],
             shadows: vec![],
+            isolation_backends: vec![],
         };
         let manifest = materialize_manifest(source, &ai_dir, "test-bundle").unwrap();
         assert_eq!(manifest.provides_kinds, vec!["mykind"]);
@@ -1824,7 +1879,7 @@ typo_field: oops
     }
 
     #[test]
-    fn parse_manifest_dev_mode_materializes_from_source() {
+    fn parse_manifest_rejects_source_only_bundle() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("dev-bundle");
         let ai_dir = bundle.join(".ai");
@@ -1841,16 +1896,12 @@ typo_field: oops
         )
         .unwrap();
 
-        let mf = parse_manifest(&bundle, "dev-bundle")
-            .unwrap()
-            .expect("should find manifest via source fallback");
-        assert_eq!(mf.name, "dev-bundle");
-        assert_eq!(mf.provides_kinds, vec!["custom"]);
-        assert!(mf.requires_kinds.is_empty());
+        let error = parse_manifest(&bundle, "dev-bundle").unwrap_err();
+        assert!(error.to_string().contains("required generated"));
     }
 
     #[test]
-    fn parse_manifest_prefers_generated_over_source() {
+    fn parse_manifest_reads_generated_and_ignores_source() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("pub-bundle");
         let ai_dir = bundle.join(".ai");
@@ -1868,9 +1919,7 @@ typo_field: oops
         )
         .unwrap();
 
-        let mf = parse_manifest(&bundle, "pub-bundle")
-            .unwrap()
-            .expect("should find manifest");
+        let mf = parse_manifest(&bundle, "pub-bundle").expect("should find generated manifest");
         assert_eq!(mf.version, "2.0", "should read generated, not source");
         assert_eq!(mf.provides_kinds, vec!["published-kind"]);
     }

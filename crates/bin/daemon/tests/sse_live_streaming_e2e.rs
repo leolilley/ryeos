@@ -14,10 +14,9 @@
 //! the terminal would arrive together (no gap). The enforced gap is the proof
 //! of live, incremental publish.
 //!
-//! Item layout follows the working `directive_runtime_e2e` pattern: provider,
-//! model routing, and the directive are planted into the *project* (passed as
-//! `project_path`), since dispatch resolves items from the project + installed
-//! bundles, not from the user HOME.
+//! Item layout follows the launch contract: provider config is bundle-owned,
+//! while model routing and the directive are planted into the project passed
+//! as `project_path`.
 
 mod common;
 
@@ -25,7 +24,10 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by, FastFixture};
+use common::fast_fixture::{
+    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
+    FastFixture,
+};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
@@ -140,11 +142,9 @@ response:
     Ok(())
 }
 
-/// Plant provider + routing + directive into the project that will be passed as
-/// `project_path`, so dispatch resolves the directive and the runtime resolves
-/// the provider from the same root.
-fn plant_project_items(project: &Path, mock_url: &str, signer: &SigningKey) {
-    plant_mock_provider(project, mock_url, signer).expect("plant provider");
+/// Plant the project-owned routing overlay and directive. Provider authority
+/// lives in the registered fixture bundle.
+fn plant_project_items(project: &Path, signer: &SigningKey) {
     plant_model_routing(project, signer).expect("plant routing");
     plant_directive(project, "test/live_e2e", "Say hello.", signer).expect("plant directive");
 }
@@ -272,8 +272,8 @@ async fn read_timed_until_terminal(
 /// Boot a daemon whose mock provider sleeps `PROVIDER_DELAY` before each
 /// response. Returns the harness, the user signing key (HTTP principal), the
 /// publisher signing key (signs project items), the node fingerprint
-/// (audience), and the mock base URL.
-async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, String) {
+/// (audience).
+async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String) {
     let mock = MockProvider::start_with_response_delay(
         vec![
             MockResponse::Text("Hello ".into()),
@@ -287,6 +287,12 @@ async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, S
     let plant =
         move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
             register_standard_bundle(state_path, fixture)?;
+            register_config_fixture_bundle(
+                state_path,
+                "fixture-live-stream-model-config",
+                fixture,
+                |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            )?;
             plant_execute_stream_route(state_path, &fixture.publisher)?;
             write_authorized_key_signed_by(state_path, &fixture.user, &fixture.node)?;
             Ok(())
@@ -297,8 +303,6 @@ async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, S
             "RUST_LOG",
             std::env::var("RUST_LOG").unwrap_or_else(|_| "info,ryeosd=debug".into()),
         );
-        // Provider/routing config lives under the project root.
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with delayed mock + execute-stream route");
@@ -307,7 +311,7 @@ async fn boot_live_daemon() -> (DaemonHarness, SigningKey, SigningKey, String, S
     let user_sk = fixture.user.clone();
     let publisher_sk = fixture.publisher.clone();
     let node_fp = fixture.node_fp();
-    (h, user_sk, publisher_sk, node_fp, mock_url)
+    (h, user_sk, publisher_sk, node_fp)
 }
 
 /// Open the gateway `/execute/stream` and return the live response plus the
@@ -322,6 +326,7 @@ async fn open_gateway_stream(
 ) -> (reqwest::Response, String) {
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/live_e2e",
+        "ref_bindings": { "model": "directive:test/live_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -387,13 +392,14 @@ async fn open_gateway_stream(
 /// delivery rather than a single buffered flush at completion.
 #[tokio::test(flavor = "multi_thread")]
 async fn gateway_stream_delivers_events_incrementally_not_buffered() {
-    let (mut h, user_sk, publisher_sk, node_fp, mock_url) = boot_live_daemon().await;
+    let (mut h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_project_items(project.path(), &mock_url, &publisher_sk);
+    plant_project_items(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();
 
     let body_obj = serde_json::json!({
         "item_ref": "directive:test/live_e2e",
+        "ref_bindings": { "model": "directive:test/live_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
     });
@@ -457,9 +463,9 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
 /// the terminal only later — once the delayed provider settles.
 #[tokio::test(flavor = "multi_thread")]
 async fn chain_tail_attached_before_terminal_receives_terminal_live() {
-    let (h, user_sk, publisher_sk, node_fp, mock_url) = boot_live_daemon().await;
+    let (h, user_sk, publisher_sk, node_fp) = boot_live_daemon().await;
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_project_items(project.path(), &mock_url, &publisher_sk);
+    plant_project_items(project.path(), &publisher_sk);
     let project_path = project.path().to_str().unwrap().to_string();
 
     // Launch via the gateway and learn the thread id. Keep the gateway stream

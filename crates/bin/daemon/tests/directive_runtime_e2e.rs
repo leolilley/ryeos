@@ -16,7 +16,7 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
@@ -50,6 +50,19 @@ pricing:
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
     std::fs::write(dir.join("mock.yaml"), signed)?;
     Ok(())
+}
+
+fn register_mock_provider_bundle(
+    state_path: &Path,
+    mock_base_url: &str,
+    fixture: &FastFixture,
+) -> anyhow::Result<()> {
+    register_config_fixture_bundle(
+        state_path,
+        "fixture-directive-model-config",
+        fixture,
+        |bundle_root| plant_mock_provider(bundle_root, mock_base_url, &fixture.publisher),
+    )
 }
 
 /// Plant `model_routing` mapping `tier: general` to provider `mock`.
@@ -176,7 +189,8 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_standard_bundle(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
@@ -188,13 +202,11 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(
         project.path(),
@@ -217,9 +229,10 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
                 let stderr = h.drain_stderr_nonblocking().await;
                 // Probe state dir for runtime exit + thread events
                 let state = h.state_path.clone();
-                let projection = state.join(".ai/state/projection.sqlite3");
-                let projection_dump = if projection.exists() {
-                    match ryeos_state::projection::ProjectionDb::open(&projection) {
+                let projection = common::selected_projection_path(&state).ok();
+                let projection_dump = if projection.as_ref().is_some_and(|path| path.exists()) {
+                    let projection = projection.as_ref().expect("checked selected projection");
+                    match ryeos_state::projection::ProjectionDb::open(projection) {
                         Ok(db) => format!(
                             "threads = {:#?}",
                             ryeos_state::queries::list_threads(&db, 10).ok()
@@ -227,7 +240,7 @@ async fn e2e_directive_runtime_hello_world_succeeds() {
                         Err(e) => format!("projection open error: {e}"),
                     }
                 } else {
-                    "no projection.sqlite3".into()
+                    "no selected projection generation".into()
                 };
                 panic!(
                     "POST /execute timed out after 30s — directive-runtime hung.\n\
@@ -299,17 +312,15 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_standard_bundle(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
-    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
-    })
-    .await
-    .expect("start daemon");
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |_| {})
+        .await
+        .expect("start daemon");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(
         project.path(),
@@ -337,7 +348,8 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     // Open the projection DB and confirm the thread row carries the
     // SUBJECT identity (`directive_run` / `directive:p3b3/subject`),
     // not the executor runtime's identity.
-    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     for _ in 0..40 {
         if projection_path.exists() {
             break;
@@ -346,7 +358,7 @@ async fn e2e_directive_runtime_thread_records_subject_not_runtime() {
     }
     assert!(
         projection_path.exists(),
-        "projection.sqlite3 must exist at {}",
+        "selected projection must exist at {}",
         projection_path.display()
     );
 
@@ -424,7 +436,8 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_standard_bundle(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
@@ -433,13 +446,11 @@ async fn e2e_directive_runtime_tool_call_round_trip() {
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + standard bundle + echo tool");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_python_echo_tool(project.path(), "echo").expect("plant echo tool");
     plant_directive(
@@ -533,7 +544,8 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_standard_bundle(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
 
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
@@ -542,13 +554,11 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock + non-matching cap");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_python_echo_tool(project.path(), "echo").expect("plant echo tool");
     plant_directive(
@@ -667,7 +677,8 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     let mock_url = mock.base_url.clone();
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
-        register_standard_bundle(state_path, fixture)
+        register_standard_bundle(state_path, fixture)?;
+        register_mock_provider_bundle(state_path, &mock_url, fixture)
     };
     let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
         cmd.env(
@@ -675,14 +686,12 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
             std::env::var("RUST_LOG")
                 .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
         );
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_directive(
         project.path(),
@@ -709,7 +718,8 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     );
 
     // The settled directive thread (no upstream).
-    let projection_path = h.state_path.join(".ai/state/projection.sqlite3");
+    let projection_path =
+        common::selected_projection_path(&h.state_path).expect("resolve selected projection");
     let first = poll_thread(
         &projection_path,
         |t| t.item_ref == "directive:cont/dir" && t.upstream_thread_id.is_none(),
@@ -727,9 +737,11 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
             "service:threads/input",
             &project_path,
             serde_json::json!({
-                "thread": first_id.clone(),
-                "project_path": project_path.clone(),
                 "input": "continue",
+                "target": {
+                    "kind": "thread",
+                    "thread_id": first_id.clone(),
+                },
             }),
         )
         .await

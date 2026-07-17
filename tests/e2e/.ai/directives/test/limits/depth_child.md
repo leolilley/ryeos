@@ -31,7 +31,7 @@ Child directive spawned by depth_limit_test. Writes a marker then tries to spawn
 
 <process>
   <step name="write_child_marker">
-    Write "Child thread at level {input:level}" to `depth_child_{input:level}.txt`.
+    Write "Child thread at level ${inputs.level}" to `depth_child_${inputs.level}.txt`.
   </step>
   <step name="try_spawn_grandchild">
     Try to spawn child directive `test/tools/file_system/write_file` with message "Grandchild should not run" and output_path "depth_grandchild.txt". This should fail if depth limit is reached.

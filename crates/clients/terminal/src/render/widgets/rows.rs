@@ -6,7 +6,7 @@ use ryeos_client_base::text_surface::TextSurface;
 use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsRowVm};
 
 use super::super::primitives::fill_line;
-use super::super::text::{display_width, letterspace, truncate};
+use super::super::text::{display_width, truncate};
 use super::super::theme::{
     active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
     tone_style, ACCENT,
@@ -27,7 +27,7 @@ pub fn draw_rows(
     let mut y = rect.y as usize;
     let bottom = rect.y as usize + height;
     if !columns.is_empty() && y < bottom {
-        let header = letterspace(&columns.join(" · "));
+        let header = columns.join(" · ");
         surface.draw_text(rect.x as usize, y, &truncate(&header, width), style_muted());
         y += 1;
     }
@@ -53,11 +53,13 @@ pub fn draw_rows(
         };
         style = active_pulse_style(style, row.tone, now_ms);
         style = shimmer_style(
-        style,
-        row.changed_at_ms,
-        row.changed_tone.map(|tone| tone_style(tone).fg).unwrap_or(ACCENT),
-        now_ms,
-    );
+            style,
+            row.changed_at_ms,
+            row.changed_tone
+                .map(|tone| tone_style(tone).fg)
+                .unwrap_or(ACCENT),
+            now_ms,
+        );
         fill_line(surface, rect.x as usize, y, width, style);
         let glyph_style = if row.selected {
             style

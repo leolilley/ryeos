@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-05-31T08:15:57Z:7dd9bf2dc1d37f5fc9cbfa7038d499ddfd6c457bfddc78a00da73049609273cd:yZlsYuPDMbJCVZoJVzT1NIGkvUtwMVdFwgHyV3cQGMyVZhrhjPjnCHM59w+cmI2nXVvd5jK+dhk/yxiMvCXPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T05:16:49Z:d0e9dca3755f54960e42cd2cafe195a380bcd403a311965282eb7de796eea5e7:BtG2uPSqB6+6i0iDD7L+6uRn3Tw1dzzk7isPbjlblYIEAXyGDcr9Hi2GcSN/amgUQEiUZHTDRlHFZqIjq91bDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, lifecycle, init, start, stop, status, ryeos-node]
-version: "1.0.0"
+version: "1.3.0"
 description: >
   Local node lifecycle semantics owned by the ryeos-node crate: init,
   start, stop, status, liveness, daemon metadata, and CLI preflight.
@@ -18,11 +18,11 @@ is exactly four verbs:
 ryeos init
 ryeos start
 ryeos stop
-ryeos status
+ryeos node status
 ```
 
 There is no `restart`, no enable/disable command, no init-system
-integration, and no separate probe command. `ryeos status` is the only
+integration, and no separate probe command. `ryeos node status` is the only
 lifecycle read operation. Lifecycle operations are local-node operations
 and intentionally ignore `RYEOSD_URL`; that variable only steers normal
 daemon-backed dispatch.
@@ -37,7 +37,8 @@ daemon-backed dispatch.
   `daemon.json` hint reading, lifecycle RPC timeout, and start-lock
   acquisition.
 - `LifecycleController` — controller for `init`, `init_state`,
-  `require_initialized`, `status`, `start`, and `stop`.
+  `require_initialized`, `status`, `start`, and `stop`, including optional
+  progress-observer variants for startup and shutdown.
 - `init::run_init` — authoritative operator init.
 - `init_check::{init_state, require_initialized}` — initialized-state
   checks based on signed bundle registrations.
@@ -52,7 +53,7 @@ registration. Missing system space, missing registration directory, or no
 signed registrations returns `NotInitialized` with `Run: ryeos init`
 guidance. Bundle names are not hardcoded.
 
-## `ryeos status`
+## `ryeos node status`
 
 `status` is strictly read-only: no directory creation, no metadata
 writes, no repair, no socket cleanup.
@@ -87,23 +88,40 @@ crashed starter cannot wedge future starts.
 readiness via the same `status` liveness contract. If the child exits
 early, it re-probes once for concurrent-starter convergence, then
 surfaces stderr immediately instead of holding the lock to the deadline.
-Default readiness timeout is 15 seconds.
+The readiness timeout is 15 minutes so verified projection recovery can finish.
+
+When stdout and stderr are interactive terminals, the CLI consumes the typed
+lifecycle observer and redraws one compact `RYE/OS BOOT` line. The bar follows
+the real `StartupPhase` enum and uses real chain counters when the daemon
+publishes them. Redirected and non-interactive calls do not emit cursor control
+sequences or timing-dependent progress lines.
 
 ## `ryeos stop`
 
-`stop` sends shutdown to the UDS that just proved the daemon is live; it
-never blind-fires at stale `daemon.json` paths. Default graceful timeout
-is 10 seconds.
+`stop` first establishes that the local daemon is live, then connects to a
+configured UDS candidate and asks the kernel for that socket peer's
+`SO_PEERCRED` PID and `SO_PEERPIDFD`. The pidfd is the process identity;
+`daemon.json` and the PID returned by `lifecycle.status` are never signal
+authority. The numeric peer PID is used only to verify that `/proc/<pid>/comm`
+or `/proc/<pid>/exe` identifies `ryeosd`.
 
-With `--force`, after graceful timeout, stop re-confirms live PID through
-a fresh `lifecycle.status` RPC immediately before signalling. It fails
-closed if no live daemon responds, response status is not `running`, or
-no PID is present. On Unix it verifies `/proc/<pid>/comm == "ryeosd"` or
-`/proc/<pid>/exe` basename `ryeosd` before `SIGTERM`. `ESRCH` is benign.
+The normal path sends `SIGTERM` through the peer pidfd. That enters the daemon's
+graceful shutdown coordinator, closes new runtime authoring, stops listeners,
+and drains attached workloads. The default wait is 10 seconds.
 
-Generation tokens and pidfd/SO_PEERCRED hardening were deliberately not
-added; fresh-RPC reconfirm plus `/proc` verification is the chosen
-portable floor.
+With `--force`, expiry of that wait causes a fresh socket connection, fresh
+kernel peer credentials, and fresh peer pidfd capture before `SIGKILL`
+escalation. Stop then waits another two seconds for disappearance. It fails
+closed when no configured socket has a verifiable live `ryeosd` peer. There is
+no numeric-PID or stale-metadata fallback.
+
+Interactive shutdown uses the same presentation boundary: `RYE/OS HALT`
+animates while verified lifecycle probes still see the daemon and completes
+only after the process/state authority is gone. This does not alter the
+pidfd-based stop contract.
+
+This contract requires the Linux pidfd and `SO_PEERPIDFD` primitives in the
+supported-node baseline; see [Platform Support](../platform-support.md).
 
 ## Lifecycle RPC timeout
 
@@ -116,3 +134,7 @@ Normal daemon-backed CLI dispatch first checks local lifecycle status
 unless `RYEOSD_URL` is set. If not `Running`, it fails before signing with
 guidance to run `ryeos init` or `ryeos start`. `RYEOSD_URL` bypasses this
 preflight for normal dispatch only; lifecycle verbs still ignore it.
+
+Sandbox policy is not a live-reload surface. Validate edits with
+`ryeos node doctor`, then stop/start the node so startup resolves a new immutable
+snapshot. See [Execution Isolation](execution-isolation.md).

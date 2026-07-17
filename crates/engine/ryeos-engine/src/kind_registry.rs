@@ -18,7 +18,9 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::contracts::{ItemMetadata, ResolvedSourceFormat, SignatureEnvelope, ValueShape};
+use crate::contracts::{
+    FieldType, ItemMetadata, PrimType, ResolvedSourceFormat, SignatureEnvelope, ValueShape,
+};
 use crate::error::EngineError;
 use crate::resolution::decl::ResolutionStepDecl;
 use crate::trust::TrustStore;
@@ -475,7 +477,7 @@ pub enum TerminatorDecl {
     /// referenced protocol descriptor.
     Subprocess {
         /// Canonical ref into ProtocolRegistry, e.g.
-        /// "protocol:ryeos/core/runtime_v1".
+        /// "protocol:ryeos/core/runtime".
         #[serde(rename = "protocol")]
         protocol_ref: String,
     },
@@ -545,6 +547,10 @@ pub enum MethodDispatchVia {
 #[serde(deny_unknown_fields)]
 pub struct MethodDispatchDecl {
     pub via: MethodDispatchVia,
+    /// Signed wire contract used when the selected runtime is spawned for a
+    /// method call. This is distinct from the runtime kind's normal launch
+    /// protocol because method runtimes consume `MethodCallEnvelope`.
+    pub protocol: String,
     /// Method invoked when a request carries no explicit `call.method`.
     ///
     /// Optional by design: a schema may omit it, in which case every
@@ -646,10 +652,8 @@ pub enum LaunchAugmentationDecl {
         /// Which kind handles composition. Daemon's interpreter uses
         /// this for prefix validation and runtime lookup.
         target_kind: String,
-        /// Runtime handler method name to dispatch. For knowledge this
-        /// defaults to augmentation-private `compose_positions`, which is
-        /// intentionally not a generic schema method.
-        #[serde(default = "default_target_method")]
+        /// Runtime handler method name to dispatch. Required so the schema,
+        /// rather than daemon defaults, owns the private method selection.
         target_method: String,
         /// Derived field on the consumer kind's KindComposedView
         /// holding the position → refs map.
@@ -673,9 +677,6 @@ pub enum LaunchAugmentationDecl {
     },
 }
 
-fn default_target_method() -> String {
-    "compose_positions".to_string()
-}
 fn default_source_derived() -> String {
     "composed_context".to_string()
 }
@@ -721,6 +722,22 @@ fn default_true() -> bool {
     true
 }
 
+/// Kind-declared source for an authored thread-history policy.
+///
+/// The path is evaluated against the daemon-composed effective item, never
+/// against `ItemMetadata::extra` or a re-read source file. Kinds opt in by
+/// declaring this block; the resolver remains entirely kind/ref agnostic.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ThreadHistoryPolicyDecl {
+    /// Top-level object key in the final composed item. Example: `history`.
+    ///
+    /// The declaration deliberately names one atomic field rather than a
+    /// generic path language: an opted-in kind either inherits or replaces
+    /// the complete history mapping.
+    pub composed_path: String,
+}
+
 /// Execution configuration for a kind (resolution pipeline + aliases).
 /// Only kinds with an execution block can be executed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -762,6 +779,10 @@ pub struct ExecutionSchema {
     /// at boot — no hardcoded Rust profile map needed.
     #[serde(default)]
     pub thread_profile: Option<ThreadProfileDecl>,
+    /// Optional authored thread-history policy source. Absence means this kind
+    /// cannot author an override; the node default still applies.
+    #[serde(default)]
+    pub history_policy: Option<ThreadHistoryPolicyDecl>,
     /// Kind-level method dispatch: the route shared by all methods plus
     /// the default method invoked when `/execute` omits `call.method`.
     /// Present iff `methods` is non-empty (enforced at load time).
@@ -915,6 +936,7 @@ impl KindSchema {
 #[derive(Debug, Clone)]
 pub struct KindRegistry {
     schemas: HashMap<String, KindSchema>,
+    schema_content_hashes: HashMap<String, String>,
     fingerprint: String,
 }
 
@@ -923,6 +945,7 @@ impl KindRegistry {
     pub fn empty() -> Self {
         Self {
             schemas: HashMap::new(),
+            schema_content_hashes: HashMap::new(),
             fingerprint: "empty".to_owned(),
         }
     }
@@ -947,19 +970,27 @@ impl KindRegistry {
         trust_store: &TrustStore,
     ) -> Result<Self, EngineError> {
         let mut schemas: HashMap<String, KindSchema> = HashMap::new();
+        let mut schema_content_hashes = HashMap::new();
         let mut fingerprint_data = Vec::new();
 
         for root in search_roots {
             if !root.exists() {
                 continue;
             }
-            loading::load_schemas_from_dir(root, &mut schemas, &mut fingerprint_data, trust_store)?;
+            loading::load_schemas_from_dir(
+                root,
+                &mut schemas,
+                &mut schema_content_hashes,
+                &mut fingerprint_data,
+                trust_store,
+            )?;
         }
 
         let fingerprint = lillux::cas::sha256_hex(&fingerprint_data);
 
         Ok(Self {
             schemas,
+            schema_content_hashes,
             fingerprint,
         })
     }
@@ -971,6 +1002,11 @@ impl KindRegistry {
             tracing::trace!(kind = %kind, registered = self.schemas.len(), "kind registry miss");
         }
         found
+    }
+
+    /// Verified content hash of the signed schema which registered `kind`.
+    pub fn schema_content_hash(&self, kind: &str) -> Option<&str> {
+        self.schema_content_hashes.get(kind).map(String::as_str)
     }
 
     /// Check whether a kind is registered.
@@ -1046,7 +1082,7 @@ impl Default for KindRegistry {
 fn load_and_verify_kind_schema(
     yaml_path: &Path,
     trust_store: &TrustStore,
-) -> Result<KindSchema, EngineError> {
+) -> Result<(KindSchema, String), EngineError> {
     let content =
         std::fs::read_to_string(yaml_path).map_err(|e| EngineError::SchemaLoaderError {
             reason: format!("cannot read {}: {e}", yaml_path.display()),
@@ -1061,7 +1097,7 @@ fn load_and_verify_kind_schema(
         suffix,
     );
 
-    match sig_header {
+    let content_hash = match sig_header {
         Some(header) => {
             let body = lillux::signature::strip_signature_lines(&content);
             let actual_hash = lillux::signature::content_hash(&body);
@@ -1091,15 +1127,17 @@ fn load_and_verify_kind_schema(
                     reason: "Ed25519 signature verification failed".into(),
                 });
             }
+            actual_hash
         }
         None => {
             return Err(EngineError::SignatureMissing {
                 canonical_ref: format!("node:{}", infer_node_id(yaml_path)),
             });
         }
-    }
+    };
 
-    parse_kind_schema_content(&yaml_path.display().to_string(), &content)
+    let schema = parse_kind_schema_content(&yaml_path.display().to_string(), &content)?;
+    Ok((schema, content_hash))
 }
 
 /// Reverse-map a kind-schema filesystem path to a node item ID.
@@ -1236,6 +1274,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             });
         }
     };
+    validate_history_policy_value_contract(execution.as_ref(), &composed_value_contract, display)?;
 
     let composer = data
         .get("composer")
@@ -1772,6 +1811,21 @@ fn parse_execution_schema(
 
     let thread_profile = parse_thread_profile(execution_value, display)?;
 
+    let history_policy = match execution_value.get("history_policy") {
+        Some(value) => {
+            let decl = serde_yaml::from_value::<ThreadHistoryPolicyDecl>(value.clone()).map_err(
+                |error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid execution.history_policy declaration: {error}"
+                    ),
+                },
+            )?;
+            validate_history_policy_decl(&decl, display)?;
+            Some(decl)
+        }
+        None => None,
+    };
+
     // Parse method_dispatch (route + default method).
     let method_dispatch = if let Some(md_value) = execution_value.get("method_dispatch") {
         Some(
@@ -1822,7 +1876,7 @@ fn parse_execution_schema(
             return Err(EngineError::SchemaLoaderError {
                 reason: format!(
                     "{display}: kind declares `methods` but no `method_dispatch` \
-                     (declare `method_dispatch: {{ via: runtime_registry, default: <method> }}`)"
+                     (declare `method_dispatch: {{ via: runtime_registry, protocol: <protocol-ref>, default: <method> }}`)"
                 ),
             });
         }
@@ -1932,10 +1986,94 @@ fn parse_execution_schema(
         terminator,
         delegate,
         thread_profile,
+        history_policy,
         method_dispatch,
         methods,
         launch_augmentations,
     }))
+}
+
+fn validate_history_policy_decl(
+    decl: &ThreadHistoryPolicyDecl,
+    display: &str,
+) -> Result<(), EngineError> {
+    let mut chars = decl.composed_path.chars();
+    let starts_valid = chars
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic());
+    let rest_valid = chars.all(|ch| ch == '_' || ch == '-' || ch.is_ascii_alphanumeric());
+    if !starts_valid || !rest_valid {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.history_policy.composed_path `{}` is invalid; use one ASCII identifier key",
+                decl.composed_path
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn validate_history_policy_value_contract(
+    execution: Option<&ExecutionSchema>,
+    contract: &ValueShape,
+    display: &str,
+) -> Result<(), EngineError> {
+    let Some(declaration) = execution.and_then(|value| value.history_policy.as_ref()) else {
+        return Ok(());
+    };
+    let field = contract
+        .optional
+        .get(&declaration.composed_path)
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: execution.history_policy.composed_path `{}` must be admitted as an optional mapping in composed_value_contract",
+                declaration.composed_path
+            ),
+        })?;
+    let history_contract =
+        nested_mapping_contract(field).ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: composed_value_contract.{} must be a mapping with a nested contract",
+                declaration.composed_path
+            ),
+        })?;
+    let retention = history_contract
+        .required
+        .get("retention")
+        .and_then(nested_mapping_contract)
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: composed_value_contract.{}.retention must be a required mapping with a nested contract",
+                declaration.composed_path
+            ),
+        })?;
+    let terminal_for_is_string = matches!(
+        retention.required.get("terminal_for"),
+        Some(FieldType::Single {
+            prim: PrimType::String,
+            ..
+        })
+    );
+    if !terminal_for_is_string {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: composed_value_contract.{}.retention.terminal_for must be a required string",
+                declaration.composed_path
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn nested_mapping_contract(field: &FieldType) -> Option<&ValueShape> {
+    match field {
+        FieldType::Single {
+            prim: PrimType::Mapping,
+            nested_contract: Some(contract),
+            ..
+        } => Some(contract),
+        _ => None,
+    }
 }
 
 /// Parse the `execution.thread_profile` block from a kind schema.
@@ -2664,6 +2802,111 @@ formats:
     }
 
     #[test]
+    fn execution_history_policy_path_is_typed_and_kind_declared() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let yaml = "\
+location:
+  directory: services
+resolution: []
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  history_policy:
+    composed_path: history
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+composed_value_contract:
+  root_type: mapping
+  required: {}
+  optional:
+    history:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          retention:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                terminal_for: { type: single, prim: string }
+";
+        sign_and_write_schema(&tmp, "service", yaml, &sk);
+
+        let registry = KindRegistry::load_base(&[tmp], &ts).unwrap();
+        let declaration = registry
+            .get("service")
+            .and_then(KindSchema::execution)
+            .and_then(|execution| execution.history_policy.as_ref())
+            .expect("history policy declaration");
+        assert_eq!(declaration.composed_path, "history");
+        assert!(registry
+            .schema_content_hash("service")
+            .is_some_and(|hash| hash.len() == 64));
+    }
+
+    #[test]
+    fn execution_history_policy_rejects_empty_or_non_identifier_paths() {
+        for path in ["''", "thread.history"] {
+            let tmp = tempdir();
+            let sk = test_signing_key();
+            let ts = test_trust_store(&sk);
+            let yaml = format!(
+                "location:\n  directory: services\nresolution: []\nexecution:\n  terminator:\n    kind: in_process\n    registry: services\n  history_policy:\n    composed_path: {path}\nformats:\n  - extensions: [\".yaml\"]\n    parser: parser:ryeos/core/yaml/yaml\n    signature:\n      prefix: \"#\"\n"
+            );
+            sign_and_write_schema(&tmp, "service", &yaml, &sk);
+
+            let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("execution.history_policy.composed_path"),
+                "unexpected error for {path}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn execution_history_policy_requires_matching_optional_value_contract() {
+        let tmp = tempdir();
+        let sk = test_signing_key();
+        let ts = test_trust_store(&sk);
+        let yaml = "\
+location:
+  directory: services
+resolution: []
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  history_policy:
+    composed_path: history
+formats:
+  - extensions: [\".yaml\"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: \"#\"
+";
+        sign_and_write_schema(&tmp, "service", yaml, &sk);
+
+        let error = KindRegistry::load_base(&[tmp], &ts).unwrap_err();
+        assert!(
+            error.to_string().contains(
+                "execution.history_policy.composed_path `history` must be admitted as an optional mapping"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn empty_resolution_is_explicit() {
         let tmp = tempdir();
         let sk = test_signing_key();
@@ -2855,13 +3098,13 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert_eq!(
             exec.terminator,
             Some(TerminatorDecl::Subprocess {
-                protocol_ref: "protocol:ryeos/core/runtime_v1".into()
+                protocol_ref: "protocol:ryeos/core/runtime".into()
             })
         );
     }
@@ -2980,7 +3223,7 @@ execution:
         let yaml = "\
 execution:
   terminator:
-    kind: wasm_sandbox
+    kind: wasm_isolation
     protocol: protocol:ryeos/core/opaque
 ";
         let err = parse_exec(yaml).unwrap_err();
@@ -3059,6 +3302,7 @@ execution:
     supports_continuation: false
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose:
@@ -3079,6 +3323,7 @@ execution:
             .method_dispatch
             .as_ref()
             .expect("method_dispatch present");
+        assert_eq!(md.protocol, "protocol:ryeos/core/method_runtime");
         assert_eq!(md.default.as_deref(), Some("compose"));
         assert!(exec.terminator.is_none());
         assert!(exec.delegate.is_none());
@@ -3091,6 +3336,7 @@ execution:
 execution:
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose:
@@ -3134,6 +3380,7 @@ execution:
 execution:
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
     default: query
   methods:
     compose: {}
@@ -3167,9 +3414,10 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose: {}
@@ -3190,6 +3438,7 @@ execution:
     via: runtime_registry
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose: {}
@@ -3215,6 +3464,7 @@ execution:
     supports_continuation: false
   method_dispatch:
     via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
     default: compose
   methods:
     compose: {}
@@ -3232,7 +3482,7 @@ execution:
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.methods.is_empty());
@@ -3284,7 +3534,7 @@ execution:
     }
 
     #[test]
-    fn launch_augmentations_defaults_applied() {
+    fn launch_augmentations_non_routing_defaults_applied() {
         let yaml = "\
 execution:
   delegate:
@@ -3292,6 +3542,7 @@ execution:
   launch_augmentations:
     - step: compose_context_positions
       target_kind: knowledge
+      target_method: compose_positions
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         match &exec.launch_augmentations[0] {
@@ -3316,12 +3567,25 @@ execution:
     }
 
     #[test]
+    fn launch_augmentation_requires_target_method() {
+        let yaml = "\
+execution:
+  delegate:
+    via: runtime_registry
+  launch_augmentations:
+    - step: compose_context_positions
+      target_kind: knowledge
+";
+        assert!(parse_exec(yaml).is_err());
+    }
+
+    #[test]
     fn launch_augmentations_default_to_empty() {
         let yaml = "\
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
 ";
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.launch_augmentations.is_empty());

@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
 use regex::Regex;
-use ryeos_handler_protocol::{ComposeRequest, ComposeSuccess, ResolutionStepNameWire};
+use ryeos_handler_protocol::{
+    ComposeRequest, ComposeSuccess, ComposerFieldRequirement, ComposerFieldSemantics,
+    ResolutionStepNameWire,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -97,6 +100,45 @@ pub fn validate_config(config: &Value) -> Result<(), String> {
             return Err(format!(
                 "extends_chain: policy_fact `{}` has empty path segment",
                 pf.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate that configured rules preserve each requested field as one atomic
+/// value. Strategy names remain private to this handler; the engine asks only
+/// for generic semantics through the handler protocol.
+pub fn validate_field_requirements(
+    config: &Value,
+    requirements: &[ComposerFieldRequirement],
+) -> Result<(), String> {
+    let cfg: ExtendsChainConfig =
+        serde_json::from_value(config.clone()).map_err(|e| e.to_string())?;
+    for requirement in requirements {
+        if requirement.field.is_empty() {
+            return Err("extends_chain composer field requirement must not be empty".to_string());
+        }
+        let rule = cfg
+            .fields
+            .iter()
+            .find(|rule| rule.name == requirement.field)
+            .ok_or_else(|| {
+                format!(
+                    "extends_chain: field `{}` requires {:?} composition semantics but has no field rule",
+                    requirement.field, requirement.semantics
+                )
+            })?;
+        let supported = match requirement.semantics {
+            ComposerFieldSemantics::RootVerbatim => rule.strategy == ComposerStrategy::RootVerbatim,
+            ComposerFieldSemantics::InheritOrReplace => {
+                rule.strategy == ComposerStrategy::ReplaceRootLast
+            }
+        };
+        if !supported {
+            return Err(format!(
+                "extends_chain: field `{}` uses strategy {:?}, which cannot provide {:?} composition semantics",
+                requirement.field, rule.strategy, requirement.semantics
             ));
         }
     }
@@ -315,7 +357,7 @@ fn apply_strategy(
             }
         }
         ComposerStrategy::ReplaceRootLast => {
-            if let Some(value) = last_non_null_field(ancestor_parsed, root_parsed, &rule.name) {
+            if let Some(value) = last_declared_field(ancestor_parsed, root_parsed, &rule.name) {
                 if let Value::Object(obj) = composed {
                     obj.insert(rule.name.clone(), value.clone());
                 }
@@ -1025,15 +1067,20 @@ fn operation_set(entry: &Value) -> HashSet<String> {
         .unwrap_or_default()
 }
 
-fn last_non_null_field<'a>(
+/// Select the nearest declaration without treating `null` as omission.
+///
+/// `replace_root_last` is an exact-value strategy: a declared null must ride
+/// through to final contract validation instead of silently exposing an older
+/// ancestor value. Only an absent key means inherit.
+fn last_declared_field<'a>(
     ancestor_parsed: &'a [&'a Value],
     root_parsed: &'a Value,
     field: &str,
 ) -> Option<&'a Value> {
     ancestor_parsed
         .iter()
-        .filter_map(|parent| parent.get(field).filter(|v| !v.is_null()))
-        .chain(root_parsed.get(field).filter(|v| !v.is_null()))
+        .filter_map(|parent| parent.get(field))
+        .chain(root_parsed.get(field))
         .last()
 }
 
@@ -2123,6 +2170,44 @@ mod tests {
     }
 
     #[test]
+    fn exact_field_requires_atomic_strategy() {
+        let replace = json!({
+            "extends_field": "extends",
+            "fields": [{
+                "name": "policy",
+                "strategy": "replace_root_last",
+                "expect_value_type": "mapping"
+            }]
+        });
+        validate_field_requirements(
+            &replace,
+            &[ComposerFieldRequirement {
+                field: "policy".into(),
+                semantics: ComposerFieldSemantics::InheritOrReplace,
+            }],
+        )
+        .unwrap();
+
+        let deep_merge = json!({
+            "extends_field": "extends",
+            "fields": [{
+                "name": "policy",
+                "strategy": "dict_merge_root_last",
+                "expect_value_type": "mapping"
+            }]
+        });
+        let error = validate_field_requirements(
+            &deep_merge,
+            &[ComposerFieldRequirement {
+                field: "policy".into(),
+                semantics: ComposerFieldSemantics::InheritOrReplace,
+            }],
+        )
+        .unwrap_err();
+        assert!(error.contains("cannot provide InheritOrReplace"));
+    }
+
+    #[test]
     fn validate_config_rejects_empty_extends_field() {
         let cfg = json!({
             "extends_field": "",
@@ -2267,6 +2352,20 @@ mod tests {
             view.composed.get("layout").unwrap(),
             &json!({ "root": "mid" })
         );
+    }
+
+    #[test]
+    fn replace_root_last_preserves_declared_null_for_contract_rejection() {
+        let cfg = json!({
+            "extends_field": "ext",
+            "fields": [
+                { "name": "layout", "strategy": "replace_root_last", "expect_value_type": "mapping" }
+            ]
+        });
+        let root = json!({ "ext": "parent", "layout": null });
+        let parent = json!({ "layout": { "root": "parent" } });
+        let view = run(cfg, root, vec![ancestor_input("parent", parent)]).unwrap();
+        assert!(view.composed["layout"].is_null());
     }
 
     #[test]

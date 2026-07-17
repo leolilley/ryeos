@@ -27,7 +27,7 @@
 //!     `work`) and the successor (ran post-follow `mark`) each reach
 //!     `thread_completed` exactly once.
 //!   - Value flow: the child returns a sentinel that the resumed parent consumes
-//!     (`${result.child_ran}`) and re-returns, so the successor's persisted
+//!     (`${result.result.child_ran}`) and re-returns, so the successor's persisted
 //!     result carries it — proving the child's result was actually consumed, not
 //!     merely stepped past.
 
@@ -36,7 +36,7 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
+use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
 use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
@@ -81,7 +81,6 @@ config:
   nodes:
     work:
       node_type: gate
-      assign: {tick: true}
       next:
         type: conditional
         branches:
@@ -103,11 +102,11 @@ fn plant_parent_follow_graph(project_dir: &Path, signer: &SigningKey) -> anyhow:
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     // `fetch` consumes the child result on resume and assigns the child's value
-    // into state via `${result.child_ran}` — the follow result binds to the child's
-    // terminal `result`, which for a graph child is its return `output`
-    // (`graph_result.result`), so the child's `child_ran` output is at the top
-    // level. `done` re-returns it so the successor's persisted result carries the
-    // sentinel iff the follow result was consumed correctly.
+    // from the typed GraphResult (`result.result.child_ran`). Graph-to-graph
+    // dispatch deliberately preserves that structured result rather than
+    // flattening one runtime kind specially. `done` re-returns it so the
+    // successor's persisted result carries the sentinel iff the follow result
+    // was consumed correctly.
     let body = r#"category: ""
 version: "1.0.0"
 requires:
@@ -122,15 +121,15 @@ config:
       follow: true
       action:
         item_id: "graph:child"
+        ref_bindings: {}
         params: {}
       assign:
-        child_ran: "${result.child_ran}"
+        child_ran: "${result.result.child_ran}"
       next:
         type: unconditional
         to: mark
     mark:
       node_type: gate
-      assign: {seen: true}
       next:
         type: conditional
         branches:
@@ -149,9 +148,10 @@ config:
 /// The test owns the whole daemon, so an unfiltered read is exactly the parent +
 /// child + successor threads.
 fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
-    let db_path = state_path
-        .join(ryeos_engine::AI_DIR)
-        .join("state/projection.sqlite3");
+    let db_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
     let conn = match rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -382,11 +382,11 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
 
     // 6. Value flow: the child's returned value reached the resumed parent's
     //    persisted result. A missing / mis-shaped follow result would break the
-    //    `${result.child_ran}` assign and the sentinel would be absent.
+    //    `${result.result.child_ran}` assign and the sentinel would be absent.
     let (get_status, get_body) = h
         .post_execute(
             "service:threads/get",
-            ".",
+            project.path().to_str().unwrap(),
             serde_json::json!({ "thread_id": successor_tid }),
         )
         .await
@@ -419,6 +419,7 @@ config:
     boom:
       action:
         item_id: "tool:nonexistent/boom"
+        ref_bindings: {}
         params: {}
       next:
         type: unconditional
@@ -450,6 +451,7 @@ config:
       follow: true
       action:
         item_id: "graph:child_fail"
+        ref_bindings: {}
         params: {}
       on_error: recover
       next:
@@ -457,14 +459,12 @@ config:
         to: unreached
     recover:
       node_type: gate
-      assign: {recovered: true}
       next:
         type: conditional
         branches:
           - to: done
     unreached:
       node_type: gate
-      assign: {wrong: true}
       next:
         type: conditional
         branches:
@@ -579,7 +579,6 @@ config:
   nodes:
     worka:
       node_type: gate
-      assign: {tick: true}
       next:
         type: conditional
         branches:
@@ -602,7 +601,6 @@ config:
   nodes:
     workb:
       node_type: gate
-      assign: {tick: true}
       next:
         type: conditional
         branches:
@@ -634,6 +632,7 @@ config:
       follow: true
       action:
         item_id: "graph:child_a"
+        ref_bindings: {}
         params: {}
       next:
         type: unconditional
@@ -643,6 +642,7 @@ config:
       follow: true
       action:
         item_id: "graph:child_b"
+        ref_bindings: {}
         params: {}
       next:
         type: unconditional
@@ -859,6 +859,8 @@ config:
       follow: true
       action:
         item_id: "directive:costchild"
+        ref_bindings:
+          model: "directive:costchild"
         params: {}
       next:
         type: unconditional
@@ -878,6 +880,12 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
 
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-follow-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -888,14 +896,11 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
                 "info,ryeosd=debug,ryeos_graph_runtime=debug,ryeos_directive_runtime=debug".into()
             }),
         );
-        // Allow the project-level mock provider config the directive child resolves.
-        cmd.env("RYEOS_ALLOW_PROJECT_PROVIDER_CONFIG", "1");
     })
     .await
     .expect("start daemon with mock provider + standard bundle");
 
     let project = tempfile::tempdir().expect("project tempdir");
-    plant_mock_provider(project.path(), &mock_url, &fixture.publisher).expect("plant provider");
     plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
     plant_cost_directive_child(project.path(), &fixture.publisher).expect("plant child directive");
     plant_parent_cost_graph(project.path(), &fixture.publisher).expect("plant parent");
@@ -956,7 +961,7 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
     let (get_status, get_body) = h
         .post_execute(
             "service:threads/get",
-            ".",
+            project.path().to_str().unwrap(),
             serde_json::json!({ "thread_id": successor_tid }),
         )
         .await

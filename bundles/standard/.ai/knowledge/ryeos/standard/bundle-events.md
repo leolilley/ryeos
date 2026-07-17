@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-04T03:59:54Z:83db9611f757faee8503e75cff9e1f2ed0764679adf43646999542f04f77393b:7eH77Gw737q2GvaCpSi9UqnEAj6lILEJX1BYvXUtzfZZjeO6rMFBHTT5vfTc9AvKwGnJO6lDTN+GC/bgidvTCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-16T10:54:58Z:1c926ceecdff2878925db9a22dcd7aeeb5cff36772ac0d15a4bd1382d73b0772:VjlqiOERvh0yfs9NsJEBSpBj2eLGvGwjqreSDzyUaqGbxAqu49Ru0DE0sZfUKl6++3iu2LIKJiwbux28YYBGCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [bundle-events, runtime-authority, manifest, capabilities, vault]
@@ -13,7 +13,8 @@ description: >
 
 A bundle event is a durable, append-only record written to a per-bundle event
 chain via the daemon runtime callbacks (`runtime.bundle_events_append`,
-`runtime.bundle_events_read_chain`, `runtime.bundle_events_scan`). They are the
+`runtime.bundle_events_read_chain`, `runtime.bundle_events_scan`, and
+`runtime.bundle_events_materialize_attachment`). They are the
 "durable memory" half of a real agent: pattern stats, suppression lists, audit
 trails that must survive across runs.
 
@@ -49,6 +50,15 @@ ryeos.<verb>.bundle-events.<bundle-id>/<event-kind>
 | `bundle_events_append` | `append` |
 | `bundle_events_read_chain` | `scan` |
 | `bundle_events_scan` | `scan` |
+| `bundle_events_materialize_attachment` | `scan` |
+
+An append may attach bounded project-relative files. The daemon stores each
+file as a CAS blob and links it from the event object, making it part of the
+event's retained/exported object closure. Materialization uses `scan` authority,
+revalidates the event's bundle identity, and atomically writes to a caller-
+selected project-relative destination without following symlinks. This is the
+standard path for durable non-secret artifacts such as learner checkpoints;
+the runtime vault remains bounded secret/configuration storage.
 
 `read_chain` is authorized under **`scan`**, not a separate `read` verb. So a
 tool that does **create-or-append** — read the current chain, then append — needs

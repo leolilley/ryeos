@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Timeline roles: how a projected record participates in the
 /// coalesced timeline. Mechanism vocabulary — which event kinds map
@@ -548,8 +548,33 @@ pub struct TableColumn {
     /// Optional presentation: `tail_first` renders a `/`-pathed value
     /// leaf-first (`study ‹ directive:arc`), so right-truncation in a
     /// narrow cell keeps the segment that names the thing instead of the
-    /// namespace boilerplate.
+    /// namespace boilerplate. `leaf` keeps only that final segment; `words`
+    /// turns underscore-delimited wire values into display words; `time_date`
+    /// renders a canonical timestamp as `14:32 · 15 Jul`.
     pub present: Option<String>,
+    /// Authored display value used only when the projected field is absent or
+    /// empty. This is presentation fallback, not synthesized record data.
+    pub fallback: Option<String>,
+}
+
+/// Optional structural projection for a hierarchy-aware table. The source owns
+/// semantic ancestry; the client owns indentation, connectors, and local folds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableHierarchy {
+    pub id: String,
+    pub parent: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableHierarchyRow {
+    pub source_index: usize,
+    pub key: String,
+    /// Whether each ancestor has a later sibling. Renderers use these booleans
+    /// to continue vertical guide lines without receiving authored glyphs.
+    pub ancestor_continues: Vec<bool>,
+    pub is_last: bool,
+    pub has_children: bool,
+    pub collapsed: bool,
 }
 
 /// Apply a column's declared presentation to a projected cell.
@@ -562,14 +587,72 @@ fn present_cell(cell: &str, present: Option<&str>) -> String {
             Some((prefix, leaf)) if !leaf.is_empty() => format!("{leaf} ‹ {prefix}"),
             _ => cell.to_string(),
         },
+        Some("leaf") => cell
+            .rsplit_once('/')
+            .map(|(_, leaf)| leaf)
+            .filter(|leaf| !leaf.is_empty())
+            .unwrap_or(cell)
+            .to_string(),
+        Some("words") => cell.replace('_', " "),
+        Some("time_date") => present_time_date(cell).unwrap_or_else(|| cell.to_string()),
         _ => cell.to_string(),
     }
 }
 
+fn present_time_date(value: &str) -> Option<String> {
+    let (date, time) = value.split_once('T')?;
+    let mut date = date.split('-');
+    let year = date.next()?;
+    let month_number = date.next()?;
+    let day_text = date.next()?;
+    if date.next().is_some()
+        || year.len() != 4
+        || !year.bytes().all(|byte| byte.is_ascii_digit())
+        || day_text.len() != 2
+        || !day_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let month = match month_number {
+        "01" => "Jan",
+        "02" => "Feb",
+        "03" => "Mar",
+        "04" => "Apr",
+        "05" => "May",
+        "06" => "Jun",
+        "07" => "Jul",
+        "08" => "Aug",
+        "09" => "Sep",
+        "10" => "Oct",
+        "11" => "Nov",
+        "12" => "Dec",
+        _ => return None,
+    };
+    let day = day_text.parse::<u8>().ok()?;
+    if !(1..=31).contains(&day) {
+        return None;
+    }
+    let clock = time.get(..5)?;
+    let clock = clock.as_bytes();
+    if clock.get(2) != Some(&b':')
+        || ![clock[0], clock[1], clock[3], clock[4]]
+            .into_iter()
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let hour = value.get(11..13)?.parse::<u8>().ok()?;
+    let minute = value.get(14..16)?.parse::<u8>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(format!("{hour:02}:{minute:02} · {day} {month}"))
+}
+
 /// The columns a `table` view declares — `projections.columns`, each
-/// `{label, field, tone?}` (label defaults to the field path). A column
-/// missing a field is skipped; absent `columns` → empty (the table renders
-/// headerless).
+/// `{label, field, tone?, present?, fallback?}` (label defaults to the field
+/// path). A column missing a field is skipped; absent `columns` → empty (the
+/// table renders headerless).
 pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
     binding
         .projections
@@ -588,11 +671,152 @@ pub fn table_columns(binding: &ViewBinding) -> Vec<TableColumn> {
                             .get("present")
                             .and_then(Value::as_str)
                             .map(str::to_string),
+                        fallback: col
+                            .get("fallback")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
                     })
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Parse the optional generic table hierarchy declaration:
+/// `projections.hierarchy: {id, parent}`.
+pub fn table_hierarchy(binding: &ViewBinding) -> Option<TableHierarchy> {
+    let hierarchy = binding.projections.get("hierarchy")?;
+    Some(TableHierarchy {
+        id: hierarchy.get("id")?.as_str()?.to_string(),
+        parent: hierarchy.get("parent")?.as_str()?.to_string(),
+    })
+}
+
+/// Resolve a hierarchy declaration into visible pre-order rows. Parent links
+/// may arrive in any source order; missing parents become roots, cycles degrade
+/// to additional roots, and local folds are keyed by stable authored ids.
+pub fn table_hierarchy_rows(
+    binding: &ViewBinding,
+    records: &[Value],
+    collapsed_rows: &BTreeSet<String>,
+) -> Option<Vec<TableHierarchyRow>> {
+    let hierarchy = table_hierarchy(binding)?;
+    let ids = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            field_text(record, &hierarchy.id).unwrap_or_else(|| format!("index:{index}"))
+        })
+        .collect::<Vec<_>>();
+    let by_id = ids
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut children = vec![Vec::<usize>::new(); records.len()];
+    let mut roots = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let parent = field_text(record, &hierarchy.parent).filter(|parent| !parent.is_empty());
+        match parent.and_then(|parent| by_id.get(&parent).copied()) {
+            Some(parent_index) if parent_index != index => children[parent_index].push(index),
+            _ => roots.push(index),
+        }
+    }
+
+    // This local DFS keeps its immutable graph inputs and two accumulators
+    // explicit; packaging them would obscure which state recursion mutates.
+    fn mark_hidden_descendants(
+        index: usize,
+        children: &[Vec<usize>],
+        visited: &mut BTreeSet<usize>,
+    ) {
+        if !visited.insert(index) {
+            return;
+        }
+        for child in children[index].iter().copied() {
+            mark_hidden_descendants(child, children, visited);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn visit(
+        index: usize,
+        is_last: bool,
+        ancestors: &[bool],
+        ids: &[String],
+        children: &[Vec<usize>],
+        collapsed_rows: &BTreeSet<String>,
+        visited: &mut BTreeSet<usize>,
+        out: &mut Vec<TableHierarchyRow>,
+    ) {
+        if !visited.insert(index) {
+            return;
+        }
+        let key = ids[index].clone();
+        let collapsed = collapsed_rows.contains(&key);
+        out.push(TableHierarchyRow {
+            source_index: index,
+            key,
+            ancestor_continues: ancestors.to_vec(),
+            is_last,
+            has_children: !children[index].is_empty(),
+            collapsed,
+        });
+        if collapsed {
+            for child in children[index].iter().copied() {
+                mark_hidden_descendants(child, children, visited);
+            }
+            return;
+        }
+        let mut next_ancestors = ancestors.to_vec();
+        next_ancestors.push(!is_last);
+        let child_count = children[index].len();
+        for (position, child) in children[index].iter().copied().enumerate() {
+            visit(
+                child,
+                position + 1 == child_count,
+                &next_ancestors,
+                ids,
+                children,
+                collapsed_rows,
+                visited,
+                out,
+            );
+        }
+    }
+
+    let mut out = Vec::with_capacity(records.len());
+    let mut visited = BTreeSet::new();
+    let root_count = roots.len();
+    for (position, root) in roots.into_iter().enumerate() {
+        visit(
+            root,
+            position + 1 == root_count,
+            &[],
+            &ids,
+            &children,
+            collapsed_rows,
+            &mut visited,
+            &mut out,
+        );
+    }
+    // A component with no root is cyclic. Keep it inspectable as a separate
+    // root instead of dropping it or recursing forever.
+    for index in 0..records.len() {
+        if !visited.contains(&index) {
+            visit(
+                index,
+                true,
+                &[],
+                &ids,
+                &children,
+                collapsed_rows,
+                &mut visited,
+                &mut out,
+            );
+        }
+    }
+    Some(out)
 }
 
 /// Fields a rows/table view exposes when a row is expanded in place. The
@@ -666,8 +890,8 @@ pub struct ProjectedTableRow {
 /// Project a table source response: pull the collection (same shape as
 /// `project_records`), then one cell per declared column. Row tone reuses the
 /// shared `projections.tone` block; a column's own `tone` block tones its
-/// cell through the same `project_tone` rules. Missing cells degrade to
-/// empty strings.
+/// cell through the same `project_tone` rules. Missing or empty cells use the
+/// column's authored display fallback when present, otherwise an empty string.
 pub fn project_table(
     binding: &ViewBinding,
     response: &Value,
@@ -688,7 +912,10 @@ pub fn project_table_record(
         cells: columns
             .iter()
             .map(|col| {
-                let cell = field_text(record, &col.field).unwrap_or_default();
+                let cell = field_text(record, &col.field)
+                    .filter(|cell| !cell.is_empty())
+                    .or_else(|| col.fallback.clone())
+                    .unwrap_or_default();
                 present_cell(&cell, col.present.as_deref())
             })
             .collect(),
@@ -1247,6 +1474,85 @@ mod tests {
         // cell stays untoned; the row tone still comes from status.
         assert_eq!(rows[1].tone.as_deref(), Some("danger"));
         assert_eq!(rows[1].cell_tones, vec![None, None]);
+    }
+
+    #[test]
+    fn table_presentation_is_content_authored_and_preserves_raw_records() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:example/list", "collection": "items" },
+            "projections": {
+                "columns": [
+                    { "label": "item", "field": "item_ref", "present": "leaf" },
+                    { "label": "project", "field": "project.name", "fallback": "node" },
+                    { "label": "lineage", "field": "follow.display_state", "present": "words" },
+                    { "label": "created", "field": "created_at", "present": "time_date" }
+                ]
+            }
+        }))
+        .unwrap();
+        let record = json!({
+            "item_ref": "surface:ryeos/lens",
+            "project": { "name": "" },
+            "follow": { "display_state": "resume_queued" },
+            "created_at": "2026-07-15T14:32:18Z"
+        });
+        let columns = table_columns(&binding);
+        let rows = project_table(&binding, &json!({ "items": [record.clone()] }), &columns);
+
+        assert_eq!(
+            rows[0].cells,
+            ["lens", "node", "resume queued", "14:32 · 15 Jul"]
+        );
+        assert_eq!(rows[0].raw, record);
+    }
+
+    #[test]
+    fn invalid_time_date_presentation_keeps_the_authored_value() {
+        assert_eq!(
+            present_cell("not-a-timestamp", Some("time_date")),
+            "not-a-timestamp"
+        );
+        assert_eq!(
+            present_cell("2026-07-15T29:88:00Z", Some("time_date")),
+            "2026-07-15T29:88:00Z"
+        );
+    }
+
+    #[test]
+    fn table_hierarchy_orders_children_and_folds_by_stable_id() {
+        let binding: ViewBinding = serde_json::from_value(json!({
+            "widget": "table",
+            "source": { "ref": "service:example/tree", "collection": "threads" },
+            "projections": {
+                "hierarchy": { "id": "thread_id", "parent": "tree.parent_thread_id" },
+                "columns": [{ "label": "execution", "field": "item_ref" }]
+            }
+        }))
+        .unwrap();
+        // Deliberately not pre-ordered: hierarchy projection owns structure.
+        let records = json!([
+            { "thread_id": "child-b", "item_ref": "b", "tree": { "parent_thread_id": "root" } },
+            { "thread_id": "root", "item_ref": "root", "tree": {} },
+            { "thread_id": "grandchild", "item_ref": "g", "tree": { "parent_thread_id": "child-a" } },
+            { "thread_id": "child-a", "item_ref": "a", "tree": { "parent_thread_id": "root" } }
+        ]);
+        let records = records.as_array().unwrap();
+        let rows = table_hierarchy_rows(&binding, records, &BTreeSet::new()).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>(),
+            ["root", "child-b", "child-a", "grandchild"]
+        );
+        assert!(rows[0].has_children);
+        assert!(!rows[1].is_last);
+        assert!(rows[2].is_last);
+        assert_eq!(rows[3].ancestor_continues, [false, false]);
+
+        let collapsed = BTreeSet::from(["root".to_string()]);
+        let rows = table_hierarchy_rows(&binding, records, &collapsed).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "root");
+        assert!(rows[0].collapsed);
     }
 
     #[test]

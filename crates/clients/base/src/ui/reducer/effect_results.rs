@@ -28,6 +28,9 @@ impl RyeOsCore {
         }
 
         if !result.ok {
+            if let Some(source_key) = completed_source_key.as_deref() {
+                self.record_source_failure(source_key, result.id, result.error.as_deref());
+            }
             self.notice(
                 effect_failure_notice(&expected, result.error.as_deref()),
                 RyeOsTone::Danger,
@@ -70,6 +73,22 @@ impl RyeOsCore {
             effects.push(effect);
         }
         effects
+    }
+
+    fn record_source_failure(&mut self, source_key: &str, result_id: u64, error: Option<&str>) {
+        let floor = self.data.source_floor.get(source_key).copied().unwrap_or(0);
+        let newest = self.data.source_epoch.get(source_key).copied().unwrap_or(0);
+        let stored = self.data.source_stored_epoch.get(source_key).copied();
+        if result_id < floor
+            || result_id < newest
+            || stored.is_some_and(|stored_id| result_id < stored_id)
+        {
+            return;
+        }
+        self.data.source_errors.insert(
+            source_key.to_string(),
+            error.unwrap_or("source request failed").to_string(),
+        );
     }
 
     /// Effect batches resolve concurrently, so an older shared-dataset
@@ -303,17 +322,13 @@ impl RyeOsCore {
                     //   latency exceeds the hint-refetch cadence into a
                     //   permanent "loading" — every response would arrive
                     //   already superseded.
-                    let floor = self
-                        .data
-                        .source_floor
-                        .get(tile_id)
-                        .copied()
-                        .unwrap_or(0);
+                    let floor = self.data.source_floor.get(tile_id).copied().unwrap_or(0);
                     let stored = self.data.source_stored_epoch.get(tile_id).copied();
                     if result_id >= floor && stored.is_none_or(|s| result_id >= s) {
                         let old = self.data.sources.get(tile_id).cloned();
                         self.note_source_row_changes(tile_id, old.as_ref(), &data);
                         self.data.sources.insert(tile_id.clone(), data);
+                        self.data.source_errors.remove(tile_id);
                         self.data
                             .source_stored_epoch
                             .insert(tile_id.clone(), result_id);
@@ -476,6 +491,7 @@ impl RyeOsCore {
         self.data.files = None;
         self.data.tile_files.clear();
         self.data.sources.clear();
+        self.data.source_errors.clear();
         self.data.source_epoch.clear();
         self.data.source_stored_epoch.clear();
         self.data.source_floor.clear();
@@ -1043,6 +1059,68 @@ mod tests {
     }
 
     #[test]
+    fn source_failure_is_visible_until_retry_or_success() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/slow");
+        let failed = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("fetch emitted");
+
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: failed.id,
+                ok: false,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: None,
+                error: Some("daemon rejected source".to_string()),
+            },
+        });
+        assert_eq!(
+            core.data.source_errors.get("K").map(String::as_str),
+            Some("daemon rejected source")
+        );
+
+        let retry = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("retry emitted");
+        assert!(!core.data.source_errors.contains_key("K"));
+
+        deliver(&mut core, retry.id, "recovered");
+        assert_eq!(core.data.sources["K"]["tag"], "recovered");
+        assert!(!core.data.source_errors.contains_key("K"));
+    }
+
+    #[test]
+    fn superseded_source_failure_does_not_hide_newer_request() {
+        let mut core = RyeOsCore::new(writable_session(), BrowserViewport::default(), 0);
+        seed_view(&mut core, "view:test/slow");
+        let older = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("older fetch emitted");
+        let newer = core
+            .emit_fetch_source_keyed("K".to_string(), "view:test/slow")
+            .pop()
+            .expect("newer fetch emitted");
+
+        core.dispatch(RyeOsEvent::EffectResult {
+            result: RyeOsEffectResult {
+                id: older.id,
+                ok: false,
+                kind: RyeOsEffectResultKind::SourceData,
+                data: None,
+                error: Some("stale failure".to_string()),
+            },
+        });
+        assert!(!core.data.source_errors.contains_key("K"));
+
+        deliver(&mut core, newer.id, "new");
+        assert_eq!(core.data.sources["K"]["tag"], "new");
+    }
+
+    #[test]
     fn facet_write_floor_refuses_pre_write_stragglers() {
         // Even with the store empty after eviction, a response from a fetch
         // issued BEFORE the facet write (the old subject) must not land.
@@ -1070,7 +1148,7 @@ mod tests {
 
         deliver(&mut core, pre_write.id, "old-subject");
         assert!(
-            core.data.sources.get(&key).is_none(),
+            !core.data.sources.contains_key(&key),
             "pre-write straggler must be refused by the floor"
         );
         let fresh = refetch.last().expect("refetch effect");
@@ -1410,6 +1488,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({}),
                 },
             },
@@ -1453,6 +1532,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({}),
                 },
             },
@@ -1489,6 +1569,7 @@ mod tests {
             event: RyeOsUiEvent::Activate {
                 intent: RyeOsUiIntent::ExecuteItem {
                     item_ref: "tool:demo/run".to_string(),
+                    ref_bindings: std::collections::BTreeMap::new(),
                     parameters: serde_json::json!({}),
                 },
             },

@@ -9,12 +9,12 @@
 //! DaemonOnly: the authoritative host-env source is the daemon's process
 //! environment, so the report must come from the daemon, not an offline CLI.
 //!
-//! Scope: item `required_secrets` PLUS runtime-derived provider auth. When
-//! the target's runtime declares the `provider_snapshot` envelope field
-//! (directives), the provider is resolved through the same preflight the
-//! launch path uses and its `auth.env_var` joins the checked set — so
-//! env-check enumerates exactly what a real launch would demand.
+//! Scope: item `required_secrets` plus symbolic requirements returned by the
+//! target's signed generic launch contract. The same threadless preparation
+//! pass used by accepted launch validates bindings, configuration, and handler
+//! output without exposing secret values or runtime-specific concepts here.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -31,6 +31,7 @@ use ryeos_executor::executor::ServiceAvailability;
 pub struct Request {
     /// The item whose declared secrets to check (e.g. `tool:foo/bar`).
     pub item_ref: String,
+    pub ref_bindings: BTreeMap<String, String>,
     /// Project root the item resolves against (also the `.env` overlay root).
     /// Bound by the CLI from the discovered project; absent when run outside
     /// a project.
@@ -44,12 +45,25 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
     ctx.require_verified()?;
+    ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
+        .map_err(map_dispatch_error)?;
 
-    let project_path = req.project_path.ok_or_else(|| {
+    let requested_project_path = req.project_path.ok_or_else(|| {
         HandlerError::BadRequest(
             "env-check requires a project: run inside a project directory".into(),
         )
     })?;
+    let project_path = std::fs::canonicalize(&requested_project_path).map_err(|error| {
+        HandlerError::BadRequest(format!(
+            "could not resolve project path `{requested_project_path}`: {error}"
+        ))
+    })?;
+    if !project_path.is_dir() {
+        return Err(HandlerError::BadRequest(format!(
+            "project path is not a directory: {}",
+            project_path.display()
+        )));
+    }
 
     let canonical =
         ryeos_engine::canonical_ref::CanonicalRef::parse(&req.item_ref).map_err(|e| {
@@ -69,6 +83,23 @@ pub async fn handle(
         .map_err(|_| {
             HandlerError::Forbidden(format!("missing required capability: {required_cap}"))
         })?;
+    for (name, item_ref) in &req.ref_bindings {
+        let bound =
+            ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|error| {
+                HandlerError::BadRequest(format!("invalid ref_bindings.{name}: {error}"))
+            })?;
+        let required =
+            ryeos_runtime::authorizer::canonical_cap(&bound.kind, &bound.bare_id, "execute");
+        let policy = ryeos_runtime::authorizer::AuthorizationPolicy::require(&required);
+        state
+            .authorizer
+            .authorize(&ctx.scopes, &policy)
+            .map_err(|_| {
+                HandlerError::Forbidden(format!(
+                    "missing required capability for ref binding '{name}': {required}"
+                ))
+            })?;
+    }
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let plan_ctx = PlanContext {
@@ -77,7 +108,7 @@ pub async fn handle(
             scopes: ctx.scopes.clone(),
         }),
         project_context: ProjectContext::LocalPath {
-            path: std::path::PathBuf::from(&project_path),
+            path: project_path.clone(),
         },
         current_site_id: state.threads.site_id().to_string(),
         origin_site_id: state.threads.site_id().to_string(),
@@ -96,11 +127,36 @@ pub async fn handle(
     .map_err(|e| HandlerError::BadRequest(format!("could not verify `{}`: {e:#}", req.item_ref)))?;
 
     let mut names = verified.resolved.metadata.required_secrets.clone();
-    // Provider auth: resolved via the launch path's own preflight machinery
-    // (never injected), with the env var folded into the checked set.
-    let provider_auth = provider_auth_report(&state, &project_path, &verified, &mut names);
-    let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(std::path::Path::new(&project_path)));
+    let exec_ctx = ryeos_executor::executor::ExecutionContext {
+        principal_fingerprint: ctx.fingerprint.clone(),
+        caller_scopes: ctx.scopes.clone(),
+        engine: state.engine.clone(),
+        plan_ctx: plan_ctx.clone(),
+        requested_call: None,
+    };
+    let applicability =
+        ryeos_executor::dispatch::launch_contract_applicability(&req.item_ref, &exec_ctx)
+            .map_err(map_dispatch_error)?;
+    let prepared = ryeos_executor::dispatch::prepare_launch_contract(
+        &applicability,
+        &verified.resolved,
+        &req.ref_bindings,
+        std::path::Path::new(&project_path),
+        &exec_ctx,
+    )
+    .map_err(map_dispatch_error)?;
+    let launch_contract_applied = prepared.is_some();
+    if let Some(prepared) = prepared {
+        names.extend(
+            prepared
+                .required_secrets
+                .into_iter()
+                .map(|requirement| requirement.name),
+        );
+    }
+    names.sort();
+    names.dedup();
+    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path.as_path()));
     let report = ryeos_app::vault::resolve_secret_sources(
         state.vault.as_ref(),
         &ctx.fingerprint,
@@ -132,9 +188,41 @@ pub async fn handle(
     // runs a bounded subprocess, so it goes off the async runtime.
     let import_report = {
         let engine = state.engine.clone();
+        let isolation = state.isolation.clone();
+        let isolation_bundle_roots = engine
+            .resolution_roots(Some(project_path.clone()))
+            .ordered
+            .iter()
+            .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
+            .filter_map(|root| root.ai_root.parent().map(std::path::Path::to_path_buf))
+            .collect::<Vec<_>>();
+        let isolation_node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+        let isolation_verified_code = [ryeos_engine::isolation::IsolationVerifiedCode {
+            source_path: verified.resolved.source_path.clone(),
+            content_hash: verified.resolved.content_hash.clone(),
+        }];
+        let isolation_item_ref = req.item_ref.clone();
         let probe_names = names.clone();
         tokio::task::spawn_blocking(move || {
-            ryeos_app::env_probe::import_dry_run(&engine, &plan_ctx, &verified, &probe_names)
+            ryeos_app::env_probe::import_dry_run(
+                &engine,
+                &plan_ctx,
+                &verified,
+                &probe_names,
+                &isolation,
+                ryeos_engine::isolation::IsolationLaunchContext {
+                    project_path: &project_path,
+                    project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &isolation_bundle_roots,
+                    node_trusted_keys_dir: Some(&isolation_node_trusted_keys_dir),
+                    verified_code: &isolation_verified_code,
+                    item_ref: &isolation_item_ref,
+                    thread_id: "tool-env-check",
+                },
+            )
         })
         .await
         .unwrap_or_else(|e| {
@@ -150,7 +238,7 @@ pub async fn handle(
         "kind": canonical.kind,
         "secrets": secrets,
         "missing": missing,
-        "provider_auth": provider_auth,
+        "launch_contract_applied": launch_contract_applied,
     });
     if let (Some(obj), Some(extra)) = (response.as_object_mut(), import_report.as_object()) {
         for (k, v) in extra {
@@ -160,109 +248,16 @@ pub async fn handle(
     Ok(response)
 }
 
-/// Resolve the provider the target would launch with and fold its auth env
-/// var into `names`. Returns the `provider_auth` report block:
-/// `required: false` when the target's runtime never resolves a provider;
-/// `checked: false` (with the error) when provider resolution fails — a real
-/// launch would fail identically, so the failure IS the finding.
-fn provider_auth_report(
-    state: &Arc<AppState>,
-    project_path: &str,
-    verified: &ryeos_engine::contracts::VerifiedItem,
-    names: &mut Vec<String>,
-) -> Value {
-    let required_envelope_fields = match state
-        .engine
-        .runtimes
-        .resolve_for_launch(None, &verified.resolved.kind)
-    {
-        Ok(runtime) => runtime.yaml.required_envelope_fields.clone(),
-        Err(e) => {
-            // No registered runtime for this kind → nothing resolves a
-            // provider. But a kind that HAS runtimes and still fails here
-            // (ambiguous defaults, broken registration) would fail a real
-            // launch the same way — that failure is the finding, not
-            // "nothing to check".
-            let kind_has_runtimes = state
-                .engine
-                .runtimes
-                .all()
-                .any(|r| r.yaml.serves == verified.resolved.kind);
-            if kind_has_runtimes {
-                return serde_json::json!({
-                    "checked": false,
-                    "error": format!("runtime resolution for kind '{}': {e}", verified.resolved.kind),
-                    "note": "a real launch fails the same way — fix the runtime registration",
-                });
-            }
-            Vec::new()
-        }
-    };
-    if !ryeos_executor::execution::launch::requires_provider_snapshot(&required_envelope_fields) {
-        return serde_json::json!({ "checked": true, "required": false });
-    }
+fn map_dispatch_error(error: ryeos_executor::dispatch_error::DispatchError) -> HandlerError {
+    use axum::http::StatusCode;
 
-    let project_root = std::path::PathBuf::from(project_path);
-    let engine_roots = state.engine.resolution_roots(Some(project_root.clone()));
-    let effective_parsers = match state
-        .engine
-        .effective_parser_dispatcher(Some(&project_root))
-    {
-        Ok(parsers) => parsers,
-        Err(e) => {
-            return serde_json::json!({
-                "checked": false,
-                "error": format!("effective parser dispatcher: {e}"),
-            });
-        }
-    };
-    let resolution = match ryeos_engine::resolution::run_resolution_pipeline(
-        &verified.resolved.canonical_ref,
-        &state.engine.kinds,
-        &effective_parsers,
-        &engine_roots,
-        &state.engine.trust_store,
-        &state.engine.composers,
-    ) {
-        Ok(resolution) => resolution,
-        Err(e) => {
-            return serde_json::json!({
-                "checked": false,
-                "error": format!("resolution pipeline: {e}"),
-            });
-        }
-    };
-    let operator_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
-    match ryeos_executor::execution::launch::resolve_provider_preflight(
-        &resolution.composed,
-        &engine_roots,
-        &operator_trusted_keys_dir,
-    ) {
-        Ok(preflight) => match &preflight.env_var {
-            Some(env_var) => {
-                if !names.contains(env_var) {
-                    names.push(env_var.clone());
-                }
-                serde_json::json!({
-                    "checked": true,
-                    "required": true,
-                    "provider_id": preflight.provider_id,
-                    "env_var": env_var,
-                })
-            }
-            None => serde_json::json!({
-                "checked": true,
-                "required": true,
-                "provider_id": preflight.provider_id,
-                "env_var": null,
-                "note": "provider declares no auth env var",
-            }),
-        },
-        Err(e) => serde_json::json!({
-            "checked": false,
-            "error": format!("{e}"),
-            "note": "a real launch fails the same way — fix the model/provider config",
-        }),
+    let message = format!("{}: {error}", error.code());
+    match error.http_status() {
+        StatusCode::FORBIDDEN => HandlerError::Forbidden(message),
+        StatusCode::NOT_FOUND => HandlerError::NotFound,
+        StatusCode::CONFLICT => HandlerError::Conflict(message),
+        status if status.is_server_error() => HandlerError::Internal(message),
+        _ => HandlerError::BadRequest(message),
     }
 }
 

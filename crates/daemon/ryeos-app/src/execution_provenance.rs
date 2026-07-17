@@ -46,6 +46,10 @@ pub enum ExecutionProvenance {
         /// Live project root. Doubles as effective_path and
         /// original_project_path.
         project_path: PathBuf,
+        /// Present only when the live-fs path is a daemon-created ephemeral
+        /// workspace (for example `--no-project`). The runner transfers this
+        /// lifeline into detached execution ownership.
+        workspace_lifeline: Option<Arc<TempDirGuard>>,
         /// Deliberate runtime state-root override (`/execute` `state_root`):
         /// item resolution stays anchored at `project_path` while the
         /// runtime-state project path advertised to the child (callback
@@ -75,6 +79,7 @@ pub enum ExecutionProvenance {
     BorrowedChildLiveFs {
         request_engine: Arc<Engine>,
         project_path: PathBuf,
+        workspace_lifeline: Option<Arc<TempDirGuard>>,
         /// Inherited runtime state-root override; children of a run whose
         /// state was redirected keep writing state to the same place.
         state_root: Option<PathBuf>,
@@ -99,9 +104,52 @@ impl ExecutionProvenance {
         Self::RootLiveFs {
             request_engine,
             project_path,
+            workspace_lifeline: None,
             state_root: None,
             __seal: ProvenanceSeal(()),
         }
+    }
+
+    /// Attach ownership of a daemon-created live-fs workspace.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the guard is disarmed, names a different path, or this is a
+    /// pushed-head provenance (which already has a mandatory lifeline).
+    pub fn with_workspace_lifeline(
+        mut self,
+        workspace_lifeline: Option<Arc<TempDirGuard>>,
+    ) -> Self {
+        if let Some(lifeline) = &workspace_lifeline {
+            match lifeline.path() {
+                Some(path) if path == self.effective_path() => {}
+                Some(path) => panic!(
+                    "ExecutionProvenance::with_workspace_lifeline: lifeline path {} \
+                     does not match effective_path {}",
+                    path.display(),
+                    self.effective_path().display(),
+                ),
+                None => {
+                    panic!("ExecutionProvenance::with_workspace_lifeline: lifeline is disarmed")
+                }
+            }
+        }
+        match &mut self {
+            Self::RootLiveFs {
+                workspace_lifeline: slot,
+                ..
+            }
+            | Self::BorrowedChildLiveFs {
+                workspace_lifeline: slot,
+                ..
+            } => *slot = workspace_lifeline,
+            Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => {
+                panic!(
+                    "ExecutionProvenance::with_workspace_lifeline: pushed-head provenance already owns its workspace"
+                );
+            }
+        }
+        self
     }
 
     /// Attach a runtime state-root override to a live-fs provenance.
@@ -189,17 +237,20 @@ impl ExecutionProvenance {
             Self::RootLiveFs {
                 request_engine,
                 project_path,
+                workspace_lifeline,
                 state_root,
                 ..
             }
             | Self::BorrowedChildLiveFs {
                 request_engine,
                 project_path,
+                workspace_lifeline,
                 state_root,
                 ..
             } => Self::BorrowedChildLiveFs {
                 request_engine: request_engine.clone(),
                 project_path: project_path.clone(),
+                workspace_lifeline: workspace_lifeline.clone(),
                 state_root: state_root.clone(),
                 __seal: ProvenanceSeal(()),
             },
@@ -273,6 +324,49 @@ impl ExecutionProvenance {
         }
     }
 
+    /// Whether the project path is a daemon-created runtime workspace that is
+    /// allowed to live beneath the otherwise protected app-root cache.
+    pub fn isolation_project_authority(
+        &self,
+    ) -> ryeos_engine::isolation::IsolationProjectAuthority {
+        match self {
+            Self::RootLiveFs {
+                workspace_lifeline, ..
+            }
+            | Self::BorrowedChildLiveFs {
+                workspace_lifeline, ..
+            } if workspace_lifeline.is_some() => {
+                ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
+            }
+            Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => {
+                ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
+            }
+            Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => {
+                ryeos_engine::isolation::IsolationProjectAuthority::External
+            }
+        }
+    }
+
+    /// Clone the ephemeral workspace lifeline, when this execution owns one.
+    /// Callers moving process work into a blocking task keep this Arc in that
+    /// task so cancellation of the async request cannot remove the live cwd.
+    pub fn workspace_lifeline(&self) -> Option<Arc<TempDirGuard>> {
+        match self {
+            Self::RootLiveFs {
+                workspace_lifeline, ..
+            }
+            | Self::BorrowedChildLiveFs {
+                workspace_lifeline, ..
+            } => workspace_lifeline.clone(),
+            Self::RootPushedHead {
+                workspace_lifeline, ..
+            }
+            | Self::BorrowedChildPushedHead {
+                workspace_lifeline, ..
+            } => Some(workspace_lifeline.clone()),
+        }
+    }
+
     /// True iff this execution must skip pin + foldback because a root
     /// parent owns the snapshot lifecycle.
     ///
@@ -305,7 +399,12 @@ impl std::fmt::Debug for ExecutionProvenance {
             .field(
                 "has_lifeline",
                 &match self {
-                    Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => false,
+                    Self::RootLiveFs {
+                        workspace_lifeline, ..
+                    }
+                    | Self::BorrowedChildLiveFs {
+                        workspace_lifeline, ..
+                    } => workspace_lifeline.is_some(),
                     Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => true,
                 },
             )

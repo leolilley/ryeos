@@ -1,19 +1,45 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:9c7cc3b735deb05f65e49c9bb5752da1b8fbad7f0b19335428fae5a55b4bb718:Ag0W+870bzY4I2oosAYFwzqFXq43p4zM/mcr4wcLJll2LzIA++p+iiUpV33tWBktEMTvs7mcxopPMI65akjtAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:21:56Z:cd0dac091108dfe72cb8ec0593707fb677508a9235617c2e8bb0965923be5814:RtcRChqrys7/pxWIwbR49ryHwpM/ySZgq+auCFJXTuy1ispox64wRhS/QrYqKe9cQ/4DleGyq/jmS4TXVDWgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
 tags: [architecture, isolation, hermetic, env, security, subprocess]
-version: "1.0.0"
+version: "2.2.0"
 description: >
-  Hermetic execution properties — env_clear, explicit env injection,
-  per-route semaphores, callback capability boundaries, and the
-  subprocess env allowlist.
+  Hermetic execution and optional OS isolation — env_clear, explicit env
+  injection, node-owned policy, signed backend bundles, per-route semaphores,
+  and callback
+  capability boundaries.
 ---
 
 # Execution Isolation
 
 Rye OS enforces isolation at multiple layers to prevent privilege
 escalation, secret leakage, and environment-dependent behavior.
+
+## Node-owned OS isolation
+
+Tool and runtime item launches can additionally pass through the immutable strict
+node isolation snapshot. The default mode is disabled. In enforce mode, the
+node—not the item—owns filesystem/network policy, environment filtering, and
+the Lillux open-file cap. Policy is resolved once at startup and shared across
+launch paths; edits require restart. Parser/composer handlers are trusted engine
+infrastructure and retain the hermetic handler boundary below.
+
+The engine emits a typed backend-neutral launch plan. The selected signed bundle
+declares an adapter, launcher artifacts, target triples, and a capability upper
+bound; live inspection may narrow but never broaden that authority. Backends
+are independently authored and installed bundles. Items may narrow node policy
+but may not select a backend, enable isolation, or request fallback.
+
+At bootstrap and prospective bundle admission, the selected adapter and
+payloads are signature-verified and copied into immutable sealed executable
+handles. Registry construction receives that exact runtime snapshot. Managed
+launch metadata records the policy, backend, signer, executable digests,
+effective capability set, and a canonical plan digest whose argument and
+environment plaintext has been redacted.
+
+See [Execution Isolation](../node/execution-isolation.md) for the complete node-owner
+schema, pickup behavior, diagnostics, and security limits.
 
 ## Hermetic Handler Execution
 
@@ -33,7 +59,8 @@ This applies at two levels:
 1. **Handler binaries** — parser and composer handlers receive an empty
    env vec. No daemon secrets, no API keys, no PATH.
 2. **Runtime subprocesses** — directive, graph, and knowledge runtimes
-   receive only the vars explicitly composed by `build_spawn_env()`.
+   receive only the typed bindings composed by the final environment-contract
+   builder.
 
 ### What This Prevents
 
@@ -61,9 +88,11 @@ HTTP_PROXY, HTTPS_PROXY, NO_PROXY, SSL_CERT_FILE, SSL_CERT_DIR
 (and lowercase proxy forms)
 ```
 
-### Daemon-injected vars
+### Protocol and daemon bindings
 
-These are set automatically by the protocol builder:
+The verified protocol declares its own environment injections; the daemon
+produces only those requested values. The table below is the union of common
+protocol and lifecycle bindings, not a list granted to every subprocess:
 
 | Variable | Purpose |
 |---|---|
@@ -71,7 +100,7 @@ These are set automatically by the protocol builder:
 | `RYEOSD_CALLBACK_TOKEN` | Auth token for daemon callbacks |
 | `RYEOSD_THREAD_AUTH_TOKEN` | Per-thread auth token |
 | `RYEOSD_THREAD_ID` | Thread identifier |
-| `RYEOSD_PROJECT_PATH` | Project root path |
+| `RYEOSD_PROJECT_PATH` | Callback authorization/state anchor; a deliberate state-root override when present, otherwise the effective project root |
 | `RYE_THREAD_ID` | Thread ID for tool primitives |
 | `RYEOS_ITEM_PATH` | Resolved item source path |
 | `RYEOS_ITEM_KIND` | Resolved item kind |
@@ -81,6 +110,11 @@ These are set automatically by the protocol builder:
 | `RYEOS_APP_ROOT` | App root path |
 | `RYEOS_CHECKPOINT_DIR` | Per-thread checkpoint directory |
 | `RYEOS_RESUME` | Set to `1` on resume re-spawns |
+
+For example, `runtime` and the default `tool_callback` declare their
+`RYEOSD_*` callback bindings, while `opaque` and `tool_streaming` declare only
+callback-free `RYE_*` identity/project bindings. Callback-free launches receive
+no callback tokens or daemon-socket sandbox mount.
 
 ### Host env passthrough (tools only)
 
@@ -98,18 +132,19 @@ heavy upload endpoint cannot starve a lightweight health check.
 
 ## Callback Capability Boundaries
 
-Child processes cannot escalate beyond their parent's capabilities.
-Callback tokens carry `effective_caps` — the composed capability set from
-the kind's permission model. When the child process calls back to the
-daemon, the dispatcher enforces these caps before dispatch:
+Child processes cannot escalate beyond their parent's capabilities. Callback
+tokens carry `effective_caps` — the composed capability set from the kind's
+permission model. Capability-gated callback operations enforce these caps at
+dispatch:
 
-1. Empty `effective_caps` = deny-all
+1. Empty `effective_caps` = deny all capability-gated resource operations
 2. Wildcard `"*"` in `effective_caps` = allow everything
 3. Otherwise: structured + regex matching against the required caps
 
-The daemon does not trust the runtime to self-police. Enforcement
-happens at the trust boundary (the UDS callback). See
-[callback-auth](../protocols/callback-auth.md) for details.
+Exact-thread and chain-local lifecycle methods instead enforce their declared
+callback-token, thread-auth, or two-proof access class. The daemon does not
+trust the runtime to self-police; enforcement happens at the UDS callback trust
+boundary. See [callback-auth](../protocols/callback-auth.md) for details.
 
 ## Resume Capability Preservation
 
@@ -118,6 +153,3 @@ gets a fresh callback token but with the **same** `effective_caps` the
 pre-crash run had. The caps are persisted in `ResumeContext` in the
 runtime database and restored verbatim on resume — the reconciler does
 not re-derive them.
-
-If a persisted row lacks `effective_caps` (pre-V5.5 data), it defaults
-to an empty `Vec` which is deny-all. This is the safe default.

@@ -72,7 +72,8 @@ impl Attestation {
         self.validate_unsigned_fields()?;
 
         let unsigned = self.without_signature();
-        let canonical = lillux::canonical_json(&unsigned);
+        let canonical = lillux::canonical_json(&unsigned)
+            .context("failed to canonicalize unsigned attestation")?;
         let sig_bytes = signer.sign(canonical.as_bytes());
         self.signature = base64::engine::general_purpose::STANDARD.encode(sig_bytes);
         self.validate()?;
@@ -118,7 +119,8 @@ impl Attestation {
         let signature = lillux::crypto::Signature::from_slice(&sig_bytes)
             .map_err(|e| anyhow!("failed to parse signature: {e}"))?;
         let unsigned = self.without_signature();
-        let canonical = lillux::canonical_json(&unsigned);
+        let canonical = lillux::canonical_json(&unsigned)
+            .context("failed to canonicalize unsigned attestation")?;
         key.verify(canonical.as_bytes(), &signature)
             .map_err(|e| anyhow!("signature verification failed: {e}"))?;
         Ok(())
@@ -179,9 +181,10 @@ impl Attestation {
                 self.kind
             );
         }
-        if !lillux::valid_hash(&self.subject_hash) {
-            anyhow::bail!("invalid subject_hash: {}", self.subject_hash);
-        }
+        crate::objects::thread_snapshot::validate_canonical_hash(
+            "subject_hash",
+            &self.subject_hash,
+        )?;
         if self.claim.is_empty() {
             anyhow::bail!("claim must not be empty");
         }
@@ -366,6 +369,10 @@ mod tests {
         fn fingerprint(&self) -> &str {
             &self.fingerprint
         }
+
+        fn verifying_key(&self) -> lillux::crypto::VerifyingKey {
+            self.signing_key.verifying_key()
+        }
     }
 
     #[test]
@@ -390,8 +397,16 @@ mod tests {
         let signed1 = unsigned().sign(&signer).unwrap();
         let signed2 = unsigned().sign(&signer).unwrap();
         assert_eq!(signed1.to_value(), signed2.to_value());
-        let hash1 = lillux::sha256_hex(lillux::canonical_json(&signed1.to_value()).as_bytes());
-        let hash2 = lillux::sha256_hex(lillux::canonical_json(&signed2.to_value()).as_bytes());
+        let hash1 = lillux::sha256_hex(
+            lillux::canonical_json(&signed1.to_value())
+                .unwrap()
+                .as_bytes(),
+        );
+        let hash2 = lillux::sha256_hex(
+            lillux::canonical_json(&signed2.to_value())
+                .unwrap()
+                .as_bytes(),
+        );
         assert_eq!(hash1, hash2);
     }
 

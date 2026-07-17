@@ -13,6 +13,7 @@ use crate::contracts::{
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
+use crate::launch_preparers::LaunchPreparerRegistry;
 use crate::parsers::ParserDispatcher;
 use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
@@ -32,6 +33,8 @@ pub struct EffectiveItemRequest {
 #[serde(deny_unknown_fields)]
 pub struct EffectiveItemSource {
     pub path: PathBuf,
+    /// Whole-file SHA-256 of the exact root bytes used by resolution.
+    pub content_hash: String,
     /// The installed bundle root (parent of `.ai/`) when the item
     /// came from an installed bundle space. `None` for project-space
     /// items, or when the resolver cannot determine
@@ -77,7 +80,12 @@ pub struct EffectiveItem {
 pub struct Engine {
     pub kinds: KindRegistry,
     pub parser_dispatcher: ParserDispatcher,
+    /// Combined item trust for the current project/request.
     pub trust_store: TrustStore,
+    /// Persistent node trust used exclusively for installed bundle
+    /// schemas, handlers, protocols, and native executable manifests. Project
+    /// keys and caller-scoped overlays never enter this store.
+    pub node_trust_store: TrustStore,
     /// Per-kind composer registry — owned by the engine so boot
     /// validation and the daemon-side resolution pipeline see the
     /// **same** instance (no split-brain between launcher and
@@ -89,6 +97,11 @@ pub struct Engine {
     /// default so test sites that construct an engine directly without
     /// a runtimes scan still compile.
     pub runtimes: RuntimeRegistry,
+
+    /// Boot-bound runtime→launch-preparer registry. Handler preparation is
+    /// always resolved through this verified binding rather than looking up a
+    /// handler dynamically at launch time.
+    pub launch_preparers: LaunchPreparerRegistry,
 
     /// Protocol registry — loaded from base roots at engine init.
     /// Protocol descriptors declare wire contracts for subprocess
@@ -103,6 +116,89 @@ pub struct Engine {
 
     /// System bundle roots (parents of `AI_DIR`)
     pub bundle_roots: Vec<PathBuf>,
+
+    /// Generation guard shared with launch preparation. It is inert for
+    /// directly-constructed test engines and active for node engines.
+    isolation_generation: std::sync::Arc<crate::isolation::IsolationRuntime>,
+}
+
+/// Read-only engine view bound to one verified installed-bundle generation.
+///
+/// A caller resolving a coherent batch (for example a surface and all of its
+/// views) uses this view so the generation is locked and verified once around
+/// the whole batch instead of once per item.
+pub struct CheckedEngineGeneration<'a> {
+    engine: &'a Engine,
+}
+
+fn parallel_map_ordered<T, U>(items: &[T], operation: impl Fn(&T) -> U + Sync) -> Vec<U>
+where
+    T: Sync,
+    U: Send,
+{
+    if items.len() <= 1 {
+        return items.iter().map(operation).collect();
+    }
+    let worker_count = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(8)
+        .min(items.len());
+    let chunk_size = items.len().div_ceil(worker_count);
+    std::thread::scope(|scope| {
+        let operation = &operation;
+        items
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(operation).collect::<Vec<_>>()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+impl CheckedEngineGeneration<'_> {
+    pub fn resolve(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+    ) -> Result<ResolvedItem, EngineError> {
+        self.engine.resolve_current(ctx, item_ref)
+    }
+
+    pub fn effective_item(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<EffectiveItem, EngineError> {
+        self.engine.effective_item_current(request)
+    }
+
+    /// Resolve independent canonical items concurrently while retaining this
+    /// generation and preserving input order.
+    pub fn resolve_many(
+        &self,
+        ctx: &PlanContext,
+        item_refs: &[CanonicalRef],
+    ) -> Vec<Result<ResolvedItem, EngineError>> {
+        parallel_map_ordered(item_refs, |item_ref| {
+            self.engine.resolve_current(ctx, item_ref)
+        })
+    }
+
+    /// Compose independent effective items concurrently while retaining this
+    /// generation and preserving input order.
+    pub fn effective_items(
+        &self,
+        requests: &[EffectiveItemRequest],
+    ) -> Vec<Result<EffectiveItem, EngineError>> {
+        parallel_map_ordered(requests, |request| {
+            self.engine.effective_item_current(request.clone())
+        })
+    }
 }
 
 impl Engine {
@@ -115,16 +211,64 @@ impl Engine {
             kinds,
             parser_dispatcher,
             trust_store: TrustStore::empty(),
+            node_trust_store: TrustStore::empty(),
             composers: ComposerRegistry::new(),
             runtimes: RuntimeRegistry::default(),
+            launch_preparers: LaunchPreparerRegistry::default(),
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
             bundle_roots,
+            isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
         }
+    }
+
+    pub fn with_isolation_generation(
+        mut self,
+        isolation: std::sync::Arc<crate::isolation::IsolationRuntime>,
+    ) -> Self {
+        self.isolation_generation = isolation;
+        self
+    }
+
+    fn checked_bundle_generation<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        self.with_checked_bundle_generation(|_| operation())
+    }
+
+    /// Run a coherent read batch against one verified installed-bundle
+    /// generation. Supported bundle mutations are excluded for the duration;
+    /// concurrent read batches remain independent.
+    pub fn with_checked_bundle_generation<T, E>(
+        &self,
+        operation: impl FnOnce(&CheckedEngineGeneration<'_>) -> Result<T, E>,
+    ) -> Result<T, E>
+    where
+        E: From<EngineError>,
+    {
+        let _operation_guard = self
+            .isolation_generation
+            .begin_registered_generation_operation()
+            .map_err(E::from)?;
+        self.isolation_generation
+            .ensure_registered_generation_current()
+            .map_err(E::from)?;
+        let generation = CheckedEngineGeneration { engine: self };
+        let value = operation(&generation)?;
+        self.isolation_generation
+            .ensure_registered_generation_current()
+            .map_err(E::from)?;
+        Ok(value)
     }
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.trust_store = trust_store;
+        self
+    }
+
+    pub fn with_node_trust_store(mut self, trust_store: TrustStore) -> Self {
+        self.node_trust_store = trust_store;
         self
     }
 
@@ -143,6 +287,11 @@ impl Engine {
     /// `Engine::new` initializes the field to an empty registry.
     pub fn with_runtimes(mut self, runtimes: RuntimeRegistry) -> Self {
         self.runtimes = runtimes;
+        self
+    }
+
+    pub fn with_launch_preparers(mut self, launch_preparers: LaunchPreparerRegistry) -> Self {
+        self.launch_preparers = launch_preparers;
         self
     }
 
@@ -172,6 +321,14 @@ impl Engine {
 
     /// Resolve a canonical ref to a concrete item.
     pub fn resolve(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+    ) -> Result<ResolvedItem, EngineError> {
+        self.checked_bundle_generation(|| self.resolve_current(ctx, item_ref))
+    }
+
+    fn resolve_current(
         &self,
         ctx: &PlanContext,
         item_ref: &CanonicalRef,
@@ -224,6 +381,16 @@ impl Engine {
                 ))
             })?;
 
+        // Pin the exact signature-stripped bytes consumed by runtimes. Hook
+        // occurrence identities use this digest, not the whole signed-file
+        // digest carried in `content_hash`.
+        let raw_content = lillux::signature::strip_signature_lines_with_envelope(
+            &content,
+            &source_format.signature.prefix,
+            source_format.signature.suffix.as_deref(),
+        );
+        let raw_content_digest = crate::item_resolution::content_hash(&raw_content);
+
         // Parse raw document via the **effective** parser dispatcher
         // — the boot dispatcher overlaid by this project's
         // `.ai/parsers/` if any. Then apply extraction rules from
@@ -275,6 +442,7 @@ impl Engine {
             resolved_from: result.winner_label,
             shadowed: result.shadowed,
             materialized_project_root: project_root,
+            raw_content_digest,
             content_hash: hash,
             signature_header,
             source_format,
@@ -284,7 +452,8 @@ impl Engine {
 
     /// Verify trust and integrity on a resolved item.
     ///
-    /// Trust store is system + user only — no project widening.
+    /// Trust is the configured store plus keys explicitly declared by this
+    /// request's project root.
     pub fn verify(
         &self,
         ctx: &PlanContext,
@@ -317,6 +486,13 @@ impl Engine {
         &self,
         request: EffectiveItemRequest,
     ) -> Result<EffectiveItem, EngineError> {
+        self.checked_bundle_generation(|| self.effective_item_current(request))
+    }
+
+    fn effective_item_current(
+        &self,
+        request: EffectiveItemRequest,
+    ) -> Result<EffectiveItem, EngineError> {
         let ref_str = request.item_ref.to_string();
 
         if let Some(expected) = &request.expected_kind {
@@ -346,22 +522,10 @@ impl Engine {
             // error variants so consumers can branch on error code.
             use crate::resolution::ResolutionError;
             match &e {
-                ResolutionError::StepFailed { reason, .. } => {
-                    if reason.starts_with("unknown kind:")
-                        || reason.contains("not found")
-                        || reason.contains("not in manifest")
-                        || reason.contains("missing")
-                    {
-                        EngineError::EffectiveItemNotFound {
-                            canonical_ref: ref_str.clone(),
-                        }
-                    } else {
-                        EngineError::EffectiveItemCompositionFailed {
-                            canonical_ref: ref_str.clone(),
-                            reason: e.to_string(),
-                        }
-                    }
-                }
+                ResolutionError::StepFailed { .. } => EngineError::EffectiveItemCompositionFailed {
+                    canonical_ref: ref_str.clone(),
+                    reason: e.to_string(),
+                },
                 ResolutionError::CycleDetected { .. }
                 | ResolutionError::MaxDepthExceeded { .. } => {
                     EngineError::EffectiveItemCompositionFailed {
@@ -440,6 +604,7 @@ impl Engine {
             root_trust_class: output.root.trust_class,
             source: EffectiveItemSource {
                 path: output.root.source_path,
+                content_hash: output.root.source_content_digest,
                 bundle_root,
             },
             provenance,
@@ -455,6 +620,16 @@ impl Engine {
     /// Checks execution scope on the principal before building.
     /// Uses system-only kind schemas and system+user trust.
     pub fn build_plan(
+        &self,
+        ctx: &PlanContext,
+        item: &VerifiedItem,
+        parameters: &Value,
+        hints: &ExecutionHints,
+    ) -> Result<ExecutionPlan, EngineError> {
+        self.checked_bundle_generation(|| self.build_plan_current(ctx, item, parameters, hints))
+    }
+
+    fn build_plan_current(
         &self,
         ctx: &PlanContext,
         item: &VerifiedItem,
@@ -499,6 +674,7 @@ impl Engine {
             roots: &roots,
             registry_fingerprint: &effective_fp,
             trust_store: &trust_store,
+            node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
         })
     }
@@ -511,6 +687,23 @@ impl Engine {
     /// name or terminal ref). Acquires the same per-request roots / effective
     /// parsers / trust store as `build_plan`.
     pub fn resolve_terminal_executor(
+        &self,
+        root_source_path: &std::path::Path,
+        root_executor_id: &str,
+        root_kind: &str,
+        project_root: Option<PathBuf>,
+    ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
+        self.checked_bundle_generation(|| {
+            self.resolve_terminal_executor_current(
+                root_source_path,
+                root_executor_id,
+                root_kind,
+                project_root,
+            )
+        })
+    }
+
+    fn resolve_terminal_executor_current(
         &self,
         root_source_path: &std::path::Path,
         root_executor_id: &str,
@@ -537,12 +730,14 @@ impl Engine {
         ctx: &EngineContext,
         plan: ExecutionPlan,
     ) -> Result<ExecutionCompletion, EngineError> {
-        tracing::debug!(plan_id = %plan.plan_id, "executing plan");
-        let result = crate::dispatch::execute_plan(&plan, ctx);
-        if let Ok(ref completion) = result {
-            tracing::info!(plan_id = %plan.plan_id, status = ?completion.status, "plan execution completed");
-        }
-        result
+        self.checked_bundle_generation(|| {
+            tracing::debug!(plan_id = %plan.plan_id, "executing plan");
+            let result = crate::dispatch::execute_plan(&plan, ctx);
+            if let Ok(ref completion) = result {
+                tracing::info!(plan_id = %plan.plan_id, status = ?completion.status, "plan execution completed");
+            }
+            result
+        })
     }
 
     /// Spawn a plan's subprocess without waiting.
@@ -552,8 +747,10 @@ impl Engine {
         ctx: &EngineContext,
         plan: &ExecutionPlan,
     ) -> Result<crate::dispatch::SpawnedExecution, EngineError> {
-        tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
-        crate::dispatch::spawn_plan(plan, ctx)
+        self.checked_bundle_generation(|| {
+            tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
+            crate::dispatch::spawn_plan(plan, ctx)
+        })
     }
 
     /// Build resolution roots for a given project root (project-first order).
@@ -671,6 +868,25 @@ mod tests {
     use lillux::crypto::SigningKey;
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct CountingGenerationLifeline {
+        begins: AtomicUsize,
+        checks: AtomicUsize,
+    }
+
+    impl crate::isolation::IsolationGenerationLifeline for CountingGenerationLifeline {
+        fn begin_operation(&self) -> Result<Box<dyn Send + Sync>, String> {
+            self.begins.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(()))
+        }
+
+        fn ensure_current(&self) -> Result<(), String> {
+            self.checks.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     fn test_signing_key() -> SigningKey {
         SigningKey::from_bytes(&[42u8; 32])
@@ -791,6 +1007,31 @@ formats:
     }
 
     #[test]
+    fn checked_generation_batches_multiple_resolutions_under_one_guard() {
+        let lifeline = std::sync::Arc::new(CountingGenerationLifeline::default());
+        let isolation = crate::isolation::IsolationRuntime::default().retain_registered_generation(
+            lifeline.clone(),
+            TrustStore::empty(),
+            vec![],
+        );
+        let engine = test_engine().with_isolation_generation(std::sync::Arc::new(isolation));
+        let ctx = test_plan_context();
+        let item_ref = CanonicalRef::parse("tool:missing").unwrap();
+
+        engine
+            .with_checked_bundle_generation(|generation| -> Result<(), EngineError> {
+                let results = generation.resolve_many(&ctx, &[item_ref.clone(), item_ref]);
+                assert_eq!(results.len(), 2);
+                assert!(results.into_iter().all(|result| result.is_err()));
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(lifeline.begins.load(Ordering::SeqCst), 1);
+        assert_eq!(lifeline.checks.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn resolve_rejects_unknown_kind() {
         let engine = test_engine();
         let ctx = test_plan_context();
@@ -879,6 +1120,13 @@ formats:
         assert_eq!(sig.signer_fingerprint, "fp_test");
         assert_eq!(resolved.materialized_project_root, Some(project_dir));
         assert!(!resolved.content_hash.is_empty());
+        assert_eq!(
+            resolved.raw_content_digest,
+            crate::item_resolution::content_hash(
+                "# ryeos-tool:\n#   note: hello\nprint('hello')\n"
+            )
+        );
+        assert_ne!(resolved.raw_content_digest, resolved.content_hash);
     }
 
     fn signed_tool_content(

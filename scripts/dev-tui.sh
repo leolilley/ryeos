@@ -17,10 +17,15 @@
 #
 # Packaged acceptance afterwards:
 #   scripts/populate-bundles.sh --key .dev-keys/PUBLISHER_DEV.pem --owner ryeos-dev --all
-#   scripts/pkg/install-local-direct.sh
+#   scripts/pkg/install-local-direct.sh --trust-source-publishers
 #   ryeos tui
 
 set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/lib/ryeos-terminal.sh
+source "$REPO_ROOT/scripts/lib/ryeos-terminal.sh"
+ryeos_term_init
 
 usage() {
     cat <<'EOF'
@@ -74,26 +79,27 @@ while [[ $# -gt 0 ]]; do
         --no-build) BUILD=0; shift ;;
         -h|--help) usage; exit 0 ;;
         surface:*) SURFACE="$1"; shift ;;
-        -*) echo "dev-tui.sh: unknown option: $1" >&2; usage >&2; exit 2 ;;
-        *) echo "dev-tui.sh: expected a surface: ref, got: $1" >&2; exit 2 ;;
+        -*) ryeos_term_fail "unknown option: $1"; usage >&2; exit 2 ;;
+        *) ryeos_term_fail "expected a surface ref, got: $1"; exit 2 ;;
     esac
 done
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 if [[ "$BUILD" -eq 1 ]]; then
     if [[ "$PROFILE" == "release" ]]; then
-        cargo build --release -p ryeos-client-terminal
+        ryeos_term_run RUN "building release TUI" -- \
+            cargo build --release -p ryeos-client-terminal
     else
-        cargo build -p ryeos-client-terminal
+        ryeos_term_run RUN "building debug TUI" -- \
+            cargo build -p ryeos-client-terminal
     fi
 fi
 
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 BIN="$TARGET_DIR/$PROFILE/ryeos-tui"
 if [[ ! -x "$BIN" ]]; then
-    echo "dev-tui.sh: built binary not found at $BIN" >&2
+    ryeos_term_fail "built binary not found at $BIN"
     exit 1
 fi
 
@@ -103,7 +109,7 @@ if [[ "$LOCAL" -eq 1 ]]; then
     # (if running) still serves whatever the tree doesn't carry, plus all
     # live data.
     SURFACE_FILE="$REPO_ROOT/bundles/ryeos-ui/.ai/surfaces/${SURFACE#surface:}.yaml"
-    [[ -f "$SURFACE_FILE" ]] || { echo "dev-tui.sh: no local surface file at $SURFACE_FILE" >&2; exit 1; }
+    [[ -f "$SURFACE_FILE" ]] || { ryeos_term_fail "no local surface file at $SURFACE_FILE"; exit 1; }
     ARGS=(--surface-file "$SURFACE_FILE" --views-root "$REPO_ROOT/bundles/ryeos-ui/.ai/views" --project "$PROJECT")
 else
     ARGS=(--surface "$SURFACE" --project "$PROJECT")
@@ -112,5 +118,6 @@ if [[ "$READ_ONLY" -eq 1 ]]; then
     ARGS+=(--read-only)
 fi
 
-echo "dev-tui: $BIN ${ARGS[*]}" >&2
+ryeos_term_info "launching $SURFACE with $PROFILE TUI"
+ryeos_term_cleanup
 exec "$BIN" "${ARGS[@]}"

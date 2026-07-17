@@ -1,8 +1,8 @@
 //! Graph observer hooks, wired to the shared `ryeos-runtime` hook machinery.
 //!
-//! Authored `config.hooks` are typed [`HookDefinition`]s — the same grammar
-//! directives use, one hook vocabulary across runtimes. The walker fires them
-//! at graph lifecycle events (`graph_started`, `graph_step_completed`,
+//! Authored `config.hooks` use the shared source grammar and compile with the
+//! graph definition into [`CompiledHook`]s. The walker fires them at graph
+//! lifecycle events (`graph_started`, `graph_step_completed`,
 //! `graph_completed`); each matching hook's action is dispatched through the
 //! SAME callback path a node action uses, so a hook child is a real dispatch:
 //! effective_caps enforced at the callback boundary, cost accrued, visible in
@@ -11,31 +11,38 @@
 
 use serde_json::Value;
 
-use ryeos_runtime::callback::{ActionPayload, CallbackError, DispatchActionRequest, MethodCall};
+use ryeos_runtime::callback::{
+    parse_hook_action, CallbackError, DispatchActionRequest, HookDispatchOccurrence,
+};
 use ryeos_runtime::callback_client::CallbackClient;
-use ryeos_runtime::hooks_eval::{run_hooks, HookDispatcher};
-use ryeos_runtime::HookDefinition;
+use ryeos_runtime::envelope::{
+    normalize_hook_dispatch_result, RuntimeCost, HOOK_INTEGRITY_FAILURE_CODE,
+};
+use ryeos_runtime::hooks_eval::{run_hooks, HookDispatcher, HookRunError};
+use ryeos_runtime::CompiledHook;
 
 /// Fire every hook matching `event` against `context`. Returns `Err` with a
-/// diagnostic when a hook's condition, action interpolation, or dispatch fails
+/// diagnostic when a hook's condition, action evaluation, or dispatch fails
 /// (including a hook child that ran but reported failure, normalized to
-/// `hook_child_failed`) — the caller records it as a warning rather than failing
-/// the graph. The hook control result is discarded: graph hooks observe.
+/// `hook_child_failed`). Ordinary evaluation/child failures remain observer
+/// warnings, while accounting or integrity failures are fatal because the
+/// caller can no longer prove the graph's terminal history. The hook control
+/// result is always discarded: graph hooks never steer routing.
 pub async fn run_graph_hooks(
     callback: &CallbackClient,
     thread_id: &str,
     project_path: &str,
-    hooks: &[HookDefinition],
-    event: &str,
+    hooks: &[CompiledHook],
+    occurrence: HookDispatchOccurrence,
     context: &Value,
-) -> Result<(), String> {
+) -> Result<Option<RuntimeCost>, HookRunError> {
     if hooks.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let dispatcher = build_dispatcher(callback.clone(), thread_id.to_string());
-    run_hooks(event, context, hooks, project_path, &dispatcher)
+    run_hooks(occurrence, context, hooks, project_path, &dispatcher)
         .await
-        .map(|_control| ())
+        .map(|result| result.cost)
 }
 
 /// Build a [`HookDispatcher`] that routes a hook action through the runtime
@@ -43,115 +50,38 @@ pub async fn run_graph_hooks(
 /// failed hook child surfaces as a `hook_child_failed` error instead of a silent
 /// success.
 fn build_dispatcher(callback: CallbackClient, thread_id: String) -> HookDispatcher {
-    Box::new(move |action, project_path| {
+    Box::new(move |action, project_path, hook_dispatch| {
         let cb = callback.clone();
         let tid = thread_id.clone();
         Box::pin(async move {
             // Build the dispatch payload leniently, exactly as a node action does
             // (`thread` defaults to "inline", `call` is optional) — a hook action
             // rides the identical callback path, not a stricter contract.
-            let payload = hook_action_payload(&action)?;
+            let payload =
+                parse_hook_action(action).map_err(|message| CallbackError::ActionFailed {
+                    code: "invalid_hook_action".to_string(),
+                    message,
+                    retryable: false,
+                })?;
             let response = cb
                 .dispatch_action(DispatchActionRequest {
                     thread_id: tid,
                     project_path,
                     action: payload,
+                    hook_dispatch: Some(hook_dispatch),
                 })
-                .await
-                .map_err(|e| CallbackError::Transport(anyhow::anyhow!("{e}")))?;
+                .await?;
             // Hooks run on the leaf result only — the parent-thread snapshot has
             // no bearing on hook control flow.
-            normalize_hook_dispatch_result(response.result)
+            normalize_hook_dispatch_result(response.result).map_err(|message| {
+                CallbackError::ActionFailed {
+                    code: HOOK_INTEGRITY_FAILURE_CODE.to_string(),
+                    message: message.to_string(),
+                    retryable: false,
+                }
+            })
         })
     })
-}
-
-/// Parse an interpolated hook action into the dispatch payload the callback
-/// expects, mirroring the graph node dispatcher: `item_id`/`params` are read
-/// directly, `thread` defaults to `"inline"`, and a malformed `call` block fails
-/// loudly rather than silently dropping the method selector.
-fn hook_action_payload(action: &Value) -> Result<ActionPayload, CallbackError> {
-    let item_id = action
-        .get("item_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let params = action.get("params").cloned().unwrap_or(Value::Null);
-    let thread = action
-        .get("thread")
-        .and_then(|v| v.as_str())
-        .unwrap_or("inline")
-        .to_string();
-    let call = match action.get("call") {
-        None | Some(Value::Null) => None,
-        Some(call_val) => Some(
-            serde_json::from_value::<MethodCall>(call_val.clone()).map_err(|e| {
-                CallbackError::Transport(anyhow::anyhow!("invalid hook `call` block: {e}"))
-            })?,
-        ),
-    };
-    Ok(ActionPayload {
-        item_id,
-        params,
-        thread,
-        call,
-        // Hooks dispatch inline (observers); no detached-child facets or
-        // launch window.
-        facets: None,
-        launch_window: None,
-    })
-}
-
-/// Normalize a hook child's dispatch envelope: a native-runtime or managed
-/// envelope reporting failure becomes a `hook_child_failed` error (so a failing
-/// hook is loud, not a silent success); a successful envelope peels to its inner
-/// result; a bare tool value passes through untouched.
-fn normalize_hook_dispatch_result(result: Value) -> Result<Value, CallbackError> {
-    let Some(obj) = result.as_object() else {
-        return Ok(result);
-    };
-
-    let is_native_runtime_envelope = obj.contains_key("success")
-        && obj.contains_key("status")
-        && obj.contains_key("result")
-        && (obj.contains_key("outputs")
-            || obj.contains_key("warnings")
-            || obj.contains_key("cost"));
-    if is_native_runtime_envelope {
-        let success = obj.get("success").and_then(Value::as_bool).unwrap_or(false);
-        let status = obj
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        if !success || status != "completed" {
-            let message = obj
-                .get("error")
-                .or_else(|| obj.get("result"))
-                .map(Value::to_string)
-                .unwrap_or_else(|| format!("hook child returned status `{status}`"));
-            return Err(CallbackError::ActionFailed {
-                code: "hook_child_failed".to_string(),
-                message,
-                retryable: false,
-            });
-        }
-        return Ok(obj.get("result").cloned().unwrap_or(Value::Null));
-    }
-
-    let is_managed_envelope =
-        obj.contains_key("outcome_code") && obj.contains_key("result") && obj.contains_key("error");
-    if is_managed_envelope {
-        if let Some(error) = obj.get("error").filter(|value| !value.is_null()) {
-            return Err(CallbackError::ActionFailed {
-                code: "hook_child_failed".to_string(),
-                message: error.to_string(),
-                retryable: false,
-            });
-        }
-        return Ok(obj.get("result").cloned().unwrap_or(Value::Null));
-    }
-
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -162,9 +92,14 @@ mod tests {
     #[test]
     fn normalize_passes_bare_tool_value() {
         let bare = json!({"msg": "hi"});
-        assert_eq!(normalize_hook_dispatch_result(bare.clone()).unwrap(), bare);
         assert_eq!(
-            normalize_hook_dispatch_result(json!("scalar")).unwrap(),
+            normalize_hook_dispatch_result(bare.clone()).unwrap().value,
+            bare
+        );
+        assert_eq!(
+            normalize_hook_dispatch_result(json!("scalar"))
+                .unwrap()
+                .value,
             json!("scalar")
         );
     }
@@ -177,27 +112,81 @@ mod tests {
             "result": {"ok": 1},
             "outputs": null,
             "warnings": [],
+            "cost": null,
         });
         assert_eq!(
-            normalize_hook_dispatch_result(env).unwrap(),
+            normalize_hook_dispatch_result(env).unwrap().value,
             json!({"ok": 1})
         );
+    }
+
+    #[test]
+    fn normalize_preserves_valid_native_cost_for_walker_accounting() {
+        let output = normalize_hook_dispatch_result(json!({
+            "success": true,
+            "status": "completed",
+            "result": null,
+            "outputs": null,
+            "warnings": [],
+            "cost": {
+                "input_tokens": 3,
+                "output_tokens": 5,
+                "total_usd": 0.25
+            }
+        }))
+        .unwrap();
+        let cost = output.cost.unwrap();
+        assert_eq!(cost.input_tokens, 3);
+        assert_eq!(cost.output_tokens, 5);
+        assert_eq!(cost.total_usd, 0.25);
     }
 
     #[test]
     fn normalize_rejects_failed_native_envelope_as_hook_child_failed() {
         let env = json!({
             "success": false,
-            "status": "error",
+            "status": "failed",
             "result": {"error": "boom"},
             "outputs": null,
             "warnings": [],
+            "cost": {
+                "input_tokens": 7,
+                "output_tokens": 11,
+                "total_usd": 0.5
+            },
         });
-        let err = normalize_hook_dispatch_result(env).unwrap_err();
-        assert!(matches!(
-            err,
-            CallbackError::ActionFailed { ref code, .. } if code == "hook_child_failed"
-        ));
+        let output = normalize_hook_dispatch_result(env).unwrap();
+        assert!(output.failure.unwrap().contains("hook_child_failed"));
+        assert_eq!(output.cost.unwrap().input_tokens, 7);
+    }
+
+    #[test]
+    fn normalize_rejects_legacy_or_contradictory_native_status() {
+        for env in [
+            json!({
+                "success": false,
+                "status": "error",
+                "result": {"error": "boom"},
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            }),
+            json!({
+                "success": true,
+                "status": "failed",
+                "result": null,
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            }),
+        ] {
+            match normalize_hook_dispatch_result(env) {
+                Ok(output) => assert!(output
+                    .failure
+                    .is_some_and(|failure| failure.contains("hook_child_failed"))),
+                Err(error) => assert!(error.contains("hook_child_failed")),
+            }
+        }
     }
 
     #[test]
@@ -206,12 +195,10 @@ mod tests {
             "outcome_code": "exit:1",
             "result": null,
             "error": {"exit_code": 1},
+            "artifacts": [],
         });
-        let err = normalize_hook_dispatch_result(env).unwrap_err();
-        assert!(matches!(
-            err,
-            CallbackError::ActionFailed { ref code, .. } if code == "hook_child_failed"
-        ));
+        let output = normalize_hook_dispatch_result(env).unwrap();
+        assert!(output.failure.unwrap().contains("hook_child_failed"));
     }
 
     #[test]
@@ -220,9 +207,10 @@ mod tests {
             "outcome_code": "exit:0",
             "result": {"v": 2},
             "error": null,
+            "artifacts": [],
         });
         assert_eq!(
-            normalize_hook_dispatch_result(env).unwrap(),
+            normalize_hook_dispatch_result(env).unwrap().value,
             json!({"v": 2})
         );
     }
@@ -235,11 +223,20 @@ mod tests {
         let ctx = json!({"event": "graph_started"});
         // Empty hook list → Ok, and the dispatcher (which would panic here) is
         // never built.
-        assert!(
-            run_graph_hooks(&client, "T-test", "/tmp", &[], "graph_started", &ctx)
-                .await
-                .is_ok()
-        );
+        assert!(run_graph_hooks(
+            &client,
+            "T-test",
+            "/tmp",
+            &[],
+            HookDispatchOccurrence::GraphStarted {
+                graph_run_id: "run-1".to_string(),
+                definition_ref: "graph:test/fixture".to_string(),
+                definition_hash: "definition-hash".to_string(),
+            },
+            &ctx,
+        )
+        .await
+        .is_ok());
     }
 
     struct NoopClient;
@@ -269,6 +266,7 @@ mod tests {
             &self,
             _: &str,
             _: Option<&str>,
+            _: ryeos_runtime::TerminalCompletion,
         ) -> Result<Value, CallbackError> {
             Ok(json!({}))
         }

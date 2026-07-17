@@ -221,12 +221,13 @@ mod tests {
 
     fn head(subject: &str) -> FederationHeadRemoteRecord {
         let ref_path = format!("admissions/local-node-v1/{subject}/head");
+        let signer = "aa".repeat(32);
         FederationHeadRemoteRecord {
             namespace: "admissions".into(),
             name: format!("local-node-v1/{subject}"),
             ref_path: ref_path.clone(),
             target_hash: "11".repeat(32),
-            signer: "signer".into(),
+            signer: signer.clone(),
             updated_at: "2026-05-30T00:00:00Z".into(),
             signed_ref: RemoteSignedRef {
                 schema: 1,
@@ -234,7 +235,7 @@ mod tests {
                 ref_path,
                 target_hash: "11".repeat(32),
                 updated_at: "2026-05-30T00:00:00Z".into(),
-                signer: "signer".into(),
+                signer,
                 signature: "sig".into(),
             },
         }

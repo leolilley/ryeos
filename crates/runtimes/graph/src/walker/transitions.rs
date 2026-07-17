@@ -1,6 +1,6 @@
 use crate::model::{ErrorMode, ErrorRecord, GraphConfig, GraphNode};
 
-use super::NextOnError;
+use super::outcome::NextOnError;
 
 /// Whether a node whose current dispatch just failed has retry attempts left.
 ///
@@ -58,7 +58,6 @@ mod tests {
             next: None,
             on_error: None,
             cache_result: false,
-            cache: false,
             follow: false,
             detach: false,
             facets: None,
@@ -83,7 +82,6 @@ mod tests {
             config_schema: None,
             env_requires: Vec::new(),
             state: None,
-            max_concurrency: None,
             segment_steps: None,
         }
     }

@@ -74,11 +74,13 @@ impl LaunchMode {
 #[serde(deny_unknown_fields)]
 struct RawLaunchSourceConfig {
     item_ref: String,
+    ref_bindings: std::collections::BTreeMap<String, String>,
     project_path: String,
 }
 
 pub struct CompiledLaunchMode {
     item_ref: crate::routes::parsed_ref::ParsedItemRef,
+    ref_bindings: std::collections::BTreeMap<String, String>,
     project_path: crate::routes::abs_path::AbsolutePathBuf,
     body: RawRequestBody,
     invoker: crate::routes::invokers::launch_invocation::CompiledLaunchInvocation,
@@ -141,7 +143,7 @@ impl ResponseMode for LaunchMode {
                 id: raw.id.clone(),
                 mode: "launch".into(),
                 reason: "launch mode requires response.source_config = \
-                    { item_ref, project_path }"
+                    { item_ref, ref_bindings, project_path }"
                     .into(),
             });
         } else {
@@ -170,6 +172,12 @@ impl ResponseMode for LaunchMode {
                     ),
                 }
             })?;
+        ryeos_executor::execution::launch_preparation::validate_ref_bindings(&cfg.ref_bindings)
+            .map_err(|error| RouteConfigError::InvalidResponseSpec {
+                id: raw.id.clone(),
+                mode: "launch".into(),
+                reason: format!("invalid source_config.ref_bindings: {error}"),
+            })?;
 
         let project_path = crate::routes::abs_path::AbsolutePathBuf::try_from_str(
             &cfg.project_path,
@@ -182,6 +190,7 @@ impl ResponseMode for LaunchMode {
 
         Ok(Arc::new(CompiledLaunchMode {
             item_ref,
+            ref_bindings: cfg.ref_bindings,
             project_path,
             body: raw.request.body.clone(),
             invoker: crate::routes::invokers::launch_invocation::CompiledLaunchInvocation,
@@ -206,8 +215,10 @@ impl CompiledResponseMode for CompiledLaunchMode {
     ) -> Result<axum::response::Response, RouteDispatchError> {
         // Parse body per declared shape.
         let body_value: Value = match self.body {
-            RawRequestBody::Json => serde_json::from_slice(&ctx.body_raw)
-                .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?,
+            RawRequestBody::Json => ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
+                .map_err(|e| {
+                RouteDispatchError::BadRequest(format!("invalid JSON body: {e}"))
+            })?,
             RawRequestBody::Text => {
                 let s = std::str::from_utf8(&ctx.body_raw).map_err(|e| {
                     RouteDispatchError::BadRequest(format!("body is not valid UTF-8: {e}"))
@@ -238,6 +249,7 @@ impl CompiledResponseMode for CompiledLaunchMode {
         // Prepare invoker input.
         let input = serde_json::json!({
             "item_ref": self.item_ref.as_str(),
+            "ref_bindings": self.ref_bindings,
             "project_path": self.project_path.as_path().display().to_string(),
             "parameters": envelope,
         });
@@ -251,6 +263,7 @@ impl CompiledResponseMode for CompiledLaunchMode {
             body_raw: ctx.body_raw,
             input,
             principal: Some(ctx.principal),
+            workspace_lifeline: None,
             state: ctx.state,
             webhook_dedupe: ctx.webhook_dedupe,
         };
@@ -358,6 +371,7 @@ mod tests {
                 source: None,
                 source_config: serde_json::json!({
                     "item_ref": "directive:webhooks/handler",
+                    "ref_bindings": {},
                     "project_path": "/opt/proj",
                 }),
                 status: None,
@@ -484,6 +498,7 @@ mod tests {
         let mut raw = make_raw("r1");
         raw.response.source_config = serde_json::json!({
             "item_ref": "directive:x",
+            "ref_bindings": {},
             "project_path": "/opt/p",
             "stranger": "danger",
         });
@@ -500,6 +515,7 @@ mod tests {
         let mut raw = make_raw("r1");
         raw.response.source_config = serde_json::json!({
             "item_ref": "no-colon-here",
+            "ref_bindings": {},
             "project_path": "/opt/p",
         });
         let err = match LaunchMode::default().compile(&raw) {
@@ -526,6 +542,7 @@ mod tests {
             let mut raw = make_raw("r1");
             raw.response.source_config = serde_json::json!({
                 "item_ref": ref_str,
+                "ref_bindings": {},
                 "project_path": "/opt/p",
             });
             let r = LaunchMode::default().compile(&raw);
@@ -543,6 +560,7 @@ mod tests {
         let mut raw = make_raw("r1");
         raw.response.source_config = serde_json::json!({
             "item_ref": "directive:x",
+            "ref_bindings": {},
             "project_path": "relative/path",
         });
         let err = match LaunchMode::default().compile(&raw) {

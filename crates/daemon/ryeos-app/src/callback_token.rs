@@ -11,9 +11,6 @@ use crate::execution_provenance::ExecutionProvenance;
 /// Default TTL for callback tokens when no explicit duration is requested.
 const DEFAULT_CALLBACK_TTL_SECS: u64 = 300;
 
-/// Maximum allowed TTL — tokens requesting longer lifetimes are capped.
-const MAX_CALLBACK_TTL_SECS: u64 = 3600;
-
 #[derive(Debug, Clone)]
 pub struct CallbackCapability {
     pub token: String,
@@ -42,6 +39,10 @@ pub struct CallbackCapability {
     pub effective_bundle_id: Option<String>,
     /// Root item ref that minted this callback token, used for attribution.
     pub item_ref: Option<String>,
+    /// Verified raw-content digest of `item_ref`, captured at launch. Callback
+    /// hook identity must match this value; resolving live during a callback
+    /// would reintroduce a source-mutation race.
+    pub root_content_digest: String,
     /// Parent thread's resolved hard limits, serialized by the launcher. The
     /// daemon passes this through out-of-band on callback-dispatched child
     /// launches so runtimes cannot spoof parent budget inheritance.
@@ -91,6 +92,7 @@ impl CallbackCapabilityStore {
         ttl: Duration,
         effective_caps: Vec<String>,
         provenance: ExecutionProvenance,
+        root_content_digest: String,
     ) -> CallbackCapability {
         self.generate_with_context(
             thread_id,
@@ -100,13 +102,14 @@ impl CallbackCapabilityStore {
             provenance,
             None,
             None,
+            root_content_digest,
             Value::Null,
             0,
         )
     }
 
-    // One argument per capability field; eleven call sites across five
-    // crates bind them positionally — restructure with a compiler, not here.
+    // One argument per capability field; launch boundaries bind them
+    // positionally so every authority-bearing value is explicit at mint time.
     #[allow(clippy::too_many_arguments)]
     pub fn generate_with_context(
         &self,
@@ -117,6 +120,7 @@ impl CallbackCapabilityStore {
         provenance: ExecutionProvenance,
         effective_bundle_id: Option<String>,
         item_ref: Option<String>,
+        root_content_digest: String,
         hard_limits: Value,
         depth: u32,
     ) -> CallbackCapability {
@@ -142,6 +146,7 @@ impl CallbackCapabilityStore {
             provenance,
             effective_bundle_id,
             item_ref,
+            root_content_digest,
             hard_limits,
             depth,
         };
@@ -249,11 +254,6 @@ impl CallbackCapabilityStore {
     }
 }
 
-pub fn compute_ttl(duration_seconds: Option<u64>) -> Duration {
-    let secs = duration_seconds.unwrap_or(DEFAULT_CALLBACK_TTL_SECS);
-    Duration::from_secs(secs.min(MAX_CALLBACK_TTL_SECS))
-}
-
 /// Margin added to a run's hard timeout so the run-scoped token outlives the
 /// finalization callback that fires at/just after the deadline.
 const LAUNCH_TTL_MARGIN_SECS: u64 = 300;
@@ -266,9 +266,8 @@ const MAX_LAUNCH_TTL_SECS: u64 = 7 * 24 * 3600;
 /// TTL for a **run-scoped** launch token (the callback + thread-auth tokens a
 /// launched runtime holds for its whole life).
 ///
-/// Unlike [`compute_ttl`], it is deliberately NOT capped at
-/// [`MAX_CALLBACK_TTL_SECS`] (3600s): the token must outlive the run's hard
-/// timeout (`duration_seconds`) plus the finalization window, or a run allowed
+/// The token must outlive the run's hard timeout (`duration_seconds`) plus the
+/// finalization window, or a run allowed
 /// to exceed 3600s loses callback/auth authority before it can finalize — a
 /// silent mid-run failure. The token is thread-scoped and invalidated at run
 /// end, so a TTL that tracks the run's duration is the correct lifetime; a
@@ -439,6 +438,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/project")),
+            "0".repeat(64),
         );
         assert!(cap.token.starts_with("cbt-"));
         assert!(cap.invocation_id.starts_with("inv-"));
@@ -461,6 +461,7 @@ mod tests {
             provenance(PathBuf::from("/p")),
             None,
             None,
+            "0".repeat(64),
             serde_json::Value::Null,
             0,
         );
@@ -483,6 +484,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         assert_eq!(cap.chain_root_id, "T-root");
     }
@@ -496,6 +498,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         store.set_chain_root(&cap.token, "T-root");
         let cap = store
@@ -524,6 +527,7 @@ mod tests {
             provenance(PathBuf::from("/project")),
             Some("bundle-123".to_string()),
             Some("directive:team/parent".to_string()),
+            "1".repeat(64),
             hard_limits.clone(),
             4,
         );
@@ -536,6 +540,7 @@ mod tests {
         assert_eq!(validated.depth, 4);
         assert_eq!(validated.effective_bundle_id.as_deref(), Some("bundle-123"));
         assert_eq!(validated.item_ref.as_deref(), Some("directive:team/parent"));
+        assert_eq!(validated.root_content_digest, "1".repeat(64));
     }
 
     #[test]
@@ -556,6 +561,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         store.invalidate(&cap.token);
         assert!(store
@@ -572,6 +578,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let cap2 = store.generate(
             "T-2",
@@ -579,6 +586,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         store.invalidate_for_thread("T-1");
         assert!(store
@@ -598,6 +606,7 @@ mod tests {
             Duration::from_secs(0),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         let err = store
@@ -615,6 +624,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let err = store
             .validate(&cap.token, "T-2", PathBuf::from("/p").as_path())
@@ -631,6 +641,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/project-a")),
+            "0".repeat(64),
         );
         let err = store
             .validate(&cap.token, "T-1", PathBuf::from("/project-b").as_path())
@@ -647,6 +658,7 @@ mod tests {
             Duration::from_secs(0),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
         store.generate(
@@ -655,6 +667,7 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let pruned = store.prune_expired();
         assert_eq!(pruned, 1);
@@ -680,6 +693,7 @@ mod tests {
             Duration::from_secs(300),
             vec!["ryeos.*".to_string()],
             provenance,
+            "0".repeat(64),
         );
         let validated = store.validate(&cap.token, "T-test", tmp.path()).unwrap();
 
@@ -718,6 +732,7 @@ mod tests {
             ),
             effective_bundle_id: None,
             item_ref: None,
+            root_content_digest: "0".repeat(64),
             hard_limits: serde_json::Value::Null,
             depth: 0,
         };
@@ -735,21 +750,12 @@ mod tests {
             Duration::from_secs(300),
             Vec::new(),
             provenance(PathBuf::from("/p")),
+            "0".repeat(64),
         );
         let validated = store
             .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())
             .unwrap();
         assert_eq!(validated.provenance.effective_path(), Path::new("/p"));
-    }
-
-    #[test]
-    fn compute_ttl_defaults_to_300() {
-        assert_eq!(compute_ttl(None), Duration::from_secs(300));
-    }
-
-    #[test]
-    fn compute_ttl_caps_at_3600() {
-        assert_eq!(compute_ttl(Some(9999)), Duration::from_secs(3600));
     }
 
     #[test]
@@ -794,11 +800,6 @@ mod tests {
             launch_token_ttl(None),
             Duration::from_secs(DEFAULT_CALLBACK_TTL_SECS + LAUNCH_TTL_MARGIN_SECS)
         );
-    }
-
-    #[test]
-    fn compute_ttl_uses_provided_value() {
-        assert_eq!(compute_ttl(Some(600)), Duration::from_secs(600));
     }
 
     // ── ThreadAuthStore ──────────────────────────────────────────────

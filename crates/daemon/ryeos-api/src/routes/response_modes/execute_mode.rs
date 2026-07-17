@@ -1,8 +1,7 @@
 //! `execute` response mode — data-driven `/execute` route.
 //!
-//! This mode is the sole entry point for the `/execute` endpoint. The old
-//! The old standalone `/execute` handler is deleted. All execute logic
-//! lives here, driven by the dispatcher's per-route auth chain.
+//! This mode is the sole entry point for the `/execute` endpoint. All execute
+//! logic lives here, driven by the dispatcher's per-route auth chain.
 //!
 //! Compile-time validation:
 //! * `auth` must be `ryeos_signed`
@@ -40,8 +39,8 @@ use ryeos_state::ignore::IgnoreMatcher;
 #[serde(deny_unknown_fields)]
 pub struct ExecuteRequest {
     /// Canonical item ref to execute (e.g. "directive:my/agent").
-    #[serde(default)]
-    pub item_ref: Option<String>,
+    pub item_ref: String,
+    pub ref_bindings: std::collections::BTreeMap<String, String>,
     /// Project root path for resolution.
     #[serde(default)]
     pub project_path: Option<String>,
@@ -98,6 +97,19 @@ impl ExecuteRequest {
 
 fn default_launch_mode() -> String {
     "inline".to_string()
+}
+
+fn execution_project_context(
+    no_project_requested: bool,
+    effective_path: &Path,
+) -> ryeos_engine::contracts::ProjectContext {
+    if no_project_requested {
+        ryeos_engine::contracts::ProjectContext::None
+    } else {
+        ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: effective_path.to_path_buf(),
+        }
+    }
 }
 
 // ── Mode ──────────────────────────────────────────────────────────────────
@@ -196,21 +208,19 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let caller_scopes = principal.scopes.clone();
 
         // Parse body.
-        let mut request: ExecuteRequest = serde_json::from_slice(&ctx.body_raw)
-            .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
+        let mut request: ExecuteRequest =
+            ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
+                .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
         if ctx.request_parts.uri.path() == "/execute/launch" && request.launch_mode == "inline" {
             request.launch_mode = "accepted".to_string();
         }
 
-        if request.item_ref.is_none() {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                axum::Json(json!({ "error": "item_ref is required" })),
-            )
-                .into_response());
+        let item_ref = &request.item_ref;
+        if let Err(error) = ryeos_executor::execution::launch_preparation::validate_ref_bindings(
+            &request.ref_bindings,
+        ) {
+            return Ok(dispatch_error_response(error));
         }
-
-        let item_ref = request.item_ref.as_ref().unwrap();
         let no_project_requested = request.project_path.is_none();
 
         // Capability check: derive the required cap from the item_ref
@@ -233,6 +243,26 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     RouteDispatchError::Forbidden(format!(
                         "missing required capability: {}",
                         required_cap
+                    ))
+                })?;
+        }
+        for (name, bound_ref) in &request.ref_bindings {
+            let canonical =
+                ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref).map_err(|error| {
+                    RouteDispatchError::BadRequest(format!("invalid ref_bindings.{name}: {error}"))
+                })?;
+            let required_cap = ryeos_runtime::authorizer::canonical_cap(
+                &canonical.kind,
+                &canonical.bare_id,
+                "execute",
+            );
+            let policy = AuthorizationPolicy::require(&required_cap);
+            state
+                .authorizer
+                .authorize(&caller_scopes, &policy)
+                .map_err(|_| {
+                    RouteDispatchError::Forbidden(format!(
+                        "missing required capability for ref binding '{name}': {required_cap}"
                     ))
                 })?;
         }
@@ -260,13 +290,61 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
         let site_id = state.threads.site_id();
         let project_source = request.project_source.clone().unwrap_or_default();
+        let checkout_id = format!(
+            "pre-{}-{:08x}",
+            lillux::time::timestamp_millis(),
+            rand::random::<u32>()
+        );
+        let mut no_project_guard = None;
         // For PushedHead, the client MUST send a canonical path so
         // push and execute hash the same string. resolve_project_context
         // re-runs canonical_project_ref defensively, but we still need
         // a PathBuf here to feed it.
         //
         let project_path = match &request.project_path {
-            Some(p) => std::path::PathBuf::from(p),
+            Some(p) => {
+                let path = std::path::PathBuf::from(p);
+                if p == NO_PROJECT_SENTINEL {
+                    if matches!(project_source, ProjectSource::PushedHead) {
+                        path
+                    } else {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({
+                                "error": "the no-project sentinel is valid only for pushed_head execution"
+                            })),
+                        )
+                            .into_response());
+                    }
+                } else {
+                    if !path.is_absolute() {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": "project_path must be absolute" })),
+                        )
+                            .into_response());
+                    }
+                    if matches!(project_source, ProjectSource::LiveFs) {
+                        match std::fs::canonicalize(&path) {
+                            Ok(path) => path,
+                            Err(error) => {
+                                return Ok((
+                                    StatusCode::BAD_REQUEST,
+                                    axum::Json(json!({
+                                        "error": format!(
+                                            "live project_path '{}' cannot be resolved: {error}",
+                                            path.display()
+                                        )
+                                    })),
+                                )
+                                    .into_response());
+                            }
+                        }
+                    } else {
+                        path
+                    }
+                }
+            }
             None => {
                 if matches!(project_source, ProjectSource::PushedHead) {
                     return Ok((
@@ -274,9 +352,71 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         axum::Json(json!({ "error": "project_path is required when project_source is pushed_head" })),
                     ).into_response());
                 }
-                state.config.app_root.clone()
+                let execution_root = state.config.runtime_root().cache().join("executions");
+                std::fs::create_dir_all(&execution_root).map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "create execution workspace root {}: {error}",
+                        execution_root.display()
+                    ))
+                })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(
+                        &execution_root,
+                        std::fs::Permissions::from_mode(0o700),
+                    )
+                    .map_err(|error| {
+                        RouteDispatchError::Internal(format!(
+                            "protect execution workspace root {}: {error}",
+                            execution_root.display()
+                        ))
+                    })?;
+                }
+                let workspace = execution_root.join(format!("no-project-{checkout_id}"));
+                std::fs::create_dir(&workspace).map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "create isolated no-project workspace {}: {error}",
+                        workspace.display()
+                    ))
+                })?;
+                let guard = std::sync::Arc::new(ryeos_app::temp_dir_guard::TempDirGuard::new(
+                    workspace.clone(),
+                ));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|error| {
+                            RouteDispatchError::Internal(format!(
+                                "protect isolated no-project workspace {}: {error}",
+                                workspace.display()
+                            ))
+                        })?;
+                }
+                std::fs::create_dir(workspace.join(ryeos_engine::AI_DIR)).map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "initialize isolated no-project workspace {}: {error}",
+                        workspace.display()
+                    ))
+                })?;
+                no_project_guard = Some(guard);
+                workspace
             }
         };
+
+        if request.project_path.is_some()
+            && matches!(project_source, ProjectSource::LiveFs)
+            && !project_path.join(ryeos_engine::AI_DIR).is_dir()
+        {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({
+                    "error": "live project_path must name a project root containing .ai"
+                })),
+            )
+                .into_response());
+        }
 
         // Reject validate_only + pushed_head.
         if request.validate_only && matches!(project_source, ProjectSource::PushedHead) {
@@ -289,8 +429,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // ── Runtime state-root override ─────────────────────────────
         // Validate the deliberate `state_root` control before it reaches
         // provenance: live-fs + inline only, explicit project required,
-        // absolute path. The directory is created here so `/tmp/...` smoke
-        // roots work without a client-side mkdir.
+        // absolute path. The directory must already exist: callers cannot use
+        // this field to make the daemon create arbitrary host paths. Enforced
+        // isolation launches additionally require it to fall under an explicit
+        // operator-declared writable root.
         let state_root: Option<std::path::PathBuf> = match &request.state_root {
             None => None,
             Some(raw) => {
@@ -322,10 +464,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 // The override's whole purpose is keeping runtime state OUT
                 // of the executed source tree; a state root inside (or equal
                 // to) the project recreates the pollution with extra
-                // indirection. Lexical check first (so a rejected path is
-                // never even created), then the canonical check below —
-                // after creation, when both paths exist — so symlinked
-                // spellings can't sneak one in.
+                // indirection. Lexical check first, then canonicalize both
+                // existing paths so symlinked spellings cannot sneak one in.
                 if path.starts_with(&project_path) {
                     return Ok((
                         StatusCode::BAD_REQUEST,
@@ -338,15 +478,40 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     )
                         .into_response());
                 }
-                if let Err(e) = std::fs::create_dir_all(&path) {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(json!({ "error": format!("state_root '{raw}' could not be created: {e}") })),
-                    ).into_response());
-                }
-                let canonical_state = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                let canonical_project =
-                    std::fs::canonicalize(&project_path).unwrap_or_else(|_| project_path.clone());
+                let canonical_state = match std::fs::canonicalize(&path) {
+                    Ok(path) if path.is_dir() => path,
+                    Ok(_) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": format!(
+                                "state_root '{raw}' must name an existing directory"
+                            ) })),
+                        )
+                            .into_response());
+                    }
+                    Err(error) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": format!(
+                                "state_root '{raw}' must name an existing directory: {error}"
+                            ) })),
+                        )
+                            .into_response());
+                    }
+                };
+                let canonical_project = match std::fs::canonicalize(&project_path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            axum::Json(json!({ "error": format!(
+                                "project source '{}' could not be canonicalized: {error}",
+                                project_path.display()
+                            ) })),
+                        )
+                            .into_response());
+                    }
+                };
                 if canonical_state.starts_with(&canonical_project) {
                     return Ok((
                         StatusCode::BAD_REQUEST,
@@ -359,17 +524,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     )
                         .into_response());
                 }
-                Some(path)
+                Some(canonical_state)
             }
         };
 
         // Resolve project execution context.
-        let checkout_id = format!(
-            "pre-{}-{:08x}",
-            lillux::time::timestamp_millis(),
-            rand::random::<u32>()
-        );
-        let project_ctx = match project_source::resolve_project_context(
+        let mut project_ctx = match project_source::resolve_project_context(
             &state,
             &project_source,
             &project_path,
@@ -392,18 +552,26 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 return Ok(dispatch_error_response(dispatch_err));
             }
         };
+        if let Some(guard) = no_project_guard {
+            project_ctx.temp_dir = Some(guard);
+        }
 
         // Build plan context.
-        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
+        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
         let plan_ctx = PlanContext {
             requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
                 fingerprint: caller_principal_id.clone(),
                 scopes: caller_scopes.clone(),
             }),
-            project_context: ProjectContext::LocalPath {
-                path: project_ctx.effective_path.clone(),
-            },
+            // The isolated directory gives no-project execution a safe cwd; it
+            // is runtime provenance, not project identity. Keep the explicit
+            // `None` contract so service audit rows and policy never mistake a
+            // disposable `no-project-pre-*` workspace for a real project.
+            project_context: execution_project_context(
+                no_project_requested,
+                &project_ctx.effective_path,
+            ),
             current_site_id: site_id.to_string(),
             origin_site_id: site_id.to_string(),
             execution_hints: {
@@ -457,6 +625,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     project_ctx.effective_path.clone(),
                     project_ctx.request_engine.clone(),
                 )
+                .with_workspace_lifeline(project_ctx.temp_dir.clone())
                 .with_state_root(state_root.clone())
             }
             ProjectSource::PushedHead => {
@@ -616,39 +785,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 )
                     .into_response());
             }
-            // Existence + trust gate: resolve + trust-verify the root item so
-            // invalid refs and trust violations fail before a thread_id is
-            // minted. This does NOT demand a terminal `executor_id` — which
-            // executor runs (a terminal subprocess for tools, or a
-            // runtime-registry runtime for directive/graph) is decided by
-            // `dispatch::dispatch` in the spawned task below. Required caps
-            // and secrets are enforced here from the resolved metadata.
-            let accepted_resolved = match ryeos_app::thread_lifecycle::preflight_root_execution(
-                ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-                    engine: &project_ctx.request_engine,
-                    site_id,
-                    project_path: &project_ctx.effective_path,
-                    item_ref,
-                    launch_mode: "inline",
-                    parameters: request.parameters.clone(),
-                    requested_by: Some(caller_principal_id.clone()),
-                    usage_subject: usage_subject.clone(),
-                    usage_subject_asserted_by: usage_subject_asserted_by.clone(),
-                    caller_scopes: caller_scopes.clone(),
-                    validate_only: false,
-                },
-            ) {
-                Ok(resolved) => resolved,
-                Err(err) => {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(json!({
-                            "error": format!("accepted launch preflight failed: {err}"),
-                        })),
-                    )
-                        .into_response());
-                }
-            };
             // Route preflight: walk the dispatch chain and run the cheap
             // route-level checks dispatch makes before creating the thread
             // row (terminal `executor_id` + tool `requires` declaration,
@@ -658,27 +794,30 @@ impl CompiledResponseMode for CompiledExecuteMode {
             // leaf dispatch + the launch finalize-on-error net, not here.
             // In-process service kinds run synchronously and never thread a
             // pre-minted id, so they are not eligible for accepted launch.
-            match ryeos_executor::dispatch::preflight_root_dispatch(
+            let accepted_preflight = match ryeos_executor::dispatch::preflight_root_dispatch(
                 item_ref,
                 root_canonical.kind.as_str(),
                 &request.parameters,
+                &request.ref_bindings,
+                usage_subject.as_ref(),
+                usage_subject_asserted_by.as_deref(),
                 &exec_ctx,
                 &state,
             ) {
-                Ok(ryeos_executor::dispatch::RootDispatchClass::InProcess) => {
+                Ok(preflight) if !preflight.class.persists_pre_minted_root() => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
                         axum::Json(json!({
-                            "error": "launch_mode='accepted' is not supported for in-process kinds; they execute synchronously — call execute without --async",
+                            "error": "launch_mode='accepted' requires execution that persists a pre-minted thread root — call execute without --async",
                         })),
                     )
                         .into_response());
                 }
-                Ok(_) => {}
+                Ok(preflight) => preflight,
                 Err(e) => return Ok(dispatch_error_response(e)),
-            }
+            };
             let required_caps = ryeos_app::service_registry::extract_required_caps(
-                &accepted_resolved.metadata.extra,
+                &accepted_preflight.requested_subject.resolved.metadata.extra,
             );
             if !required_caps.is_empty() {
                 let cap_refs = required_caps.iter().map(String::as_str).collect::<Vec<_>>();
@@ -699,7 +838,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
             if let Err(err) = ryeos_app::vault::read_required_secrets(
                 state.vault.as_ref(),
                 &caller_principal_id,
-                &accepted_resolved.metadata.required_secrets,
+                &accepted_preflight
+                    .requested_subject
+                    .resolved
+                    .metadata
+                    .required_secrets,
                 &dotenv_dirs,
             ) {
                 return Ok((
@@ -710,33 +853,69 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 )
                     .into_response());
             }
-            let accepted_project_path = crate::routes::abs_path::AbsolutePathBuf::try_new(
-                project_ctx.effective_path.clone(),
+            let accepted_root_admission = accepted_preflight.root_admission.ok_or_else(|| {
+                RouteDispatchError::Internal(
+                    "threaded dispatch preflight returned no root admission".to_string(),
+                )
+            })?;
+            let mut launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
+                accepted_root_admission,
+                request.ref_bindings.clone(),
             )
-            .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "validated accepted-launch policy rejected at dispatch boundary: {error:#}"
+                ))
+            })?;
+            launch_options.usage_subject = usage_subject.clone();
+            launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
+            launch_options.call = request.call().cloned();
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             let response_thread_id = thread_id.clone();
 
-            let handle = crate::routes::launch::spawn_dispatch_launch(
+            let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_item_ref,
-                accepted_project_path,
                 request.parameters.clone(),
                 caller_principal_id.clone(),
                 caller_scopes.clone(),
                 thread_id.clone(),
-                crate::routes::launch::DispatchLaunchOptions {
-                    launch_mode: "inline".to_string(),
-                    target_site_id: None,
-                    validate_only: false,
-                    usage_subject: usage_subject.clone(),
-                    usage_subject_asserted_by: usage_subject_asserted_by.clone(),
-                    call: request.call().cloned(),
-                    previous_thread_id: None,
-                },
+                provenance.clone(),
+                launch_options,
             );
+            // No-project execution uses a request-owned scratch workspace.
+            // Keep its guard alive until the accepted background launch has
+            // actually finished, not merely until this HTTP response returns.
+            let workspace_guard = project_ctx.temp_dir.clone();
+
+            let ready_thread_id = tokio::select! {
+                biased;
+                readiness = ready => match readiness {
+                    Ok(Ok(ready_thread_id)) => ready_thread_id,
+                    Ok(Err(failure)) => {
+                        return Ok(launch_handoff_failure_response(failure));
+                    }
+                    Err(_) => {
+                        return Ok(launch_task_result_response(handle.await));
+                    }
+                },
+                result = &mut handle => {
+                    return Ok(launch_task_result_response(result));
+                }
+            };
+            if ready_thread_id != response_thread_id {
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    axum::Json(json!({
+                        "code": "launch_handoff_identity_mismatch",
+                        "error": "authoritative handoff returned a different thread identity",
+                    })),
+                )
+                    .into_response());
+            }
 
             tokio::spawn(async move {
+                let _workspace_guard = workspace_guard;
                 match handle.await {
                     Ok(Ok(())) => {
                         tracing::debug!(thread_id = %thread_id, "accepted execute background dispatch completed");
@@ -810,7 +989,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 if usage_subject.is_some() {
                     return Ok(dispatch_error_response(target_site_unsupported(
                         &plan.target_site_id,
-                        "usage_subject attribution is not supported for target-site forwarding v1",
+                        "usage_subject attribution is not supported for target-site forwarding",
                     )));
                 }
                 let client = crate::remote::client::RemoteClient::new(
@@ -826,6 +1005,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 let forward_req = crate::remote::forward::RemoteForwardRequest {
                     remote: &plan.remote,
                     item_ref,
+                    ref_bindings: &request.ref_bindings,
                     local_project_path: plan.local_project_path.as_deref(),
                     remote_project_path: &plan.remote_project_path,
                     parameters: request.parameters.clone(),
@@ -854,6 +1034,49 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         };
 
+        // A pushed-head request is the remote destination boundary: complete a
+        // threadless admission pass against the request-scoped overlay engine
+        // before local authoritative dispatch can create a row or spawn.
+        if matches!(project_source, ProjectSource::PushedHead) {
+            let primary = match exec_ctx.engine.resolve(&exec_ctx.plan_ctx, &root_canonical) {
+                Ok(resolved) => match exec_ctx.engine.verify(&exec_ctx.plan_ctx, resolved) {
+                    Ok(verified) => verified.resolved,
+                    Err(error) => {
+                        return Ok(dispatch_error_response(
+                            ryeos_executor::dispatch_error::DispatchError::InvalidRef(
+                                item_ref.to_string(),
+                                format!("verification failed: {error}"),
+                            ),
+                        ));
+                    }
+                },
+                Err(error) => {
+                    return Ok(dispatch_error_response(
+                        ryeos_executor::dispatch_error::DispatchError::InvalidRef(
+                            item_ref.to_string(),
+                            format!("resolution failed: {error}"),
+                        ),
+                    ));
+                }
+            };
+            let applicability = match ryeos_executor::dispatch::launch_contract_applicability(
+                item_ref, &exec_ctx,
+            ) {
+                Ok(applicability) => applicability,
+                Err(error) => return Ok(dispatch_error_response(error)),
+            };
+            if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
+                &applicability,
+                &primary,
+                &request.ref_bindings,
+                &project_ctx.effective_path,
+                &exec_ctx,
+                &state,
+            ) {
+                return Ok(dispatch_error_response(error));
+            }
+        }
+
         // ── Local dispatch ─────────────────────────────────────────
         // No target_site_id, or target_site_id == current_site_id
         // (normalized to None above). Build dispatch request and call
@@ -863,6 +1086,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             target_site_id: dispatch_target_site_id,
             validate_only: request.validate_only,
             params: request.parameters.clone(),
+            ref_bindings: request.ref_bindings.clone(),
             acting_principal: caller_principal_id.as_str(),
             project_path: &project_ctx.effective_path,
             provenance,
@@ -871,6 +1095,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id: None,
+            root_admission: None,
             parent_execution_context: None,
         };
 
@@ -909,6 +1134,47 @@ fn dispatch_error_response(
     let status = e.http_status();
     let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);
     (status, axum::Json(payload.to_value())).into_response()
+}
+
+fn launch_handoff_failure_response(
+    failure: ryeos_executor::execution::launch::LaunchHandoffFailure,
+) -> axum::response::Response {
+    let status = StatusCode::from_u16(failure.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    (status, axum::Json(failure.body)).into_response()
+}
+
+fn launch_task_result_response(
+    result: Result<Result<(), crate::routes::launch::LaunchSpawnError>, tokio::task::JoinError>,
+) -> axum::response::Response {
+    match result {
+        Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {
+            dispatch_error_response(error)
+        }
+        Ok(Err(error)) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({
+                "code": error.code(),
+                "error": error.to_string(),
+            })),
+        )
+            .into_response(),
+        Ok(Ok(())) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({
+                "code": "launch_handoff_missing",
+                "error": "launch completed without authoritative handoff",
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(json!({
+                "code": "launch_task_failed",
+                "error": error.to_string(),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug)]
@@ -950,7 +1216,7 @@ fn plan_target_site_forward(
         return Err(target_site_unsupported(
             target_site_id,
             format!(
-                "launch_mode '{}' is not supported; target-site forwarding v1 supports inline only",
+                "launch_mode '{}' is not supported; target-site forwarding supports inline only",
                 request.launch_mode
             ),
         ));
@@ -966,14 +1232,14 @@ fn plan_target_site_forward(
     if !matches!(project_source, ProjectSource::LiveFs) {
         return Err(target_site_unsupported(
             target_site_id,
-            "project_source pushed_head is not supported for target-site forwarding v1",
+            "project_source pushed_head is not supported for target-site forwarding",
         ));
     }
 
     if request.method().is_some() || request.args().is_some() {
         return Err(target_site_unsupported(
             target_site_id,
-            "call.method/call.args are not supported for target-site forwarding v1",
+            "call.method/call.args are not supported for target-site forwarding",
         ));
     }
 
@@ -1236,7 +1502,8 @@ mod tests {
 
     fn target_request(target_site_id: Option<&str>) -> ExecuteRequest {
         ExecuteRequest {
-            item_ref: Some("tool:test/thing".into()),
+            item_ref: "tool:test/thing".into(),
+            ref_bindings: std::collections::BTreeMap::new(),
             project_path: Some("/tmp/project".into()),
             parameters: serde_json::Value::Null,
             launch_mode: "inline".into(),
@@ -1602,5 +1869,23 @@ mod tests {
         ));
         assert_eq!(dispatch_err.http_status(), StatusCode::BAD_GATEWAY);
         assert!(dispatch_err.to_string().contains("not a descendant"));
+    }
+
+    #[test]
+    fn no_project_execution_keeps_none_identity() {
+        assert_eq!(
+            execution_project_context(true, Path::new("/runtime/no-project-pre-123")),
+            ryeos_engine::contracts::ProjectContext::None
+        );
+    }
+
+    #[test]
+    fn project_execution_records_the_effective_path() {
+        assert_eq!(
+            execution_project_context(false, Path::new("/workspace/project")),
+            ryeos_engine::contracts::ProjectContext::LocalPath {
+                path: PathBuf::from("/workspace/project"),
+            }
+        );
     }
 }

@@ -32,17 +32,17 @@ Load a directive to inspect its structure, then write a summary of its metadata 
   </inputs>
 
   <outputs>
-    <success>Loaded directive {input:directive_id} and wrote summary to {input:output_path}</success>
-    <failure>Failed to load directive {input:directive_id} or write summary</failure>
+    <success>Loaded directive ${inputs.directive_id} and wrote summary to ${inputs.output_path}</success>
+    <failure>Failed to load directive ${inputs.directive_id} or write summary</failure>
   </outputs>
 </directive>
 ```
 
 <process>
   <step name="load_directive">
-    Load the directive `{input:directive_id}` to inspect its structure and metadata.
+    Load the directive `${inputs.directive_id}` to inspect its structure and metadata.
   </step>
   <step name="write_summary">
-    Write a structured summary of the directive's name, description, permissions, and steps to `{input:output_path}`.
+    Write a structured summary of the directive's name, description, permissions, and steps to `${inputs.output_path}`.
   </step>
 </process>

@@ -1,18 +1,32 @@
 //! Shared test state builder for handler tests.
 //!
 //! Provides two modes:
-//! - `build_test_state()`: empty engine (fast, for error-path tests)
-//! - `build_test_state_with_bundles()`: full engine with workspace
-//!   bundles (slower, for happy-path tests; requires populated bundles)
+//! - `build_test_state()`: empty engine for paths that reject before item
+//!   resolution;
+//! - `build_test_state_with_live_bundles()`: full engine with signed workspace
+//!   bundles for paths that resolve or execute canonical item refs.
 
 use std::sync::Arc;
 
 use ryeos_app::state::AppState;
 use ryeos_engine::kind_registry::KindRegistry;
-use ryeos_engine::trust::TrustStore;
+
+fn service_descriptors() -> &'static [ryeos_app::service_registry::ServiceDescriptor] {
+    static DESCRIPTORS: std::sync::OnceLock<Vec<ryeos_app::service_registry::ServiceDescriptor>> =
+        std::sync::OnceLock::new();
+    DESCRIPTORS
+        .get_or_init(|| {
+            ryeos_api::handlers::ALL
+                .iter()
+                .chain(ryeos_ui::handlers::ALL.iter())
+                .copied()
+                .collect()
+        })
+        .as_slice()
+}
 
 /// Build a minimal AppState with an empty engine.
-/// Suitable for testing error paths (not found, wrong kind, etc.).
+/// Suitable only for paths that reject before canonical item resolution.
 #[allow(dead_code)]
 pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
@@ -29,23 +43,37 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
-        sandbox_enabled: false,
         tool_env_passthrough: Vec::new(),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
+    let mut head_trust = ryeos_state::refs::TrustStore::new();
+    head_trust.insert(
+        identity.fingerprint().to_string(),
+        *identity.verifying_key(),
+    );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
-        ryeos_app::state_store::StateStore::new(
+        ryeos_app::state_store::StateStore::new_with_head_trust(
+            tmpdir.path().to_path_buf(),
             runtime_state_dir,
             runtime_db_path,
             signer,
             write_barrier.clone(),
+            Arc::new(head_trust),
         )
         .unwrap(),
     );
+    let engine = Arc::new(ryeos_engine::engine::Engine::new(
+        ryeos_engine::kind_registry::KindRegistry::empty(),
+        ryeos_engine::parsers::ParserDispatcher::new(
+            ryeos_engine::parsers::ParserRegistry::empty(),
+            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+        ),
+        Vec::new(),
+    ));
     let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
@@ -54,6 +82,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
     let threads = Arc::new(
         ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
             state_store.clone(),
+            engine.clone(),
             kind_profiles.clone(),
             events.clone(),
             event_streams.clone(),
@@ -65,15 +94,6 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         kind_profiles,
         events.clone(),
     ));
-
-    let engine = ryeos_engine::engine::Engine::new(
-        ryeos_engine::kind_registry::KindRegistry::empty(),
-        ryeos_engine::parsers::ParserDispatcher::new(
-            ryeos_engine::parsers::ParserRegistry::empty(),
-            Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
-        ),
-        Vec::new(),
-    );
 
     build_app_state(
         tmpdir,
@@ -91,7 +111,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
 
 /// Build an AppState backed by the live workspace core + standard + RyeOS UI bundles.
 /// Suitable for happy-path topology/session tests that need real kind schemas,
-/// parsers, handlers, runtimes, and bundled items.
+/// verified item resolution, and effective-item composition.
 #[allow(dead_code)]
 pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     std::env::set_var("HOSTNAME", "testhost");
@@ -108,24 +128,33 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         operator_signing_key_path: tmpdir.path().join("user-key.pem"),
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
-        sandbox_enabled: false,
         tool_env_passthrough: Vec::new(),
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
         &identity,
     ));
+    let mut head_trust = ryeos_state::refs::TrustStore::new();
+    head_trust.insert(
+        identity.fingerprint().to_string(),
+        *identity.verifying_key(),
+    );
     let write_barrier = ryeos_app::write_barrier::WriteBarrier::new();
     let state_store = Arc::new(
-        ryeos_app::state_store::StateStore::new(
+        ryeos_app::state_store::StateStore::new_with_head_trust(
+            tmpdir.path().to_path_buf(),
             runtime_state_dir,
             runtime_db_path,
             signer,
             write_barrier.clone(),
+            Arc::new(head_trust),
         )
         .unwrap(),
     );
-    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(None));
+    let engine = Arc::new(build_live_bundle_engine());
+    let kind_profiles = Arc::new(ryeos_app::kind_profiles::KindProfileRegistry::build(Some(
+        &engine.kinds,
+    )));
     let events = Arc::new(ryeos_app::event_store_service::EventStoreService::new(
         state_store.clone(),
     ));
@@ -133,6 +162,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
     let threads = Arc::new(
         ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
             state_store.clone(),
+            engine.clone(),
             kind_profiles.clone(),
             events.clone(),
             event_streams.clone(),
@@ -144,8 +174,6 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         kind_profiles,
         events.clone(),
     ));
-
-    let engine = build_live_bundle_engine();
 
     build_app_state(
         tmpdir,
@@ -162,46 +190,34 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
 }
 
 #[allow(dead_code)]
-fn workspace_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .find(|p| p.join("bundles").is_dir())
-        .expect("workspace root with bundles/ directory")
-        .to_path_buf()
-}
-
-#[allow(dead_code)]
 fn build_live_bundle_engine() -> ryeos_engine::engine::Engine {
-    let workspace = workspace_root();
-    let trusted_dir = workspace.join("crates/bin/daemon/tests/fixtures/trusted_signers");
-    let trust_store = TrustStore::load_from_dir(&trusted_dir).expect("load test trust store");
-    let core_bundle = workspace.join("bundles/core");
-    let std_bundle = workspace.join("bundles/standard");
-    let ryeos_bundle = workspace.join("bundles/ryeos-ui");
+    let trust_store = ryeos_engine::test_support::live_trust_store();
+    let core_bundle = ryeos_engine::test_support::core_bundle_root();
+    let standard_bundle = ryeos_engine::test_support::standard_bundle_root();
+    let ryeos_ui_bundle = ryeos_engine::test_support::workspace_root().join("bundles/ryeos-ui");
 
     let kinds = KindRegistry::load_base(
         &[
             core_bundle.join(".ai/node/engine/kinds"),
-            std_bundle.join(".ai/node/engine/kinds"),
+            standard_bundle.join(".ai/node/engine/kinds"),
         ],
         &trust_store,
     )
-    .expect("load kind registry");
+    .expect("load live kind registry");
 
-    let bundle_roots = vec![core_bundle, std_bundle, ryeos_bundle];
+    let bundle_roots = vec![core_bundle, standard_bundle, ryeos_ui_bundle];
     let (parser_tools, _) =
         ryeos_engine::parsers::ParserRegistry::load_base(&bundle_roots, &trust_store, &kinds)
-            .expect("load parser tools");
+            .expect("load live parser tools");
     let native_handlers = ryeos_engine::test_support::load_live_handler_registry();
-    let parser_dispatcher = ryeos_engine::parsers::ParserDispatcher::new(
-        parser_tools,
-        std::sync::Arc::clone(&native_handlers),
-    );
+    let parser_dispatcher =
+        ryeos_engine::parsers::ParserDispatcher::new(parser_tools, Arc::clone(&native_handlers));
     let composers = ryeos_engine::composers::ComposerRegistry::from_kinds(&kinds, &native_handlers)
-        .expect("derive composers");
+        .expect("derive live composers");
 
     ryeos_engine::engine::Engine::new(kinds, parser_dispatcher, bundle_roots)
-        .with_trust_store(trust_store)
+        .with_trust_store(trust_store.clone())
+        .with_node_trust_store(trust_store)
         .with_composers(composers)
 }
 
@@ -212,13 +228,14 @@ fn build_app_state(
     config: ryeos_app::config::Config,
     identity: ryeos_app::identity::NodeIdentity,
     state_store: Arc<ryeos_app::state_store::StateStore>,
-    engine: ryeos_engine::engine::Engine,
+    engine: Arc<ryeos_engine::engine::Engine>,
     threads: Arc<ryeos_app::thread_lifecycle::ThreadLifecycleService>,
     events: Arc<ryeos_app::event_store_service::EventStoreService>,
     commands: Arc<ryeos_app::command_service::CommandService>,
     write_barrier: ryeos_app::write_barrier::WriteBarrier,
     event_streams: Arc<ryeos_app::event_stream::ThreadEventHub>,
 ) -> (tempfile::TempDir, AppState) {
+    let service_descriptors = service_descriptors();
     let snapshot = ryeos_app::node_config::NodeConfigSnapshot {
         bundles: vec![],
         routes: vec![],
@@ -232,8 +249,9 @@ fn build_app_state(
 
     let state = AppState {
         config: Arc::new(config),
+        isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
         state_store,
-        engine: Arc::new(engine),
+        engine,
         engine_cache: ryeos_app::engine_cache::EngineCache::new(
             ryeos_app::engine_cache::EngineCacheConfig::default(),
         ),
@@ -258,10 +276,13 @@ fn build_app_state(
             missing_services: vec![],
         },
         services: Arc::new(ryeos_api::registry::build_service_registry_from(
-            ryeos_ui::handlers::ALL,
+            service_descriptors,
         )),
-        service_descriptors: ryeos_ui::handlers::ALL,
+        service_descriptors,
         node_config: Arc::new(snapshot),
+        node_history_policy: Arc::new(
+            ryeos_engine::history_policy::ResolvedNodeThreadHistoryPolicy::durable_without_config(),
+        ),
         vault: Arc::new(ryeos_app::vault::EmptyVault),
         command_registry: test_command_registry,
         authorizer: test_auth,

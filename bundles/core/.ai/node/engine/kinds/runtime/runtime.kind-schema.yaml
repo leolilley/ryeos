@@ -1,5 +1,4 @@
-# ryeos:signed:2026-07-03T01:05:56Z:d09ed41b84a08defa9c2b01c6f00178063f888e950e13e9009a7ef2e751de851:TW71WcKId8ik9UYzxc9U9LjnN7mqIW0M4ExwcXioZxTtiXoCmP8Fb/dDW6j2iWI5W7NhAdpgyLywZ3jwriaOAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
-# rye:unsigned
+# ryeos:signed:2026-07-15T07:49:04Z:1c2f1ddd4239e44e4a1dec8038ded0f05bd6a1dfe6990f08318883ec08910854:d1Xpwd+aiS2AbOTqeZxtAh/5Tl2sjni6H4961o6VEqR2tAmP0/rCTtBeuz6SvileAgERcMmGFp6GGWSw0FFGDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/runtime"
 version: "1.0.0"
 location:
@@ -10,7 +9,7 @@ resolution: []
 execution:
   terminator:
     kind: subprocess
-    protocol: protocol:ryeos/core/runtime_v1
+    protocol: protocol:ryeos/core/runtime
   thread_profile:
     name: runtime_run
     root_executable: true
@@ -30,25 +29,53 @@ composed_value_contract:
     serves: { type: single, prim: string }
     binary_ref: { type: single, prim: string }
     abi_version: { type: single, prim: string }
+    launch_contract:
+      type: single
+      prim: mapping
+      contract:
+        root_type: mapping
+        required:
+          primary_allowed_kinds:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          primary_allowed_spaces:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string, enum: [bundle, project] }
+          primary_allowed_trust:
+            type: single
+            prim: sequence
+            elements:
+              type: single
+              prim: string
+              enum: [trusted_bundle, trusted_project, untrusted_project, unsigned]
+          ref_bindings: { type: single, prim: mapping }
+          preparation: { type: single, prim: mapping }
+          config_inputs: { type: single, prim: mapping }
+          secret_policy:
+            type: single
+            prim: mapping
+            contract:
+              root_type: mapping
+              required:
+                max_requirements: { type: single, prim: integer }
+                allowed_names:
+                  type: single
+                  prim: sequence
+                  elements: { type: single, prim: string }
+          required_runtime_data:
+            type: single
+            prim: sequence
+            elements: { type: single, prim: string }
+          runtime_facts: { type: single, prim: mapping }
   optional:
     default: { type: single, prim: boolean }
     required_caps:
       type: single
       prim: sequence
       elements: { type: single, prim: string }
-    required_envelope_fields:
-      type: single
-      prim: sequence
-      elements: { type: single, prim: string }
     description: { type: single, prim: string }
-    schema:
-      type: single
-      prim: mapping
-      contract:
-        root_type: mapping
-        required:
-          envelope: { type: single, prim: string }
-          result: { type: single, prim: string }
 metadata:
   rules:
     version:
@@ -72,6 +99,3 @@ metadata:
     required_caps:
       from: path_string_seq
       key: required_caps
-    required_envelope_fields:
-      from: path_string_seq
-      key: required_envelope_fields

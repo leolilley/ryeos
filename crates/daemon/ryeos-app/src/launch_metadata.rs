@@ -8,9 +8,11 @@
 //! routing, checkpoint dir, original params, snapshot/base hash,
 //! executor chain refs, vault references…) lives here.
 //!
-//! Persisted as a JSON blob in `runtime_db.thread_runtime.launch_metadata`
-//! so the struct can be extended without schema migrations.
+//! Persisted as a versioned JSON blob in
+//! `runtime_db.thread_runtime.launch_metadata`. Shape changes use the owned
+//! launch-metadata normalizer independently of SQLite table migrations.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ryeos_engine::contracts::{
@@ -20,13 +22,24 @@ use ryeos_engine::contracts::{
 use serde::{Deserialize, Serialize};
 
 use crate::execution_provenance::ExecutionProvenance;
+use crate::thread_lifecycle::SealedRootExecutionRequest;
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 /// Version tag for the JSON payload persisted into
 /// `runtime_db.thread_runtime.launch_metadata`. Bump when an
-/// incompatible shape change ships; readers MUST decode loudly so a
+/// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 3;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -39,10 +52,9 @@ pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 1;
 /// working dir is an ephemeral CAS checkout and fold-back skips
 /// `state/` and dotfile paths.
 ///
-/// `ryeos_runtime::thread_state_dir` is the project-relative path
-/// used by tool subprocesses for transcripts/knowledge (which DO
-/// fold back into CAS). This helper is the daemon-side counterpart
-/// for state that must NOT fold back.
+/// Runtime-specific transcript writers own any project-relative output that
+/// should fold back into CAS. This helper is only for daemon state that must
+/// remain outside that fold-back boundary.
 ///
 /// `RuntimeLaunchMetadata` and the resume-attempts counter both live
 /// in `runtime_db.thread_runtime` — the daemon's runtime ledger,
@@ -68,33 +80,30 @@ pub fn daemon_checkpoint_dir(app_root: &std::path::Path, thread_id: &str) -> std
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeLaunchMetadata {
-    /// Persisted schema version. Defaults via serde to the current
-    /// `LAUNCH_METADATA_SCHEMA_VERSION` so rows written before this
-    /// field existed deserialize without error. A loud decode failure
-    /// (see `runtime_db::get_runtime_info`) is the signal that an
-    /// incompatible payload was written.
+    /// Exact persisted schema version. Missing or older shapes fail decoding;
+    /// there is no compatibility/default reader.
     pub schema_version: u32,
 
     /// Cancellation policy resolved at decorate-spec time and snapshotted
     /// here so the daemon can route cancellation without re-loading the spec.
     /// `None` = use the default 3s graceful shutdown.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub cancellation_mode: Option<CancellationMode>,
 
     /// Resume policy carried over from `SubprocessSpec.execution.native_resume`.
     /// Presence ⇒ this thread is replay-aware. The daemon allocates
     /// `checkpoint_dir`, injects `RYEOS_CHECKPOINT_DIR` into the spawn
     /// env, and on restart consults `reconcile.rs` for auto-resume.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub native_resume: Option<NativeResumeSpec>,
 
     /// Per-thread checkpoint directory (`<thread_state_dir>/checkpoints/`).
     /// Allocated by the daemon at spawn time when `native_resume` is set.
     /// Carried in the manifest so reconcile/resume paths can find it
     /// without rederiving paths.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub checkpoint_dir: Option<PathBuf>,
 
     /// Minimum context required to reconstruct the thread's launch identity —
@@ -102,17 +111,35 @@ pub struct RuntimeLaunchMetadata {
     /// daemon restart, and for a continuation/follow-resume successor to
     /// relaunch it. Populated at managed launch time for continuation-capable
     /// OR native-resume launches. `None` for threads that are neither.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub resume_context: Option<ResumeContext>,
+
+    /// Immutable source identity for a continuation runtime seed. Present only
+    /// while/after a successor is created from a settled source and used by
+    /// startup reconciliation to reject thread-id collisions.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub continuation_source_thread_id: Option<String>,
+
+    /// Complete sealed fresh-root request used only while a created child has
+    /// not crossed its first-launch boundary. Recovery consumes this exact
+    /// authority and never re-resolves the item source.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub sealed_root_request: Option<SealedRootExecutionRequest>,
 
     /// Validated parent execution seed used when a detached follow child is
     /// admitted later, after the live callback context is gone.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub follow_parent_context: Option<PersistedParentExecutionContext>,
 
     /// Durable launch-window policy for crash repair before admission.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub follow_launch_window: Option<FollowLaunchWindow>,
+
+    /// Exact secret-free isolation generation and compiled-plan identity used
+    /// at the spawn boundary. `None` only before isolation compilation or for
+    /// execution paths that never launch a subprocess.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub isolation: Option<ryeos_engine::isolation::IsolationLaunchProvenance>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,8 +165,11 @@ impl Default for RuntimeLaunchMetadata {
             native_resume: None,
             checkpoint_dir: None,
             resume_context: None,
+            continuation_source_thread_id: None,
+            sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
+            isolation: None,
         }
     }
 }
@@ -199,6 +229,9 @@ impl OriginalPushedHeadRef {
 pub struct ResumeContext {
     pub kind: String,
     pub item_ref: String,
+    /// Complete canonical secondary execution identity. Required on disk;
+    /// absence is a schema error, never an empty-map fallback.
+    pub ref_bindings: BTreeMap<String, String>,
     pub launch_mode: String,
     pub parameters: serde_json::Value,
     /// Full engine `ProjectContext` from the original `PlanContext`.
@@ -211,7 +244,7 @@ pub struct ResumeContext {
     /// the original LocalPath so resume targets the pinned project
     /// version, not the current head. `None` when the original spawn
     /// went through the live-FS path with no allocated snapshot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub original_snapshot_hash: Option<String>,
     /// Pushed-head identity captured at original spawn time — set iff the
     /// spawn's provenance was `RootPushedHead`. The resume path uses it to
@@ -219,14 +252,14 @@ pub struct ResumeContext {
     /// resolving against the daemon's live engine. `None` for LocalPath
     /// spawns. NOT interchangeable with `original_snapshot_hash`, which is
     /// the LocalPath native-resume pin allocated by the runner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub original_pushed_head_ref: Option<OriginalPushedHeadRef>,
     /// Deliberate runtime state-root override captured at original spawn
     /// time (`/execute` `state_root`). Re-applied to the rebuilt provenance
     /// on resume so a crashed overridden run keeps writing its state — and
     /// advertising its callback identity — under the override instead of
     /// silently reverting into the source project.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub state_root: Option<std::path::PathBuf>,
     pub current_site_id: String,
     pub origin_site_id: String,
@@ -236,7 +269,6 @@ pub struct ResumeContext {
     pub requested_by: EffectivePrincipal,
     /// `ExecutionHints` from the original `PlanContext`. Carried
     /// verbatim so executor-specific flags survive resume.
-    #[serde(default = "default_execution_hints")]
     pub execution_hints: ExecutionHints,
     /// Composed `effective_caps` captured at original spawn time. The
     /// reconciler re-mints a callback token for the resumed subprocess and
@@ -248,7 +280,6 @@ pub struct ResumeContext {
     /// launcher feeds to `CapabilityPolicy::FollowChildHybrid`. The child's
     /// own composed caps overwrite it in launch metadata once the child is
     /// launched and policy resolution succeeds.
-    #[serde(default)]
     pub effective_caps: Vec<String>,
     /// Persisted executor identity (`native:<binary>`) of the runtime that
     /// launched this thread. Runtime-registry (delegate) kinds — directive,
@@ -256,26 +287,99 @@ pub struct ResumeContext {
     /// reconstructs its launch identity from this. Captured at fresh managed
     /// launch; preferred over re-deriving from the registry so a later default
     /// change cannot silently switch runtimes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub executor_ref: Option<String>,
     /// Persisted canonical ref (`runtime:<name>`) of the runtime that launched
     /// this thread, so a successor reattaches by-ref rather than re-resolving
     /// the default for the kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub runtime_ref: Option<String>,
 }
 
-fn default_execution_hints() -> ExecutionHints {
-    ExecutionHints::default()
-}
-
 impl ResumeContext {
-    /// Extract a fingerprint string for the daemon's
-    /// `requested_by: Option<String>` thread-record column.
-    pub fn requested_by_name(&self) -> Option<String> {
+    /// Return the exact captured principal identifier for resumed planning and
+    /// row authority. The captured `EffectivePrincipal` is exhaustive, so a
+    /// resume never needs to invent a fallback identity.
+    pub fn principal_identifier(&self) -> &str {
         match &self.requested_by {
-            EffectivePrincipal::Local(Principal { fingerprint, .. }) => Some(fingerprint.clone()),
-            EffectivePrincipal::Delegated(d) => Some(d.caller_fingerprint.clone()),
+            EffectivePrincipal::Local(Principal { fingerprint, .. }) => fingerprint,
+            EffectivePrincipal::Delegated(delegated) => &delegated.caller_fingerprint,
+        }
+    }
+
+    /// Snapshot that can reconstruct this project as a fresh, non-lineage
+    /// workspace. A locally pinned snapshot wins; a pushed-root snapshot is an
+    /// equivalent immutable source when a borrowed child must not inherit the
+    /// parent's pushed-head ownership semantics.
+    pub fn durable_project_snapshot_hash(&self) -> Option<&str> {
+        self.original_snapshot_hash.as_deref().or_else(|| {
+            self.original_pushed_head_ref
+                .as_ref()
+                .map(|pinned| pinned.snapshot_hash.as_str())
+        })
+    }
+
+    /// Canonical project identity persisted into authoritative thread
+    /// snapshots. This deliberately distinguishes every ProjectContext shape:
+    /// local paths retain their path attribution and optional immutable launch
+    /// pin, while remote/reference contexts must resolve to an immutable CAS
+    /// snapshot before a continuation can be committed.
+    pub(crate) fn authoritative_project_identity(
+        &self,
+    ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
+        match &self.project_context {
+            ProjectContext::None => {
+                if self.durable_project_snapshot_hash().is_some() {
+                    anyhow::bail!("project_context none contradicts a durable project snapshot");
+                }
+                Ok((None, None))
+            }
+            ProjectContext::LocalPath { path } => {
+                if self.original_pushed_head_ref.is_some() {
+                    anyhow::bail!(
+                        "local-path project context contradicts pushed-head project identity"
+                    );
+                }
+                Ok((Some(path.clone()), self.original_snapshot_hash.clone()))
+            }
+            ProjectContext::SnapshotHash { hash } => {
+                for pinned in [
+                    self.original_snapshot_hash.as_deref(),
+                    self.original_pushed_head_ref
+                        .as_ref()
+                        .map(|pushed| pushed.snapshot_hash.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if pinned != hash.as_str() {
+                        anyhow::bail!(
+                            "snapshot project context {hash} contradicts durable launch pin {pinned}"
+                        );
+                    }
+                }
+                Ok((None, Some(hash.clone())))
+            }
+            ProjectContext::ProjectRef { .. } => {
+                let original = self.original_snapshot_hash.as_deref();
+                let pushed = self
+                    .original_pushed_head_ref
+                    .as_ref()
+                    .map(|pushed| pushed.snapshot_hash.as_str());
+                if let (Some(original), Some(pushed)) = (original, pushed) {
+                    if original != pushed {
+                        anyhow::bail!(
+                            "project-ref continuation has contradictory immutable snapshot pins"
+                        );
+                    }
+                }
+                let pinned = original.or(pushed).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "project-ref continuation has no immutable resolved snapshot pin"
+                    )
+                })?;
+                Ok((None, Some(pinned.to_owned())))
+            }
         }
     }
 }
@@ -303,8 +407,11 @@ impl RuntimeLaunchMetadata {
             native_resume: spec.execution.native_resume.clone(),
             checkpoint_dir: None,
             resume_context: None,
+            continuation_source_thread_id: None,
+            sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
+            isolation: None,
         }
     }
 
@@ -317,8 +424,11 @@ impl RuntimeLaunchMetadata {
             && self.native_resume.is_none()
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
+            && self.continuation_source_thread_id.is_none()
+            && self.sealed_root_request.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
+            && self.isolation.is_none()
     }
 
     /// Set the daemon-allocated checkpoint directory.
@@ -342,6 +452,60 @@ impl RuntimeLaunchMetadata {
         self
     }
 
+    pub fn with_continuation_source(mut self, source_thread_id: impl Into<String>) -> Self {
+        self.continuation_source_thread_id = Some(source_thread_id.into());
+        self
+    }
+
+    /// Derive the durable launch seed for a continuation successor. Runtime
+    /// policy and the reconstructable request identity survive the handoff;
+    /// fresh-root-only admission records do not. A replay-aware successor gets
+    /// its own checkpoint directory rather than inheriting the source path.
+    pub fn for_continuation_successor(
+        &self,
+        source_thread_id: &str,
+        checkpoint_dir: PathBuf,
+    ) -> Self {
+        Self {
+            schema_version: self.schema_version,
+            cancellation_mode: self.cancellation_mode,
+            native_resume: self.native_resume.clone(),
+            checkpoint_dir: self.native_resume.as_ref().map(|_| checkpoint_dir),
+            resume_context: self.resume_context.clone(),
+            continuation_source_thread_id: Some(source_thread_id.to_string()),
+            sealed_root_request: None,
+            follow_parent_context: None,
+            follow_launch_window: None,
+            // Isolation is compiled against one concrete spawn and verified
+            // bundle generation. The successor receives fresh provenance when
+            // its own launch plan is compiled.
+            isolation: None,
+        }
+    }
+
+    /// Project this thread's execution-level policy into a newly-created
+    /// continuation successor.
+    ///
+    /// A continuation is another segment of the same managed execution, so its
+    /// cancellation and native-resume declarations remain authoritative. The
+    /// checkpoint directory and follow-child admission fields are owned by one
+    /// concrete thread, however, and must never be copied to a different thread
+    /// identity. Launch preparation allocates the successor's own checkpoint
+    /// directory before it attaches.
+    pub(crate) fn continuation_successor_seed(&self, resume_context: ResumeContext) -> Self {
+        Self {
+            cancellation_mode: self.cancellation_mode,
+            native_resume: self.native_resume.clone(),
+            resume_context: Some(resume_context),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_sealed_root_request(mut self, request: SealedRootExecutionRequest) -> Self {
+        self.sealed_root_request = Some(request);
+        self
+    }
+
     /// True iff the spec declared `native_resume`. NOTE: this is a
     /// pure factual check on the persisted spec — actual reconciler
     /// eligibility additionally requires `resume_context.is_some()`,
@@ -354,12 +518,13 @@ impl RuntimeLaunchMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec};
+    use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec};
     use std::collections::HashMap;
 
     fn empty_spec() -> PlanSubprocessSpec {
         PlanSubprocessSpec {
             cmd: "/bin/true".to_string(),
+            verified_command: None,
             args: Vec::new(),
             cwd: None,
             env: HashMap::new(),
@@ -380,6 +545,27 @@ mod tests {
     fn local_path_ctx() -> ProjectContext {
         ProjectContext::LocalPath {
             path: PathBuf::from("/tmp/proj"),
+        }
+    }
+
+    fn resume_context(project_context: ProjectContext) -> ResumeContext {
+        ResumeContext {
+            kind: "tool_run".to_string(),
+            item_ref: "tool:test/run".to_string(),
+            ref_bindings: BTreeMap::new(),
+            launch_mode: "detached".to_string(),
+            parameters: serde_json::json!({}),
+            project_context,
+            original_snapshot_hash: None,
+            original_pushed_head_ref: None,
+            state_root: None,
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            requested_by: local_principal(),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: Vec::new(),
+            executor_ref: Some("native:test".to_string()),
+            runtime_ref: None,
         }
     }
 
@@ -422,8 +608,11 @@ mod tests {
             native_resume: None,
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
             resume_context: None,
+            continuation_source_thread_id: None,
+            sealed_root_request: None,
             follow_parent_context: None,
             follow_launch_window: None,
+            isolation: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
@@ -447,7 +636,6 @@ mod tests {
 
     #[test]
     fn from_spec_native_resume_propagates() {
-        use ryeos_engine::contracts::NativeResumeSpec;
         let mut spec = empty_spec();
         spec.execution.native_resume = Some(NativeResumeSpec {
             checkpoint_interval_secs: 60,
@@ -464,6 +652,45 @@ mod tests {
     fn declares_native_resume_false_without_native_resume() {
         let m = RuntimeLaunchMetadata::from_spec(&empty_spec());
         assert!(!m.declares_native_resume());
+    }
+
+    #[test]
+    fn continuation_successor_seed_preserves_policy_and_clears_thread_owned_state() {
+        let native_resume = NativeResumeSpec {
+            checkpoint_interval_secs: 17,
+            max_auto_resume_attempts: 4,
+        };
+        let source = RuntimeLaunchMetadata {
+            cancellation_mode: Some(CancellationMode::Hard),
+            native_resume: Some(native_resume.clone()),
+            checkpoint_dir: Some(PathBuf::from("/state/threads/source/checkpoints")),
+            resume_context: Some(resume_context(local_path_ctx())),
+            continuation_source_thread_id: Some("earlier-source".to_string()),
+            follow_parent_context: Some(PersistedParentExecutionContext {
+                parent_thread_id: "follow-parent".to_string(),
+                hard_limits: serde_json::json!({"max_depth": 2}),
+                depth: 1,
+            }),
+            follow_launch_window: Some(FollowLaunchWindow {
+                key: "follow:source".to_string(),
+                width: 2,
+            }),
+            ..RuntimeLaunchMetadata::default()
+        };
+        let successor_resume = resume_context(ProjectContext::SnapshotHash {
+            hash: "a".repeat(64),
+        });
+
+        let successor = source.continuation_successor_seed(successor_resume.clone());
+
+        assert_eq!(successor.cancellation_mode, Some(CancellationMode::Hard));
+        assert_eq!(successor.native_resume, Some(native_resume));
+        assert_eq!(successor.resume_context, Some(successor_resume));
+        assert!(successor.checkpoint_dir.is_none());
+        assert!(successor.continuation_source_thread_id.is_none());
+        assert!(successor.sealed_root_request.is_none());
+        assert!(successor.follow_parent_context.is_none());
+        assert!(successor.follow_launch_window.is_none());
     }
 
     #[test]
@@ -533,6 +760,7 @@ mod tests {
         let ctx = ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "ns/foo".to_string(),
+            ref_bindings: BTreeMap::new(),
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),
@@ -586,6 +814,60 @@ mod tests {
         assert_eq!(
             back_ctx.effective_caps,
             vec!["ryeos.execute.tool.test".to_string()]
+        );
+    }
+
+    #[test]
+    fn authoritative_project_identity_none_is_explicitly_empty() {
+        let context = resume_context(ProjectContext::None);
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, None)
+        );
+
+        let mut contradictory = context;
+        contradictory.original_snapshot_hash = Some("a".repeat(64));
+        assert!(contradictory.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn authoritative_project_identity_local_path_carries_path_and_optional_pin() {
+        let mut context = resume_context(ProjectContext::LocalPath {
+            path: PathBuf::from("/work/project"),
+        });
+        context.original_snapshot_hash = Some("b".repeat(64));
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (Some(PathBuf::from("/work/project")), Some("b".repeat(64)))
+        );
+    }
+
+    #[test]
+    fn authoritative_project_identity_snapshot_hash_is_the_pin() {
+        let hash = "c".repeat(64);
+        let context = resume_context(ProjectContext::SnapshotHash { hash: hash.clone() });
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, Some(hash))
+        );
+
+        let mut contradictory = context;
+        contradictory.original_snapshot_hash = Some("d".repeat(64));
+        assert!(contradictory.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn authoritative_project_identity_project_ref_requires_resolved_pin() {
+        let mut context = resume_context(ProjectContext::ProjectRef {
+            principal: "fp:test".to_string(),
+            ref_name: "projects/demo".to_string(),
+        });
+        assert!(context.authoritative_project_identity().is_err());
+
+        context.original_snapshot_hash = Some("e".repeat(64));
+        assert_eq!(
+            context.authoritative_project_identity().unwrap(),
+            (None, Some("e".repeat(64)))
         );
     }
 }
