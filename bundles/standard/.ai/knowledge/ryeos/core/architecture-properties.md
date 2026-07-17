@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:edeaf5ceca33a6b5a29b726380370f1194f3f6eab8ad7b1261dbbfde3a242bcd:bkNrfLflH/hJbNRKoPB3S3iiCA1NWR+9evdiAhUOUVRVvAJaFEhdoLJ4/IdLLkL4xOU6fZDxrSxkZ3oEPrXnAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:28:22Z:e0d1800d74209ad73df002eada1523a4d0d6cf9568075c9fc2ff7de33f7baa34:jeZ2z0j3HYT1f9EmHEF0RcjH9laYz47Wd0DFaX+MYRDVVKvFSof5a2luYqRc7pNhOrOfAq8lN09jVmAObaj8CA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 
 ---
 category: ryeos/core
@@ -108,8 +108,8 @@ environment-dependent behavior.
 
 ### 10. Node-Owned Executable Isolation
 
-Authorized tool and runtime processes can be wrapped in an immutable
-node-owned Bubblewrap policy. Items cannot activate the boundary or broaden its
+Authorized tool and runtime processes can be wrapped by a selected signed
+backend under an immutable node-owned policy. Items cannot activate the boundary or broaden its
 filesystem, network, environment, or resource controls.
 
 → [Execution Isolation](node/execution-isolation.md)

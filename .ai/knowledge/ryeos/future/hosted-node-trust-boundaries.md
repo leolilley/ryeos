@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:49:38Z:c8ae232917b6811a4d3444ef9da610aceb38f6e84cd7a94e974c4617083961eb:s1INGLy8HEBkvrSojbcocBjybyhqWdABNDqM58HJoeXUWMXhhRpO67GV36afhVRRGJU0Wq3TIMRQpoYSxlF3Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:28:22Z:2bc2cedc00914f2c5f4e821ab182824c1462333680f58a553895ec8ef34fc3ba:+iZ2zdarNlQDYyD1ht7JqRqCninoV7eVwuE520AfS6GJCbOtOQMJdHXLKH3FIJtoDvloeyMZo9RnLfaABualCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
@@ -17,7 +17,7 @@ tags:
 
 ## Status
 
-The node-owned RyeOS Bubblewrap process boundary is implemented as optional
+The node-owned RyeOS process-isolation boundary is implemented as optional
 Linux groundwork and remains disabled by default. When enabled, it gives RyeOS
 one immutable, node-owned launch boundary where
 verified code identity, descriptor-pinned filesystem authority, environment,
@@ -51,7 +51,7 @@ treating them as one backlog item.
 ## The four boundaries
 
 1. **Hosted-principal process isolation.** The local node now has an optional,
-   node-wide Bubblewrap process-confinement boundary for tool/runtime launches.
+   node-wide backend-driven confinement boundary for tool/runtime launches.
    That is useful node-level defense in depth, but it is not a multi-tenant
    contract: profiles are not principal-specific and there is no hostile-tenant
    kernel boundary. Hosting still requires a deployment-shaped isolation
@@ -75,7 +75,7 @@ treating them as one backlog item.
 ## Target hostile-workload stack
 
 Hosted execution should resolve a typed isolation requirement and layer controls
-rather than attempt to turn one Bubblewrap policy into the whole tenancy model:
+rather than attempt to turn one process-isolation policy into the whole tenancy model:
 
 ```text
 signed request + node admission

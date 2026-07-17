@@ -202,9 +202,9 @@ entrypoint runs `ryeos init` on every boot (idempotent) before starting
 so keys, trust, and runtime state survive redeploys. Release containers rely
 only on the official publisher key compiled into `ryeos`; the entrypoint does
 not infer trust from files baked into the image. The initialized isolation policy
-defaults to disabled, so the normal container profile needs no extra namespace
-capabilities. Bubblewrap remains installed in the image for operators who opt
-in to enforcement. Keep `/data` on a named volume:
+defaults to disabled with no backend selected, so the normal container profile
+needs no extra namespace capabilities. Release images do not include an
+isolation backend. Keep `/data` on a named volume:
 
 ```bash
 docker volume create ryeos-data
@@ -213,25 +213,6 @@ docker run -d --name ryeos \
   -v ryeos-data:/data \
   ghcr.io/leolilley/ryeos-standard:latest
 docker exec ryeos ryeos node status
-```
-
-To opt in to enforced Bubblewrap isolation, change the node-owned policy,
-recreate the container with the required namespace/AppArmor profile, and
-verify both the running daemon's immutable snapshot and the backend check:
-
-```bash
-docker exec ryeos sed -i 's/^mode: disabled$/mode: enforce/' \
-  /data/app/.ai/node/isolation.yaml
-docker rm -f ryeos
-docker run -d --name ryeos \
-  --cap-add SYS_ADMIN \
-  --security-opt seccomp=unconfined \
-  --security-opt apparmor=unconfined \
-  -p 8000:8000 \
-  -v ryeos-data:/data \
-  ghcr.io/leolilley/ryeos-standard:latest
-docker exec ryeos ryeos daemon status
-docker exec ryeos ryeos node doctor --json
 ```
 
 A locally built image signed by a development or custom publisher requires an
@@ -246,17 +227,15 @@ not use it for release images. See the
 [official publisher trust contract](bundles/standard/.ai/knowledge/ryeos/core/node/operator-init.md#official-publisher-trust)
 for the complete operator contract.
 
-The release gate exercises two distinct profiles: default-disabled startup and
-signed execution without extra capabilities, then explicitly enforced startup,
-verification of the running daemon's isolation snapshot, backend diagnostics, and
-signed execution with the namespace/AppArmor capability profile. Back up the
-`ryeos-data` volume before upgrades; it contains node identity, trust, vault,
-and durable execution state.
+The release gate exercises default-disabled startup and signed execution
+without extra capabilities or an isolation backend. Back up the `ryeos-data`
+volume before upgrades; it contains node identity, trust, vault, and durable
+execution state.
 
 ### From source
 
-Source installs stage the selected isolation implementation as a signed bundle.
-No host process-confinement package is required in either policy mode.
+Source installs do not stage an isolation implementation. Backend bundles are
+authored and installed separately when an operator chooses to use one.
 
 ```bash
 git clone https://github.com/leolilley/ryeos.git

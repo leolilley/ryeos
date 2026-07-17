@@ -1201,7 +1201,7 @@ fn normalize_migrated_launch_metadata(raw: &str) -> Result<String> {
         .get("schema_version")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
-    if !matches!(schema_version, 1 | 2) {
+    if !matches!(schema_version, 1 | 2 | 3) {
         bail!("unsupported stored launch metadata schema_version `{schema_version}`");
     }
     object.insert(
@@ -1525,6 +1525,51 @@ fn migrate_owned_runtime_db(conn: &Connection, path: &Path) -> Result<()> {
             "rolled back incomplete pre-commit follow reservations during runtime schema migration"
         );
     }
+    Ok(())
+}
+
+/// Normalize versioned launch-metadata payloads even when the enclosing
+/// SQLite table/index schema is already current. JSON shape changes do not
+/// create a structural SQLite mismatch, so they need their own owned-data
+/// migration gate before startup decodes recovery rows.
+fn migrate_owned_launch_metadata(conn: &Connection, path: &Path) -> Result<()> {
+    let metadata_rows = {
+        let mut statement = conn.prepare(
+            "SELECT thread_id,launch_metadata FROM thread_runtime
+             WHERE launch_metadata IS NOT NULL",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    let mut replacements = Vec::new();
+    for (thread_id, raw) in metadata_rows {
+        let migrated = normalize_migrated_launch_metadata(&raw)
+            .with_context(|| format!("migrate launch metadata for thread `{thread_id}`"))?;
+        if migrated != raw {
+            replacements.push((thread_id, migrated));
+        }
+    }
+    if replacements.is_empty() {
+        return Ok(());
+    }
+    tracing::info!(
+        database = %path.display(),
+        rows = replacements.len(),
+        "normalizing persisted runtime launch metadata"
+    );
+    let tx = conn.unchecked_transaction()?;
+    for (thread_id, migrated) in replacements {
+        tx.execute(
+            "UPDATE thread_runtime SET launch_metadata=?2 WHERE thread_id=?1",
+            params![thread_id, migrated],
+        )?;
+    }
+    tx.commit()
+        .context("commit runtime launch-metadata migration")?;
     Ok(())
 }
 
@@ -2104,6 +2149,9 @@ impl RuntimeDb {
             migrate_owned_runtime_db(&conn, path)?;
         }
         assert_current_runtime_schema(&conn, path)?;
+        if allow_create {
+            migrate_owned_launch_metadata(&conn, path)?;
+        }
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .context("verify runtime database integrity")?;
@@ -5698,6 +5746,38 @@ mod tests {
             path.is_file(),
             "migration must retain the original database"
         );
+    }
+
+    #[test]
+    fn open_migrates_launch_metadata_when_sqlite_schema_is_already_current() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        let mut legacy = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
+        let legacy = legacy.as_object_mut().unwrap();
+        legacy.insert("schema_version".to_string(), Value::from(1));
+        legacy.remove("isolation");
+        db.conn
+            .execute(
+                "INSERT INTO thread_runtime (
+                     thread_id, chain_root_id, launch_metadata
+                 ) VALUES (?1, ?2, ?3)",
+                params![
+                    "T-pre-isolation",
+                    "T-pre-isolation",
+                    serde_json::to_string(legacy).unwrap()
+                ],
+            )
+            .unwrap();
+        drop(db);
+
+        let migrated = RuntimeDb::open(&path).unwrap();
+        let metadata = migrated
+            .get_launch_metadata("T-pre-isolation")
+            .unwrap()
+            .expect("launch metadata row must survive migration");
+        assert_eq!(metadata.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
+        assert!(metadata.isolation.is_none());
     }
 
     #[test]

@@ -1598,7 +1598,7 @@ impl IsolationRuntime {
         inherited_fds.extend(backend.artifact_handles.values().cloned());
         // The adapter descriptor is used only as the initial exec path. Keep
         // its parent handle alive through spawn but leave FD_CLOEXEC set so it
-        // disappears in the adapter image and cannot reach Bubblewrap/target.
+        // disappears in the adapter image and cannot reach its launcher or target.
         inherited_fds.push(request_handle);
 
         let requested_open_files = limits.as_ref().and_then(|limits| limits.max_open_files);

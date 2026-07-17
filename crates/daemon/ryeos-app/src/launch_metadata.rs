@@ -8,8 +8,9 @@
 //! routing, checkpoint dir, original params, snapshot/base hash,
 //! executor chain refs, vault references…) lives here.
 //!
-//! Persisted as a JSON blob in `runtime_db.thread_runtime.launch_metadata`
-//! so the struct can be extended without schema migrations.
+//! Persisted as a versioned JSON blob in
+//! `runtime_db.thread_runtime.launch_metadata`. Shape changes use the owned
+//! launch-metadata normalizer independently of SQLite table migrations.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -38,7 +39,7 @@ where
 /// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 2;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 3;
 
 /// Per-thread daemon-owned state directory.
 ///

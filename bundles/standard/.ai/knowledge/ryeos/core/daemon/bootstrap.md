@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:78438aac0bd8fad559b4492dceb30621ddbe88e77d91569fd2130fc62f12e62f:nbEnxn0wcadnNDoGZnvB2TK86Zn5jKAjK7g5Kz11EOFnUOfdhhIT/huIq09II53IBf/Q0wJCkqv3g14JFPfaAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:28:23Z:4fb735c65ffd4fa4fa9ccddb8d6ae8d02c23bc3ca6d5a95bd74455f485a83865:Ts43feWJqgov64CH3R3sXLGUvDMnoYSom9oBOLKe8x8riXmu7+aRWsQcB3JbWV7GMRoG8e256L/Dd4OOCwdPCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, bootstrap, bundles, section-table, repair, init]
@@ -47,7 +47,7 @@ daemon path is not part of the system anymore.
 
 After bootstrap configuration is resolved, the daemon strictly loads one
 sandbox-policy snapshot. An invalid strict policy fails startup. Disabled mode does
-not inspect Bubblewrap; enforced mode resolves the backend and resource limit
+not inspect a backend; enforced mode resolves the selected backend and resource limit
 before listeners accept execution. Startup never rewrites the operator policy.
 See [Execution Isolation](../node/execution-isolation.md).
 

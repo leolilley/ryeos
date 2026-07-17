@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-17T00:21:57Z:d088bd75310b6445d87dc432a4a0dc1b8ea3f9826cef1058a6b324c1cf6679e6:MFxvk7tV90FvuMdt4SdiWgjG5up1LVP56iIleHeAIrFlMX0QtgkDJopVy/EJjG3uR1yfmdCThpbjRTZwfe/DBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:28:23Z:f8e58a961c4be1b3bb607b28ca22bfdc142eb291d16fe4494705d9ad73553c07:XR19ldriTOs2++7OjXs+CEznu9m00QS5/RT4cDJPSOU8WR7Hg0JnrLrsBOPt31QJJWL7H30/ouJnpphM8TFlDA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
@@ -171,10 +171,10 @@ app roots reached through a symlink still occupy the namespace path expected by
 the process. Every policy, app, project, working-directory, state, checkpoint,
 socket, bundle, trusted-key, and generated-code namespace destination must be
 an absolute root followed only by normal path components. Parent traversal is
-rejected before Bubblewrap can reinterpret it inside the new root. Enforce mode
-then pins system, policy-selected, identity, socket, bundle, writable, and code
-mount sources with `O_PATH` descriptors and gives Bubblewrap `--bind-fd` or
-`--ro-bind-fd` references. Caller-supplied inherited descriptors are refused.
+rejected before an adapter can interpret it. Enforce mode then pins system,
+policy-selected, identity, socket, bundle, writable, and code mount sources
+with `O_PATH` descriptors and passes only typed descriptor authorities to the
+selected adapter. Caller-supplied inherited descriptors are refused.
 The descriptors remain close-on-exec in the
 multithreaded daemon and are made inheritable only in the forked child, so a
 pathname replacement cannot redirect a validated mount and concurrent spawns
@@ -227,7 +227,7 @@ policy. This prevents a request from turning a path parameter into new host
 write authority.
 
 Writable roots may not overlap `/`, protected system roots, the app root, the
-Bubblewrap executable, or the daemon socket. The resolved host home itself and
+selected backend artifacts, or the daemon socket. The resolved host home itself and
 its ancestors are also rejected. The only app-root exceptions are a
 daemon-provenance execution workspace directly beneath
 `.ai/state/cache/executions` and the exact daemon-owned checkpoint directory.
@@ -236,13 +236,10 @@ Absolute paths in this file are node-owner authority and should be kept narrow.
 ## Process boundary
 
 Enforce mode canonicalizes the command, project, working directory, mount
-sources, and complete constructed environment before spawn. Bubblewrap itself
-receives an empty environment; target variables are installed inside the
-namespace with `--setenv`, so loader controls such as `LD_PRELOAD` do not run
-before isolation. The complete Bubblewrap option vector, target environment,
-and target arguments are NUL-separated in an immutable sealed anonymous file;
-the host-visible Bubblewrap command line contains only `--args <fd>`. `TMPDIR`
-is always `/tmp`, backed by a private tmpfs.
+sources, and complete constructed environment before spawn. The adapter receives
+a strict typed plan and no ambient target environment. The request is stored in
+an immutable sealed anonymous file, and `TMPDIR` is normalized to `/tmp` in the
+target environment.
 
 The namespace uses a private root and new user, IPC, and UTS namespaces. An
 isolated network policy also creates a network namespace; host mode deliberately
@@ -255,9 +252,9 @@ host mount would let a same-UID workload traverse another process's `root`,
 still use host identifiers, and the isolation does not claim PID or same-UID
 signal isolation.
 
-Bubblewrap reports the target's host PID through a private
-`--json-status-fd` pipe for accounting. Lillux creates a new session before it
-executes Bubblewrap, and the target inherits the retained wrapper's process
+The adapter reports the target's host PID through the isolation protocol's
+private status channel for accounting. Lillux creates a new session before it
+executes the adapter, and the target inherits the retained wrapper's process
 group. The wrapper remains unreaped while Lillux terminates that group, which
 keeps the PGID reserved even if the initial target exits while descendants are
 still running. Timeout, cancellation, output overflow, and wait failure all use
@@ -310,7 +307,7 @@ Verified node or bundle commands without a content identity are refused;
 project and node-selected commands are copied from one opened byte sequence and
 run from the same synthetic read-only namespace. `/usr`, `/bin`, `/lib`, and
 `/lib64` are descriptor-pinned read-only; the small required `/etc` runtime
-surface is pinned separately, `/dev` is created by Bubblewrap, `/proc` is empty,
+surface is pinned separately, `/dev` is backend-provided, `/proc` is empty,
 and `/tmp` is private tmpfs.
 
 `limits.open_files` becomes `RLIMIT_NOFILE` before exec. Output is retained only
@@ -354,9 +351,8 @@ backend availability and capture digest, and reports filesystem, network,
 environment, open-file, captured-output, and verified-artifact-limit posture.
 
 The published container runs the default disabled profile without extra
-capabilities. Enforce mode requires the selected signed bundle and usable user
-namespaces. The shipped bundle contains Bubblewrap 0.11.2 with libcap linked
-into the payload; no host Bubblewrap or libcap installation is consulted.
+capabilities. Enforce mode requires a separately installed selected signed
+backend bundle and every host facility needed by its declared capabilities.
 Setuid, setgid, and file-capability adapter or launcher artifacts are refused,
 and verified bytes execute from sealed private captures.
 The supported Docker profile adds `SYS_ADMIN` and uses unconfined seccomp and
@@ -406,4 +402,4 @@ hostile code.
 Do not generalize this policy by adding backend-specific fields to the current
 schema. New implementations declare their adapter, artifacts, target triples,
 and capability upper bound in a signed bundle and consume the existing typed
-plan. Bubblewrap remains one Linux adapter rather than engine policy.
+plan. No backend implementation is part of engine policy.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:58Z:e7a14d53230c5d0763105681e7a562e0fe02a4fbbee748adf4c5fba367cec334:zScjd+11z5reoiN9vD7AA8rMSE0quzltu15+roNWb8pq/fUgpMItaFNH8AsOw7fjIUpt+uiuv7fK9fCLkP4VCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:28:23Z:9fbc7529e4b7f944499675deb8b3a5f8a705bf35d0cc8ed770b4aaf168bb897e:fvUYIZo5yR46iy66aReplEu6RzDTqAyH3HZ853YYmcf1oyDz+yYDrYdcsVRpbAokqBI4pm024rHs0bJ91NcpCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/core
 tags: [reference, env, daemon, cli, runtimes, lifecycle]
@@ -67,8 +67,8 @@ and the proxy/CA vars (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`,
 
 This is the construction allowlist. When node isolation policy is enforced,
 `environment.allow` is a second node-owned filter over the completed target
-environment. Bubblewrap itself starts env-empty; accepted variables are set for
-the target inside the namespace. Enforced mode replaces any inherited
+environment. The selected adapter receives no target environment; accepted
+variables are represented in the typed launch plan. Enforced mode replaces any inherited
 `TMPDIR` value with `/tmp`, the isolation-private tmpfs. When a verified protocol
 requests callback IPC, its `RYEOSD_SOCKET_PATH` value
 is checked against the daemon-pinned path before the exact socket is exposed.

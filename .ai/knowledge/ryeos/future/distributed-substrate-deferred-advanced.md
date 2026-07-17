@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:57Z:200cae5a3f9ec896f8c99a6ca799d315ce3a5f59f4d8d0b5c07e52bcfc76d235:rzs4W3m7wJ0VcxrYkk1QvBuvwvUBFOVrqR2RzirENxxs2HiJ2Mv1KNcVA1T3zouqZLlS05da18xB0qhR+wRQCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:28:22Z:58e88e343c56b799f50e39ce1c5d5e33b21e927f6be3a33b4d87f422504e6627:D2JC9FgunkSQ0oJP/UjemFeazYJFblcFBycV158ixdm2e/tDKHWDigNcr6fvDuUXnVjPh+WyaAdvGDMrmgLVBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
@@ -77,10 +77,10 @@ principal outside the node owner's trust boundary. Signed admission establishes
 who requested work and what object closure was admitted; it does not by itself
 make that code safe to co-locate with other principals.
 
-The current optional Linux Bubblewrap boundary is one inner execution backend
-and the integration seam for this future work. It must first be expressed as a
-typed backend-neutral isolation plan rather than promoted into the whole hosted
-architecture. A hostile-workload scheduler must add, per principal or job:
+The current optional backend-driven boundary is one inner execution layer and
+the integration seam for this future work. It must remain a typed
+backend-neutral isolation plan rather than being promoted into the whole
+hosted architecture. A hostile-workload scheduler must add, per principal or job:
 
 - CPU, memory, and process-count cgroup limits, accounting, and authoritative
   whole-workload teardown across descendant process groups and sessions;
@@ -97,7 +97,7 @@ architecture. A hostile-workload scheduler must add, per principal or job:
 
 Host PIDs and same-UID signals are not isolated by the current inner isolation.
 The outer worker design must remove that shared authority rather than claiming
-Bubblewrap alone solved it. Durable job records should therefore carry an
+an inner isolation backend alone solved it. Durable job records should therefore carry an
 explicit isolation class and worker/cgroup identity once this path is activated.
 That outer identity also closes the spawn-to-durable-attachment crash window:
 if a node dies after creating a process but before committing its exact birth

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T03:44:59Z:f2136ecfb3022a0f469ca4943cd2ba29c4534bd5eedfdfebf1e57505a6616232:PjqllpWscU2EkocidGkiYRu6wqqPuz6wEzkVqE5/fedvb7isxgcsAXt8e+0dY3CE3YIGJfBOcObqiz0fnr3UBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-17T00:28:24Z:d935a499f4405e51b941a74491746565c8e5e995446663cc7a7b0352a715ae9b:bKtYfRaDJdH3hYZWwEuUV3u4e6JtZJF3v5VKAHbhPSNtljUw2QFqgCc3rgoQbXN07J3/k0ziiCIJSXLGypq3CA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/core
 tags: [platform, linux, containers, compatibility, portability, support]
@@ -31,10 +31,9 @@ The supported Linux node requires kernel 6.9 or newer, including
 fails before launching work when either is unavailable; there is no reusable
 numeric-PID signal fallback. It also requires atomic bundle replacement through
 `renameat2(RENAME_EXCHANGE)`. When isolation policy is `mode: enforce`, the
-selected registered bundle must provide a trusted adapter and launcher for the
-host triple. The shipped Linux bundle carries Bubblewrap 0.11.2 with libcap
-linked into the payload; it does not depend on a host Bubblewrap or libcap
-installation. The host must permit its configured user and other namespaces.
+selected registered bundle must provide a trusted adapter and artifacts for the
+host triple. RyeOS does not ship one by default. The host must permit every
+kernel operation required by the selected backend's declared capabilities.
 Setuid, setgid, and file-capability executables are refused before RyeOS copies
 the verified bytes into an immutable private capture. See [Execution
 Isolation](node/execution-isolation.md).
@@ -57,8 +56,8 @@ Production support is declared only when the full path exists: signed bundle
 artifacts, durable installation, release packaging, CI coverage, and a tested
 enforced-isolation profile where that capability is claimed.
 
-Non-Linux isolation must not imitate Bubblewrap flags or map unlike host
-primitives to one broad claim. RyeOS matches typed isolation requirements
+Isolation backends must not expose implementation-specific flags through node
+policy or map unlike host primitives to one broad claim. RyeOS matches typed isolation requirements
 against node-owned backend capabilities and reports exactly which boundary was
 realized. Until a platform has a
 packaged adapter, backend integration tests, and the rest of the node's
