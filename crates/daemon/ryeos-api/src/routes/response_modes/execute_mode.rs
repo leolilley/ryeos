@@ -99,6 +99,19 @@ fn default_launch_mode() -> String {
     "inline".to_string()
 }
 
+fn execution_project_context(
+    no_project_requested: bool,
+    effective_path: &Path,
+) -> ryeos_engine::contracts::ProjectContext {
+    if no_project_requested {
+        ryeos_engine::contracts::ProjectContext::None
+    } else {
+        ryeos_engine::contracts::ProjectContext::LocalPath {
+            path: effective_path.to_path_buf(),
+        }
+    }
+}
+
 // ── Mode ──────────────────────────────────────────────────────────────────
 
 pub struct ExecuteMode;
@@ -544,16 +557,21 @@ impl CompiledResponseMode for CompiledExecuteMode {
         }
 
         // Build plan context.
-        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
+        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
 
         let plan_ctx = PlanContext {
             requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
                 fingerprint: caller_principal_id.clone(),
                 scopes: caller_scopes.clone(),
             }),
-            project_context: ProjectContext::LocalPath {
-                path: project_ctx.effective_path.clone(),
-            },
+            // The isolated directory gives no-project execution a safe cwd; it
+            // is runtime provenance, not project identity. Keep the explicit
+            // `None` contract so service audit rows and policy never mistake a
+            // disposable `no-project-pre-*` workspace for a real project.
+            project_context: execution_project_context(
+                no_project_requested,
+                &project_ctx.effective_path,
+            ),
             current_site_id: site_id.to_string(),
             origin_site_id: site_id.to_string(),
             execution_hints: {
@@ -1851,5 +1869,23 @@ mod tests {
         ));
         assert_eq!(dispatch_err.http_status(), StatusCode::BAD_GATEWAY);
         assert!(dispatch_err.to_string().contains("not a descendant"));
+    }
+
+    #[test]
+    fn no_project_execution_keeps_none_identity() {
+        assert_eq!(
+            execution_project_context(true, Path::new("/runtime/no-project-pre-123")),
+            ryeos_engine::contracts::ProjectContext::None
+        );
+    }
+
+    #[test]
+    fn project_execution_records_the_effective_path() {
+        assert_eq!(
+            execution_project_context(false, Path::new("/workspace/project")),
+            ryeos_engine::contracts::ProjectContext::LocalPath {
+                path: PathBuf::from("/workspace/project"),
+            }
+        );
     }
 }

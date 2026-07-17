@@ -391,6 +391,17 @@ async fn reconcile_active_threads_inner(
     let mut intents: Vec<ResumeIntent> = Vec::new();
 
     for thread in &running_threads {
+        let kind_profile = state.threads.kind_profiles().get(&thread.kind);
+        if is_daemon_owned_non_execution_thread(thread, kind_profile) {
+            tracing::debug!(
+                thread_id = %thread.thread_id,
+                kind = %thread.kind,
+                status = %thread.status,
+                "daemon-owned non-execution thread — leaving to its lifecycle owner"
+            );
+            continue;
+        }
+
         let pgid = thread.runtime.pgid;
         let identity = thread.runtime.process_identity.as_ref();
         let target_liveness = identity
@@ -863,6 +874,22 @@ async fn reconcile_active_threads_inner(
     })
 }
 
+/// Process reconciliation owns executable threads and any row that carries
+/// process/launch state. A daemon-owned non-execution root (for example an
+/// operator seat) deliberately has neither: its subsystem owns liveness and
+/// terminal settlement, so treating the absent pid as an interrupted spawn
+/// would corrupt a healthy thread on every daemon restart.
+fn is_daemon_owned_non_execution_thread(
+    thread: &ThreadDetail,
+    profile: Option<&ryeos_app::kind_profiles::ThreadKindProfile>,
+) -> bool {
+    profile.is_some_and(|profile| !profile.root_executable)
+        && thread.runtime.pid.is_none()
+        && thread.runtime.pgid.is_none()
+        && thread.runtime.process_identity.is_none()
+        && thread.runtime.launch_metadata.is_none()
+}
+
 /// A follow-recovery action collected at startup and driven post-listener (the
 /// launch itself owns the claim, so a race with the live path is a benign skip).
 #[derive(Debug, Clone)]
@@ -1228,6 +1255,41 @@ mod tests {
             }),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn daemon_owned_non_execution_thread_is_not_process_reconciled() {
+        let mut seat = thread_detail("seat", "running", None, None, None);
+        seat.kind = "seat_session".into();
+        let non_execution = ryeos_app::kind_profiles::ThreadKindProfile {
+            root_executable: false,
+            supports_interrupt: false,
+            supports_continuation: false,
+            supports_operator_followup: false,
+        };
+        assert!(is_daemon_owned_non_execution_thread(
+            &seat,
+            Some(&non_execution)
+        ));
+
+        // Any launch metadata moves the row back under process recovery. This
+        // fails closed if a supposedly daemon-owned kind ever starts carrying
+        // executable lifecycle state.
+        seat.runtime.launch_metadata = Some(RuntimeLaunchMetadata::default());
+        assert!(!is_daemon_owned_non_execution_thread(
+            &seat,
+            Some(&non_execution)
+        ));
+
+        let executable = ryeos_app::kind_profiles::ThreadKindProfile {
+            root_executable: true,
+            ..non_execution
+        };
+        seat.runtime.launch_metadata = None;
+        assert!(!is_daemon_owned_non_execution_thread(
+            &seat,
+            Some(&executable)
+        ));
     }
 
     #[test]

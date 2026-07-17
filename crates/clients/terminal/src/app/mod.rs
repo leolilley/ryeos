@@ -28,6 +28,21 @@ use crate::transport::daemon::DaemonClient;
 use effects::spawn_effects;
 use keys::{handle_key, should_quit};
 
+enum SeatIoAck {
+    Append {
+        thread_id: String,
+        ok: bool,
+        upto: usize,
+    },
+    Touch {
+        thread_id: String,
+        ok: bool,
+    },
+}
+
+const SEAT_RECONNECT_MIN_MS: u64 = 1_000;
+const SEAT_RECONNECT_MAX_MS: u64 = 30_000;
+
 pub async fn run(
     project_path: &str,
     read_only: bool,
@@ -112,17 +127,28 @@ pub async fn run(
     }
     let mut seat_thread: Option<String> = None;
     let mut seat_synced: usize = 0;
+    let mut seat_bootstrap_inflight = true;
+    let mut seat_bootstrap_retry_at_ms: Option<u64> = None;
+    let mut seat_reconnect_delay_ms = SEAT_RECONNECT_MIN_MS;
     // One braid writer, one batch in flight: mirrored order matches local
     // append order, and the loop never waits on the mirror.
     let (seat_write_tx, mut seat_write_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, Vec<serde_json::Value>, usize)>();
-    let (seat_ack_tx, mut seat_ack_rx) = tokio::sync::mpsc::unbounded_channel::<(bool, usize)>();
+    let (seat_ack_tx, mut seat_ack_rx) = tokio::sync::mpsc::unbounded_channel::<SeatIoAck>();
+    let seat_touch_ack_tx = seat_ack_tx.clone();
     {
         let client = client.clone();
         tokio::spawn(async move {
             while let Some((thread_id, batch, upto)) = seat_write_rx.recv().await {
                 let ok = seat::append_braid(&client, &thread_id, batch).await;
-                if seat_ack_tx.send((ok, upto)).is_err() {
+                if seat_ack_tx
+                    .send(SeatIoAck::Append {
+                        thread_id,
+                        ok,
+                        upto,
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -241,18 +267,49 @@ pub async fn run(
                 spawn_effects(&client, project_path_of(&core), follow, &effect_tx);
                 dirty = true;
             }
-            Some((ok, upto)) = seat_ack_rx.recv() => {
-                seat_sync_inflight = false;
-                if ok {
-                    seat_synced = upto;
+            Some(ack) = seat_ack_rx.recv() => {
+                match ack {
+                    SeatIoAck::Append { thread_id, ok, upto } => {
+                        if ok && seat_thread.as_deref() == Some(thread_id.as_str()) {
+                            seat_sync_inflight = false;
+                            seat_synced = upto;
+                            queue_seat_sync(
+                                &core,
+                                &seat_thread,
+                                seat_synced,
+                                &mut seat_sync_inflight,
+                                &seat_write_tx,
+                            );
+                        } else if !ok {
+                            // The seat may have settled or been lost across a
+                            // daemon restart. Never retry the same braid against
+                            // a known-bad thread: drop this generation and let
+                            // the bounded bootstrap path open/reattach another.
+                            invalidate_seat_generation(
+                                &mut seat_thread,
+                                &thread_id,
+                                &mut seat_synced,
+                                &mut seat_sync_inflight,
+                                &mut seat_bootstrap_retry_at_ms,
+                                &mut seat_reconnect_delay_ms,
+                                now_ms(),
+                            );
+                        }
+                    }
+                    SeatIoAck::Touch { thread_id, ok } => {
+                        if !ok {
+                            invalidate_seat_generation(
+                                &mut seat_thread,
+                                &thread_id,
+                                &mut seat_synced,
+                                &mut seat_sync_inflight,
+                                &mut seat_bootstrap_retry_at_ms,
+                                &mut seat_reconnect_delay_ms,
+                                now_ms(),
+                            );
+                        }
+                    }
                 }
-                queue_seat_sync(
-                    &core,
-                    &seat_thread,
-                    seat_synced,
-                    &mut seat_sync_inflight,
-                    &seat_write_tx,
-                );
             }
             Some((event_type, data)) = tail_rx.recv() => {
                 // Transport only: forward the raw frame to the shared reducer,
@@ -303,10 +360,24 @@ pub async fn run(
                 }
             }
             Some(bootstrap) = seat_rx.recv() => {
+                seat_bootstrap_inflight = false;
+                let Some(bootstrap_thread_id) = bootstrap.thread_id else {
+                    seat_thread = None;
+                    seat_synced = 0;
+                    schedule_seat_reconnect(
+                        &mut seat_bootstrap_retry_at_ms,
+                        &mut seat_reconnect_delay_ms,
+                        now_ms(),
+                    );
+                    continue;
+                };
+                seat_bootstrap_retry_at_ms = None;
+                seat_reconnect_delay_ms = SEAT_RECONNECT_MIN_MS;
                 if bootstrap.replayed.is_empty() {
                     // Fresh (or facet-less) braid: adopt it and mirror the
                     // local log from the top, seeds included.
-                    seat_thread = bootstrap.thread_id;
+                    seat_thread = Some(bootstrap_thread_id);
+                    seat_synced = 0;
                     queue_seat_sync(
                         &core,
                         &seat_thread,
@@ -318,7 +389,7 @@ pub async fn run(
                     for event in bootstrap.replayed {
                         core.seat.append_replayed(event);
                     }
-                    seat_thread = bootstrap.thread_id;
+                    seat_thread = Some(bootstrap_thread_id);
                     seat_synced = core.seat.events().len();
                     dirty = true;
                 } else {
@@ -329,6 +400,7 @@ pub async fn run(
                     let client = client.clone();
                     let surface_ref = surface_ref.clone();
                     let seat_tx = seat_tx.clone();
+                    seat_bootstrap_inflight = true;
                     tokio::spawn(async move {
                         let thread_id = seat::open_seat_thread(&client, &surface_ref).await;
                         let _ = seat_tx.send(seat::SeatBootstrap { thread_id, replayed: Vec::new() });
@@ -337,12 +409,27 @@ pub async fn run(
             }
             _ = tick.tick() => {
                 let tick_now = now_ms();
+                if seat_thread.is_none()
+                    && !seat_bootstrap_inflight
+                    && seat_bootstrap_retry_at_ms.is_some_and(|retry_at| tick_now >= retry_at)
+                {
+                    seat_bootstrap_inflight = true;
+                    seat_bootstrap_retry_at_ms = None;
+                    let client = client.clone();
+                    let surface_ref = surface_ref.clone();
+                    let seat_tx = seat_tx.clone();
+                    tokio::spawn(async move {
+                        let _ = seat_tx.send(seat::bootstrap_seat(&client, &surface_ref).await);
+                    });
+                }
                 if tick_now.saturating_sub(last_seat_touch_ms) >= 60_000 {
                     last_seat_touch_ms = tick_now;
                     if let Some(thread_id) = seat_thread.clone() {
                         let client = client.clone();
+                        let seat_touch_ack_tx = seat_touch_ack_tx.clone();
                         tokio::spawn(async move {
-                            seat::touch_seat_thread(&client, &thread_id).await;
+                            let ok = seat::touch_seat_thread(&client, &thread_id).await;
+                            let _ = seat_touch_ack_tx.send(SeatIoAck::Touch { thread_id, ok });
                         });
                     }
                 }
@@ -415,8 +502,8 @@ fn project_path_of(core: &RyeOsCore) -> Option<String> {
 }
 
 /// Hand the braid writer the next unmirrored slice, at most one batch in
-/// flight. A failed batch retries on the next nudge because the synced
-/// watermark only advances on the writer's ack.
+/// flight. A failed batch invalidates that seat generation; the replacement
+/// seat starts again at watermark zero and receives the full local log.
 fn queue_seat_sync(
     core: &RyeOsCore,
     seat_thread: &Option<String>,
@@ -438,6 +525,34 @@ fn queue_seat_sync(
     if tx.send((thread_id.clone(), batch, events.len())).is_ok() {
         *inflight = true;
     }
+}
+
+/// Invalidate only the seat generation that produced a failed asynchronous
+/// acknowledgement. A late failure from an older generation must never tear
+/// down the replacement seat. Recovery is tick-driven after a fixed delay, so
+/// a dead seat cannot create an unbounded request loop.
+fn invalidate_seat_generation(
+    current_thread: &mut Option<String>,
+    failed_thread_id: &str,
+    synced: &mut usize,
+    sync_inflight: &mut bool,
+    retry_at_ms: &mut Option<u64>,
+    retry_delay_ms: &mut u64,
+    now_ms: u64,
+) -> bool {
+    if current_thread.as_deref() != Some(failed_thread_id) {
+        return false;
+    }
+    *current_thread = None;
+    *synced = 0;
+    *sync_inflight = false;
+    schedule_seat_reconnect(retry_at_ms, retry_delay_ms, now_ms);
+    true
+}
+
+fn schedule_seat_reconnect(retry_at_ms: &mut Option<u64>, delay_ms: &mut u64, now_ms: u64) {
+    *retry_at_ms = Some(now_ms.saturating_add(*delay_ms));
+    *delay_ms = delay_ms.saturating_mul(2).min(SEAT_RECONNECT_MAX_MS);
 }
 
 fn session_for(
@@ -466,6 +581,68 @@ fn viewport(width: u16, height: u16) -> BrowserViewport {
         width: width as u32,
         height: height as u32,
         device_pixel_ratio: 1.0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_current_seat_resets_watermark_and_schedules_reconnect() {
+        let mut current = Some("seat-old".to_string());
+        let mut synced = 12;
+        let mut inflight = true;
+        let mut retry_at = None;
+        let mut retry_delay = SEAT_RECONNECT_MIN_MS;
+
+        assert!(invalidate_seat_generation(
+            &mut current,
+            "seat-old",
+            &mut synced,
+            &mut inflight,
+            &mut retry_at,
+            &mut retry_delay,
+            500,
+        ));
+        assert_eq!(current, None);
+        assert_eq!(synced, 0);
+        assert!(!inflight);
+        assert_eq!(retry_at, Some(500 + SEAT_RECONNECT_MIN_MS));
+        assert_eq!(retry_delay, 2 * SEAT_RECONNECT_MIN_MS);
+    }
+
+    #[test]
+    fn late_failure_cannot_invalidate_replacement_seat() {
+        let mut current = Some("seat-new".to_string());
+        let mut synced = 3;
+        let mut inflight = true;
+        let mut retry_at = None;
+        let mut retry_delay = SEAT_RECONNECT_MIN_MS;
+
+        assert!(!invalidate_seat_generation(
+            &mut current,
+            "seat-old",
+            &mut synced,
+            &mut inflight,
+            &mut retry_at,
+            &mut retry_delay,
+            500,
+        ));
+        assert_eq!(current.as_deref(), Some("seat-new"));
+        assert_eq!(synced, 3);
+        assert!(inflight);
+        assert_eq!(retry_at, None);
+        assert_eq!(retry_delay, SEAT_RECONNECT_MIN_MS);
+    }
+
+    #[test]
+    fn reconnect_backoff_caps_at_thirty_seconds() {
+        let mut retry_at = None;
+        let mut delay = SEAT_RECONNECT_MAX_MS;
+        schedule_seat_reconnect(&mut retry_at, &mut delay, 100);
+        assert_eq!(retry_at, Some(100 + SEAT_RECONNECT_MAX_MS));
+        assert_eq!(delay, SEAT_RECONNECT_MAX_MS);
     }
 }
 
