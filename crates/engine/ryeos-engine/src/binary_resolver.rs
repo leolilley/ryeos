@@ -164,7 +164,7 @@ fn validate_captured_executable(handle: &std::fs::File, path: &Path) -> Result<(
     let result = unsafe {
         libc::fgetxattr(
             handle.as_raw_fd(),
-            b"security.capability\0".as_ptr().cast(),
+            c"security.capability".as_ptr(),
             std::ptr::null_mut(),
             0,
         )

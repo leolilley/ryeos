@@ -175,7 +175,7 @@ impl LaunchPreparerRunner {
         bundle_roots: &[PathBuf],
     ) -> Result<Self, EngineError> {
         Ok(Self {
-            isolation: isolation,
+            isolation,
             bundle_roots: bundle_roots.to_vec().into(),
         })
     }

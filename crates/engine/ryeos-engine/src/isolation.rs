@@ -146,7 +146,6 @@ impl Drop for VerifiedArtifactStore {
                     );
                 }
             }
-            return;
         }
     }
 }
@@ -644,6 +643,61 @@ struct LoadedIsolationPolicy {
     app_root_authority: lillux::PinnedDirectory,
 }
 
+struct IsolationRuntimeResolution {
+    policy: IsolationPolicy,
+    source: Option<PathBuf>,
+    digest: Option<String>,
+    app_root: Option<PathBuf>,
+    app_root_authority: Option<Arc<lillux::PinnedDirectory>>,
+    app_root_destination: Option<PathBuf>,
+    daemon_socket: Option<PinnedDaemonSocket>,
+    backend: Option<Arc<ResolvedIsolationBackend>>,
+}
+
+#[derive(Clone, Copy)]
+struct CodeNamespace<'a> {
+    project_destination: &'a Path,
+    canonical_project: &'a Path,
+    bundle_roots: &'a [PathBuf],
+}
+
+#[derive(Clone, Copy)]
+struct MountNamespace<'a> {
+    project_destination: &'a Path,
+    canonical_project: &'a Path,
+    cwd_destination: &'a Path,
+    canonical_cwd: &'a Path,
+}
+
+struct WritableMountResolution<'a> {
+    namespace: MountNamespace<'a>,
+    checkpoint_destination: Option<&'a Path>,
+    canonical_checkpoint_dir: Option<&'a Path>,
+    checkpoint_source_handle: Option<&'a Arc<std::fs::File>>,
+    project_source_handle: Option<&'a Arc<std::fs::File>>,
+}
+
+struct ReadableMountResolution<'a> {
+    namespace: MountNamespace<'a>,
+    app_root: Option<&'a Path>,
+    app_root_authority: Option<&'a lillux::PinnedDirectory>,
+    app_root_destination: Option<&'a Path>,
+    daemon_socket: Option<&'a PinnedDaemonSocket>,
+    requested_daemon_socket: Option<&'a Path>,
+    bundle_roots: &'a [PathBuf],
+    node_trusted_keys_dir: Option<&'a Path>,
+    verified_code_mounts: &'a [ReadableMount],
+}
+
+struct WritableMountValidation<'a> {
+    app_root: Option<&'a Path>,
+    daemon_socket: Option<&'a Path>,
+    canonical_project: &'a Path,
+    project_authority: IsolationProjectAuthority,
+    runtime_workspace_authorized: bool,
+    canonical_checkpoint_dir: Option<&'a Path>,
+}
+
 impl IsolationRuntime {
     /// Load the node-owned policy from its fixed path and resolve its runtime.
     ///
@@ -741,16 +795,16 @@ impl IsolationRuntime {
         backend: Option<Arc<ResolvedIsolationBackend>>,
     ) -> Result<Self, EngineError> {
         let loaded = load_policy_source(app_root)?;
-        Self::resolve(
-            loaded.policy,
-            Some(loaded.source),
-            Some(loaded.digest),
-            Some(loaded.runtime_app_root),
-            Some(Arc::new(loaded.app_root_authority)),
-            Some(app_root.to_path_buf()),
+        Self::resolve(IsolationRuntimeResolution {
+            policy: loaded.policy,
+            source: Some(loaded.source),
+            digest: Some(loaded.digest),
+            app_root: Some(loaded.runtime_app_root),
+            app_root_authority: Some(Arc::new(loaded.app_root_authority)),
+            app_root_destination: Some(app_root.to_path_buf()),
             daemon_socket,
             backend,
-        )
+        })
     }
 
     pub fn source(&self) -> Option<&Path> {
@@ -961,6 +1015,12 @@ impl IsolationRuntime {
         }
         let canonical_project = canonicalize_context_mount("project", &project_destination)?;
         let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
+        let mount_namespace = MountNamespace {
+            project_destination: &project_destination,
+            canonical_project: &canonical_project,
+            cwd_destination: &cwd_destination,
+            canonical_cwd: &canonical_cwd,
+        };
         let (runtime_workspace_authorized, project_source_handle) = if context.project_authority
             == IsolationProjectAuthority::RuntimeWorkspace
         {
@@ -1093,6 +1153,13 @@ impl IsolationRuntime {
                 })?,
             ));
         }
+        let writable_resolution = WritableMountResolution {
+            namespace: mount_namespace,
+            checkpoint_destination: context.checkpoint_dir,
+            canonical_checkpoint_dir: canonical_checkpoint_dir.as_deref(),
+            checkpoint_source_handle: checkpoint_source_handle.as_ref(),
+            project_source_handle: project_source_handle.as_ref(),
+        };
         let resolved_writable_mounts =
             if context.project_authority == IsolationProjectAuthority::ReadOnly {
                 Vec::new()
@@ -1101,19 +1168,7 @@ impl IsolationRuntime {
                     .filesystem
                     .writable
                     .iter()
-                    .map(|configured| {
-                        resolve_writable_mount(
-                            configured,
-                            &project_destination,
-                            &canonical_project,
-                            &cwd_destination,
-                            &canonical_cwd,
-                            context.checkpoint_dir,
-                            canonical_checkpoint_dir.as_deref(),
-                            checkpoint_source_handle.as_ref(),
-                            project_source_handle.as_ref(),
-                        )
-                    })
+                    .map(|configured| resolve_writable_mount(configured, &writable_resolution))
                     .collect::<Result<Vec<_>, _>>()?
             };
         let mut writable_mounts = Vec::<WritableMount>::new();
@@ -1133,28 +1188,28 @@ impl IsolationRuntime {
                 .cmp(&right.destination)
                 .then_with(|| left.source.cmp(&right.source))
         });
+        let writable_validation = WritableMountValidation {
+            app_root: self.app_root.as_deref(),
+            daemon_socket: self
+                .daemon_socket
+                .as_ref()
+                .map(|socket| socket.source.as_path()),
+            canonical_project: &canonical_project,
+            project_authority: context.project_authority,
+            runtime_workspace_authorized,
+            canonical_checkpoint_dir: canonical_checkpoint_dir.as_deref(),
+        };
         for mount in &writable_mounts {
-            validate_writable_mount(
-                &mount.source,
-                self.app_root.as_deref(),
-                self.daemon_socket
-                    .as_ref()
-                    .map(|socket| socket.source.as_path()),
-                &canonical_project,
-                context.project_authority,
-                runtime_workspace_authorized,
-                mount.authority,
-                canonical_checkpoint_dir.as_deref(),
-            )?;
+            validate_writable_mount(&mount.source, mount.authority, &writable_validation)?;
         }
+        let code_namespace = CodeNamespace {
+            project_destination: &project_destination,
+            canonical_project: &canonical_project,
+            bundle_roots: context.bundle_roots,
+        };
         let mut prepared_code = Vec::with_capacity(context.verified_code.len() + 1);
         for verified in context.verified_code {
-            let prepared = self.prepare_verified_code(
-                verified,
-                &project_destination,
-                &canonical_project,
-                context.bundle_roots,
-            )?;
+            let prepared = self.prepare_verified_code(verified, code_namespace)?;
             rewrite_verified_code_references(
                 &mut args,
                 &mut envs,
@@ -1213,12 +1268,7 @@ impl IsolationRuntime {
                 // Operator/project executables such as a virtual-environment
                 // interpreter are not signed bundle material. Capture the
                 // exact opened bytes now and execute only the immutable copy.
-                let prepared = self.prepare_current_command(
-                    &canonical_command,
-                    &project_destination,
-                    &canonical_project,
-                    context.bundle_roots,
-                )?;
+                let prepared = self.prepare_current_command(&canonical_command, code_namespace)?;
                 let command_path = prepared.artifact.destination.clone();
                 prepared_code.push(prepared);
                 command_path
@@ -1276,28 +1326,23 @@ impl IsolationRuntime {
                 Ok(configured.source.clone())
             })
             .transpose()?;
+        let readable_resolution = ReadableMountResolution {
+            namespace: mount_namespace,
+            app_root: self.app_root.as_deref(),
+            app_root_authority: self.app_root_authority.as_deref(),
+            app_root_destination: self.app_root_destination.as_deref(),
+            daemon_socket: self.daemon_socket.as_ref(),
+            requested_daemon_socket,
+            bundle_roots: context.bundle_roots,
+            node_trusted_keys_dir: context.node_trusted_keys_dir,
+            verified_code_mounts: &verified_code_mounts,
+        };
         let mut readable_mounts = self
             .inspection
             .filesystem
             .readable
             .iter()
-            .map(|configured| {
-                resolve_readable_mounts(
-                    configured,
-                    &project_destination,
-                    &canonical_project,
-                    &cwd_destination,
-                    &canonical_cwd,
-                    self.app_root.as_deref(),
-                    self.app_root_authority.as_deref(),
-                    self.app_root_destination.as_deref(),
-                    self.daemon_socket.as_ref(),
-                    requested_daemon_socket,
-                    context.bundle_roots,
-                    context.node_trusted_keys_dir,
-                    &verified_code_mounts,
-                )
-            })
+            .map(|configured| resolve_readable_mounts(configured, &readable_resolution))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
@@ -1661,16 +1706,17 @@ impl IsolationRuntime {
         }
     }
 
-    fn resolve(
-        policy: IsolationPolicy,
-        source: Option<PathBuf>,
-        digest: Option<String>,
-        app_root: Option<PathBuf>,
-        app_root_authority: Option<Arc<lillux::PinnedDirectory>>,
-        app_root_destination: Option<PathBuf>,
-        daemon_socket: Option<PinnedDaemonSocket>,
-        backend: Option<Arc<ResolvedIsolationBackend>>,
-    ) -> Result<Self, EngineError> {
+    fn resolve(resolution: IsolationRuntimeResolution) -> Result<Self, EngineError> {
+        let IsolationRuntimeResolution {
+            policy,
+            source,
+            digest,
+            app_root,
+            app_root_authority,
+            app_root_destination,
+            daemon_socket,
+            backend,
+        } = resolution;
         if policy.version != ISOLATION_POLICY_VERSION {
             return Err(refused(format!(
                 "unsupported node isolation policy version {} (expected {})",
@@ -1805,9 +1851,7 @@ impl IsolationRuntime {
     fn prepare_verified_code(
         &self,
         verified: &IsolationVerifiedCode,
-        project_destination: &Path,
-        canonical_project: &Path,
-        bundle_roots: &[PathBuf],
+        namespace: CodeNamespace<'_>,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         if !verified.source_path.is_absolute() {
             return Err(refused(format!(
@@ -1853,18 +1897,14 @@ impl IsolationRuntime {
             Some(&canonical_source),
             &verified.content_hash,
             &content,
-            project_destination,
-            canonical_project,
-            bundle_roots,
+            namespace,
         )
     }
 
     fn prepare_current_command(
         &self,
         command: &Path,
-        project_destination: &Path,
-        canonical_project: &Path,
-        bundle_roots: &[PathBuf],
+        namespace: CodeNamespace<'_>,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         let artifacts = self
             .verified_artifacts
@@ -1882,15 +1922,7 @@ impl IsolationRuntime {
             }
         }
         let content_hash = lillux::cas::sha256_hex(&content);
-        self.prepare_code_bytes(
-            command,
-            Some(command),
-            &content_hash,
-            &content,
-            project_destination,
-            canonical_project,
-            bundle_roots,
-        )
+        self.prepare_code_bytes(command, Some(command), &content_hash, &content, namespace)
     }
 
     fn prepare_code_bytes(
@@ -1899,9 +1931,7 @@ impl IsolationRuntime {
         expected_canonical_source: Option<&Path>,
         content_hash: &str,
         content: &[u8],
-        project_destination: &Path,
-        canonical_project: &Path,
-        bundle_roots: &[PathBuf],
+        namespace: CodeNamespace<'_>,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         let canonical_source = canonicalize_context_mount("code source", original)?;
         if expected_canonical_source.is_some_and(|expected| expected != canonical_source) {
@@ -1913,9 +1943,9 @@ impl IsolationRuntime {
         let (mirror, destination) = code_namespace_layout(
             original,
             &canonical_source,
-            project_destination,
-            canonical_project,
-            bundle_roots,
+            namespace.project_destination,
+            namespace.canonical_project,
+            namespace.bundle_roots,
         )?;
         let artifact_root = self
             .verified_artifacts
@@ -1940,16 +1970,16 @@ impl IsolationRuntime {
 /// Production composition must call [`IsolationRuntime::load`].
 impl Default for IsolationRuntime {
     fn default() -> Self {
-        Self::resolve(
-            IsolationPolicy::default_disabled(),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        )
+        Self::resolve(IsolationRuntimeResolution {
+            policy: IsolationPolicy::default_disabled(),
+            source: None,
+            digest: None,
+            app_root: None,
+            app_root_authority: None,
+            app_root_destination: None,
+            daemon_socket: None,
+            backend: None,
+        })
         .expect("compiled disabled isolation fixture policy is valid")
     }
 }
@@ -2466,7 +2496,7 @@ fn mount_fd_arg(handle: &Arc<std::fs::File>) -> String {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd as _;
-        return handle.as_raw_fd().to_string();
+        handle.as_raw_fd().to_string()
     }
     #[cfg(not(unix))]
     {
@@ -2498,15 +2528,14 @@ fn same_file_identity(left: &std::fs::File, right: &std::fs::File) -> Result<boo
 
 fn resolve_writable_mount(
     configured: &str,
-    project_destination: &Path,
-    canonical_project: &Path,
-    cwd_destination: &Path,
-    canonical_cwd: &Path,
-    checkpoint_destination: Option<&Path>,
-    canonical_checkpoint_dir: Option<&Path>,
-    checkpoint_source_handle: Option<&Arc<std::fs::File>>,
-    project_source_handle: Option<&Arc<std::fs::File>>,
+    resolution: &WritableMountResolution<'_>,
 ) -> Result<Option<WritableMount>, EngineError> {
+    let MountNamespace {
+        project_destination,
+        canonical_project,
+        cwd_destination,
+        canonical_cwd,
+    } = resolution.namespace;
     let authority = if configured == "{checkpoint_dir}" {
         WritableMountAuthority::DaemonCheckpoint
     } else {
@@ -2518,7 +2547,10 @@ fn resolve_writable_mount(
             project_destination.to_path_buf(),
         ),
         "{cwd}" => (canonical_cwd.to_path_buf(), cwd_destination.to_path_buf()),
-        "{checkpoint_dir}" => match (canonical_checkpoint_dir, checkpoint_destination) {
+        "{checkpoint_dir}" => match (
+            resolution.canonical_checkpoint_dir,
+            resolution.checkpoint_destination,
+        ) {
             (Some(source), Some(destination)) => (source.to_path_buf(), destination.to_path_buf()),
             (None, None) => return Ok(None),
             _ => {
@@ -2545,11 +2577,13 @@ fn resolve_writable_mount(
         )));
     }
     let source_handle = if authority == WritableMountAuthority::DaemonCheckpoint {
-        checkpoint_source_handle
+        resolution
+            .checkpoint_source_handle
             .cloned()
             .ok_or_else(|| refused("daemon checkpoint mount has no pinned authority".to_string()))?
-    } else if configured == "{project}" && project_source_handle.is_some() {
-        project_source_handle
+    } else if configured == "{project}" && resolution.project_source_handle.is_some() {
+        resolution
+            .project_source_handle
             .cloned()
             .expect("checked project source handle")
     } else {
@@ -2565,21 +2599,17 @@ fn resolve_writable_mount(
 
 fn resolve_readable_mounts(
     configured: &str,
-    project_destination: &Path,
-    canonical_project: &Path,
-    cwd_destination: &Path,
-    canonical_cwd: &Path,
-    app_root: Option<&Path>,
-    app_root_authority: Option<&lillux::PinnedDirectory>,
-    app_root_destination: Option<&Path>,
-    daemon_socket: Option<&PinnedDaemonSocket>,
-    requested_daemon_socket: Option<&Path>,
-    bundle_roots: &[PathBuf],
-    node_trusted_keys_dir: Option<&Path>,
-    verified_code_mounts: &[ReadableMount],
+    resolution: &ReadableMountResolution<'_>,
 ) -> Result<Vec<ReadableMount>, EngineError> {
+    let MountNamespace {
+        project_destination,
+        canonical_project,
+        cwd_destination,
+        canonical_cwd,
+    } = resolution.namespace;
     if configured == "{node_public_identity}" {
-        let source_path = app_root
+        let source_path = resolution
+            .app_root
             .ok_or_else(|| {
                 refused(
                     "isolation runtime cannot resolve {node_public_identity} without an app root"
@@ -2588,13 +2618,14 @@ fn resolve_readable_mounts(
             })?
             .join(crate::AI_DIR)
             .join("node/identity/public-identity.json");
-        let authority = app_root_authority.ok_or_else(|| {
+        let authority = resolution.app_root_authority.ok_or_else(|| {
             refused(
                 "isolation runtime cannot resolve {node_public_identity} without pinned app-root authority"
                     .to_string(),
             )
         })?;
-        let destination = app_root_destination
+        let destination = resolution
+            .app_root_destination
             .ok_or_else(|| {
                 refused(
                     "isolation runtime cannot resolve {node_public_identity} destination without an app root"
@@ -2625,10 +2656,10 @@ fn resolve_readable_mounts(
     }
 
     if configured == "{daemon_socket}" {
-        let Some(requested) = requested_daemon_socket else {
+        let Some(requested) = resolution.requested_daemon_socket else {
             return Ok(Vec::new());
         };
-        let configured = daemon_socket.ok_or_else(|| {
+        let configured = resolution.daemon_socket.ok_or_else(|| {
             refused(
                 "isolation launch requested daemon IPC without a daemon-pinned socket path"
                     .to_string(),
@@ -2655,7 +2686,8 @@ fn resolve_readable_mounts(
     }
 
     if configured == "{bundle_roots}" {
-        return bundle_roots
+        return resolution
+            .bundle_roots
             .iter()
             .map(|destination| {
                 let source = canonicalize_context_mount("bundle root", destination)?;
@@ -2670,7 +2702,7 @@ fn resolve_readable_mounts(
     }
 
     if configured == "{node_trusted_keys}" {
-        let Some(destination) = node_trusted_keys_dir else {
+        let Some(destination) = resolution.node_trusted_keys_dir else {
             return Ok(Vec::new());
         };
         let source = canonicalize_context_mount("node trusted-keys directory", destination)?;
@@ -2683,7 +2715,7 @@ fn resolve_readable_mounts(
     }
 
     if configured == "{verified_code}" {
-        return Ok(verified_code_mounts.to_vec());
+        return Ok(resolution.verified_code_mounts.to_vec());
     }
 
     let (source, destination) = match configured {
@@ -2777,13 +2809,8 @@ fn validate_thread_path_component(thread_id: &str) -> Result<(), EngineError> {
 
 fn validate_writable_mount(
     path: &Path,
-    app_root: Option<&Path>,
-    daemon_socket: Option<&Path>,
-    canonical_project: &Path,
-    project_authority: IsolationProjectAuthority,
-    runtime_workspace_authorized: bool,
     mount_authority: WritableMountAuthority,
-    canonical_checkpoint_dir: Option<&Path>,
+    validation: &WritableMountValidation<'_>,
 ) -> Result<(), EngineError> {
     if path == Path::new("/") {
         return Err(refused(
@@ -2791,16 +2818,16 @@ fn validate_writable_mount(
         ));
     }
 
-    if let Some(app_root) = app_root {
+    if let Some(app_root) = validation.app_root {
         let execution_root = app_root.join(crate::AI_DIR).join("state/cache/executions");
-        let is_exact_runtime_workspace = project_authority
+        let is_exact_runtime_workspace = validation.project_authority
             == IsolationProjectAuthority::RuntimeWorkspace
-            && runtime_workspace_authorized
-            && canonical_project.parent() == Some(execution_root.as_path())
-            && path.starts_with(canonical_project);
+            && validation.runtime_workspace_authorized
+            && validation.canonical_project.parent() == Some(execution_root.as_path())
+            && path.starts_with(validation.canonical_project);
         let is_exact_daemon_checkpoint = mount_authority
             == WritableMountAuthority::DaemonCheckpoint
-            && canonical_checkpoint_dir == Some(path);
+            && validation.canonical_checkpoint_dir == Some(path);
         if paths_overlap(path, app_root)
             && !is_exact_runtime_workspace
             && !is_exact_daemon_checkpoint
@@ -2812,7 +2839,7 @@ fn validate_writable_mount(
             )));
         }
     }
-    if let Some(socket) = daemon_socket {
+    if let Some(socket) = validation.daemon_socket {
         if paths_overlap(path, socket) {
             return Err(refused(format!(
                 "isolation writable path {} overlaps protected daemon socket {}",
