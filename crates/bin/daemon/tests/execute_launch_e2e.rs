@@ -52,7 +52,10 @@ async fn thread_get(h: &DaemonHarness, thread_id: &str) -> Value {
 /// Poll until the thread reaches a terminal status, returning the
 /// `threads.get` result.
 async fn wait_for_terminal_thread(h: &DaemonHarness, thread_id: &str) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // This suite runs many full fixture daemons concurrently. Accepted launch
+    // must return its durable id promptly, but the background runtime is allowed
+    // to finish under host contention; keep those two contracts distinct.
+    let deadline = Instant::now() + Duration::from_secs(90);
     loop {
         let result = thread_get(h, thread_id).await;
         if let Some(status) = result

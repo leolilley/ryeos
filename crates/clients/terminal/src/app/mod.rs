@@ -120,9 +120,10 @@ pub async fn run(
     {
         let client = client.clone();
         let surface_ref = surface_ref.clone();
+        let project_path = project_path.to_string();
         let seat_tx = seat_tx.clone();
         tokio::spawn(async move {
-            let _ = seat_tx.send(seat::bootstrap_seat(&client, &surface_ref).await);
+            let _ = seat_tx.send(seat::bootstrap_seat(&client, &surface_ref, &project_path).await);
         });
     }
     let mut seat_thread: Option<String> = None;
@@ -399,10 +400,12 @@ pub async fn run(
                     // alone and open a new seat for this session instead.
                     let client = client.clone();
                     let surface_ref = surface_ref.clone();
+                    let project_path = project_path.to_string();
                     let seat_tx = seat_tx.clone();
                     seat_bootstrap_inflight = true;
                     tokio::spawn(async move {
-                        let thread_id = seat::open_seat_thread(&client, &surface_ref).await;
+                        let thread_id =
+                            seat::open_seat_thread(&client, &surface_ref, &project_path).await;
                         let _ = seat_tx.send(seat::SeatBootstrap { thread_id, replayed: Vec::new() });
                     });
                 }
@@ -417,9 +420,12 @@ pub async fn run(
                     seat_bootstrap_retry_at_ms = None;
                     let client = client.clone();
                     let surface_ref = surface_ref.clone();
+                    let project_path = project_path.to_string();
                     let seat_tx = seat_tx.clone();
                     tokio::spawn(async move {
-                        let _ = seat_tx.send(seat::bootstrap_seat(&client, &surface_ref).await);
+                        let _ = seat_tx.send(
+                            seat::bootstrap_seat(&client, &surface_ref, &project_path).await,
+                        );
                     });
                 }
                 if tick_now.saturating_sub(last_seat_touch_ms) >= 60_000 {

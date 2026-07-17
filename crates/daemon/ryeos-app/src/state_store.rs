@@ -5140,6 +5140,28 @@ impl StateStore {
             .claim_thread_launch(thread_id, claim_id, claimed_by)
     }
 
+    /// Reserve launch ownership for a pre-minted thread ID before its row is
+    /// published. Fresh execution paths use this to make creation visible only
+    /// after durable spawn ownership exists. The owned executor guard removes
+    /// the reservation if creation fails; daemon startup clears reservations
+    /// left by an interrupted process.
+    pub fn reserve_fresh_thread_launch(
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        claimed_by: &str,
+    ) -> Result<runtime_db::LaunchClaimOutcome> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if g.state_db.get_thread(thread_id)?.is_some() {
+            bail!(
+                "fresh launch reservation requires an unpublished thread ID; thread already exists: {thread_id}"
+            );
+        }
+        g.runtime_db
+            .claim_thread_launch(thread_id, claim_id, claimed_by)
+    }
+
     /// Release a launch claim the caller owns (matched by `claim_id`).
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let g = self.lock()?;
@@ -6417,6 +6439,35 @@ mod tests {
             .into_iter()
             .map(|event| event.event_type)
             .collect()
+    }
+
+    #[test]
+    fn fresh_launch_reservation_precedes_thread_publication() {
+        let store = test_store();
+        let thread_id = "T-fresh-launch-reservation";
+
+        assert_eq!(
+            store
+                .reserve_fresh_thread_launch(thread_id, "claim-fresh", "daemon:test")
+                .expect("reserve fresh launch"),
+            runtime_db::LaunchClaimOutcome::Claimed
+        );
+        assert!(store
+            .get_thread(thread_id)
+            .expect("inspect unpublished thread")
+            .is_none());
+
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("publish reserved thread");
+        let claim = store
+            .get_launch_claim(thread_id)
+            .expect("read launch claim")
+            .expect("claim remains attached after publication");
+        assert_eq!(claim.claim_id, "claim-fresh");
+        assert!(store
+            .release_thread_launch_claim(thread_id, "claim-fresh")
+            .expect("release launch reservation"));
     }
 
     #[test]

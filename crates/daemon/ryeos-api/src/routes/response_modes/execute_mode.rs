@@ -860,6 +860,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             })?;
             let mut launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
                 accepted_root_admission,
+                &project_ctx.effective_path,
                 request.ref_bindings.clone(),
             )
             .map_err(|error| {

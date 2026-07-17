@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T01:35:00Z:7e7acc27f1b3d80a45690f6d05bc2269b81886b015ee8cf5d2203bfab8b17fdb:Nsixh67hVKWInwUse1aWm7qqPezz94AKm98nEIe1wSDIXc4wC/YGKZ2MjmBgc92+vD8Z0pLAPkw0PACbpafeAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-17T08:29:12Z:7c3513a244189611895d6583b83c7b0f4c56be0dcce0ef9a21e08fa915c6925f:gG6Z40ASIPinjS0EZfdBc4J7/gz9Zyf7VMDV3DTcJqd1LldHg8n1uK81anvoE4wuWunp6Fstguy+LrS239ODAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat/list
 version: "1.0.0"
@@ -7,3 +7,6 @@ endpoint: seat.list
 record_thread: false
 availability: daemon_only
 required_caps: ["ryeos.execute.service.seat/list"]
+schema:
+  surface_ref: string?
+  project_path: string

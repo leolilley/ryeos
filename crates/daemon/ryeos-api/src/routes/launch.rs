@@ -23,6 +23,7 @@
 //! Acknowledged consumers use the launch-handoff variant and expose the ID only
 //! after durable row/audit creation and spawn-task authority transfer.
 
+use anyhow::Context;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -85,16 +86,28 @@ impl DispatchLaunchOptions {
     /// Default execution controls for a synchronously admitted root.
     pub(crate) fn admitted(
         root_admission: ryeos_app::thread_lifecycle::RootExecutionAdmission,
+        execution_workspace: &std::path::Path,
         ref_bindings: BTreeMap<String, String>,
     ) -> anyhow::Result<Self> {
         root_admission.validate()?;
         if root_admission.ref_bindings() != &ref_bindings {
             anyhow::bail!("dispatch launch secondary identities do not match sealed admission");
         }
-        let project_path = root_admission
-            .project_root()
-            .ok_or_else(|| anyhow::anyhow!("dispatch launch admission has no local project root"))?
-            .to_path_buf();
+        let project_path = execution_workspace.canonicalize().with_context(|| {
+            format!(
+                "canonicalize dispatch launch workspace {}",
+                execution_workspace.display()
+            )
+        })?;
+        if let Some(admitted_project_root) = root_admission.project_root() {
+            if admitted_project_root != project_path {
+                anyhow::bail!(
+                    "dispatch launch workspace {} differs from sealed project root {}",
+                    project_path.display(),
+                    admitted_project_root.display()
+                );
+            }
+        }
         Ok(Self {
             ref_bindings,
             launch_mode: "inline".to_string(),
@@ -261,25 +274,11 @@ fn spawn_dispatch_launch_inner(
     let ref_bindings = options.ref_bindings;
 
     tokio::spawn(async move {
-        use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
-
         let site_id = current_site_id;
         let current_site_id_for_failure_row = site_id.clone();
         let origin_site_id_for_failure_row = site_id.clone();
 
-        let plan_ctx = PlanContext {
-            requested_by: EffectivePrincipal::Local(Principal {
-                fingerprint: principal_id.clone(),
-                scopes: principal_scopes.clone(),
-            }),
-            project_context: ProjectContext::LocalPath {
-                path: project_path_buf.clone(),
-            },
-            current_site_id: site_id.clone(),
-            origin_site_id: site_id,
-            execution_hints: Default::default(),
-            validate_only,
-        };
+        let plan_ctx = root_admission.plan_context().clone();
 
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: principal_id.clone(),

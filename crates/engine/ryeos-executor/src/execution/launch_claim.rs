@@ -55,6 +55,36 @@ impl ThreadLaunchClaim {
             }
         }
     }
+
+    /// Reserve a pre-minted thread ID for a fresh launch before publishing it.
+    ///
+    /// This closes the live-recovery race completely: the thread row cannot be
+    /// observed before its launch owner. A collision for a newly allocated ID
+    /// is an invariant failure rather than a benign recovery skip.
+    pub(crate) fn acquire_fresh(state: &AppState, thread_id: &str) -> anyhow::Result<Self> {
+        let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
+        static OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        let claimed_by = OWNER.get_or_init(|| {
+            format!(
+                "daemon:{}:{}",
+                std::process::id(),
+                ryeos_app::thread_lifecycle::new_thread_id()
+            )
+        });
+        match state
+            .state_store
+            .reserve_fresh_thread_launch(thread_id, &claim_id, claimed_by)?
+        {
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => Ok(Self {
+                state: state.clone(),
+                thread_id: thread_id.to_string(),
+                claim_id,
+            }),
+            ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => anyhow::bail!(
+                "fresh thread ID {thread_id} was already reserved by another launch owner"
+            ),
+        }
+    }
 }
 
 impl Drop for ThreadLaunchClaim {

@@ -27,7 +27,7 @@
 //!     `work`) and the successor (ran post-follow `mark`) each reach
 //!     `thread_completed` exactly once.
 //!   - Value flow: the child returns a sentinel that the resumed parent consumes
-//!     (`${result.result.child_ran}`) and re-returns, so the successor's persisted
+//!     (`${result.child_ran}`) and re-returns, so the successor's persisted
 //!     result carries it — proving the child's result was actually consumed, not
 //!     merely stepped past.
 
@@ -102,11 +102,11 @@ fn plant_parent_follow_graph(project_dir: &Path, signer: &SigningKey) -> anyhow:
     let graphs_dir = project_dir.join(".ai/graphs");
     std::fs::create_dir_all(&graphs_dir)?;
     // `fetch` consumes the child result on resume and assigns the child's value
-    // from the typed GraphResult (`result.result.child_ran`). Graph-to-graph
-    // dispatch deliberately preserves that structured result rather than
-    // flattening one runtime kind specially. `done` re-returns it so the
-    // successor's persisted result carries the sentinel iff the follow result
-    // was consumed correctly.
+    // from the graph child's authored return (`result.child_ran`). Graph follow
+    // uses the graph kind's declared native-result projection, so the parent sees
+    // the authored value rather than the graph runtime's internal GraphResult
+    // envelope. `done` re-returns it so the successor's persisted result carries
+    // the sentinel iff the follow result was consumed correctly.
     let body = r#"category: ""
 version: "1.0.0"
 requires:
@@ -124,7 +124,7 @@ config:
         ref_bindings: {}
         params: {}
       assign:
-        child_ran: "${result.result.child_ran}"
+        child_ran: "${result.child_ran}"
       next:
         type: unconditional
         to: mark
@@ -382,7 +382,7 @@ async fn graph_follow_suspends_launches_child_and_resumes_parent() {
 
     // 6. Value flow: the child's returned value reached the resumed parent's
     //    persisted result. A missing / mis-shaped follow result would break the
-    //    `${result.result.child_ran}` assign and the sentinel would be absent.
+    //    `${result.child_ran}` assign and the sentinel would be absent.
     let (get_status, get_body) = h
         .post_execute(
             "service:threads/get",

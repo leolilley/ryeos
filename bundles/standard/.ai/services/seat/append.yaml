@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-03T09:54:32Z:89f607ba4437f0b952d32655c60cdc3f0d2e4fc24ca483a2ad71029c1fcebfb8:ab/udrmUf+xecpL7+sAWYP70U2uIIw6kIz7lMyHhg7ZcxPsnYyJKXPoUBGQtJkXGPyKuo4i6U8cOc8t5FZySAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-17T08:16:27Z:9f499fd6b0625b525f82c520f4807978bf44062a5e07042969044c51a5deee9a:0RGDvfbG3v0PlQ/FwRlTmQZGdh3FB50RxyxLKabCVpXdNymUWVEKATNLBgs6e5tl4PNeOjfPBjcGyJ9Xk6XZAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat/append
 version: "1.0.0"
 description: Append seat facet events to an owned running seat braid (operator-signed, owner-only, seat.* namespace)
 endpoint: seat.append
+record_thread: false
 availability: daemon_only
 required_caps: ["ryeos.execute.service.seat/append"]

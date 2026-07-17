@@ -267,12 +267,20 @@ impl Console {
 
     fn write_stdout(&self, lines: &[String]) -> io::Result<()> {
         let mut out = io::stdout().lock();
-        write_lines(&mut out, lines, self.capabilities.width)
+        write_lines(
+            &mut out,
+            lines,
+            self.capabilities.tty().then_some(self.capabilities.width),
+        )
     }
 
     fn write_stderr(&self, lines: &[String]) -> io::Result<()> {
         let mut out = io::stderr().lock();
-        write_lines(&mut out, lines, self.capabilities.width)
+        write_lines(
+            &mut out,
+            lines,
+            self.capabilities.tty().then_some(self.capabilities.width),
+        )
     }
 }
 
@@ -403,13 +411,21 @@ fn visible_prefix_end(value: &str, max_width: usize) -> usize {
     end.max(value.chars().next().map(char::len_utf8).unwrap_or(0))
 }
 
-fn write_lines(out: &mut impl Write, lines: &[String], width: usize) -> io::Result<()> {
+fn write_lines(
+    out: &mut impl Write,
+    lines: &[String],
+    terminal_width: Option<usize>,
+) -> io::Result<()> {
     for line in lines {
-        writeln!(
-            out,
-            "{}",
-            clamp_visible(line, width.saturating_sub(1).max(1))
-        )?;
+        if let Some(width) = terminal_width {
+            writeln!(
+                out,
+                "{}",
+                clamp_visible(line, width.saturating_sub(1).max(1))
+            )?;
+        } else {
+            writeln!(out, "{line}")?;
+        }
     }
     out.flush()
 }
@@ -1675,6 +1691,26 @@ mod tests {
         let lines = wrap_words(&token, 24);
         assert!(lines.iter().all(|line| visible_width(line) <= 24));
         assert_eq!(lines.concat(), token);
+    }
+
+    #[test]
+    fn plain_line_output_preserves_complete_error_bodies() {
+        let line = format!(
+            "ryeos: daemon returned HTTP 500: {{\"error\":\"inventory build failed: {}\"}}",
+            "x".repeat(256)
+        );
+        let mut plain = Vec::new();
+        write_lines(&mut plain, std::slice::from_ref(&line), None).expect("write plain line");
+        assert_eq!(
+            String::from_utf8(plain).expect("utf-8 output"),
+            format!("{line}\n")
+        );
+
+        let mut tty = Vec::new();
+        write_lines(&mut tty, std::slice::from_ref(&line), Some(80)).expect("write tty line");
+        let tty = String::from_utf8(tty).expect("utf-8 output");
+        assert!(tty.ends_with("...\n"));
+        assert!(visible_width(tty.trim_end()) < 80);
     }
 
     #[test]

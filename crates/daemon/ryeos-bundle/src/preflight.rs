@@ -2361,6 +2361,7 @@ strict_fields: warn
     fn identity_kind_schema(contract_yaml: &str) -> ryeos_engine::kind_registry::KindSchema {
         ryeos_engine::kind_registry::KindSchema {
             directory: "tools".to_string(),
+            excluded_directories: vec![],
             extensions: vec![],
             extraction_rules: std::collections::HashMap::new(),
             resolution: vec![],

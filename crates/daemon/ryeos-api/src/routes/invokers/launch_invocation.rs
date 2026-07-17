@@ -118,13 +118,16 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "threaded dispatch preflight returned no root admission".to_string(),
             )
         })?;
-        let launch_options =
-            crate::routes::launch::DispatchLaunchOptions::admitted(root_admission, ref_bindings)
-                .map_err(|error| {
-                    RouteDispatchError::Internal(format!(
-                        "validated launch contract rejected at dispatch boundary: {error:#}"
-                    ))
-                })?;
+        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
+            root_admission,
+            project_path.as_path(),
+            ref_bindings,
+        )
+        .map_err(|error| {
+            RouteDispatchError::Internal(format!(
+                "validated launch contract rejected at dispatch boundary: {error:#}"
+            ))
+        })?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
 

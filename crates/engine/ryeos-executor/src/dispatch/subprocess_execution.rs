@@ -621,6 +621,9 @@ async fn dispatch_streaming_subprocess(
     // leaving a process absent from the daemon's exact-identity drain. Give
     // every invocation the same durable lifecycle/process owner as the other
     // inline terminators before any process can be spawned.
+    let _launch_claim =
+        crate::execution::launch_claim::ThreadLaunchClaim::acquire_fresh(state, &thread_id)
+            .map_err(DispatchError::Internal)?;
     let created = if let Some(parent) = request.parent_execution_context.as_ref() {
         let durable_parent = state
             .threads
@@ -1026,7 +1029,11 @@ async fn dispatch_tool_subprocess(
             admission
                 .ensure_matches_subject(&ctx.engine, local_subject, thread_profile)
                 .map_err(DispatchError::Internal)?;
+            resolved.plan_context = admission.plan_context().clone();
             resolved.root_admission = Some(admission.clone());
+            admission
+                .ensure_matches_request(&resolved)
+                .map_err(DispatchError::Internal)?;
         }
     }
 

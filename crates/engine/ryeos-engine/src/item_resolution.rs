@@ -88,6 +88,19 @@ pub fn resolve_item_full(
     kind_schema: &KindSchema,
     ref_: &CanonicalRef,
 ) -> Result<ResolutionResult, EngineError> {
+    if kind_schema.excludes_relative_path(std::path::Path::new(&ref_.bare_id)) {
+        let mut searched_spaces = Vec::new();
+        for root in &roots.ordered {
+            let space = root.space.as_str().to_owned();
+            if !searched_spaces.contains(&space) {
+                searched_spaces.push(space);
+            }
+        }
+        return Err(EngineError::ItemNotFound {
+            canonical_ref: ref_.to_string(),
+            searched_spaces,
+        });
+    }
     let mut winner: Option<(PathBuf, ItemSpace, String, String, PathBuf)> = None;
     let mut shadowed = Vec::new();
     let mut searched_spaces = Vec::new();
@@ -172,7 +185,7 @@ pub fn resolve_item(
 
 /// Enumerate every canonical ref of `kind_schema` reachable from `roots`,
 /// honouring resolution priority and the kind schema's own
-/// `directory` + `extensions` declaration.
+/// `directory`, `excluded_directories`, and `extensions` declarations.
 ///
 /// Walks `<root.ai_root>/<kind_schema.directory>/` recursively for each
 /// root in `roots.ordered`. Files whose extension matches one of
@@ -209,6 +222,11 @@ pub fn enumerate_kind_refs(
         .iter()
         .map(|e| e.ext.trim_start_matches('.'))
         .collect();
+    let excluded_directories: HashSet<&str> = kind_schema
+        .excluded_directories
+        .iter()
+        .map(String::as_str)
+        .collect();
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut refs: Vec<CanonicalRef> = Vec::new();
@@ -218,15 +236,21 @@ pub fn enumerate_kind_refs(
         if !kind_dir.is_dir() {
             continue;
         }
-        walk_kind_dir(&kind_dir, &kind_dir, &extensions, &mut |bare_id| {
-            if seen.insert(bare_id.clone()) {
-                refs.push(CanonicalRef {
-                    kind: kind.to_owned(),
-                    bare_id,
-                    suffix: None,
-                });
-            }
-        });
+        walk_kind_dir(
+            &kind_dir,
+            &kind_dir,
+            &extensions,
+            &excluded_directories,
+            &mut |bare_id| {
+                if seen.insert(bare_id.clone()) {
+                    refs.push(CanonicalRef {
+                        kind: kind.to_owned(),
+                        bare_id,
+                        suffix: None,
+                    });
+                }
+            },
+        );
     }
 
     refs.sort_by(|a, b| a.bare_id.cmp(&b.bare_id));
@@ -244,6 +268,7 @@ fn walk_kind_dir(
     kind_root: &std::path::Path,
     dir: &std::path::Path,
     extensions: &std::collections::HashSet<&str>,
+    excluded_directories: &std::collections::HashSet<&str>,
     emit: &mut dyn FnMut(String),
 ) {
     let entries = match std::fs::read_dir(dir) {
@@ -264,7 +289,10 @@ fn walk_kind_dir(
             Err(_) => continue,
         };
         if ftype.is_dir() {
-            walk_kind_dir(kind_root, &path, extensions, emit);
+            if excluded_directories.contains(basename) {
+                continue;
+            }
+            walk_kind_dir(kind_root, &path, extensions, excluded_directories, emit);
             continue;
         }
         if !ftype.is_file() {
@@ -362,6 +390,7 @@ mod tests {
     fn make_kind_schema(directory: &str, extensions: Vec<(&str, &str)>) -> KindSchema {
         KindSchema {
             directory: directory.to_owned(),
+            excluded_directories: Vec::new(),
             extraction_rules: std::collections::HashMap::new(),
             resolution: Vec::new(),
             effective_trust: crate::kind_registry::EffectiveTrustPolicy::default(),
@@ -420,6 +449,40 @@ mod tests {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(&file_path, content).unwrap();
+    }
+
+    #[test]
+    fn enumeration_skips_schema_excluded_directories() {
+        let root = tempdir();
+        let mut schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        schema.excluded_directories = vec!["lib".to_owned()];
+        write_item(
+            &root,
+            "tools",
+            "ryeos/demo/run",
+            ".yaml",
+            "executor_id: run",
+        );
+        write_item(&root, "tools", "ryeos/demo/lib/helper", ".py", "# support");
+
+        let roots = ResolutionRoots::from_flat(None, vec![root.clone()]);
+        let refs = enumerate_kind_refs(&roots, &schema, "tool");
+        assert_eq!(
+            refs.iter()
+                .map(|item| item.bare_id.as_str())
+                .collect::<Vec<_>>(),
+            ["ryeos/demo/run"]
+        );
+        let excluded = CanonicalRef::parse("tool:ryeos/demo/lib/helper").unwrap();
+        assert!(matches!(
+            resolve_item_full(&roots, &schema, &excluded),
+            Err(EngineError::ItemNotFound { .. })
+        ));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

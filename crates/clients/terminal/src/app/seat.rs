@@ -19,25 +19,39 @@ pub struct SeatBootstrap {
 /// Reattach to the freshest owned seat for this surface, or open a new
 /// one (best effort: an unreachable seat service degrades to a
 /// local-only seat, never a crash).
-pub async fn bootstrap_seat(client: &DaemonClient, surface_ref: &str) -> SeatBootstrap {
-    if let Some((thread_id, replayed)) = reattach_seat_thread(client, surface_ref).await {
+pub async fn bootstrap_seat(
+    client: &DaemonClient,
+    surface_ref: &str,
+    project_path: &str,
+) -> SeatBootstrap {
+    if let Some((thread_id, replayed)) =
+        reattach_seat_thread(client, surface_ref, project_path).await
+    {
         return SeatBootstrap {
             thread_id: Some(thread_id),
             replayed,
         };
     }
     SeatBootstrap {
-        thread_id: open_seat_thread(client, surface_ref).await,
+        thread_id: open_seat_thread(client, surface_ref, project_path).await,
         replayed: Vec::new(),
     }
 }
 
 /// Open the seat session thread.
-pub async fn open_seat_thread(client: &DaemonClient, surface_ref: &str) -> Option<String> {
+pub async fn open_seat_thread(
+    client: &DaemonClient,
+    surface_ref: &str,
+    project_path: &str,
+) -> Option<String> {
     let body = serde_json::json!({
         "item_ref": "service:seat/open",
         "ref_bindings": {},
-        "parameters": { "surface_ref": surface_ref, "client_ref": "client:ryeos/tui" },
+        "parameters": {
+            "surface_ref": surface_ref,
+            "client_ref": "client:ryeos/tui",
+            "project_path": project_path,
+        },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
     envelope
@@ -50,6 +64,7 @@ pub async fn open_seat_thread(client: &DaemonClient, surface_ref: &str) -> Optio
 async fn reattach_seat_thread(
     client: &DaemonClient,
     surface_ref: &str,
+    project_path: &str,
 ) -> Option<(String, Vec<SeatEvent>)> {
     // Discovery via `service:seat/list`: the daemon filters by the
     // `seat_session` kind, running status, and surface, and sorts freshest
@@ -58,7 +73,7 @@ async fn reattach_seat_thread(
     let body = serde_json::json!({
         "item_ref": "service:seat/list",
         "ref_bindings": {},
-        "parameters": { "surface_ref": surface_ref },
+        "parameters": { "surface_ref": surface_ref, "project_path": project_path },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
     let seats: Vec<String> = envelope

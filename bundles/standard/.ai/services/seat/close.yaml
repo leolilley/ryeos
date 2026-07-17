@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-03T09:54:32Z:72eae3fe71f9f68efc0fadb8d5b782bde126f2134f1e52bd4ced93e4598d8094:5cuhzMkW7FZxKkkt4OkB3nJinYPjmSN9N5Eb6x1kRSRj1oVCZi8gy0wnA8Tm5vYMNWVJO1vG28MngsxZW/iiBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-17T08:16:27Z:3b385127c612e0245420004d4a4880d53055d7d5234df35d37d1d32664097c9e:zKPVVfpIPOYnzyLZga0WboXBOr5SRZbm7lO4L4s0Sfgo5Gg+31eZHvNNmB3GPPJ4w6UYZeHiZs0q7wUZeoAeDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat/close
 version: "1.0.0"
 description: Settle a seat session thread
 endpoint: seat.close
+record_thread: false
 availability: daemon_only
 required_caps: ["ryeos.execute.service.seat/close"]

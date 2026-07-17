@@ -322,12 +322,16 @@ fn admit_fresh_launch(
     let root_admission = preflight.root_admission.ok_or_else(|| {
         HandlerError::Internal("threaded dispatch preflight returned no root admission".to_string())
     })?;
-    crate::routes::launch::DispatchLaunchOptions::admitted(root_admission, ref_bindings.clone())
-        .map_err(|error| {
-            HandlerError::Internal(format!(
-                "validated fresh-launch contract rejected at dispatch boundary: {error:#}"
-            ))
-        })
+    crate::routes::launch::DispatchLaunchOptions::admitted(
+        root_admission,
+        project_path.as_path(),
+        ref_bindings.clone(),
+    )
+    .map_err(|error| {
+        HandlerError::Internal(format!(
+            "validated fresh-launch contract rejected at dispatch boundary: {error:#}"
+        ))
+    })
 }
 
 fn admit_resume_launch(
