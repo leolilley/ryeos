@@ -584,6 +584,13 @@ fn viewport(width: u16, height: u16) -> BrowserViewport {
     }
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,11 +651,4 @@ mod tests {
         assert_eq!(retry_at, Some(100 + SEAT_RECONNECT_MAX_MS));
         assert_eq!(delay, SEAT_RECONNECT_MAX_MS);
     }
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
