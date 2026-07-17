@@ -1923,9 +1923,7 @@ impl IsolationRuntime {
                 &verified.source_path,
                 canonical_source,
                 artifact,
-                project_destination,
-                canonical_project,
-                bundle_roots,
+                namespace,
             );
         }
         let (content, _) = artifacts.read_source("verified code", &verified.source_path)?;
@@ -1998,14 +1996,7 @@ impl IsolationRuntime {
             .as_deref()
             .expect("enforced isolation runtime has a verified artifact store");
         let artifact = artifact_root.materialize(content_hash, content_hash, content)?;
-        self.finish_prepared_code(
-            original,
-            canonical_source,
-            artifact,
-            project_destination,
-            canonical_project,
-            bundle_roots,
-        )
+        self.finish_prepared_code(original, canonical_source, artifact, namespace)
     }
 
     fn finish_prepared_code(
@@ -2013,9 +2004,7 @@ impl IsolationRuntime {
         original: &Path,
         canonical_source: PathBuf,
         artifact: MaterializedArtifact,
-        project_destination: &Path,
-        canonical_project: &Path,
-        bundle_roots: &[PathBuf],
+        namespace: CodeNamespace<'_>,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         let (mirror, destination) = code_namespace_layout(
             original,
