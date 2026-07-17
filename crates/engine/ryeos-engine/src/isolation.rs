@@ -6,7 +6,9 @@
 //! without reopening node configuration at the process boundary.
 
 use std::collections::BTreeMap;
-use std::io::{Read as _, Seek as _};
+use std::io::Read as _;
+#[cfg(not(unix))]
+use std::io::Seek as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -125,7 +127,14 @@ struct MaterializedArtifact {
 struct VerifiedArtifactUsage {
     total_bytes: u64,
     files: u64,
-    entries: std::collections::HashMap<String, (String, u64)>,
+    entries: std::collections::HashMap<String, VerifiedArtifactEntry>,
+}
+
+#[derive(Debug)]
+struct VerifiedArtifactEntry {
+    content_hash: String,
+    content_len: u64,
+    handle: Arc<std::fs::File>,
 }
 
 impl Drop for VerifiedArtifactStore {
@@ -151,6 +160,57 @@ impl Drop for VerifiedArtifactStore {
 }
 
 impl VerifiedArtifactStore {
+    fn existing(
+        &self,
+        name: &str,
+        expected_hash: &str,
+    ) -> Result<Option<MaterializedArtifact>, EngineError> {
+        let usage = self
+            .usage
+            .lock()
+            .map_err(|_| refused("verified artifact accounting lock is poisoned".to_string()))?;
+        let Some(entry) = usage.entries.get(name) else {
+            return Ok(None);
+        };
+        if entry.content_hash != expected_hash {
+            return Err(refused(format!(
+                "verified artifact name `{name}` was reused for different content"
+            )));
+        }
+        let handle = Arc::clone(&entry.handle);
+        drop(usage);
+        self.validate_existing(name, expected_hash, handle)
+            .map(Some)
+    }
+
+    fn validate_existing(
+        &self,
+        name: &str,
+        expected_hash: &str,
+        handle: Arc<std::fs::File>,
+    ) -> Result<MaterializedArtifact, EngineError> {
+        let artifact = self.root.path().join(name);
+        protect_verified_artifact(&handle, &artifact)?;
+        let (content, _) = read_regular_file_handle_limited(
+            "verified artifact",
+            &artifact,
+            handle
+                .try_clone()
+                .map_err(|error| refused(error.to_string()))?,
+            self.max_file_bytes,
+        )?;
+        if lillux::cas::sha256_hex(&content) != expected_hash {
+            return Err(refused(format!(
+                "verified artifact {} failed its content-address check",
+                artifact.display()
+            )));
+        }
+        Ok(MaterializedArtifact {
+            path: artifact,
+            handle,
+        })
+    }
+
     fn create(
         app_root: &lillux::PinnedDirectory,
         limits: &IsolationLimitsPolicy,
@@ -364,40 +424,15 @@ impl VerifiedArtifactStore {
             .lock()
             .map_err(|_| refused("verified artifact accounting lock is poisoned".to_string()))?;
         let artifact = self.root.path().join(name);
-        if let Some((recorded_hash, recorded_len)) = usage.entries.get(name) {
-            if recorded_hash != expected_hash || *recorded_len != content_len {
+        if let Some(entry) = usage.entries.get(name) {
+            if entry.content_hash != expected_hash || entry.content_len != content_len {
                 return Err(refused(format!(
                     "verified artifact name `{name}` was reused for different content"
                 )));
             }
-            let file = self
-                .root
-                .open_regular(name.as_ref(), false)
-                .map_err(|error| refused(format!("verified artifact cannot be opened: {error}")))?
-                .ok_or_else(|| {
-                    refused(format!(
-                        "verified artifact {} disappeared",
-                        artifact.display()
-                    ))
-                })?;
-            protect_verified_artifact(&file, &artifact)?;
-            let (existing, _) = read_regular_file_handle_limited(
-                "verified artifact",
-                &artifact,
-                file.try_clone()
-                    .map_err(|error| refused(error.to_string()))?,
-                self.max_file_bytes,
-            )?;
-            if lillux::cas::sha256_hex(&existing) != expected_hash {
-                return Err(refused(format!(
-                    "verified artifact {} failed its content-address check",
-                    artifact.display()
-                )));
-            }
-            return Ok(MaterializedArtifact {
-                path: artifact,
-                handle: Arc::new(file),
-            });
+            let handle = Arc::clone(&entry.handle);
+            drop(usage);
+            return self.validate_existing(name, expected_hash, handle);
         }
 
         let next_files = usage
@@ -515,12 +550,18 @@ impl VerifiedArtifactStore {
         }
         usage.files = next_files;
         usage.total_bytes = next_total;
-        usage
-            .entries
-            .insert(name.to_string(), (expected_hash.to_string(), content_len));
+        let handle = Arc::new(file);
+        usage.entries.insert(
+            name.to_string(),
+            VerifiedArtifactEntry {
+                content_hash: expected_hash.to_string(),
+                content_len,
+                handle: Arc::clone(&handle),
+            },
+        );
         Ok(MaterializedArtifact {
             path: artifact,
-            handle: Arc::new(file),
+            handle,
         })
     }
 }
@@ -1875,6 +1916,18 @@ impl IsolationRuntime {
             .as_deref()
             .expect("enforced isolation runtime has a verified artifact store");
         let canonical_source = canonicalize_context_mount("code source", &verified.source_path)?;
+        if let Some(artifact) =
+            artifacts.existing(&verified.content_hash, &verified.content_hash)?
+        {
+            return self.finish_prepared_code(
+                &verified.source_path,
+                canonical_source,
+                artifact,
+                project_destination,
+                canonical_project,
+                bundle_roots,
+            );
+        }
         let (content, _) = artifacts.read_source("verified code", &verified.source_path)?;
         let actual_hash = lillux::cas::sha256_hex(&content);
         if actual_hash != verified.content_hash {
@@ -1940,6 +1993,30 @@ impl IsolationRuntime {
                 original.display()
             )));
         }
+        let artifact_root = self
+            .verified_artifacts
+            .as_deref()
+            .expect("enforced isolation runtime has a verified artifact store");
+        let artifact = artifact_root.materialize(content_hash, content_hash, content)?;
+        self.finish_prepared_code(
+            original,
+            canonical_source,
+            artifact,
+            project_destination,
+            canonical_project,
+            bundle_roots,
+        )
+    }
+
+    fn finish_prepared_code(
+        &self,
+        original: &Path,
+        canonical_source: PathBuf,
+        artifact: MaterializedArtifact,
+        project_destination: &Path,
+        canonical_project: &Path,
+        bundle_roots: &[PathBuf],
+    ) -> Result<PreparedVerifiedCode, EngineError> {
         let (mirror, destination) = code_namespace_layout(
             original,
             &canonical_source,
@@ -1947,11 +2024,6 @@ impl IsolationRuntime {
             namespace.canonical_project,
             namespace.bundle_roots,
         )?;
-        let artifact_root = self
-            .verified_artifacts
-            .as_deref()
-            .expect("enforced isolation runtime has a verified artifact store");
-        let artifact = artifact_root.materialize(content_hash, content_hash, content)?;
         let artifact = ReadableMount {
             source_handle: artifact.handle,
             source: artifact.path,
@@ -2353,15 +2425,9 @@ fn read_regular_file_bytes_limited(
 fn read_regular_file_handle_limited(
     kind: &str,
     path: &Path,
-    mut file: std::fs::File,
+    file: std::fs::File,
     max_bytes: u64,
 ) -> Result<(Vec<u8>, std::fs::Metadata), EngineError> {
-    file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
-        refused(format!(
-            "{kind} {} cannot be rewound: {error}",
-            path.display()
-        ))
-    })?;
     let metadata = file.metadata().map_err(|error| {
         refused(format!(
             "{kind} {} cannot be inspected: {error}",
@@ -2381,11 +2447,54 @@ fn read_regular_file_handle_limited(
             metadata.len()
         )));
     }
-    let mut content = Vec::new();
-    file.by_ref()
-        .take(max_bytes.saturating_add(1))
-        .read_to_end(&mut content)
-        .map_err(|error| refused(format!("{kind} {} cannot be read: {error}", path.display())))?;
+
+    #[cfg(unix)]
+    let content = {
+        use std::os::unix::fs::FileExt as _;
+
+        // `File::try_clone` duplicates a descriptor but shares its seek offset.
+        // Positioned reads keep validation independent when many launches hash
+        // the same pinned artifact concurrently.
+        let read_limit = max_bytes.saturating_add(1);
+        let capacity = usize::try_from(metadata.len().min(read_limit)).unwrap_or(0);
+        let mut content = Vec::with_capacity(capacity);
+        let mut offset = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        while offset < read_limit {
+            let remaining = usize::try_from((read_limit - offset).min(buffer.len() as u64))
+                .expect("bounded read size fits usize");
+            let read = file
+                .read_at(&mut buffer[..remaining], offset)
+                .map_err(|error| {
+                    refused(format!("{kind} {} cannot be read: {error}", path.display()))
+                })?;
+            if read == 0 {
+                break;
+            }
+            content.extend_from_slice(&buffer[..read]);
+            offset = offset.saturating_add(read as u64);
+        }
+        content
+    };
+
+    #[cfg(not(unix))]
+    let content = {
+        let mut file = file;
+        file.seek(std::io::SeekFrom::Start(0)).map_err(|error| {
+            refused(format!(
+                "{kind} {} cannot be rewound: {error}",
+                path.display()
+            ))
+        })?;
+        let mut content = Vec::new();
+        file.by_ref()
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut content)
+            .map_err(|error| {
+                refused(format!("{kind} {} cannot be read: {error}", path.display()))
+            })?;
+        content
+    };
     if u64::try_from(content.len()).unwrap_or(u64::MAX) > max_bytes {
         return Err(refused(format!(
             "{kind} {} grew beyond configured per-file limit {max_bytes} while being read",
@@ -3010,6 +3119,55 @@ mod tests {
             .join(ISOLATION_POLICY_RELATIVE_PATH);
         std::fs::create_dir_all(policy_path.parent().unwrap()).unwrap();
         std::fs::write(policy_path, serde_yaml::to_string(policy).unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_artifact_reuse_keeps_one_pinned_inode_across_parallel_reads() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        let pinned_root = lillux::PinnedDirectory::open(app_root.path())
+            .unwrap()
+            .unwrap();
+        let store = Arc::new(
+            VerifiedArtifactStore::create(
+                &pinned_root,
+                &IsolationPolicy::default_disabled().limits,
+            )
+            .unwrap(),
+        );
+        let content = vec![0x5a; 256 * 1024];
+        let content_hash = lillux::cas::sha256_hex(&content);
+        let first = store
+            .materialize(&content_hash, &content_hash, &content)
+            .unwrap();
+        let first_metadata = first.handle.metadata().unwrap();
+
+        // Reuse is anchored to the already-verified open inode, not a fresh
+        // pathname lookup. Removing the name therefore cannot redirect later
+        // readers, and each reader still re-hashes the pinned bytes.
+        std::fs::remove_file(&first.path).unwrap();
+        std::thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    let store = Arc::clone(&store);
+                    let content_hash = content_hash.clone();
+                    scope.spawn(move || {
+                        store
+                            .existing(&content_hash, &content_hash)
+                            .unwrap()
+                            .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            for worker in workers {
+                let reused = worker.join().unwrap();
+                let metadata = reused.handle.metadata().unwrap();
+                assert_eq!(metadata.dev(), first_metadata.dev());
+                assert_eq!(metadata.ino(), first_metadata.ino());
+            }
+        });
     }
 
     #[test]

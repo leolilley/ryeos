@@ -25,7 +25,7 @@ pub use cas::{
     atomic_write_batch, atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path,
     valid_hash, CanonicalJsonError, CasPutOutcome, CasStore,
 };
-pub use locks::{with_exclusive_file_lock, ExclusiveFileLock};
+pub use locks::{with_exclusive_file_lock, ExclusiveFileLock, SharedFileLock};
 pub use secure_fs::{
     collect_directory_tree_no_follow, collect_regular_files_no_follow, read_regular_file_no_follow,
     read_regular_file_to_string_no_follow, NoFollowDirectoryTree, PinnedDirectory,

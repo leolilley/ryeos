@@ -70,6 +70,65 @@ fn build_service_registry() -> ryeos_app::service_registry::ServiceRegistry {
     ryeos_api::registry::build_service_registry_from(service_descriptors())
 }
 
+enum ServiceCatalogCheck {
+    Healthy,
+    Missing,
+    Failed(String),
+}
+
+fn check_service_catalog_entry(
+    desc: &ryeos_app::service_registry::ServiceDescriptor,
+    resolved: Result<ryeos_engine::contracts::ResolvedItem, ryeos_engine::error::EngineError>,
+    engine: &ryeos_engine::engine::Engine,
+    plan_ctx: &ryeos_engine::contracts::PlanContext,
+    services: &ryeos_app::service_registry::ServiceRegistry,
+) -> ServiceCatalogCheck {
+    let resolved = match resolved {
+        Ok(resolved) => resolved,
+        Err(_) => {
+            tracing::warn!(
+                service = desc.service_ref,
+                "operational service not found in bundle"
+            );
+            return ServiceCatalogCheck::Missing;
+        }
+    };
+    let verified = match engine.verify(plan_ctx, resolved) {
+        Ok(verified) => verified,
+        Err(error) => {
+            let message = error.to_string();
+            tracing::error!(
+                service = desc.service_ref,
+                error = %message,
+                "operational service verification FAILED"
+            );
+            return ServiceCatalogCheck::Failed(message);
+        }
+    };
+    let endpoint = match ryeos_api::registry::extract_endpoint(&verified.resolved.metadata.extra) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            let message = format!("endpoint extraction failed: {error}");
+            tracing::error!(service = desc.service_ref, %error, %message);
+            return ServiceCatalogCheck::Failed(message);
+        }
+    };
+    if !services.has(&endpoint) {
+        let message =
+            format!("service resolves to endpoint '{endpoint}' but no handler registered");
+        tracing::error!(service = desc.service_ref, %endpoint, %message);
+        return ServiceCatalogCheck::Failed(message);
+    }
+
+    tracing::debug!(
+        service = desc.service_ref,
+        trust_class = ?verified.trust_class,
+        %endpoint,
+        "operational service verified"
+    );
+    ServiceCatalogCheck::Healthy
+}
+
 fn build_route_table(
     snapshot: &ryeos_app::node_config::NodeConfigSnapshot,
     ui: std::sync::Arc<ryeos_ui::UiState>,
@@ -337,125 +396,98 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             // Self-check: verify every registered service resolves and is trusted.
             // Every service must resolve, verify, extract an endpoint, AND have a
             // registered handler. Any failure prevents daemon start (fail-closed).
-            let catalog_health = {
-                let operational_services = service_descriptors();
-                let node_principal = identity.principal_id();
+            let catalog_health = engine.with_checked_bundle_generation(
+                |generation| -> anyhow::Result<ryeos_app::state::CatalogHealth> {
+                    let operational_services = service_descriptors();
+                    let node_principal = identity.principal_id();
 
-                let plan_ctx = ryeos_engine::contracts::PlanContext {
-                    requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
-                        ryeos_engine::contracts::Principal {
-                            fingerprint: node_principal,
-                            scopes: vec![],
-                        },
-                    ),
-                    project_context: ryeos_engine::contracts::ProjectContext::None,
-                    current_site_id: "site:local".into(),
-                    origin_site_id: "site:local".into(),
-                    execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
-                    validate_only: true,
-                };
-
-                let mut failed: Vec<(&str, String)> = Vec::new();
-                let mut missing: Vec<&str> = Vec::new();
-
-                for desc in operational_services {
-                    let canonical = match ryeos_engine::canonical_ref::CanonicalRef::parse(
-                        desc.service_ref,
-                    ) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            tracing::warn!(service = desc.service_ref, error = %e, "operational service ref parse failed");
-                            continue;
-                        }
+                    let plan_ctx = ryeos_engine::contracts::PlanContext {
+                        requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                            ryeos_engine::contracts::Principal {
+                                fingerprint: node_principal,
+                                scopes: vec![],
+                            },
+                        ),
+                        project_context: ryeos_engine::contracts::ProjectContext::None,
+                        current_site_id: "site:local".into(),
+                        origin_site_id: "site:local".into(),
+                        execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+                        validate_only: true,
                     };
 
-                    match engine.resolve(&plan_ctx, &canonical) {
-                        Ok(resolved) => match engine.verify(&plan_ctx, resolved) {
-                            Ok(verified) => {
-                                match ryeos_api::registry::extract_endpoint(
-                                    &verified.resolved.metadata.extra,
-                                ) {
-                                    Ok(endpoint) => {
-                                        if !services.has(&endpoint) {
-                                            let msg = format!(
-                                            "service resolves to endpoint '{}' but no handler registered",
-                                            endpoint
-                                        );
-                                            tracing::error!(service = desc.service_ref, %endpoint, "{}", msg);
-                                            failed.push((desc.service_ref, msg));
-                                        } else {
-                                            tracing::debug!(
-                                                service = desc.service_ref,
-                                                trust_class = ?verified.trust_class,
-                                                %endpoint,
-                                                "operational service verified"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let msg = format!("endpoint extraction failed: {e}");
-                                        tracing::error!(service = desc.service_ref, error = %e, "{}", msg);
-                                        failed.push((desc.service_ref, msg));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                let msg = format!("{e}");
-                                tracing::error!(service = desc.service_ref, error = %msg, "operational service verification FAILED");
-                                failed.push((desc.service_ref, msg));
-                            }
-                        },
-                        Err(_) => {
-                            tracing::warn!(
-                                service = desc.service_ref,
-                                "operational service not found in bundle"
-                            );
-                            missing.push(desc.service_ref);
+                    let mut failed = Vec::new();
+                    let mut missing = Vec::new();
+                    let mut resolvable = Vec::with_capacity(operational_services.len());
+                    for desc in operational_services {
+                        match ryeos_engine::canonical_ref::CanonicalRef::parse(desc.service_ref) {
+                            Ok(canonical) => resolvable.push((desc, canonical)),
+                            Err(error) => failed.push((
+                                desc.service_ref,
+                                format!("operational service ref parse failed: {error}"),
+                            )),
                         }
                     }
-                }
-
-                if !failed.is_empty() {
-                    for (svc, error) in &failed {
-                        tracing::error!(
-                            svc,
-                            error,
-                            "refusing to start: operational service failed verification"
+                    let canonical_refs = resolvable
+                        .iter()
+                        .map(|(_, canonical)| canonical.clone())
+                        .collect::<Vec<_>>();
+                    let resolved = generation.resolve_many(&plan_ctx, &canonical_refs);
+                    for ((desc, _), resolved) in resolvable.into_iter().zip(resolved) {
+                        let service_ref = desc.service_ref;
+                        let check = check_service_catalog_entry(
+                            desc, resolved, &engine, &plan_ctx, &services,
                         );
+                        match check {
+                            ServiceCatalogCheck::Healthy => {}
+                            ServiceCatalogCheck::Missing => missing.push(service_ref),
+                            ServiceCatalogCheck::Failed(error) => {
+                                failed.push((service_ref, error));
+                            }
+                        }
                     }
-                    anyhow::bail!(
+
+                    if !failed.is_empty() {
+                        for (svc, error) in &failed {
+                            tracing::error!(
+                                svc,
+                                error,
+                                "refusing to start: operational service failed verification"
+                            );
+                        }
+                        anyhow::bail!(
                 "operational service catalog self-check failed: {} service(s) failed verification",
                 failed.len()
             );
-                }
+                    }
 
-                // Missing items are NOT a boot failure: a lean node (e.g. the
-                // hosted-node image) deliberately installs a subset of bundles,
-                // so descriptors whose service YAML ships in an absent bundle
-                // simply don't resolve. The node boots degraded:
-                // `service:health/status` reports `missing_services`, and
-                // executing one returns the structured `service_not_installed`
-                // error. Only verification failures (tampered/unsigned items)
-                // remain fail-closed above.
-                if missing.is_empty() {
-                    ryeos_app::state::CatalogHealth {
-                        status: "ok".into(),
-                        missing_services: vec![],
-                    }
-                } else {
-                    for svc in &missing {
-                        tracing::warn!(
-                            svc,
-                            "operational service not found in installed bundles; \
+                    // Missing items are NOT a boot failure: a lean node (e.g. the
+                    // hosted-node image) deliberately installs a subset of bundles,
+                    // so descriptors whose service YAML ships in an absent bundle
+                    // simply don't resolve. The node boots degraded:
+                    // `service:health/status` reports `missing_services`, and
+                    // executing one returns the structured `service_not_installed`
+                    // error. Only verification failures (tampered/unsigned items)
+                    // remain fail-closed above.
+                    if missing.is_empty() {
+                        Ok(ryeos_app::state::CatalogHealth {
+                            status: "ok".into(),
+                            missing_services: vec![],
+                        })
+                    } else {
+                        for svc in &missing {
+                            tracing::warn!(
+                                svc,
+                                "operational service not found in installed bundles; \
                      starting degraded — executing it will return service_not_installed"
-                        );
+                            );
+                        }
+                        Ok(ryeos_app::state::CatalogHealth {
+                            status: "degraded".into(),
+                            missing_services: missing.iter().map(|s| s.to_string()).collect(),
+                        })
                     }
-                    ryeos_app::state::CatalogHealth {
-                        status: "degraded".into(),
-                        missing_services: missing.iter().map(|s| s.to_string()).collect(),
-                    }
-                }
-            };
+                },
+            )?;
 
             // Build UI state (browser sessions + session bus).
             let ui_state = std::sync::Arc::new(ryeos_ui::UiState::new());
