@@ -33,6 +33,9 @@ RUN --mount=type=secret,id=publisher-key \
     --mount=type=cache,id=ryeos-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=ryeos-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=ryeos-cargo-target,target=/build/target-cache,sharing=locked \
+    cp -a bundles .bundles-writable && \
+    rm -rf bundles && \
+    mv .bundles-writable bundles && \
     test -s /run/secrets/publisher-key && \
     CARGO_TARGET_DIR=/build/target-cache \
     ./scripts/populate-bundles.sh \
