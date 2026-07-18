@@ -115,9 +115,26 @@ jobs:
         run: cargo deny check
 
       - name: Scan repository history for secrets
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_workspace_tests }}
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Scan release tree for secrets
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_workspace_tests }}
+        env:
+          GITLEAKS_ARCHIVE_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
+          GITLEAKS_VERSION: 8.24.3
+        run: |
+          ARCHIVE="$RUNNER_TEMP/gitleaks.tar.gz"
+          INSTALL_DIR="$RUNNER_TEMP/gitleaks"
+          curl --fail --silent --show-error --location \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            --output "$ARCHIVE"
+          echo "${GITLEAKS_ARCHIVE_SHA256}  ${ARCHIVE}" | sha256sum --check --strict
+          mkdir -p "$INSTALL_DIR"
+          tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" gitleaks
+          "$INSTALL_DIR/gitleaks" dir --redact --verbose "$GITHUB_WORKSPACE"
 
       - name: Run release qualification gate
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_workspace_tests }}
