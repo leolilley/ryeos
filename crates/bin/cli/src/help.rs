@@ -149,6 +149,7 @@ pub(crate) fn command_rows(
     )
     .ok();
     let commands = crate::node_descriptors::load_command_descriptors_from_snapshot(snapshot);
+    let mut metadata_by_ref = BTreeMap::<String, Option<ItemHelpMetadata>>::new();
 
     for command in commands {
         // Skip short aliases (s, f) — they're abbreviations.
@@ -156,16 +157,21 @@ pub(crate) fn command_rows(
             continue;
         }
 
+        // Aliases share the same dispatch item as their canonical command.
+        // Resolve and verify that item once instead of repeating the complete
+        // effective-item pipeline for every spelling shown in help.
         let metadata = command.execute_ref().and_then(|execute| {
-            engine
+            metadata_by_ref
+                .entry(execute.to_string())
+                .or_insert_with(|| {
+                    engine
+                        .as_ref()
+                        .and_then(|engine| resolve_effective_help(engine, execute, project_path))
+                })
                 .as_ref()
-                .and_then(|engine| resolve_effective_help(engine, execute, project_path))
         });
-        let is_offline = metadata
-            .as_ref()
-            .is_some_and(ItemHelpMetadata::is_offline_dispatch);
+        let is_offline = metadata.is_some_and(ItemHelpMetadata::is_offline_dispatch);
         let description = metadata
-            .as_ref()
             .map(|metadata| metadata.description.as_str())
             .filter(|description| !description.is_empty())
             .unwrap_or(&command.description)
