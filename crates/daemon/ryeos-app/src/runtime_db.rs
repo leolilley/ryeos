@@ -384,10 +384,100 @@ pub struct WorkspaceRecord {
     /// generation from which recovery may continue.
     pub frozen_snapshot_hash: Option<String>,
     pub root_path: String,
-    pub state: String,
+    pub state: WorkspaceState,
     pub process_identity: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+/// Canonical durable execution-workspace lifecycle. SQLite stores the stable
+/// snake-case spelling, while every Rust reader and transition uses this type
+/// so an unknown state fails at the persistence boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceState {
+    Reserved,
+    Constructing,
+    Ready,
+    Active,
+    Freezing,
+    Destroying,
+    Closing,
+    Closed,
+    Orphaned,
+}
+
+impl WorkspaceState {
+    pub const ALL: [Self; 9] = [
+        Self::Reserved,
+        Self::Constructing,
+        Self::Ready,
+        Self::Active,
+        Self::Freezing,
+        Self::Destroying,
+        Self::Closing,
+        Self::Closed,
+        Self::Orphaned,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reserved => "reserved",
+            Self::Constructing => "constructing",
+            Self::Ready => "ready",
+            Self::Active => "active",
+            Self::Freezing => "freezing",
+            Self::Destroying => "destroying",
+            Self::Closing => "closing",
+            Self::Closed => "closed",
+            Self::Orphaned => "orphaned",
+        }
+    }
+}
+
+impl std::fmt::Display for WorkspaceState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkspaceStateParseError(String);
+
+impl std::fmt::Display for WorkspaceStateParseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "unknown execution workspace state {:?}", self.0)
+    }
+}
+
+impl std::error::Error for WorkspaceStateParseError {}
+
+impl std::str::FromStr for WorkspaceState {
+    type Err = WorkspaceStateParseError;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "reserved" => Ok(Self::Reserved),
+            "constructing" => Ok(Self::Constructing),
+            "ready" => Ok(Self::Ready),
+            "active" => Ok(Self::Active),
+            "freezing" => Ok(Self::Freezing),
+            "destroying" => Ok(Self::Destroying),
+            "closing" => Ok(Self::Closing),
+            "closed" => Ok(Self::Closed),
+            "orphaned" => Ok(Self::Orphaned),
+            other => Err(WorkspaceStateParseError(other.to_owned())),
+        }
+    }
+}
+
+impl rusqlite::types::FromSql for WorkspaceState {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|error| rusqlite::types::FromSqlError::Other(Box::new(error)))
+    }
 }
 
 /// Phase of a follow waiter. The row exists only while the follow is active —
@@ -3404,9 +3494,15 @@ impl RuntimeDb {
         let changed = self.conn.execute(
             "INSERT INTO execution_workspace
                 (workspace_id, lower_snapshot, root_path, state, created_at_ms, updated_at_ms)
-             VALUES (?1, ?2, ?3, 'reserved', ?4, ?4)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
              ON CONFLICT(workspace_id) DO NOTHING",
-            params![workspace_id, lower_snapshot, root_path, now],
+            params![
+                workspace_id,
+                lower_snapshot,
+                root_path,
+                WorkspaceState::Reserved.as_str(),
+                now
+            ],
         )?;
         if changed == 0 {
             let existing = self
@@ -3414,9 +3510,12 @@ impl RuntimeDb {
                 .ok_or_else(|| anyhow::anyhow!("workspace reservation disappeared"))?;
             if existing.lower_snapshot != lower_snapshot
                 || existing.root_path != root_path
-                || !matches!(existing.state.as_str(), "reserved" | "constructing")
+                || !matches!(
+                    existing.state,
+                    WorkspaceState::Reserved | WorkspaceState::Constructing
+                )
                 || existing.process_identity.is_some()
-                || (existing.state == "reserved"
+                || (existing.state == WorkspaceState::Reserved
                     && (existing.thread_id.is_some() || existing.launch_owner.is_some()))
             {
                 bail!("workspace {workspace_id} cannot adopt a conflicting durable reservation");
@@ -3435,12 +3534,13 @@ impl RuntimeDb {
             "UPDATE execution_workspace
                 SET thread_id=?2, launch_owner=?3, updated_at_ms=?4
               WHERE workspace_id=?1 AND thread_id IS NULL AND launch_owner IS NULL
-                AND state='constructing'",
+                AND state=?5",
             params![
                 workspace_id,
                 thread_id,
                 launch_owner,
-                lillux::time::timestamp_millis()
+                lillux::time::timestamp_millis(),
+                WorkspaceState::Constructing.as_str()
             ],
         )?;
         if changed != 1 {
@@ -3449,7 +3549,7 @@ impl RuntimeDb {
                 .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} disappeared"))?;
             if existing.thread_id.as_deref() != Some(thread_id)
                 || existing.launch_owner.as_deref() != Some(launch_owner)
-                || existing.state != "constructing"
+                || existing.state != WorkspaceState::Constructing
             {
                 bail!("workspace {workspace_id} cannot claim construction ownership");
             }
@@ -3473,7 +3573,7 @@ impl RuntimeDb {
             "UPDATE execution_workspace
                 SET backend_id=?4, backend_version=?5, updated_at_ms=?6
               WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
-                AND state='constructing'
+                AND state=?7
                 AND (backend_id IS NULL OR backend_id=?4)
                 AND (backend_version IS NULL OR backend_version=?5)",
             params![
@@ -3482,7 +3582,8 @@ impl RuntimeDb {
                 launch_owner,
                 backend_id,
                 backend_version,
-                lillux::time::timestamp_millis()
+                lillux::time::timestamp_millis(),
+                WorkspaceState::Constructing.as_str()
             ],
         )?;
         if changed != 1 {
@@ -3493,7 +3594,7 @@ impl RuntimeDb {
                 || existing.launch_owner.as_deref() != Some(launch_owner)
                 || existing.backend_id.as_deref() != Some(backend_id)
                 || existing.backend_version.as_deref() != Some(backend_version)
-                || existing.state != "constructing"
+                || existing.state != WorkspaceState::Constructing
             {
                 bail!(
                     "workspace {workspace_id} cannot record the selected backend before construction"
@@ -3517,9 +3618,9 @@ impl RuntimeDb {
             "UPDATE execution_workspace
                 SET backend_id=?4,
                     backend_version=?5, pinned_root_identities=?6, mount_identity=?7,
-                    state='ready', updated_at_ms=?8
+                    state=?8, updated_at_ms=?9
               WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
-                AND state='constructing'",
+                AND state=?10",
             params![
                 workspace_id,
                 thread_id,
@@ -3528,7 +3629,9 @@ impl RuntimeDb {
                 backend_version,
                 pinned_root_identities,
                 mount_identity,
-                lillux::time::timestamp_millis()
+                WorkspaceState::Ready.as_str(),
+                lillux::time::timestamp_millis(),
+                WorkspaceState::Constructing.as_str()
             ],
         )?;
         if changed != 1 {
@@ -3541,7 +3644,7 @@ impl RuntimeDb {
                 || existing.backend_version.as_deref() != backend_version
                 || existing.pinned_root_identities.as_deref() != pinned_root_identities
                 || existing.mount_identity.as_deref() != mount_identity
-                || existing.state != "ready"
+                || existing.state != WorkspaceState::Ready
             {
                 bail!("workspace {workspace_id} cannot be bound from its current state");
             }
@@ -3552,8 +3655,8 @@ impl RuntimeDb {
     pub fn transition_workspace(
         &self,
         workspace_id: &str,
-        expected: &[&str],
-        next: &str,
+        expected: &[WorkspaceState],
+        next: WorkspaceState,
         process_identity: Option<&str>,
     ) -> Result<()> {
         if expected.is_empty() {
@@ -3570,11 +3673,11 @@ impl RuntimeDb {
         let now = lillux::time::timestamp_millis();
         let mut values: Vec<rusqlite::types::Value> = vec![
             workspace_id.into(),
-            next.into(),
+            next.as_str().into(),
             process_identity.map_or(rusqlite::types::Value::Null, Into::into),
             now.into(),
         ];
-        values.extend(expected.iter().map(|value| (*value).into()));
+        values.extend(expected.iter().map(|value| value.as_str().into()));
         let changed = self
             .conn
             .execute(&sql, rusqlite::params_from_iter(values))?;
@@ -3589,8 +3692,8 @@ impl RuntimeDb {
         workspace_id: &str,
         thread_id: &str,
         launch_owner: &str,
-        expected: &[&str],
-        next: &str,
+        expected: &[WorkspaceState],
+        next: WorkspaceState,
         process_identity: Option<&str>,
     ) -> Result<()> {
         if expected.is_empty() {
@@ -3608,13 +3711,13 @@ impl RuntimeDb {
         );
         let mut values: Vec<rusqlite::types::Value> = vec![
             workspace_id.into(),
-            next.into(),
+            next.as_str().into(),
             process_identity.map_or(rusqlite::types::Value::Null, Into::into),
             lillux::time::timestamp_millis().into(),
             thread_id.into(),
             launch_owner.into(),
         ];
-        values.extend(expected.iter().map(|value| (*value).into()));
+        values.extend(expected.iter().map(|value| value.as_str().into()));
         let changed = self
             .conn
             .execute(&sql, rusqlite::params_from_iter(values))?;
@@ -3651,7 +3754,7 @@ impl RuntimeDb {
         let (workspace_thread, workspace_owner, state, lower_snapshot, existing_frozen): (
             Option<String>,
             Option<String>,
-            String,
+            WorkspaceState,
             String,
             Option<String>,
         ) = tx
@@ -3673,7 +3776,7 @@ impl RuntimeDb {
             .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} disappeared"))?;
         if workspace_thread.as_deref() != Some(thread_id)
             || workspace_owner.as_deref() != Some(launch_owner)
-            || state != "freezing"
+            || state != WorkspaceState::Freezing
             || existing_frozen
                 .as_deref()
                 .is_some_and(|existing| existing != snapshot_hash)
@@ -3716,14 +3819,15 @@ impl RuntimeDb {
             "UPDATE execution_workspace
                 SET frozen_snapshot_hash=?4, updated_at_ms=?5
               WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
-                AND state='freezing'
+                AND state=?6
                 AND (frozen_snapshot_hash IS NULL OR frozen_snapshot_hash=?4)",
             params![
                 workspace_id,
                 thread_id,
                 launch_owner,
                 snapshot_hash,
-                lillux::time::timestamp_millis()
+                lillux::time::timestamp_millis(),
+                WorkspaceState::Freezing.as_str()
             ],
         )?;
         let runtime_updated = tx.execute(
@@ -3773,9 +3877,9 @@ impl RuntimeDb {
             "SELECT workspace_id, thread_id, launch_owner, backend_id, backend_version,
                     pinned_root_identities, mount_identity, lower_snapshot,
                     frozen_snapshot_hash, root_path, state, process_identity, created_at_ms, updated_at_ms
-               FROM execution_workspace WHERE state != 'closed' ORDER BY created_at_ms",
+               FROM execution_workspace WHERE state != ?1 ORDER BY created_at_ms",
         )?;
-        let rows = statement.query_map([], |row| {
+        let rows = statement.query_map(params![WorkspaceState::Closed.as_str()], |row| {
             Ok(WorkspaceRecord {
                 workspace_id: row.get(0)?,
                 thread_id: row.get(1)?,
@@ -5364,6 +5468,64 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
         (tmp, db)
+    }
+
+    #[test]
+    fn workspace_states_have_one_strict_canonical_persistence_spelling() {
+        for state in WorkspaceState::ALL {
+            let encoded = state.as_str();
+            assert_eq!(encoded.parse::<WorkspaceState>().unwrap(), state);
+            assert_eq!(state.to_string(), encoded);
+            assert_eq!(
+                serde_json::to_string(&state).unwrap(),
+                format!("\"{encoded}\"")
+            );
+        }
+
+        assert!("Closing".parse::<WorkspaceState>().is_err());
+        assert!("unknown".parse::<WorkspaceState>().is_err());
+    }
+
+    #[test]
+    fn workspace_state_sql_contract_matches_the_rust_enum() {
+        let (_tmp, db) = fresh_db();
+        for (index, state) in WorkspaceState::ALL.into_iter().enumerate() {
+            let workspace_id = format!("workspace-{index}");
+            db.conn
+                .execute(
+                    "INSERT INTO execution_workspace
+                         (workspace_id, lower_snapshot, root_path, state,
+                          created_at_ms, updated_at_ms)
+                     VALUES (?1, 'snapshot', ?2, ?3, 1, 1)",
+                    params![
+                        workspace_id,
+                        format!("/tmp/workspace-{index}"),
+                        state.as_str()
+                    ],
+                )
+                .unwrap();
+            let persisted: WorkspaceState = db
+                .conn
+                .query_row(
+                    "SELECT state FROM execution_workspace WHERE workspace_id=?1",
+                    [&workspace_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(persisted, state);
+        }
+
+        assert!(db
+            .conn
+            .execute(
+                "INSERT INTO execution_workspace
+                     (workspace_id, lower_snapshot, root_path, state,
+                      created_at_ms, updated_at_ms)
+                 VALUES ('workspace-invalid', 'snapshot', '/tmp/workspace-invalid',
+                         'invalid', 1, 1)",
+                [],
+            )
+            .is_err());
     }
 
     fn rewrite_as_recognized_runtime_predecessor(

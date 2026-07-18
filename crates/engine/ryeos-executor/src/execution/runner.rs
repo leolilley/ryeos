@@ -34,6 +34,7 @@ use ryeos_app::callback_token::launch_token_ttl;
 use ryeos_app::env_contract::{EnvBinding, EnvSourceDetail};
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
+use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{
     is_terminal_status, StopIfAdmissionOpenOutcome, StopIntent, ThreadDetail,
@@ -786,7 +787,7 @@ fn bind_workspace_if_unbound(
         anyhow::bail!("execution workspace journal row is missing: {workspace_id}");
     };
     let launch_owner_json = lillux::canonical_json(&serde_json::to_value(launch_owner)?)?;
-    if record.state == "constructing"
+    if record.state == WorkspaceState::Constructing
         && (record.thread_id.is_none()
             || (record.thread_id.as_deref() == Some(thread_id)
                 && record.launch_owner.as_deref() == Some(launch_owner_json.as_str())))
@@ -831,7 +832,7 @@ fn bind_workspace_if_unbound(
             Some(&pinned_root_identities),
             Some(&created.mount_identity),
         )?;
-    } else if record.state != "ready"
+    } else if record.state != WorkspaceState::Ready
         || record.thread_id.as_deref() != Some(thread_id)
         || record.launch_owner.as_deref() != Some(launch_owner_json.as_str())
     {
@@ -847,8 +848,8 @@ fn transition_owned_workspace(
     state: &AppState,
     lifeline: Option<&Arc<TempDirGuard>>,
     thread_id: &str,
-    expected: &[&str],
-    next: &str,
+    expected: &[WorkspaceState],
+    next: WorkspaceState,
     process_identity: Option<&ryeos_app::process::ExecutionProcessIdentity>,
 ) -> Result<()> {
     let Some(root) = lifeline.and_then(|guard| guard.path()) else {
@@ -913,8 +914,8 @@ fn close_owned_workspace(
         state,
         Some(guard),
         thread_id,
-        &["freezing"],
-        "destroying",
+        &[WorkspaceState::Freezing],
+        WorkspaceState::Destroying,
         None,
     )?;
     let destroyed = state
@@ -941,8 +942,8 @@ fn close_owned_workspace(
         state,
         Some(guard),
         thread_id,
-        &["destroying"],
-        "closing",
+        &[WorkspaceState::Destroying],
+        WorkspaceState::Closing,
         None,
     )?;
     guard.remove_now()?;
@@ -950,8 +951,8 @@ fn close_owned_workspace(
         workspace_id,
         thread_id,
         launch_owner,
-        &["closing"],
-        "closed",
+        &[WorkspaceState::Closing],
+        WorkspaceState::Closed,
         None,
     )
 }
@@ -1281,8 +1282,8 @@ fn attach_or_kill(
             workspace_id,
             thread_id,
             launch_owner,
-            &["ready"],
-            "active",
+            &[WorkspaceState::Ready],
+            WorkspaceState::Active,
             Some(&identity),
         )
     })();
@@ -2014,8 +2015,8 @@ pub async fn run_inline(
             &state,
             guard.temp_dir.as_ref(),
             &running.thread_id,
-            &["active"],
-            "freezing",
+            &[WorkspaceState::Active],
+            WorkspaceState::Freezing,
             None,
         )
         .inspect_err(|_| guard.fail_thread("workspace_freeze_failed"))?;
@@ -2724,8 +2725,8 @@ async fn dispatch_detached_bg_task(
                     &bg_state,
                     bg_temp_dir.as_ref(),
                     &bg_thread_id,
-                    &["active"],
-                    "freezing",
+                    &[WorkspaceState::Active],
+                    WorkspaceState::Freezing,
                     None,
                 ) {
                     tracing::error!(

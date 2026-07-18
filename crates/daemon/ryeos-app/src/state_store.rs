@@ -5592,8 +5592,8 @@ impl StateStore {
     pub fn transition_execution_workspace(
         &self,
         workspace_id: &str,
-        expected: &[&str],
-        next: &str,
+        expected: &[runtime_db::WorkspaceState],
+        next: runtime_db::WorkspaceState,
         process_identity: Option<&str>,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
@@ -5607,8 +5607,8 @@ impl StateStore {
         workspace_id: &str,
         thread_id: &str,
         launch_owner: &str,
-        expected: &[&str],
-        next: &str,
+        expected: &[runtime_db::WorkspaceState],
+        next: runtime_db::WorkspaceState,
         process_identity: Option<&str>,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
@@ -5639,8 +5639,8 @@ impl StateStore {
         workspace_id: &str,
         thread_id: &str,
         launch_owner: &str,
-        expected: &[&str],
-        next: &str,
+        expected: &[runtime_db::WorkspaceState],
+        next: runtime_db::WorkspaceState,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;

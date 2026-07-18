@@ -27,6 +27,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result};
+use ryeos_app::runtime_db::WorkspaceState;
 
 use ryeos_state::objects::{ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::signer::Signer;
@@ -641,16 +642,16 @@ pub(crate) fn seal_callback_workspace_generation(
     if record.lower_snapshot != base_snapshot_hash {
         anyhow::bail!("callback workspace lower snapshot contradicts its resume base");
     }
-    match record.state.as_str() {
-        "active" => state.state_store.transition_execution_workspace_owned(
+    match record.state {
+        WorkspaceState::Active => state.state_store.transition_execution_workspace_owned(
             workspace_id,
             thread_id,
             launch_owner,
-            &["active"],
-            "freezing",
+            &[WorkspaceState::Active],
+            WorkspaceState::Freezing,
             None,
         )?,
-        "freezing" => {}
+        WorkspaceState::Freezing => {}
         state => {
             anyhow::bail!("callback workspace {workspace_id} cannot freeze from state {state}")
         }
@@ -719,7 +720,7 @@ pub fn recover_interrupted_workspace_freeze(
     state: &ryeos_app::state::AppState,
     record: &ryeos_app::runtime_db::WorkspaceRecord,
 ) -> Result<String> {
-    if record.state != "freezing" {
+    if record.state != WorkspaceState::Freezing {
         anyhow::bail!("only a freezing workspace can recover a callback generation");
     }
     if let Some(snapshot_hash) = record.frozen_snapshot_hash.as_ref() {

@@ -8,6 +8,7 @@ use ryeos_app::process::{
     execution_group_liveness, execution_identity_is_current_boot, execution_liveness,
     kill_by_action, resolve_shutdown_action, IdentityLiveness,
 };
+use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
@@ -1049,7 +1050,7 @@ fn reconcile_execution_workspaces(
             // A periodic sweep must never steal that in-process saga.
             continue;
         }
-        if workspace.state == "closing" {
+        if workspace.state == WorkspaceState::Closing {
             if let Err(error) = cleanup_dead_execution_workspace(state, &workspace) {
                 tracing::warn!(
                     workspace_id = %workspace.workspace_id,
@@ -1077,7 +1078,7 @@ fn reconcile_execution_workspaces(
             .or(recorded_identity.as_ref())
             .map(execution_group_liveness)
             .unwrap_or(IdentityLiveness::DeadOrStale);
-        if workspace.state == "freezing" {
+        if workspace.state == WorkspaceState::Freezing {
             let nonterminal_owner = workspace
                 .thread_id
                 .as_deref()
@@ -1174,7 +1175,7 @@ fn reconcile_execution_workspaces(
             // may safely reconcile these pre-bind rows.
             continue;
         }
-        if workspace.state != "orphaned" {
+        if workspace.state != WorkspaceState::Orphaned {
             if let (Some(thread_id), Some(launch_owner)) = (
                 workspace.thread_id.as_deref(),
                 workspace.launch_owner.as_deref(),
@@ -1185,14 +1186,14 @@ fn reconcile_execution_workspaces(
                         &workspace.workspace_id,
                         thread_id,
                         launch_owner,
-                        &[workspace.state.as_str()],
-                        "orphaned",
+                        &[workspace.state],
+                        WorkspaceState::Orphaned,
                     )?;
             } else {
                 state.state_store.transition_execution_workspace(
                     &workspace.workspace_id,
-                    &[workspace.state.as_str()],
-                    "orphaned",
+                    &[workspace.state],
+                    WorkspaceState::Orphaned,
                     None,
                 )?;
             }
@@ -1218,7 +1219,7 @@ fn cleanup_dead_execution_workspace(
     state: &AppState,
     workspace: &ryeos_app::runtime_db::WorkspaceRecord,
 ) -> Result<()> {
-    if workspace.state == "closing" {
+    if workspace.state == WorkspaceState::Closing {
         remove_exact_workspace_root_if_present(std::path::Path::new(&workspace.root_path))?;
         if let (Some(thread_id), Some(launch_owner)) = (
             workspace.thread_id.as_deref(),
@@ -1230,14 +1231,14 @@ fn cleanup_dead_execution_workspace(
                     &workspace.workspace_id,
                     thread_id,
                     launch_owner,
-                    &["closing"],
-                    "closed",
+                    &[WorkspaceState::Closing],
+                    WorkspaceState::Closed,
                 )?;
         } else {
             state.state_store.transition_execution_workspace(
                 &workspace.workspace_id,
-                &["closing"],
-                "closed",
+                &[WorkspaceState::Closing],
+                WorkspaceState::Closed,
                 None,
             )?;
         }
@@ -1246,15 +1247,15 @@ fn cleanup_dead_execution_workspace(
     if workspace.thread_id.is_none() && workspace.launch_owner.is_none() {
         state.state_store.transition_execution_workspace(
             &workspace.workspace_id,
-            &["orphaned"],
-            "closing",
+            &[WorkspaceState::Orphaned],
+            WorkspaceState::Closing,
             None,
         )?;
         remove_exact_workspace_root_if_present(std::path::Path::new(&workspace.root_path))?;
         state.state_store.transition_execution_workspace(
             &workspace.workspace_id,
-            &["closing"],
-            "closed",
+            &[WorkspaceState::Closing],
+            WorkspaceState::Closed,
             None,
         )?;
         return Ok(());
@@ -1294,7 +1295,7 @@ fn cleanup_dead_execution_workspace(
     // folded back.
     let recovered_create =
         if workspace.pinned_root_identities.is_none() || workspace.mount_identity.is_none() {
-            if workspace.state != "constructing" {
+            if workspace.state != WorkspaceState::Constructing {
                 anyhow::bail!("bound workspace is missing durable backend creation evidence");
             }
             Some(
@@ -1354,8 +1355,8 @@ fn cleanup_dead_execution_workspace(
             &workspace.workspace_id,
             thread_id,
             launch_owner,
-            &["orphaned"],
-            "closing",
+            &[WorkspaceState::Orphaned],
+            WorkspaceState::Closing,
         )?;
     remove_exact_workspace_root_if_present(&root)?;
     state
@@ -1364,8 +1365,8 @@ fn cleanup_dead_execution_workspace(
             &workspace.workspace_id,
             thread_id,
             launch_owner,
-            &["closing"],
-            "closed",
+            &[WorkspaceState::Closing],
+            WorkspaceState::Closed,
         )?;
     Ok(())
 }

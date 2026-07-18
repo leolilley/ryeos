@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_engine::engine::Engine;
@@ -335,12 +336,17 @@ fn resolve_pinned_snapshot_context_admitted(
         .ok_or_else(|| {
             ProjectSourceError::CheckoutFailed("workspace reservation disappeared".to_string())
         })?;
-    if reserved.state == "reserved" {
+    if reserved.state == WorkspaceState::Reserved {
         state
             .state_store
-            .transition_execution_workspace(checkout_id, &["reserved"], "constructing", None)
+            .transition_execution_workspace(
+                checkout_id,
+                &[WorkspaceState::Reserved],
+                WorkspaceState::Constructing,
+                None,
+            )
             .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    } else if reserved.state != "constructing" {
+    } else if reserved.state != WorkspaceState::Constructing {
         return Err(ProjectSourceError::CheckoutFailed(format!(
             "workspace {checkout_id} cannot be adopted from state {}",
             reserved.state
