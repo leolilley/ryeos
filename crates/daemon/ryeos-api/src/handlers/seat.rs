@@ -116,6 +116,7 @@ pub async fn handle_open(
             project_root: root_admission
                 .project_root()
                 .map(std::path::Path::to_path_buf),
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,

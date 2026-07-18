@@ -337,6 +337,20 @@ pub(crate) async fn dispatch_runtime_method(
         )
     };
 
+    let callback_launch_owner = callback_cap
+        .as_ref()
+        .map(|cap| {
+            cap.launch_owner
+                .as_deref()
+                .ok_or_else(|| anyhow!("execution callback capability has no launch owner"))
+        })
+        .transpose()?;
+    if let (Some(cap), Some(owner)) = (callback_cap.as_ref(), callback_launch_owner) {
+        state
+            .state_store
+            .assert_launch_owner(&cap.thread_id, owner)?;
+    }
+
     enforce_runtime_callback_admission(method, params, state)?;
 
     // Strip transport-level fields before typed deserialization so
@@ -391,7 +405,9 @@ pub(crate) async fn dispatch_runtime_method(
             validated_thread_auth.as_ref(),
         ),
         "runtime.finalize_thread" => {
-            let result = handle_finalize(&clean_params, state)?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("runtime.finalize_thread requires a launch owner"))?;
+            let result = handle_finalize(&clean_params, state, owner)?;
             // A self-finalizing follow child (the normal path) flips its waiter to
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
@@ -419,7 +435,11 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.claim_commands" => handle_claim_commands(&clean_params, state),
         "runtime.complete_command" => handle_complete_command(&clean_params, state),
         "runtime.get_thread_events" => handle_replay_events(&clean_params, state),
-        "runtime.attach_process" => handle_attach_process(&clean_params, state, peer).await,
+        "runtime.attach_process" => {
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("runtime.attach_process requires a launch owner"))?;
+            handle_attach_process(&clean_params, state, peer, owner).await
+        }
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
@@ -570,6 +590,7 @@ async fn handle_attach_process(
     params: &serde_json::Value,
     state: &AppState,
     peer: Option<&AuthenticatedUnixPeer>,
+    launch_owner: &str,
 ) -> Result<serde_json::Value> {
     let wire: RuntimeAttachProcessParams =
         serde_json::from_value(params.clone()).context("invalid runtime.attach_process params")?;
@@ -601,7 +622,7 @@ async fn handle_attach_process(
         metadata: None,
         launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
     };
-    let attached = match state.threads.attach_process(&params) {
+    let attached = match state.threads.attach_process_owned(&params, launch_owner) {
         Ok(thread) => thread,
         Err(error) => {
             if let Some(identity) = params.process_identity.clone() {
@@ -766,7 +787,11 @@ fn final_cost_from_runtime(
     })
 }
 
-fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+fn handle_finalize(
+    params: &serde_json::Value,
+    state: &AppState,
+    launch_owner: &str,
+) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
     let final_cost = params
@@ -802,8 +827,9 @@ fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde
         continuation_request: None,
         metadata: None,
     };
-    let finalized = state.threads.finalize_from_runtime_completion(
+    let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
+        launch_owner,
         &completion,
         Some(managed_envelope),
     )?;
@@ -1587,6 +1613,7 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("user:test".to_string()),
             project_root: None,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
@@ -1612,6 +1639,7 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("session:test".to_string()),
             project_root: None,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(sealed.captured_history_policy().clone()),
@@ -2132,6 +2160,7 @@ mod tests {
             upstream_thread_id: upstream.map(Into::into),
             requested_by: Some("user:test".to_string()),
             project_root: Some(std::path::PathBuf::from("/tmp/p")),
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
@@ -2165,6 +2194,14 @@ mod tests {
                         project_context: ProjectContext::LocalPath {
                             path: std::path::PathBuf::from("/tmp/p"),
                         },
+                        stable_project_identity: Some(
+                            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                                std::path::Path::new("/tmp/p"),
+                                "site:test",
+                            )
+                            .unwrap(),
+                        ),
+                        local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
                         original_snapshot_hash: None,
                         original_pushed_head_ref: None,
                         state_root: None,
@@ -2260,6 +2297,8 @@ mod tests {
                 launch_mode: "detached".to_string(),
                 parameters: json!({}),
                 project_context: ProjectContext::None,
+                stable_project_identity: None,
+                local_overlay_root: None,
                 original_snapshot_hash: None,
                 original_pushed_head_ref: None,
                 state_root: None,
@@ -2949,6 +2988,7 @@ mod tests {
                 upstream_thread_id: params.upstream_thread_id,
                 requested_by: params.requested_by,
                 project_root: params.project_root,
+                base_project_snapshot_hash: params.base_project_snapshot_hash,
                 usage_subject: params.usage_subject,
                 usage_subject_asserted_by: params.usage_subject_asserted_by,
                 captured_history_policy: params.captured_history_policy,
@@ -4717,6 +4757,7 @@ mod tests {
                     upstream_thread_id: Some("T-pred".to_string()),
                     requested_by: Some("user:test".to_string()),
                     project_root: None,
+                    base_project_snapshot_hash: None,
                     usage_subject: None,
                     usage_subject_asserted_by: None,
                     captured_history_policy: None,

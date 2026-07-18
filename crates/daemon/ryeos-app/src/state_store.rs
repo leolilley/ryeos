@@ -123,6 +123,8 @@ pub struct NewThreadRecord {
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub project_root: Option<PathBuf>,
+    /// Immutable project generation that authorizes this thread from birth.
+    pub base_project_snapshot_hash: Option<String>,
     pub usage_subject: Option<UsageSubject>,
     pub usage_subject_asserted_by: Option<String>,
     /// Destructive history authority captured only on a new chain root.
@@ -164,6 +166,9 @@ pub struct FinalizeThreadRecord {
     /// Persisted in the signed snapshot so later stdout reconciliation and API
     /// responses have one payload authority, not a second process claim.
     pub managed_envelope: Option<Value>,
+    /// Immutable generation produced by this exact execution owner. It may be
+    /// established only by the terminal transition.
+    pub result_project_snapshot_hash: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -797,6 +802,10 @@ pub struct StateStore {
     /// StateStore mutex (never a mutex probe followed by permit acquisition).
     write_barrier: WriteBarrier,
     process_attachment_admission_open: AtomicBool,
+    /// Exact durable owners whose executor guards are alive in this process.
+    /// Persisted claims prove fencing identity; this registry separately proves
+    /// that a current task still owns the post-exit settlement window.
+    active_launch_owners: Mutex<HashSet<String>>,
 }
 
 /// Enforces the global mutation order for every StateStore write: the
@@ -838,7 +847,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         upstream_thread_id: thread.upstream_thread_id.clone(),
         requested_by: thread.requested_by.clone(),
         project_root: thread.project_root.clone(),
-        base_project_snapshot_hash: None,
+        base_project_snapshot_hash: thread.base_project_snapshot_hash.clone(),
         result_project_snapshot_hash: None,
         created_at: now.clone(),
         updated_at: now,
@@ -869,6 +878,13 @@ fn build_continuation_snapshot(
             "continuation successor project root {:?} contradicts captured launch root {:?}",
             thread.project_root,
             project_root
+        );
+    }
+    if thread.base_project_snapshot_hash.as_deref() != base_project_snapshot_hash.as_deref() {
+        bail!(
+            "continuation successor base snapshot {:?} contradicts captured launch snapshot {:?}",
+            thread.base_project_snapshot_hash,
+            base_project_snapshot_hash
         );
     }
     let mut snapshot = build_snapshot(thread);
@@ -1655,6 +1671,7 @@ impl StateStore {
             allow_projection_rebuild: false,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            active_launch_owners: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1677,15 +1694,6 @@ impl StateStore {
         let thread_runtime_authority =
             ThreadRuntimeAuthority::capture(&app_root, &runtime_state_authority, false)?;
         let runtime_db = runtime_db::RuntimeDb::open_existing_current(&runtime_db_path)?;
-        let cleared_launch_claims = runtime_db
-            .clear_all_launch_claims()
-            .context("clear stale launch claims before offline projection recovery")?;
-        if cleared_launch_claims > 0 {
-            tracing::info!(
-                cleared = cleared_launch_claims,
-                "cleared stale launch claims before offline projection recovery"
-            );
-        }
         let state_db = StateDb::open_for_projection_rebuild(&runtime_state_dir, head_trust)?;
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
@@ -1702,6 +1710,7 @@ impl StateStore {
             allow_projection_rebuild: true,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            active_launch_owners: Mutex::new(HashSet::new()),
         })
     }
 
@@ -1764,21 +1773,10 @@ impl StateStore {
         } else {
             runtime_db::RuntimeDb::open(&runtime_db_path)?
         };
-        // Launch claims are owned exclusively by tasks in one daemon process.
-        // Holding the process-wide state lock while opening a new RuntimeDb
-        // proves every persisted claim belongs to the previous process. Clear
-        // them before projection recovery consults runtime liveness; doing this
-        // after StateDb::open would let a stale claim falsely quarantine a
-        // headless transition during the open-time replay.
-        let cleared_launch_claims = runtime_db
-            .clear_all_launch_claims()
-            .context("clear stale launch claims before projection recovery")?;
-        if cleared_launch_claims > 0 {
-            tracing::info!(
-                cleared = cleared_launch_claims,
-                "cleared stale launch claims before projection recovery"
-            );
-        }
+        // Launch claims are durable owner evidence. They must survive process
+        // restart so reconciliation can revoke the exact abandoned claim after
+        // proving its attached process identity dead (or classify a genuinely
+        // pre-attach window). Never erase ownership history wholesale here.
         let state_db = match recovery_observer {
             Some(recovery_observer) => {
                 StateDb::open_with_recovery_observer_runtime_liveness_and_namespace_authority(
@@ -1817,7 +1815,38 @@ impl StateStore {
             allow_projection_rebuild: false,
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
+            active_launch_owners: Mutex::new(HashSet::new()),
         })
+    }
+
+    pub fn is_launch_owner_active(&self, launch_owner: &str) -> bool {
+        self.active_launch_owners
+            .lock()
+            .map(|active| active.contains(launch_owner))
+            .unwrap_or(false)
+    }
+
+    /// Persist a bounded post-exit settlement observation only while the
+    /// exact current-daemon launch owner remains registered and claimed.
+    pub fn observe_active_owner_dead_process(
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        launch_owner: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        observed_at_ms: i64,
+    ) -> Result<Option<i64>> {
+        let g = self.lock()?;
+        let claim = g.runtime_db.get_launch_claim(thread_id)?;
+        if !claim.as_ref().is_some_and(|claim| {
+            claim.claim_id == claim_id
+                && claim.claimed_by == launch_owner
+                && self.is_launch_owner_active(launch_owner)
+        }) {
+            return Ok(None);
+        }
+        g.runtime_db
+            .observe_dead_process_if_matches(thread_id, process_identity, observed_at_ms)
     }
 
     /// Get the CAS root path for raw CAS access.
@@ -1871,6 +1900,24 @@ impl StateStore {
         F: FnOnce(&StateDb) -> Result<T>,
     {
         let g = self.lock()?;
+        f(&g.state_db)
+    }
+
+    /// Run a state publication while the exact execution launch owner remains
+    /// current. This closes the stale-waiter window for side effects such as a
+    /// signed project HEAD compare-and-swap.
+    pub fn with_state_db_owned<F, T>(&self, thread_id: &str, launch_owner: &str, f: F) -> Result<T>
+    where
+        F: FnOnce(&StateDb) -> Result<T>,
+    {
+        let g = self.lock()?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner cannot publish state for thread {thread_id}");
+        }
         f(&g.state_db)
     }
 
@@ -2452,6 +2499,24 @@ impl StateStore {
         self.finalize_thread_locked(thread_id, update)
     }
 
+    pub fn finalize_thread_effective_owned(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<(Vec<PersistedEventRecord>, FinalizeThreadRecord)> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("thread {thread_id} has no launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            anyhow::bail!("stale launch owner cannot finalize thread {thread_id}");
+        }
+        self.finalize_thread_with_guard(&g, permit.cas_guard(), thread_id, update, false)
+    }
+
     /// Runtime-callback finalization with stop/shutdown policy enforced under
     /// the same StateStore lock as the terminal commit. A durable Cancel/Kill
     /// dominates any self-reported status; shutdown without an explicit stop
@@ -2573,6 +2638,60 @@ impl StateStore {
         })
     }
 
+    /// Owner-qualified form of [`Self::finalize_if_nonterminal`] for daemon
+    /// supervised method/runtime completion. The terminal check, exact owner
+    /// comparison, stop dominance, and winning write share one StateStore lock.
+    pub fn finalize_if_nonterminal_owned(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<FinalizeIfNonterminalOutcome> {
+        let permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+        if is_terminal_status(&thread_row.status) {
+            return Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal {
+                status: thread_row.status,
+            });
+        }
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner cannot finalize thread {thread_id}");
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing during finalization: {thread_id}"))?;
+        if runtime.stop_intent.is_none()
+            && !self
+                .process_attachment_admission_open
+                .load(Ordering::Acquire)
+        {
+            g.runtime_db.reset_resume_attempts(thread_id)?;
+            return Ok(FinalizeIfNonterminalOutcome::PreservedForShutdown);
+        }
+        let (persisted, effective) = self.finalize_thread_with_rows(
+            &g,
+            permit.cas_guard(),
+            thread_id,
+            thread_row,
+            runtime,
+            update,
+            false,
+        )?;
+        Ok(FinalizeIfNonterminalOutcome::Finalized {
+            persisted,
+            effective: Box::new(effective),
+        })
+    }
+
     fn finalize_thread_with_guard(
         &self,
         g: &Inner,
@@ -2638,6 +2757,7 @@ impl StateStore {
             // contradictory process claim into the effective terminal
             // snapshot. Incurred cost remains authoritative and is retained.
             effective_update.managed_envelope = None;
+            effective_update.result_project_snapshot_hash = None;
         } else if !allow_closed_admission
             && !self
                 .process_attachment_admission_open
@@ -2753,6 +2873,9 @@ impl StateStore {
         });
         updated_snapshot.artifacts = artifacts_json;
         updated_snapshot.facets = facets;
+        updated_snapshot
+            .result_project_snapshot_hash
+            .clone_from(&update.result_project_snapshot_hash);
 
         let snapshot_update = SnapshotUpdate {
             thread_id: thread_id.to_string(),
@@ -3011,6 +3134,7 @@ impl StateStore {
             RunningContinuationKind::Machine { sanitized_reason },
             None,
             None,
+            None,
             Vec::new(),
         )
     }
@@ -3040,6 +3164,7 @@ impl StateStore {
             RunningContinuationKind::Machine { sanitized_reason },
             Some(expected_resume_context),
             Some(successor_launch_metadata),
+            None,
             initial_events,
         )
     }
@@ -3065,6 +3190,7 @@ impl StateStore {
             RunningContinuationKind::GraphFollowResume,
             None,
             None,
+            None,
             Vec::new(),
         )
     }
@@ -3075,6 +3201,7 @@ impl StateStore {
         source_thread_id: &str,
         chain_root_id: &str,
         successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        result_project_snapshot_hash: Option<&str>,
     ) -> Result<Vec<PersistedEventRecord>> {
         self.create_running_continuation_successor(
             successor,
@@ -3083,6 +3210,7 @@ impl StateStore {
             RunningContinuationKind::GraphFollowResume,
             successor_launch_metadata.resume_context.as_ref(),
             Some(successor_launch_metadata),
+            result_project_snapshot_hash,
             Vec::new(),
         )
     }
@@ -3103,6 +3231,7 @@ impl StateStore {
         kind: RunningContinuationKind<'_>,
         expected_resume_context: Option<&crate::launch_metadata::ResumeContext>,
         successor_launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+        source_result_snapshot_hash: Option<&str>,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<Vec<PersistedEventRecord>> {
         let permit = self.acquire_write_permit()?;
@@ -3291,7 +3420,22 @@ impl StateStore {
         // Settle the source to `continued` in the same signed head that creates
         // the successor and records its authoritative birth events.
         let now = lillux::time::iso8601_now();
-        let source_snapshot = continued_snapshot_for_transition(&g, &source_row, &now)?;
+        let mut source_snapshot = continued_snapshot_for_transition(&g, &source_row, &now)?;
+        source_snapshot.result_project_snapshot_hash =
+            source_result_snapshot_hash.map(ToOwned::to_owned);
+        if let Some(result_hash) = source_result_snapshot_hash {
+            if successor_with_upstream
+                .base_project_snapshot_hash
+                .as_deref()
+                != Some(result_hash)
+            {
+                bail!(
+                    "continuation successor {} base snapshot does not match frozen source result {}",
+                    successor.thread_id,
+                    result_hash
+                );
+            }
+        }
         let edge_reason: Option<&str> = match &kind {
             RunningContinuationKind::Machine { sanitized_reason } => *sanitized_reason,
             RunningContinuationKind::GraphFollowResume => {
@@ -3626,6 +3770,24 @@ impl StateStore {
             finished_at: thread_row.finished_at,
             runtime,
         }))
+    }
+
+    /// Read the immutable generation pinned by authoritative signed history.
+    /// Runtime metadata and projection paths are never consulted.
+    pub fn authoritative_project_generation(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<(Option<String>, Option<String>)>> {
+        let g = self.lock()?;
+        let Some(row) = g.state_db.get_thread(thread_id)? else {
+            return Ok(None);
+        };
+        let snapshot =
+            authoritative_snapshot_for_transition(&g, &row.chain_root_id, &row.thread_id)?;
+        Ok(Some((
+            snapshot.base_project_snapshot_hash,
+            snapshot.result_project_snapshot_hash,
+        )))
     }
 
     /// Read a newly-created thread from signed CAS authority. This is used
@@ -4800,6 +4962,13 @@ impl StateStore {
         queries::active_thread_count(g.state_db.projection())
     }
 
+    pub fn authoritative_result_project_snapshot(&self, thread_id: &str) -> Result<Option<String>> {
+        let g = self.lock()?;
+        Ok(g.state_db
+            .get_thread(thread_id)?
+            .and_then(|snapshot| snapshot.result_project_snapshot_hash))
+    }
+
     /// Immutable project snapshots required by active or queued runtimes.
     ///
     /// These runtime-DB references are not signed CAS heads, so online GC must
@@ -4830,6 +4999,17 @@ impl StateStore {
             }
             if let Some(pushed) = resume.original_pushed_head_ref {
                 roots.insert(pushed.snapshot_hash);
+            }
+        }
+        // Workspace reservation precedes thread birth so a crash cannot leave
+        // an unjournaled mount. Those lower generations are therefore not
+        // always reachable through authoritative thread history yet. Keep
+        // every non-closed journal generation as an operational GC root until
+        // verified backend cleanup closes the record.
+        for workspace in g.runtime_db.open_workspaces()? {
+            roots.insert(workspace.lower_snapshot);
+            if let Some(frozen) = workspace.frozen_snapshot_hash {
+                roots.insert(frozen);
             }
         }
         Ok(roots.into_iter().collect())
@@ -4893,9 +5073,19 @@ impl StateStore {
         pgid: i64,
         process_identity: &crate::process::ExecutionProcessIdentity,
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        expected_launch_owner: Option<&str>,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        if let Some(expected) = expected_launch_owner {
+            let claim = g
+                .runtime_db
+                .get_launch_claim(thread_id)?
+                .ok_or_else(|| anyhow::anyhow!("thread {thread_id} has no launch owner"))?;
+            if claim.claimed_by != expected {
+                anyhow::bail!("stale launch owner cannot attach process to {thread_id}");
+            }
+        }
         // The projection row is the authoritative lifecycle identity. A bare
         // runtime row must never acquire a process that reconcile/drain cannot
         // subsequently account for.
@@ -5105,6 +5295,24 @@ impl StateStore {
             .clear_process_if_matches(thread_id, process_identity)
     }
 
+    pub fn clear_thread_process_if_matches_owned(
+        &self,
+        thread_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        launch_owner: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner cannot detach process from {thread_id}");
+        }
+        g.runtime_db
+            .clear_process_if_matches(thread_id, process_identity)
+    }
+
     pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
         let g = self.lock()?;
         g.runtime_db.list_attached_thread_ids()
@@ -5140,6 +5348,43 @@ impl StateStore {
             .claim_thread_launch(thread_id, claim_id, claimed_by)
     }
 
+    /// Claim an existing thread and publish its in-process owner before the
+    /// StateStore lock is released. Live reconciliation reads durable claims
+    /// through this same lock, so it can never observe the new claim without
+    /// also observing the active owner that is responsible for it.
+    pub fn claim_thread_launch_active(
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        daemon_generation_id: &str,
+    ) -> Result<Option<runtime_db::LaunchClaim>> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        match g
+            .runtime_db
+            .claim_thread_launch(thread_id, claim_id, daemon_generation_id)?
+        {
+            runtime_db::LaunchClaimOutcome::AlreadyClaimed => Ok(None),
+            runtime_db::LaunchClaimOutcome::Claimed => {
+                let claim = g
+                    .runtime_db
+                    .get_launch_claim(thread_id)?
+                    .ok_or_else(|| anyhow!("launch owner disappeared after claim"))?;
+                let mut active = self
+                    .active_launch_owners
+                    .lock()
+                    .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+                if !active.insert(claim.claimed_by.clone()) {
+                    g.runtime_db
+                        .release_thread_launch_claim(thread_id, claim_id)?;
+                    bail!("launch owner is already registered in this daemon");
+                }
+                Ok(Some(claim))
+            }
+        }
+    }
+
     /// Reserve launch ownership for a pre-minted thread ID before its row is
     /// published. Fresh execution paths use this to make creation visible only
     /// after durable spawn ownership exists. The owned executor guard removes
@@ -5162,9 +5407,68 @@ impl StateStore {
             .claim_thread_launch(thread_id, claim_id, claimed_by)
     }
 
+    /// Fresh-thread counterpart to [`Self::claim_thread_launch_active`]. The
+    /// unpublished ID and its active durable owner become observable as one
+    /// StateStore operation.
+    pub fn reserve_fresh_thread_launch_active(
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        daemon_generation_id: &str,
+    ) -> Result<Option<runtime_db::LaunchClaim>> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if g.state_db.get_thread(thread_id)?.is_some() {
+            bail!(
+                "fresh launch reservation requires an unpublished thread ID; thread already exists: {thread_id}"
+            );
+        }
+        match g
+            .runtime_db
+            .claim_thread_launch(thread_id, claim_id, daemon_generation_id)?
+        {
+            runtime_db::LaunchClaimOutcome::AlreadyClaimed => Ok(None),
+            runtime_db::LaunchClaimOutcome::Claimed => {
+                let claim = g
+                    .runtime_db
+                    .get_launch_claim(thread_id)?
+                    .ok_or_else(|| anyhow!("fresh launch owner disappeared"))?;
+                let mut active = self
+                    .active_launch_owners
+                    .lock()
+                    .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+                if !active.insert(claim.claimed_by.clone()) {
+                    g.runtime_db
+                        .release_thread_launch_claim(thread_id, claim_id)?;
+                    bail!("launch owner is already registered in this daemon");
+                }
+                Ok(Some(claim))
+            }
+        }
+    }
+
     /// Release a launch claim the caller owns (matched by `claim_id`).
     pub fn release_thread_launch_claim(&self, thread_id: &str, claim_id: &str) -> Result<bool> {
         let g = self.lock()?;
+        g.runtime_db
+            .release_thread_launch_claim(thread_id, claim_id)
+    }
+
+    /// Atomically retire the in-process owner and its exact durable claim with
+    /// respect to live reconciliation. A replacement claim cannot be confused
+    /// with the owner being dropped because deletion remains claim-id-qualified.
+    pub fn release_active_thread_launch_claim(
+        &self,
+        thread_id: &str,
+        claim_id: &str,
+        launch_owner: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        let mut active = self
+            .active_launch_owners
+            .lock()
+            .map_err(|_| anyhow!("active launch-owner registry poisoned"))?;
+        active.remove(launch_owner);
         g.runtime_db
             .release_thread_launch_claim(thread_id, claim_id)
     }
@@ -5174,6 +5478,231 @@ impl StateStore {
     pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<runtime_db::LaunchClaim>> {
         let g = self.lock()?;
         g.runtime_db.get_launch_claim(thread_id)
+    }
+
+    pub fn assert_launch_owner(&self, thread_id: &str, launch_owner: &str) -> Result<()> {
+        let g = self.lock()?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner for thread {thread_id}");
+        }
+        Ok(())
+    }
+
+    /// Return the descriptor-stable process identity only when the caller is
+    /// still the thread's exact launch owner. Owner validation and identity
+    /// read share the StateStore lock so callback quiescence cannot borrow a
+    /// replacement launch's process.
+    pub fn execution_process_identity_owned(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+    ) -> Result<crate::process::ExecutionProcessIdentity> {
+        let g = self.lock()?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner for thread {thread_id}");
+        }
+        g.runtime_db
+            .get_runtime_info(thread_id)?
+            .and_then(|runtime| runtime.process_identity)
+            .ok_or_else(|| anyhow!("thread {thread_id} has no attached process identity"))
+    }
+
+    pub fn reserve_execution_workspace(
+        &self,
+        workspace_id: &str,
+        lower_snapshot: &str,
+        root_path: &str,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .reserve_workspace(workspace_id, lower_snapshot, root_path)
+    }
+
+    pub fn bind_execution_workspace(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: Option<&str>,
+        backend_id: Option<&str>,
+        backend_version: Option<&str>,
+        pinned_root_identities: Option<&str>,
+        mount_identity: Option<&str>,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        g.runtime_db.bind_workspace(
+            workspace_id,
+            thread_id,
+            launch_owner,
+            backend_id,
+            backend_version,
+            pinned_root_identities,
+            mount_identity,
+        )
+    }
+
+    pub fn claim_execution_workspace_construction(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner for thread {thread_id}");
+        }
+        g.runtime_db
+            .claim_workspace_construction(workspace_id, thread_id, launch_owner)
+    }
+
+    pub fn prepare_execution_workspace_backend(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+        backend_id: &str,
+        backend_version: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        g.runtime_db.prepare_workspace_backend(
+            workspace_id,
+            thread_id,
+            launch_owner,
+            backend_id,
+            backend_version,
+        )
+    }
+
+    pub fn transition_execution_workspace(
+        &self,
+        workspace_id: &str,
+        expected: &[&str],
+        next: &str,
+        process_identity: Option<&str>,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        g.runtime_db
+            .transition_workspace(workspace_id, expected, next, process_identity)
+    }
+
+    pub fn transition_execution_workspace_owned(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+        expected: &[&str],
+        next: &str,
+        process_identity: Option<&str>,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        let claim = g
+            .runtime_db
+            .get_launch_claim(thread_id)?
+            .ok_or_else(|| anyhow!("thread {thread_id} has no current launch owner"))?;
+        if claim.claimed_by != launch_owner {
+            bail!("stale launch owner for thread {thread_id}");
+        }
+        g.runtime_db.transition_workspace_owned(
+            workspace_id,
+            thread_id,
+            launch_owner,
+            expected,
+            next,
+            process_identity,
+        )
+    }
+
+    /// Transition an exact dead owner's workspace during reconciliation. A
+    /// replacement launch may exist for the same thread, so this fence is the
+    /// immutable workspace owner tuple rather than the thread's current claim.
+    pub fn transition_abandoned_execution_workspace_owned(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+        expected: &[&str],
+        next: &str,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let workspace = g
+            .runtime_db
+            .workspace(workspace_id)?
+            .ok_or_else(|| anyhow!("workspace {workspace_id} disappeared"))?;
+        if workspace.thread_id.as_deref() != Some(thread_id)
+            || workspace.launch_owner.as_deref() != Some(launch_owner)
+        {
+            bail!("abandoned workspace owner tuple changed during reconciliation");
+        }
+        if g.runtime_db
+            .get_launch_claim(thread_id)?
+            .is_some_and(|claim| {
+                claim.claimed_by == launch_owner && self.is_launch_owner_active(&claim.claimed_by)
+            })
+        {
+            bail!("workspace launch owner is still active in this daemon");
+        }
+        g.runtime_db.transition_workspace_owned(
+            workspace_id,
+            thread_id,
+            launch_owner,
+            expected,
+            next,
+            None,
+        )
+    }
+
+    /// Publish a callback-frozen generation under the same StateStore lock as
+    /// launch-owner fencing. RuntimeDb performs the workspace-journal and
+    /// ResumeContext updates in one immediate SQLite transaction.
+    pub fn bind_frozen_execution_workspace(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+        snapshot_hash: &str,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
+        g.runtime_db.bind_frozen_workspace_generation(
+            workspace_id,
+            thread_id,
+            launch_owner,
+            snapshot_hash,
+        )
+    }
+
+    pub fn open_execution_workspaces(&self) -> Result<Vec<runtime_db::WorkspaceRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.open_workspaces()
+    }
+
+    pub fn execution_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<runtime_db::WorkspaceRecord>> {
+        let g = self.lock()?;
+        g.runtime_db.workspace(workspace_id)
     }
 
     // ── Hook dispatch ledger ─────────────────────────────────────────────
@@ -5195,6 +5724,34 @@ impl StateStore {
         let g = self.lock()?;
         g.runtime_db
             .complete_hook_dispatch(dispatch_key, request_hash, response)
+    }
+
+    /// Reserve the stable child identity for one detached callback operation
+    /// while the authoritative parent chain is still admitted.
+    pub fn reserve_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+        parent_thread_id: &str,
+        request_hash: &str,
+        proposed_child_thread_id: &str,
+    ) -> Result<String> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let parent = g
+            .state_db
+            .get_thread(parent_thread_id)?
+            .ok_or_else(|| anyhow!("detached parent thread {parent_thread_id} does not exist"))?;
+        let _admission = g.state_db.authorize_runtime_pin(&parent.chain_root_id)?;
+        g.runtime_db.reserve_detached_spawn_intent(
+            operation_id,
+            parent_thread_id,
+            request_hash,
+            proposed_child_thread_id,
+        )
+    }
+
+    pub fn detached_spawn_intents(&self) -> Result<Vec<runtime_db::DetachedSpawnIntent>> {
+        self.lock()?.runtime_db.detached_spawn_intents()
     }
 
     // ── Follow waiters ───────────────────────────────────────────────────
@@ -6413,6 +6970,7 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("fp:test".to_string()),
             project_root: None,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
@@ -6580,6 +7138,7 @@ mod tests {
                     artifacts: Vec::new(),
                     final_cost: None,
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                 },
             )
             .expect("finalize fixture");
@@ -6617,6 +7176,7 @@ mod tests {
                     group_leader_start_time_ticks: 20,
                 },
                 &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
             )
             .expect("attach fixture process");
         let attached_before = replayed_event_types(&attached_store, attached_id);
@@ -6633,6 +7193,13 @@ mod tests {
     fn continuation_resume_context(
         project_context: ProjectContext,
     ) -> crate::launch_metadata::ResumeContext {
+        let stable_project_identity = match &project_context {
+            ProjectContext::LocalPath { path } => Some(
+                crate::launch_metadata::StableProjectIdentity::from_path(path, "site:test")
+                    .unwrap(),
+            ),
+            _ => None,
+        };
         crate::launch_metadata::ResumeContext {
             kind: "directive".to_string(),
             item_ref: "directive:test".to_string(),
@@ -6640,6 +7207,8 @@ mod tests {
             launch_mode: "inline".to_string(),
             parameters: json!({}),
             project_context,
+            stable_project_identity,
+            local_overlay_root: Some(PathBuf::from("/work/project")),
             original_snapshot_hash: Some("a".repeat(64)),
             original_pushed_head_ref: None,
             state_root: None,
@@ -6736,6 +7305,7 @@ mod tests {
                     artifacts: Vec::new(),
                     final_cost: None,
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                 },
             )
             .expect("continue parent");
@@ -6773,6 +7343,7 @@ mod tests {
                     artifacts: Vec::new(),
                     final_cost: None,
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                 },
             )
             .expect("complete parent");

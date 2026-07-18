@@ -40,9 +40,9 @@ pub struct ReachableSet {
 ///     → thread_event (prev_chain_event_hash, prev_thread_event_hash)
 ///   chain_state.prev_chain_state_hash → walk history
 ///
-///   signed project head → project_snapshot (project_manifest_hash, user_manifest_hash, parent_hashes)
-///     → source_manifest (item_source_hashes values)
-///       → item_source (content_blob_hash) → blob
+///   signed project head → project_snapshot (project_tree_hash, effective_policy_hash, parents)
+///     → project_tree (project_file hashes)
+///       → project_file (blob_hash) → blob
 ///   project_snapshot.parent_hashes → walk history
 pub fn collect_reachable(
     cas_root: &Path,
@@ -607,30 +607,42 @@ mod tests {
         let (_tmp, cas_root, refs_root) = setup_cas_refs();
 
         let blob_hash = write_blob(&cas_root, b"test content");
-        let item_source = serde_json::json!({
-            "kind": "item_source",
-            "item_ref": ".ai/directives/test.md",
-            "content_blob_hash": blob_hash,
-            "integrity": blob_hash,
-            "signature_info": null,
-            "mode": null
-        });
-        let item_source_hash = write_object(&cas_root, &item_source);
-
-        let manifest = serde_json::json!({
-            "kind": "source_manifest",
-            "item_source_hashes": {
-                ".ai/directives/test.md": item_source_hash
+        let file_hash = write_object(
+            &cas_root,
+            &crate::objects::ProjectFile {
+                blob_hash: blob_hash.clone(),
+                size: b"test content".len() as u64,
+                normalized_mode: 0o644,
             }
-        });
-        let manifest_hash = write_object(&cas_root, &manifest);
+            .to_value(),
+        );
+        let tree_hash = write_object(
+            &cas_root,
+            &crate::objects::ProjectTree {
+                files: std::collections::BTreeMap::from([(
+                    ".ai/directives/test.md".to_string(),
+                    file_hash.clone(),
+                )]),
+            }
+            .to_value(),
+        );
+        let policy_hash = write_object(
+            &cas_root,
+            &crate::objects::ProjectSnapshotPolicy::new(
+                crate::project_sync::ProjectSyncScope::FullProject,
+                Vec::new(),
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap()
+            .to_value(),
+        );
         let proj_snap = serde_json::json!({
             "kind": "project_snapshot",
             "schema": crate::objects::ProjectSnapshot::SCHEMA,
-            "project_manifest_hash": manifest_hash,
-            "user_manifest_hash": null,
+            "project_tree_hash": tree_hash,
+            "effective_policy_hash": policy_hash,
             "message": null,
-            "project_sync_scope": "full_project",
             "parent_hashes": [],
             "created_at": "2026-04-22T00:00:00Z",
             "source": "local"
@@ -648,9 +660,10 @@ mod tests {
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
         assert_eq!(set.project_hashes.len(), 1);
         assert!(set.object_hashes.contains(&proj_snap_hash));
-        assert!(set.object_hashes.contains(&manifest_hash));
-        assert!(set.object_hashes.contains(&item_source_hash));
-        assert_eq!(set.object_hashes.len(), 3);
+        assert!(set.object_hashes.contains(&tree_hash));
+        assert!(set.object_hashes.contains(&file_hash));
+        assert!(set.object_hashes.contains(&policy_hash));
+        assert_eq!(set.object_hashes.len(), 4);
         assert!(set.blob_hashes.contains(&blob_hash));
         assert_eq!(set.blob_hashes.len(), 1);
     }
@@ -660,33 +673,44 @@ mod tests {
         let (_tmp, cas_root, refs_root) = setup_cas_refs();
         let signer = TestSigner::default();
         let blob_hash = write_blob(&cas_root, b"admitted content");
-        let item_hash = write_object(
+        let file_hash = write_object(
             &cas_root,
-            &serde_json::json!({
-                "kind": "item_source",
-                "item_ref": ".ai/directives/admitted.md",
-                "content_blob_hash": blob_hash,
-                "integrity": blob_hash,
-                "signature_info": null,
-                "mode": null,
-            }),
+            &crate::objects::ProjectFile {
+                blob_hash: blob_hash.clone(),
+                size: b"admitted content".len() as u64,
+                normalized_mode: 0o644,
+            }
+            .to_value(),
         );
-        let manifest_hash = write_object(
+        let tree_hash = write_object(
             &cas_root,
-            &serde_json::json!({
-                "kind": "source_manifest",
-                "item_source_hashes": { ".ai/directives/admitted.md": item_hash },
-            }),
+            &crate::objects::ProjectTree {
+                files: std::collections::BTreeMap::from([(
+                    ".ai/directives/admitted.md".to_string(),
+                    file_hash.clone(),
+                )]),
+            }
+            .to_value(),
+        );
+        let policy_hash = write_object(
+            &cas_root,
+            &crate::objects::ProjectSnapshotPolicy::new(
+                crate::project_sync::ProjectSyncScope::FullProject,
+                Vec::new(),
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap()
+            .to_value(),
         );
         let snapshot_hash = write_object(
             &cas_root,
             &serde_json::json!({
                 "kind": "project_snapshot",
                 "schema": crate::objects::ProjectSnapshot::SCHEMA,
-                "project_manifest_hash": manifest_hash,
-                "user_manifest_hash": null,
+                "project_tree_hash": tree_hash,
+                "effective_policy_hash": policy_hash,
                 "message": null,
-                "project_sync_scope": "full_project",
                 "parent_hashes": [],
                 "created_at": "2026-07-14T00:00:00Z",
                 "source": "admission_test",
@@ -711,7 +735,13 @@ mod tests {
         );
 
         let set = collect_reachable(&cas_root, &refs_root).unwrap();
-        for hash in [attestation_hash, snapshot_hash, manifest_hash, item_hash] {
+        for hash in [
+            attestation_hash,
+            snapshot_hash,
+            tree_hash,
+            file_hash,
+            policy_hash,
+        ] {
             assert!(set.object_hashes.contains(&hash));
         }
         assert!(set.blob_hashes.contains(&blob_hash));

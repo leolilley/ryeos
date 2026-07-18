@@ -1,81 +1,82 @@
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use anyhow::Result;
 
-use ryeos_state::objects::ItemSource;
+use ryeos_state::objects::{ProjectFile, ProjectSnapshotPolicy, ProjectTree};
 
-use ryeos_app::ignore::IgnoreMatcher;
-
-pub struct IngestResult {
-    pub blob_hash: String,
-    pub object_hash: String,
-    pub integrity: String,
-}
-
-pub fn ingest_item(
+/// Capture one complete project tree with descriptor-relative traversal and
+/// streaming blob ingestion. The policy is immutable input to this capture.
+pub fn ingest_project_tree(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
-    item_ref: &str,
-    file_path: &Path,
-) -> Result<IngestResult> {
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+) -> Result<ProjectTree> {
     authority.ensure_guard(guard)?;
+    policy.validate()?;
+    let matcher = policy.matcher()?;
     let cas = authority.cas_store()?;
-    let bytes = fs::read(file_path)?;
-    let blob_hash = cas.store_blob(&bytes)?;
-    // CAS blob identity and ItemSource integrity are the same SHA-256 of the
-    // source bytes. Reuse the verified address instead of hashing every file a
-    // second time during live-project capture.
-    let integrity = blob_hash.clone();
-
-    let signature_info = parse_signature_info_from_bytes(&bytes);
-
-    // Detect Unix exec bit on the source file.
-    let mode = fs::metadata(file_path)
-        .ok()
-        .map(|m| {
-            #[cfg(unix)]
+    let mut files = std::collections::BTreeMap::new();
+    project_root.visit_regular_files(
+        |relative, is_directory| {
+            let rel = canonical_relative_path(relative)?;
+            if ryeos_state::project_sync::is_project_snapshot_floor_excluded(&rel)
+                || matcher.is_ignored(&rel)
             {
-                use std::os::unix::fs::PermissionsExt;
-                m.permissions().mode() & 0o7777
+                return Ok(true);
             }
-            #[cfg(not(unix))]
-            None
-        })
-        .filter(|m| m & 0o111 != 0);
-
-    let source = ItemSource {
-        item_ref: item_ref.to_string(),
-        content_blob_hash: blob_hash.clone(),
-        integrity: integrity.clone(),
-        signature_info,
-        mode,
-    };
-    let object_hash = cas.store_object(&source.to_value())?;
-
-    Ok(IngestResult {
-        blob_hash,
-        object_hash,
-        integrity,
-    })
+            if policy.sync_scope == ryeos_state::project_sync::ProjectSyncScope::AiOnly {
+                return Ok(!matches!(
+                    ryeos_state::project_sync::classify_project_ai_path(&rel, Some(&matcher)),
+                    ryeos_state::project_sync::ProjectAiPathClass::Deployable(_)
+                ));
+            }
+            let _ = is_directory;
+            Ok(false)
+        },
+        |relative, file| {
+            let rel = canonical_relative_path(relative)?;
+            ryeos_state::project_sync::validate_project_manifest_path(
+                &rel,
+                policy.sync_scope,
+                Some(&matcher),
+            )?;
+            let streamed =
+                cas.put_blob_from_open_regular(file, &project_root.path().join(relative))?;
+            let project_file = ProjectFile {
+                blob_hash: streamed.hash,
+                size: streamed.size,
+                normalized_mode: streamed.normalized_mode,
+            };
+            project_file.validate()?;
+            let file_hash = cas.store_object(&project_file.to_value())?;
+            if files.insert(rel.clone(), file_hash).is_some() {
+                anyhow::bail!("duplicate canonical project path during capture: {rel}");
+            }
+            Ok(())
+        },
+    )?;
+    let tree = ProjectTree { files };
+    ryeos_state::project_sync::validate_project_tree_paths(&tree, policy)?;
+    Ok(tree)
 }
 
-/// Ingest a directory into CAS, applying the ignore matcher to skip
-/// excluded paths (`.git/`, `node_modules/`, etc.).
-pub fn ingest_directory(
-    authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
-    base_path: &Path,
-    ignore: &IgnoreMatcher,
-) -> Result<HashMap<String, String>> {
-    let mut items = HashMap::new();
-    ingest_walk(authority, guard, base_path, base_path, &mut items, ignore)?;
-    Ok(items)
+fn canonical_relative_path(relative: &Path) -> Result<String> {
+    let value = relative
+        .to_str()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "project-relative path '{}' is not valid UTF-8",
+                relative.display()
+            )
+        })?
+        .replace('\\', "/");
+    ryeos_state::project_sync::validate_safe_relative_path(&value)?;
+    Ok(value)
 }
 
-pub fn materialize_item(
+pub fn materialize_project_file(
     authority: &ryeos_state::PinnedStateAuthority,
     guard: &ryeos_state::CasMutationGuard,
     object_hash: &str,
@@ -83,109 +84,20 @@ pub fn materialize_item(
 ) -> Result<()> {
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;
-    let obj = cas
+    let object = cas
         .get_object(object_hash)?
-        .ok_or_else(|| anyhow::anyhow!("item source object {object_hash} not found"))?;
-
-    let blob_hash = obj
-        .get("content_blob_hash")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("missing content_blob_hash in item source"))?;
-
-    let data = cas
-        .get_blob(blob_hash)?
-        .ok_or_else(|| anyhow::anyhow!("blob {blob_hash} not found"))?;
-
-    lillux::atomic_write(target_path, &data)?;
-    Ok(())
-}
-
-fn ingest_walk(
-    authority: &ryeos_state::PinnedStateAuthority,
-    guard: &ryeos_state::CasMutationGuard,
-    root: &Path,
-    dir: &Path,
-    items: &mut HashMap<String, String>,
-    ignore: &IgnoreMatcher,
-) -> Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        // Project snapshots capture source bytes, not filesystem topology.
-        // Never follow a symlink out of (or recursively back into) the live
-        // project. Virtualenv interpreter links are intentionally omitted.
-        if file_type.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        let relative = path.strip_prefix(root).with_context(|| {
-            format!(
-                "ingest path '{}' escaped project root '{}'",
-                path.display(),
-                root.display()
-            )
-        })?;
-        let rel = relative
-            .to_str()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "ingest project-relative path '{}' is not valid UTF-8",
-                    relative.display()
-                )
-            })?
-            .replace('\\', "/");
-
-        // Always skip the state/ directory (internal daemon state)
-        if rel.starts_with("state/") || rel == "state" {
-            continue;
-        }
-
-        // Apply shared ignore rules
-        if ignore.is_ignored(&rel) {
-            continue;
-        }
-
-        if file_type.is_dir() {
-            ingest_walk(authority, guard, root, &path, items, ignore)?;
-        } else if file_type.is_file() {
-            // The caller holds the global CAS write permit and mutation guard
-            // for the complete walk. GC therefore cannot observe or sweep the
-            // descendants before the final SourceManifest is durably staged.
-            // Staging every intermediate hash would rewrite a growing recovery
-            // record once per blob and object (quadratic metadata I/O); the
-            // manifest's verified closure protects all of them after capture.
-            let result = ingest_item(authority, guard, &rel, &path)?;
-            items.insert(rel, result.object_hash);
-        }
+        .ok_or_else(|| anyhow::anyhow!("project_file object {object_hash} not found"))?;
+    let file = ProjectFile::from_value(&object)?;
+    let size =
+        cas.materialize_blob_to_new_file(&file.blob_hash, target_path, file.normalized_mode)?;
+    if size != file.size {
+        let _ = fs::remove_file(target_path);
+        anyhow::bail!(
+            "project_file {} declared size {}, materialized {}",
+            object_hash,
+            file.size,
+            size
+        );
     }
     Ok(())
-}
-
-fn parse_signature_info_from_bytes(bytes: &[u8]) -> Option<Value> {
-    let content = std::str::from_utf8(bytes).ok()?;
-    let first_line = content.lines().next()?;
-
-    let remainder = if let Some(r) = first_line.strip_prefix("# ryeos:signed:") {
-        r
-    } else if let Some(inner) = first_line.strip_prefix("<!-- ryeos:signed:") {
-        inner.strip_suffix("-->")?.trim()
-    } else {
-        return None;
-    };
-
-    let parts: Vec<&str> = remainder.rsplitn(4, ':').collect();
-    if parts.len() != 4 {
-        return None;
-    }
-
-    Some(json!({
-        "signer": parts[0],
-        "signature": parts[1],
-        "hash": parts[2],
-        "timestamp": parts[3],
-    }))
 }

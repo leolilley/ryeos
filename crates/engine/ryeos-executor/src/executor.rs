@@ -305,6 +305,12 @@ pub async fn execute_service_verified(
                 }
                 _ => None,
             },
+            base_project_snapshot_hash: match &ctx.plan_ctx.project_context {
+                ryeos_engine::contracts::ProjectContext::SnapshotHash { hash } => {
+                    Some(hash.clone())
+                }
+                _ => None,
+            },
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,

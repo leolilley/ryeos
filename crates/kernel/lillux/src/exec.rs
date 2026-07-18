@@ -524,9 +524,8 @@ impl RunningProcess {
             // retains its Child handle until this cleanup completes. The live
             // or unreaped leader therefore reserves the numeric PGID while the
             // signal is sent, even if the launcher already reaped its reported
-            // target leader. A descendant that deliberately creates another
-            // session is outside this local guarantee; hosted workers use
-            // cgroup.kill.
+            // target leader. Sandboxed durable launches negotiate a backend
+            // that prevents descendants from escaping this process group.
             kill_owned_process_group(self.wrapper_pid, self.wrapper_pgid, !self.wrapper_reaped);
             // `Child` still owns the wrapper PID until it is reaped, so this
             // exact-PID fallback cannot hit a recycled process. It covers a

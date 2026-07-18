@@ -61,6 +61,13 @@ pub async fn try_offline_dispatch(
         .map_err(|error| CliError::Local {
             detail: format!("load node isolation policy: {error:#}"),
         })?;
+    // One generation operation spans descriptor resolution, binary capture,
+    // and the final exec/dispatch handoff. A TUI/help launch must never resolve
+    // its surface under one installed generation and execute a client from a
+    // replacement generation.
+    let _generation_guard = isolation
+        .begin_registered_generation_operation()
+        .map_err(local_err)?;
     let node_trust = isolation
         .registered_generation_node_trust()
         .ok_or_else(|| CliError::Local {
@@ -124,6 +131,7 @@ pub async fn try_offline_dispatch(
             tail,
             app_root,
             project_path,
+            &isolation,
         )
         .await
         .map(Some);
@@ -256,6 +264,7 @@ async fn exec_client(
     tail: &[String],
     app_root: &Path,
     project_path: &str,
+    _isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> Result<OfflineDispatchOutcome, CliError> {
     let item_ref = item.canonical_ref.clone();
 
@@ -299,16 +308,10 @@ async fn exec_client(
             detail: format!("item '{item_ref}' not from an installed bundle"),
         })?;
 
-    let resolved = ryeos_engine::binary_resolver::resolve_bundle_binary_ref(
+    let captured = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
         binary_ref,
         bundle_root,
-        |fp| {
-            engine
-                .node_trust_store
-                .get(fp)
-                .map(|signer| signer.verifying_key)
-        },
-        ryeos_engine::resolution::TrustClass::TrustedBundle,
+        &engine.node_trust_store,
     )
     .map_err(|e| CliError::Local {
         detail: format!("resolve client binary '{binary_ref}': {e}"),
@@ -317,7 +320,22 @@ async fn exec_client(
     let args = client_args_from_launch(launch, command_def, tail, project_path)?;
 
     // Exec: client replaces the process (inherited stdio)
-    let mut command = std::process::Command::new(&resolved.absolute_path);
+    #[cfg(unix)]
+    let executable = {
+        use std::os::fd::AsRawFd as _;
+        let fd = captured.handle.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+            return Err(local_err(anyhow::anyhow!(
+                "make captured client executable inheritable: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        PathBuf::from(format!("/proc/self/fd/{fd}"))
+    };
+    #[cfg(not(unix))]
+    let executable = captured.identity.absolute_path.clone();
+    let mut command = std::process::Command::new(&executable);
     command.args(&args);
     command
         .env("RYEOS_PROJECT_PATH", project_path)
@@ -325,24 +343,24 @@ async fn exec_client(
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit());
 
-    let status = command
-        .status()
-        .with_context(|| {
-            format!(
-                "run client '{}' ({})",
-                item_ref,
-                resolved.absolute_path.display()
-            )
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = command.exec();
+        Err(CliError::Local {
+            detail: format!("exec client '{item_ref}' from verified descriptor: {error}"),
         })
-        .map_err(local_err)?;
-
-    if !status.success() {
-        return Err(CliError::Local {
-            detail: format!("client '{}' failed with exit {:?}", item_ref, status.code()),
-        });
     }
-
-    Ok(OfflineDispatchOutcome::Silent)
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(local_err)?;
+        if !status.success() {
+            return Err(CliError::Local {
+                detail: format!("client '{}' failed with exit {:?}", item_ref, status.code()),
+            });
+        }
+        Ok(OfflineDispatchOutcome::Silent)
+    }
 }
 
 fn client_requires_daemon(value: &Value) -> bool {

@@ -23,6 +23,7 @@ pub(crate) struct ThreadLaunchClaim {
     state: AppState,
     thread_id: String,
     claim_id: String,
+    owner: ryeos_app::runtime_db::LaunchOwner,
 }
 
 impl ThreadLaunchClaim {
@@ -31,28 +32,21 @@ impl ThreadLaunchClaim {
         thread_id: &str,
     ) -> anyhow::Result<ThreadLaunchClaimOutcome> {
         let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
-        static OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let claimed_by = OWNER.get_or_init(|| {
-            format!(
-                "daemon:{}:{}",
-                std::process::id(),
-                ryeos_app::thread_lifecycle::new_thread_id()
-            )
-        });
-        match state
-            .state_store
-            .claim_thread_launch(thread_id, &claim_id, claimed_by)?
-        {
-            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => {
+        match state.state_store.claim_thread_launch_active(
+            thread_id,
+            &claim_id,
+            ryeos_app::runtime_db::daemon_generation_id(),
+        )? {
+            Some(claim) => {
+                let owner = claim.owner;
                 Ok(ThreadLaunchClaimOutcome::Claimed(Box::new(Self {
                     state: state.clone(),
                     thread_id: thread_id.to_string(),
                     claim_id,
+                    owner,
                 })))
             }
-            ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => {
-                Ok(ThreadLaunchClaimOutcome::AlreadyClaimed)
-            }
+            None => Ok(ThreadLaunchClaimOutcome::AlreadyClaimed),
         }
     }
 
@@ -63,37 +57,45 @@ impl ThreadLaunchClaim {
     /// is an invariant failure rather than a benign recovery skip.
     pub(crate) fn acquire_fresh(state: &AppState, thread_id: &str) -> anyhow::Result<Self> {
         let claim_id = ryeos_app::thread_lifecycle::new_thread_id();
-        static OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-        let claimed_by = OWNER.get_or_init(|| {
-            format!(
-                "daemon:{}:{}",
-                std::process::id(),
-                ryeos_app::thread_lifecycle::new_thread_id()
-            )
-        });
-        match state
-            .state_store
-            .reserve_fresh_thread_launch(thread_id, &claim_id, claimed_by)?
-        {
-            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed => Ok(Self {
-                state: state.clone(),
-                thread_id: thread_id.to_string(),
-                claim_id,
-            }),
-            ryeos_app::runtime_db::LaunchClaimOutcome::AlreadyClaimed => anyhow::bail!(
+        match state.state_store.reserve_fresh_thread_launch_active(
+            thread_id,
+            &claim_id,
+            ryeos_app::runtime_db::daemon_generation_id(),
+        )? {
+            Some(claim) => {
+                let owner = claim.owner;
+                Ok(Self {
+                    state: state.clone(),
+                    thread_id: thread_id.to_string(),
+                    claim_id,
+                    owner,
+                })
+            }
+            None => anyhow::bail!(
                 "fresh thread ID {thread_id} was already reserved by another launch owner"
             ),
         }
+    }
+
+    pub(crate) fn owner(&self) -> &ryeos_app::runtime_db::LaunchOwner {
+        &self.owner
+    }
+
+    pub(crate) fn canonical_owner(&self) -> anyhow::Result<String> {
+        Ok(lillux::canonical_json(&serde_json::to_value(&self.owner)?)?)
     }
 }
 
 impl Drop for ThreadLaunchClaim {
     fn drop(&mut self) {
-        if let Err(error) = self
-            .state
-            .state_store
-            .release_thread_launch_claim(&self.thread_id, &self.claim_id)
-        {
+        let release = self.canonical_owner().and_then(|owner| {
+            self.state.state_store.release_active_thread_launch_claim(
+                &self.thread_id,
+                &self.claim_id,
+                &owner,
+            )
+        });
+        if let Err(error) = release {
             tracing::warn!(
                 thread_id = %self.thread_id,
                 claim_id = %self.claim_id,

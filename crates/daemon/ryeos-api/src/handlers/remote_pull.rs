@@ -1,13 +1,13 @@
 //! `remote/pull` — fetch arbitrary CAS objects from a remote node.
 //!
-//! Thin CLI wrapper over `RemoteClient::objects_get`. Fetches objects
-//! by hash and stores them in the local CAS. Optionally materializes
-//! them to an output directory.
+//! Thin CLI wrapper over typed remote CAS reads. Operator pulls materialize
+//! explicit artifacts; they never create unrooted local CAS entries that GC
+//! could immediately collect.
 
 use std::sync::Arc;
+use std::{ffi::OsStr, ffi::OsString};
 
 use anyhow::{bail, Result};
-use base64::Engine as _;
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -25,112 +25,194 @@ pub struct Request {
     /// Remote config name.
     #[serde(default = "default_remote")]
     pub remote: String,
-    /// SHA-256 hex hashes to fetch. Accepts a single string or array.
-    #[serde(deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize")]
-    pub hashes: Vec<String>,
-    /// Optional local directory to materialize objects into.
-    /// When unset, objects are stored in the local CAS only.
-    #[serde(default)]
-    pub output_dir: Option<String>,
+    /// Typed object hashes to fetch. Namespace is never inferred.
+    #[serde(
+        default,
+        deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
+    )]
+    pub object_hashes: Vec<String>,
+    /// Typed blob hashes to fetch. Namespace is never inferred.
+    #[serde(
+        default,
+        deserialize_with = "ryeos_runtime::scalar_or_vec::deserialize"
+    )]
+    pub blob_hashes: Vec<String>,
+    /// Local directory in which typed artifacts are materialized.
+    pub output_dir: String,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
-    if req.hashes.is_empty() {
-        anyhow::bail!("hashes must not be empty");
+    if req.object_hashes.is_empty() && req.blob_hashes.is_empty() {
+        anyhow::bail!("object_hashes and blob_hashes must not both be empty");
     }
 
     let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
-    let resp = client.objects_get(&req.hashes).await?;
+    let presence = client
+        .objects_has(&req.object_hashes, &req.blob_hashes)
+        .await?;
+    let missing = presence
+        .missing_object_hashes
+        .iter()
+        .chain(&presence.missing_blob_hashes)
+        .cloned()
+        .collect::<Vec<_>>();
+    let requested_count = req.object_hashes.len() + req.blob_hashes.len();
+    if !missing.is_empty() {
+        bail!(
+            "remote.pull: {} of {} requested hashes not found on remote: {}",
+            missing.len(),
+            requested_count,
+            missing.join(", ")
+        );
+    }
+    let resp = client.objects_get(&req.object_hashes, &[]).await?;
 
     let mut fetched = 0usize;
     let mut stored_hashes: Vec<String> = Vec::new();
-    let mut missing: Vec<String> = Vec::new();
 
-    // The network fetch has completed. Capture one live state authority, then
-    // derive both the guard and CAS from it so a runtime-path rename cannot
-    // splice this write into another state tree.
-    let authority = state
-        .state_store
-        .with_state_db(|db| db.pinned_authority())?;
-    let _cas_guard = authority.acquire_shared_guard()?;
-    let cas = authority.cas_store()?;
-    let _permit = state
-        .write_barrier
-        .try_acquire()
-        .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
+    let output_dir = std::path::PathBuf::from(&req.output_dir);
+    if !output_dir.is_absolute() {
+        anyhow::bail!("remote.pull output_dir must be an absolute path");
+    }
+    let parent_path = output_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("remote.pull output_dir has no parent"))?;
+    let output_name = output_dir
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("remote.pull output_dir has no final name"))?;
+    let parent = lillux::PinnedDirectory::open_or_create(parent_path)?;
+    if parent.open_entry(output_name, false)?.is_some() {
+        anyhow::bail!("remote.pull output_dir already exists; refusing a partial merge");
+    }
+    let staging = PinnedStagingDirectory::create(parent)?;
 
     for entry in &resp.entries {
         match entry.kind.as_str() {
-            "blob" => {
-                let bytes = entry
-                    .data
-                    .as_deref()
-                    .map(|b64| base64::engine::general_purpose::STANDARD.decode(b64))
-                    .transpose()
-                    .map_err(|e| anyhow::anyhow!("invalid base64 for blob {}: {e}", entry.hash))?
-                    .ok_or_else(|| anyhow::anyhow!("blob {} missing data field", entry.hash))?;
-
-                let stored = cas.store_blob(&bytes)?;
-                if stored != entry.hash {
-                    bail!(
-                        "remote.pull: blob hash mismatch: expected {}, got {stored}",
-                        entry.hash
-                    );
-                }
-                stored_hashes.push(stored.clone());
-                fetched += 1;
-
-                if let Some(ref dir) = req.output_dir {
-                    let out_path = std::path::Path::new(dir).join(&entry.hash);
-                    std::fs::create_dir_all(dir)?;
-                    std::fs::write(&out_path, &bytes)?;
-                }
-            }
             "object" => {
                 let value = entry
                     .value
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("object {} missing value field", entry.hash))?;
-                let stored = cas.store_object(value)?;
-                if stored != entry.hash {
-                    bail!(
-                        "remote.pull: object hash mismatch: expected {}, got {stored}",
-                        entry.hash
-                    );
-                }
-                stored_hashes.push(stored.clone());
+                stored_hashes.push(entry.hash.clone());
                 fetched += 1;
-
-                if let Some(ref dir) = req.output_dir {
-                    let out_path = std::path::Path::new(dir).join(format!("{}.json", entry.hash));
-                    std::fs::create_dir_all(dir)?;
-                    let content = serde_json::to_string_pretty(value)?;
-                    std::fs::write(&out_path, content)?;
+                let content = serde_json::to_vec_pretty(value)?;
+                let name = OsString::from(format!("{}.json", entry.hash));
+                if staging
+                    .directory()
+                    .atomic_create_regular(&name, &content, 0o600)?
+                    .is_none()
+                {
+                    anyhow::bail!("duplicate remote object artifact name");
                 }
             }
-            "missing" => {
-                missing.push(entry.hash.clone());
-            }
+            "missing_object" | "missing_blob" => anyhow::bail!(
+                "remote object disappeared after the preflight presence check: {}",
+                entry.hash
+            ),
             _ => {}
         }
     }
 
-    // Fail-closed: if any requested hash was not found on the remote,
-    // abort and report all missing hashes.
-    if !missing.is_empty() {
-        bail!(
-            "remote.pull: {} of {} requested hashes not found on remote: {}",
-            missing.len(),
-            req.hashes.len(),
-            missing.join(", ")
-        );
+    for hash in presence.found_blob_hashes {
+        let mut output =
+            staging
+                .directory()
+                .open_regular_create(OsStr::new(&hash), true, true, 0o600)?;
+        client.stream_blob(&hash, &mut output).await?;
+        output.sync_all()?;
+        stored_hashes.push(hash);
+        fetched += 1;
     }
+    staging.directory().try_clone_descriptor()?.sync_all()?;
+    staging.publish(output_name)?;
 
     Ok(serde_json::json!({
         "fetched": fetched,
-        "requested": req.hashes.len(),
+        "requested": requested_count,
         "hashes": stored_hashes,
     }))
+}
+
+struct PinnedStagingDirectory {
+    parent: lillux::PinnedDirectory,
+    name: OsString,
+    directory: Option<lillux::PinnedDirectory>,
+}
+
+impl PinnedStagingDirectory {
+    fn create(parent: lillux::PinnedDirectory) -> Result<Self> {
+        for _ in 0..16 {
+            let name = OsString::from(format!(
+                ".ryeos-remote-pull-{}.{}",
+                std::process::id(),
+                rand::random::<u64>()
+            ));
+            match parent.create_child(&name, 0o700) {
+                Ok(directory) => {
+                    return Ok(Self {
+                        parent,
+                        name,
+                        directory: Some(directory),
+                    });
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.kind() == std::io::ErrorKind::AlreadyExists) => {
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        anyhow::bail!("could not reserve a unique remote.pull staging directory")
+    }
+
+    fn directory(&self) -> &lillux::PinnedDirectory {
+        self.directory
+            .as_ref()
+            .expect("staging directory exists until publication")
+    }
+
+    fn publish(mut self, target_name: &OsStr) -> Result<()> {
+        let publication =
+            self.parent
+                .rename_child_directory_noreplace(&self.name, target_name, self.directory());
+        match publication {
+            Ok(()) => {
+                self.directory.take();
+                Ok(())
+            }
+            Err(error) => {
+                // The rename may be visible even when the parent durability
+                // barrier fails. Never let Drop mistake a committed output
+                // directory for disposable staging in that state.
+                if error.namespace_committed() {
+                    self.directory.take();
+                }
+                Err(error.into())
+            }
+        }
+    }
+}
+
+impl Drop for PinnedStagingDirectory {
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.as_ref() else {
+            return;
+        };
+        if let Err(error) = directory.remove_contents_recursive().and_then(|()| {
+            self.parent
+                .remove_empty_child_if_same(&self.name, directory)
+                .and_then(|removed| {
+                    if removed {
+                        Ok(())
+                    } else {
+                        anyhow::bail!("staging directory remained non-empty")
+                    }
+                })
+        }) {
+            tracing::warn!(%error, "failed to clean remote.pull staging directory");
+        }
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

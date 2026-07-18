@@ -7,7 +7,6 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::thread_snapshot::{parse_canonical_timestamp, validate_canonical_hash};
-use crate::project_sync::ProjectSyncScope;
 
 /// A snapshot of a project's source files at a point in time.
 ///
@@ -15,14 +14,12 @@ use crate::project_sync::ProjectSyncScope;
 /// via `base_project_snapshot_hash` and `result_project_snapshot_hash`.
 #[derive(Debug, Clone)]
 pub struct ProjectSnapshot {
-    /// Hash of the project manifest (root descriptor).
-    pub project_manifest_hash: String,
-    /// Hash of the user-level manifest (if any).
-    pub user_manifest_hash: Option<String>,
+    /// Hash of the canonical `ProjectTree` root descriptor.
+    pub project_tree_hash: String,
+    /// Hash of the exact effective snapshot policy used for this generation.
+    pub effective_policy_hash: String,
     /// Optional operator-facing description for manually created snapshots.
     pub message: Option<String>,
-    /// Declared scope of the project manifest.
-    pub project_sync_scope: ProjectSyncScope,
     /// Parent snapshot hashes (DAG structure for versioning).
     pub parent_hashes: Vec<String>,
     /// ISO-8601 timestamp of creation.
@@ -36,10 +33,9 @@ pub struct ProjectSnapshot {
 struct ProjectSnapshotWire {
     kind: String,
     schema: u32,
-    project_manifest_hash: String,
-    user_manifest_hash: Value,
+    project_tree_hash: String,
+    effective_policy_hash: String,
     message: Value,
-    project_sync_scope: ProjectSyncScope,
     parent_hashes: Vec<String>,
     created_at: String,
     source: String,
@@ -48,17 +44,16 @@ struct ProjectSnapshotWire {
 impl ProjectSnapshot {
     /// Current immutable CAS wire schema for project snapshots. Earlier schema
     /// identifiers remain occupied even though no legacy reader is provided.
-    pub const SCHEMA: u32 = 4;
+    pub const SCHEMA: u32 = 5;
 
     /// Serialize to a CAS JSON object.
     pub fn to_value(&self) -> Value {
         json!({
             "kind": "project_snapshot",
             "schema": Self::SCHEMA,
-            "project_manifest_hash": self.project_manifest_hash,
-            "user_manifest_hash": self.user_manifest_hash,
+            "project_tree_hash": self.project_tree_hash,
+            "effective_policy_hash": self.effective_policy_hash,
             "message": self.message,
-            "project_sync_scope": self.project_sync_scope,
             "parent_hashes": self.parent_hashes,
             "created_at": self.created_at,
             "source": self.source,
@@ -68,7 +63,7 @@ impl ProjectSnapshot {
     /// Deserialize from a CAS JSON value.
     pub fn from_value(value: &Value) -> anyhow::Result<Self> {
         let wire: ProjectSnapshotWire = serde_json::from_value(value.clone())
-            .context("failed to deserialize project_snapshot schema 4")?;
+            .context("failed to deserialize project_snapshot schema 5")?;
         if wire.kind != "project_snapshot" {
             anyhow::bail!(
                 "project_snapshot kind mismatch: expected project_snapshot, got {}",
@@ -82,14 +77,8 @@ impl ProjectSnapshot {
                 wire.schema
             );
         }
-        validate_canonical_hash("project_manifest_hash", &wire.project_manifest_hash)?;
-        let user_manifest_hash = required_nullable_string(
-            "project_snapshot user_manifest_hash",
-            &wire.user_manifest_hash,
-        )?;
-        if let Some(hash) = &user_manifest_hash {
-            validate_canonical_hash("user_manifest_hash", hash)?;
-        }
+        validate_canonical_hash("project_tree_hash", &wire.project_tree_hash)?;
+        validate_canonical_hash("effective_policy_hash", &wire.effective_policy_hash)?;
         let message = required_nullable_string("project_snapshot message", &wire.message)?;
         let mut parents = HashSet::with_capacity(wire.parent_hashes.len());
         for hash in &wire.parent_hashes {
@@ -106,10 +95,9 @@ impl ProjectSnapshot {
         }
 
         Ok(Self {
-            project_manifest_hash: wire.project_manifest_hash,
-            user_manifest_hash,
+            project_tree_hash: wire.project_tree_hash,
+            effective_policy_hash: wire.effective_policy_hash,
             message,
-            project_sync_scope: wire.project_sync_scope,
             parent_hashes: wire.parent_hashes,
             created_at: wire.created_at,
             source: wire.source,
@@ -132,45 +120,28 @@ mod tests {
     #[test]
     fn roundtrip() {
         let original = ProjectSnapshot {
-            project_manifest_hash: "ab".repeat(32),
-            user_manifest_hash: None,
+            project_tree_hash: "ab".repeat(32),
+            effective_policy_hash: "cd".repeat(32),
             message: None,
-            project_sync_scope: ProjectSyncScope::FullProject,
             parent_hashes: vec![],
             created_at: "2026-04-23T00:00:00Z".to_string(),
             source: "fold_back".to_string(),
         };
         let value = original.to_value();
         let restored = ProjectSnapshot::from_value(&value).unwrap();
+        assert_eq!(restored.project_tree_hash, original.project_tree_hash);
         assert_eq!(
-            restored.project_manifest_hash,
-            original.project_manifest_hash
+            restored.effective_policy_hash,
+            original.effective_policy_hash
         );
         assert_eq!(restored.source, "fold_back");
-    }
-
-    #[test]
-    fn roundtrip_with_user_manifest() {
-        let original = ProjectSnapshot {
-            project_manifest_hash: "ab".repeat(32),
-            user_manifest_hash: Some("cd".repeat(32)),
-            message: None,
-            project_sync_scope: ProjectSyncScope::FullProject,
-            parent_hashes: vec!["ef".repeat(32)],
-            created_at: "2026-04-23T00:00:00Z".to_string(),
-            source: "manual_push".to_string(),
-        };
-        let value = original.to_value();
-        let restored = ProjectSnapshot::from_value(&value).unwrap();
-        assert_eq!(restored.user_manifest_hash, Some("cd".repeat(32)));
-        assert_eq!(restored.parent_hashes.len(), 1);
     }
 
     #[test]
     fn rejects_non_current_or_incomplete_wire_objects() {
         let value = json!({
             "kind": "project_snapshot",
-            "schema": 3,
+            "schema": 4,
             "project_manifest_hash": "ab".repeat(32),
             "parent_hashes": [],
             "created_at": "2026-04-23T00:00:00Z",
@@ -181,9 +152,13 @@ mod tests {
         let mut current = value;
         current["schema"] = json!(ProjectSnapshot::SCHEMA);
         assert!(ProjectSnapshot::from_value(&current).is_err());
-        current["project_sync_scope"] = json!("full_project");
+        current["project_tree_hash"] = json!("ab".repeat(32));
+        current["effective_policy_hash"] = json!("cd".repeat(32));
+        current
+            .as_object_mut()
+            .unwrap()
+            .remove("project_manifest_hash");
         assert!(ProjectSnapshot::from_value(&current).is_err());
-        current["user_manifest_hash"] = Value::Null;
         current["message"] = Value::Null;
         assert!(ProjectSnapshot::from_value(&current).is_ok());
     }
@@ -193,10 +168,9 @@ mod tests {
         let value = json!({
             "kind": "project_snapshot",
             "schema": ProjectSnapshot::SCHEMA,
-            "project_manifest_hash": "ab".repeat(32),
-            "user_manifest_hash": null,
+            "project_tree_hash": "ab".repeat(32),
+            "effective_policy_hash": "cd".repeat(32),
             "message": null,
-            "project_sync_scope": "full_project",
             "parent_hashes": ["cd".repeat(32), 7],
             "created_at": "2026-04-23T00:00:00Z",
             "source": "manual_push",
@@ -205,28 +179,11 @@ mod tests {
     }
 
     #[test]
-    fn ai_only_scope_roundtrips() {
-        let original = ProjectSnapshot {
-            project_manifest_hash: "ab".repeat(32),
-            user_manifest_hash: None,
-            message: None,
-            project_sync_scope: ProjectSyncScope::AiOnly,
-            parent_hashes: vec![],
-            created_at: "2026-04-23T00:00:00Z".to_string(),
-            source: "remote_ai_sync".to_string(),
-        };
-        let value = original.to_value();
-        let restored = ProjectSnapshot::from_value(&value).unwrap();
-        assert_eq!(restored.project_sync_scope, ProjectSyncScope::AiOnly);
-    }
-
-    #[test]
     fn roundtrip_with_message() {
         let original = ProjectSnapshot {
-            project_manifest_hash: "ab".repeat(32),
-            user_manifest_hash: None,
+            project_tree_hash: "ab".repeat(32),
+            effective_policy_hash: "cd".repeat(32),
             message: Some("Update deployment workflow".to_string()),
-            project_sync_scope: ProjectSyncScope::FullProject,
             parent_hashes: vec![],
             created_at: "2026-04-23T00:00:00Z".to_string(),
             source: "snapshot_create".to_string(),

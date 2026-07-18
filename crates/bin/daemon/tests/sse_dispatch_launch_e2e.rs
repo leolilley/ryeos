@@ -610,6 +610,7 @@ fn sse_dispatch_launch_collision() {
         upstream_thread_id: None,
         requested_by: Some("fp:test-collision".to_string()),
         project_root: None,
+        base_project_snapshot_hash: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: Some({

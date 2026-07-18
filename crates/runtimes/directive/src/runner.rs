@@ -1150,6 +1150,7 @@ impl Runner {
                                             thread_id: self.thread_id.clone(),
                                             project_path: self.callback.project_path().to_string(),
                                             action: ryeos_runtime::callback::ActionPayload {
+                                                operation_id: None,
                                                 item_id: dispatch_result.canonical_ref.clone(),
                                                 ref_bindings: std::collections::BTreeMap::new(),
                                                 params: dispatch_result.arguments.clone(),

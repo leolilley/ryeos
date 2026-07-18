@@ -34,7 +34,7 @@ use serde_json::{json, Value};
 use ryeos_app::callback_token::{CallbackCapability, ThreadAuthState};
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::{
-    PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
+    FollowLaunchWindow, PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
 };
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
@@ -58,15 +58,30 @@ pub async fn spawn_detached_child(
     state: &AppState,
     thread_auth: &ThreadAuthState,
     cap: &CallbackCapability,
-    child_provenance: ExecutionProvenance,
+    mut child_provenance: ExecutionProvenance,
     child_item_ref: &str,
     child_ref_bindings: &BTreeMap<String, String>,
     child_parameters: &Value,
     facets: Option<&Value>,
     launch_window: Option<&ryeos_runtime::callback::LaunchWindow>,
+    operation_id: &str,
 ) -> Result<Value> {
     let parent_thread_id = cap.thread_id.clone();
 
+    let child_ref = CanonicalRef::parse(child_item_ref)
+        .with_context(|| format!("detach: invalid child item ref '{child_item_ref}'"))?;
+    let request_identity = json!({
+        "item_ref": child_ref.to_string(),
+        "ref_bindings": child_ref_bindings,
+        "parameters": child_parameters,
+        "facets": facets,
+        "launch_window": launch_window,
+    });
+    let request_hash = lillux::sha256_hex(
+        lillux::canonical_json(&request_identity)
+            .context("detach: canonicalize operation request")?
+            .as_bytes(),
+    );
     // Parent thread row → chain root + site identity. Never trust the caller
     // for these. This launch's mode is the daemon-selected detached mode below,
     // not the mode under which the parent itself was launched.
@@ -78,12 +93,66 @@ pub async fn spawn_detached_child(
     // The callback capability carries the chain root it was minted under; confirm
     // it against authoritative state before minting a linked child.
     cap.assert_chain_root(&parent.chain_root_id)?;
+    let persisted_launch_window = launch_window.map(|window| FollowLaunchWindow {
+        key: format!("{parent_thread_id}:{}", window.key),
+        width: window.width,
+    });
+    let child_thread_id = state.state_store.reserve_detached_spawn_intent(
+        operation_id,
+        &parent_thread_id,
+        &request_hash,
+        &new_thread_id(),
+    )?;
+
+    // A retry after the child birth transaction must repair lineage and launch
+    // progress, never mint another child. The immutable launch metadata saved
+    // with the row is sufficient for the normal recovery launcher.
+    if let Some(child) = state.threads.get_thread(&child_thread_id)? {
+        let inherited_stop =
+            state
+                .state_store
+                .record_child_link(&parent_thread_id, &child_thread_id, "dispatch")?;
+        if inherited_stop.is_some() {
+            crate::execution::process_attachment::finalize_requested_stop_if_present(
+                state,
+                &child_thread_id,
+            )?;
+            anyhow::bail!(
+                "detach: parent {parent_thread_id} was stop-requested during child admission"
+            );
+        }
+        let queued = if child.status == "created" {
+            if let Some(window) = persisted_launch_window.as_ref() {
+                let admitted = state.state_store.launch_window_enqueue(
+                    &child_thread_id,
+                    &window.key,
+                    window.width,
+                    crate::execution::launch::global_live_fanout_limit(),
+                    lillux::time::timestamp_millis(),
+                )?;
+                for admitted_child in &admitted {
+                    crate::execution::launch::launch_admitted_window_member(state, admitted_child);
+                }
+                !admitted.iter().any(|id| id == &child_thread_id)
+            } else {
+                crate::execution::launch::launch_admitted_window_member(state, &child_thread_id);
+                false
+            }
+        } else {
+            false
+        };
+        return Ok(detached_callback_response(
+            &child_thread_id,
+            if queued { "created" } else { &child.status },
+            queued,
+        ));
+    }
 
     // A borrowed daemon workspace cannot be reconstructed safely from its old
     // path: manufacturing a second TempDirGuard would race the parent's real
     // guard. Inherit only the parent's immutable snapshot and reconstruct the
     // child into a fresh non-lineage checkout after a crash/queued launch.
-    let inherited_snapshot_hash = if cap.provenance.workspace_lifeline().is_some() {
+    let launch_snapshot_hash = if cap.provenance.captured_snapshot_hash().is_some() {
         Some(
             state
                 .state_store
@@ -103,13 +172,41 @@ pub async fn spawn_detached_child(
     } else {
         None
     };
+    let inherited_generation = launch_snapshot_hash
+        .as_deref()
+        .map(|base| {
+            let frozen = crate::execution::seal_callback_workspace_generation(
+                state,
+                &parent_thread_id,
+                cap.provenance.effective_path(),
+                base,
+            )?;
+            crate::execution::ensure_control_tree_unchanged(state, base, frozen.snapshot_hash())?;
+            Ok::<_, anyhow::Error>(frozen)
+        })
+        .transpose()?;
+    let inherited_snapshot_hash = inherited_generation
+        .as_ref()
+        .map(|generation| generation.snapshot_hash().to_string());
 
     // Execute authority over the child was already enforced at the callback trust
     // boundary (`enforce_callback_caps` in the dispatch handler) against this same
     // item_id; no second check is needed here — the parent's `effective_caps`
     // bound the child under `FollowChildHybrid` at launch exactly as for follow.
-    let child_ref = CanonicalRef::parse(child_item_ref)
-        .with_context(|| format!("detach: invalid child item ref '{child_item_ref}'"))?;
+    if let Some(snapshot_hash) = inherited_snapshot_hash.as_deref() {
+        let child_context = crate::execution::project_source::resolve_pinned_snapshot_context(
+            state,
+            snapshot_hash,
+            cap.provenance.original_project_path().to_path_buf(),
+            &child_thread_id,
+        )?;
+        child_provenance = cap.provenance.clone_for_borrowed_child_workspace(
+            child_context.effective_path,
+            child_context
+                .temp_dir
+                .ok_or_else(|| anyhow::anyhow!("detach: child workspace has no lifecycle guard"))?,
+        );
+    }
 
     // Managed-runtime children only: a child kind served by a registered runtime
     // resolves here; a leaf tool/service kind does not. The same lookup yields the
@@ -199,8 +296,17 @@ pub async fn spawn_detached_child(
             // Resume identity derives from validated server-side provenance, never
             // the request body — same rule as follow.
             project_context: ProjectContext::LocalPath {
-                path: cap.provenance.effective_path().to_path_buf(),
+                path: child_provenance.effective_path().to_path_buf(),
             },
+            stable_project_identity: Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    cap.provenance.original_project_path(),
+                    &parent.origin_site_id,
+                )?,
+            ),
+            local_overlay_root: (cap.provenance.project_source()
+                == ryeos_app::execution_provenance::ProjectSourceKind::LiveFs)
+                .then(|| cap.provenance.original_project_path().to_path_buf()),
             original_snapshot_hash: inherited_snapshot_hash,
             // A detached child borrows the parent's workspace; it never owns snapshot
             // lineage, so no pushed-head identity is seeded.
@@ -230,7 +336,7 @@ pub async fn spawn_detached_child(
         hard_limits: launch_parent_context.hard_limits.clone(),
         depth: launch_parent_context.depth,
     });
-    let child_thread_id = new_thread_id();
+    meta.follow_launch_window = persisted_launch_window.clone();
     let prepared = crate::execution::launch::prepare_follow_child_launch(
         state,
         &child_thread_id,
@@ -333,11 +439,10 @@ pub async fn spawn_detached_child(
     // id so a caller can only pace its own children.
     let mut queued = false;
     let mut co_admitted: Vec<String> = Vec::new();
-    if let Some(w) = launch_window {
-        let window_key = format!("{parent_thread_id}:{}", w.key);
+    if let Some(w) = persisted_launch_window.as_ref() {
         let admitted = match state.state_store.launch_window_enqueue(
             &child_thread_id,
-            &window_key,
+            &w.key,
             w.width,
             crate::execution::launch::global_live_fanout_limit(),
             lillux::time::timestamp_millis(),
@@ -426,6 +531,9 @@ pub async fn spawn_detached_child(
     for other in &co_admitted {
         crate::execution::launch::launch_admitted_window_member(state, other);
     }
+    if let Some(generation) = inherited_generation {
+        generation.publish()?;
+    }
 
     tracing::info!(
         parent_thread_id = %parent_thread_id,
@@ -442,10 +550,18 @@ pub async fn spawn_detached_child(
     // emit `child_thread_spawned` + record the dispatch edge; `result` is the bare
     // value a `foreach → launch` body sees (`${result.child_thread_id}`) — there
     // is no leaf terminal result, the parent does not consume the child.
-    Ok(json!({
+    Ok(detached_callback_response(
+        &child_thread_id,
+        if queued { "created" } else { "running" },
+        queued,
+    ))
+}
+
+fn detached_callback_response(child_thread_id: &str, status: &str, queued: bool) -> Value {
+    json!({
         "thread": {
             "thread_id": child_thread_id,
-            "status": if queued { "created" } else { "running" },
+            "status": status,
             "detached": true,
         },
         "result": {
@@ -453,7 +569,7 @@ pub async fn spawn_detached_child(
             "child_thread_id": child_thread_id,
             "queued": queued,
         },
-    }))
+    })
 }
 
 fn settle_detached_pre_handoff_failure(

@@ -141,6 +141,16 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
         }
 
         let site_id = ctx.state.threads.site_id().to_string();
+        let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
+            &ctx.state,
+            &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
+            &project_path,
+            &principal_id,
+            &format!("dispatch-{}", ryeos_app::thread_lifecycle::new_thread_id()),
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("capture dispatch project: {error}"))
+        })?;
 
         let plan_ctx = PlanContext {
             requested_by: EffectivePrincipal::Local(Principal {
@@ -148,7 +158,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
                 scopes: principal_scopes.clone(),
             }),
             project_context: ProjectContext::LocalPath {
-                path: project_path.clone(),
+                path: project_ctx.effective_path.clone(),
             },
             current_site_id: site_id.clone(),
             origin_site_id: site_id,
@@ -159,16 +169,27 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: principal_id.clone(),
             caller_scopes: principal_scopes,
-            engine: ctx.state.engine.clone(),
+            engine: project_ctx.request_engine.clone(),
             plan_ctx,
             requested_call: None,
         };
 
-        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            project_path.clone(),
-            ctx.state.engine.clone(),
-        )
-        .with_workspace_lifeline(ctx.workspace_lifeline.clone());
+        let provenance =
+            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+                project_ctx.effective_path.clone(),
+                project_ctx.original_path.clone(),
+                project_ctx.request_engine.clone(),
+                project_ctx.temp_dir.clone().ok_or_else(|| {
+                    RouteDispatchError::Internal(
+                        "captured dispatch project has no workspace guard".to_string(),
+                    )
+                })?,
+                project_ctx.snapshot_hash.clone().ok_or_else(|| {
+                    RouteDispatchError::Internal(
+                        "captured dispatch project has no snapshot".to_string(),
+                    )
+                })?,
+            );
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: "inline",
@@ -177,7 +198,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             params: config.parameters,
             ref_bindings: config.ref_bindings,
             acting_principal: principal_id.as_str(),
-            project_path: &project_path,
+            project_path: &project_ctx.effective_path,
             provenance,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: None,

@@ -85,6 +85,14 @@ pub async fn handle(
         .project_path
         .ok_or_else(|| HandlerError::BadRequest("project_path is required".to_string()))?;
     let project_path = std::path::PathBuf::from(project_path);
+    let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
+        &state,
+        &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
+        &project_path,
+        &ctx.fingerprint,
+        &format!("command-{}", ryeos_app::thread_lifecycle::new_thread_id()),
+    )
+    .map_err(|error| HandlerError::BadRequest(format!("capture command project: {error}")))?;
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let site_id = state.threads.site_id().to_string();
@@ -94,7 +102,7 @@ pub async fn handle(
             scopes: ctx.scopes.clone(),
         }),
         project_context: ProjectContext::LocalPath {
-            path: project_path.clone(),
+            path: project_ctx.effective_path.clone(),
         },
         current_site_id: site_id.clone(),
         origin_site_id: site_id,
@@ -104,14 +112,24 @@ pub async fn handle(
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
         principal_fingerprint: ctx.fingerprint.clone(),
         caller_scopes: ctx.scopes.clone(),
-        engine: state.engine.clone(),
+        engine: project_ctx.request_engine.clone(),
         plan_ctx,
         requested_call: None,
     };
-    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-        project_path.clone(),
-        state.engine.clone(),
-    );
+    let provenance =
+        ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+            project_ctx.effective_path.clone(),
+            project_ctx.original_path.clone(),
+            project_ctx.request_engine.clone(),
+            project_ctx.temp_dir.clone().ok_or_else(|| {
+                HandlerError::Internal(
+                    "captured command project has no workspace guard".to_string(),
+                )
+            })?,
+            project_ctx.snapshot_hash.clone().ok_or_else(|| {
+                HandlerError::Internal("captured command project has no snapshot".to_string())
+            })?,
+        );
     let kind = item_ref.split(':').next().unwrap_or("");
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
         launch_mode: "inline",
@@ -120,7 +138,7 @@ pub async fn handle(
         params: parameters,
         ref_bindings: req.ref_bindings,
         acting_principal: ctx.fingerprint.as_str(),
-        project_path: &project_path,
+        project_path: &project_ctx.effective_path,
         provenance,
         original_root_kind: kind,
         pre_minted_thread_id: None,

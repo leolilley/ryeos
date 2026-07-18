@@ -5,7 +5,7 @@ requires_kinds: []
 uses_kinds: []
 isolation_backends:
   - id: linux-bubblewrap
-    protocol: ryeos.isolation-adapter/v1
+    protocol: ryeos.isolation-adapter/v2
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
@@ -17,6 +17,8 @@ isolation_backends:
       - filesystem.fd_read_only
       - filesystem.fd_writable
       - filesystem.ordered_overlays
+      - filesystem.project_workspace_cow
+      - filesystem.workspace_delta
       - filesystem.private_tmp
       - devices.minimal
       - environment.exact

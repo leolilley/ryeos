@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:125dd5df005f05356db8e6b9155d7b4101e6b8a79d4182aa77916eba3d70fb0b:DcPm7aZU3Qg8tzkY2o3XJauyWtc3eF3RxDCQCnvxP32yYwkDHPd/jFsitVSF2mrkVwg3qN5UDD2rjk5bsS4TBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-18T18:35:26Z:72ae878acff67de6b9d2b5e14f6e6f15470d7ad5e487c82dfe345454a0b0fb0e:WHBMmJ2ytO2QRyLOXhdgMxPfXVED8MzNB+6WpG/dKPwOvCjdUbIQpDiYgnZ/eSz3fFRkYzhy9V+/L6Z0JkoCBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/remote
 tags: [remote, cli, reference, manpage, capabilities]
@@ -207,15 +207,16 @@ Failure modes:
 
 ## `ryeos remote pull`
 
-Fetch CAS objects from a remote by hash.
+Fetch explicitly typed CAS artifacts from a remote into one new directory.
 
 ```bash
-ryeos remote pull --remote prod --hashes abc123 def456
-ryeos remote pull --remote prod --hashes abc123 --output-dir /tmp/objects
+ryeos remote pull --remote prod --object-hashes abc123 --output-dir /tmp/objects
+ryeos remote pull --remote prod --blob-hashes def456 --output-dir /tmp/blobs
 ```
 
-Objects are stored in the local CAS. With `--output-dir`, blobs are
-written as `<hash>` and JSON objects as `<hash>.json`.
+Blobs are written as `<hash>` and JSON objects as `<hash>.json`. The output
+directory is required, must be absolute, and must not already exist. Nothing is
+inserted into local CAS by this operator export command.
 
 Failure mode: fail-closed if any requested hash is missing on the
 remote; the error reports all missing hashes.
@@ -243,7 +244,7 @@ an absolute project path or the explicit no-project sentinel.
 
 Execution phases:
 
-1. Push project state, or an empty project manifest in `--no-project`
+1. Push a typed project snapshot, or an empty project snapshot in `--no-project`
    mode.
 2. Call remote `/execute` using the pushed project source.
 3. Pull result objects and apply changed project files locally.

@@ -66,6 +66,7 @@ pub fn validate_execution_process_identity_shape(
 
 #[derive(Debug, Clone, Copy)]
 struct ProcessStat {
+    state: char,
     pgrp: i64,
     start_time_ticks: i64,
 }
@@ -153,8 +154,28 @@ pub fn remove_stale_socket(path: &Path) -> Result<()> {
 
 /// Check if a process group is alive.
 pub fn pgid_alive(pgid: i64) -> bool {
-    // kill(0, -pgid) checks if any process in the group exists
-    unsafe { libc::kill(-(pgid as i32), 0) == 0 }
+    process_group_presence(pgid) == IdentityLiveness::Alive
+}
+
+/// Read-only numeric process-group absence probe. This never signals the
+/// group: signal 0 asks the kernel only whether any member exists. EPERM means
+/// present, ESRCH means absent, and every other outcome is unavailable so
+/// recovery fails closed.
+pub fn process_group_presence(pgid: i64) -> IdentityLiveness {
+    let Ok(pgid) = i32::try_from(pgid) else {
+        return IdentityLiveness::Unavailable;
+    };
+    if pgid <= 1 {
+        return IdentityLiveness::Unavailable;
+    }
+    if unsafe { libc::kill(-pgid, 0) } == 0 {
+        return IdentityLiveness::Alive;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => IdentityLiveness::DeadOrStale,
+        Some(libc::EPERM) => IdentityLiveness::Alive,
+        _ => IdentityLiveness::Unavailable,
+    }
 }
 
 /// Prove that a persisted PID/PGID still identifies the RyeOS runtime for the
@@ -602,6 +623,122 @@ pub fn signal_exact_group(identity: &ExecutionProcessIdentity, signal: i32) -> S
     }
 }
 
+/// After delivering `SIGSTOP`, prove that every member of the exact pinned
+/// process group has entered a stopped (or terminal zombie) state. Signal
+/// delivery alone is not a freeze barrier: a runnable member may not yet have
+/// observed the signal when workspace bytes are scanned.
+pub fn wait_for_exact_group_quiesced(
+    identity: &ExecutionProcessIdentity,
+    timeout: Duration,
+) -> Result<Vec<ExecutionProcessIdentity>> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (identity, timeout);
+        anyhow::bail!("exact process-group quiescence is unavailable on this platform");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _pinned = pin_group_leader(identity)
+            .map_err(|error| anyhow::anyhow!("cannot pin execution group: {error:?}"))?;
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(std::time::Instant::now);
+        loop {
+            let mut members = Vec::new();
+            let mut observed_members = 0_usize;
+            let mut runnable = false;
+            for entry in std::fs::read_dir("/proc").context("enumerate process group")? {
+                let entry = entry?;
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|value| value.parse::<i64>().ok())
+                else {
+                    continue;
+                };
+                match read_process_stat(pid) {
+                    Ok(stat) if stat.pgrp == identity.pgid => {
+                        observed_members += 1;
+                        if matches!(stat.state, 'T' | 't') {
+                            members.push(ExecutionProcessIdentity {
+                                schema_version: PROCESS_IDENTITY_SCHEMA_VERSION,
+                                boot_id: identity.boot_id.clone(),
+                                target_pid: pid,
+                                target_start_time_ticks: stat.start_time_ticks,
+                                group_leader_pid: identity.group_leader_pid,
+                                group_leader_start_time_ticks: identity
+                                    .group_leader_start_time_ticks,
+                            });
+                        }
+                        runnable |= !matches!(stat.state, 'T' | 't' | 'Z' | 'X');
+                    }
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error).context("inspect process-group member"),
+                }
+            }
+            if observed_members > 0 && !runnable {
+                // Every nonterminal member remains stopped while this list is
+                // captured, so none can fork between the barrier proof and
+                // this identity snapshot. Terminal zombies need no later
+                // signal; stopped identities remain independently resumable
+                // if the group leader exits.
+                members.sort_by_key(|member| member.target_pid);
+                return Ok(members);
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "execution group {} did not reach a provable stopped state",
+                    identity.pgid
+                );
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Terminate a previously quiesced, descriptor-identified member set and
+/// prove every exact incarnation is gone. This remains safe after group-leader
+/// death because each signal is delivered through that member's own pidfd.
+pub fn terminate_exact_processes(
+    identities: &[ExecutionProcessIdentity],
+    timeout: Duration,
+) -> Result<()> {
+    for identity in identities {
+        match signal_exact_target(identity, libc::SIGKILL) {
+            SignalResult::Delivered | SignalResult::AlreadyDead | SignalResult::StaleIdentity => {}
+            outcome => anyhow::bail!(
+                "cannot terminate exact process {}: {}",
+                identity.target_pid,
+                outcome.as_str()
+            ),
+        }
+    }
+    let deadline = std::time::Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(std::time::Instant::now);
+    loop {
+        let mut live = Vec::new();
+        for identity in identities {
+            match execution_liveness(identity) {
+                IdentityLiveness::DeadOrStale => {}
+                IdentityLiveness::Alive => live.push(identity.target_pid),
+                IdentityLiveness::Unavailable => anyhow::bail!(
+                    "liveness became unavailable for exact process {}",
+                    identity.target_pid
+                ),
+            }
+        }
+        if live.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("exact processes did not terminate before timeout: {live:?}");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Whether the persisted target still names the exact live incarnation.
 pub fn execution_alive(identity: &ExecutionProcessIdentity) -> bool {
     execution_liveness(identity) == IdentityLiveness::Alive
@@ -708,6 +845,12 @@ fn read_process_stat(pid: i64) -> std::io::Result<ProcessStat> {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "malformed /proc stat comm")
     })?;
     let fields = raw[close + 1..].split_whitespace().collect::<Vec<_>>();
+    let state = fields
+        .first()
+        .and_then(|value| value.chars().next())
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "missing /proc stat state")
+        })?;
     let pgrp = fields
         .get(2)
         .ok_or_else(|| {
@@ -732,6 +875,7 @@ fn read_process_stat(pid: i64) -> std::io::Result<ProcessStat> {
         ));
     }
     Ok(ProcessStat {
+        state,
         pgrp,
         start_time_ticks,
     })

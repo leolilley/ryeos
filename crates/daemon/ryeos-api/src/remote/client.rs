@@ -373,6 +373,7 @@ impl RemoteClient {
             "staging_id": staging_id,
             "project_path": project_path,
             "blobs": blobs,
+            "blob_chunks": [],
             "objects": wrapped_objects,
         });
         let resp = self.signed_post("/objects/put", &body).await?;
@@ -405,12 +406,151 @@ impl RemoteClient {
         })
     }
 
+    pub async fn objects_put_blob_chunk(
+        &self,
+        staging_id: &str,
+        project_path: &str,
+        chunk: &BlobChunkUpload,
+    ) -> Result<ObjectsPutResponse> {
+        let body = serde_json::json!({
+            "staging_id": staging_id,
+            "project_path": project_path,
+            "blobs": [],
+            "blob_chunks": [chunk],
+            "objects": [],
+        });
+        let resp = self.signed_post("/objects/put", &body).await?;
+        Ok(ObjectsPutResponse {
+            staging_id: resp["staging_id"]
+                .as_str()
+                .context("objects/put response missing staging_id")?
+                .to_string(),
+            expected_previous_hash: match resp.get("expected_previous_hash") {
+                Some(Value::String(hash)) => Some(hash.clone()),
+                Some(Value::Null) => None,
+                _ => anyhow::bail!("objects/put response missing nullable expected_previous_hash"),
+            },
+            blob_hashes: resp["blob_hashes"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            object_hashes: resp["object_hashes"]
+                .as_array()
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
     /// POST /objects/get (authenticated).
     ///
     /// Server returns `{ "entries": [{ "hash": "...", "kind": "blob"|"object"|"missing", ... }] }`.
-    pub async fn objects_get(&self, hashes: &[String]) -> Result<ObjectsGetResponse> {
-        self.objects_get_with_response_limit(hashes, DEFAULT_JSON_RESPONSE_MAX_BYTES)
-            .await
+    pub async fn objects_get(
+        &self,
+        object_hashes: &[String],
+        blob_hashes: &[String],
+    ) -> Result<ObjectsGetResponse> {
+        self.objects_get_with_response_limit(
+            object_hashes,
+            blob_hashes,
+            DEFAULT_JSON_RESPONSE_MAX_BYTES,
+        )
+        .await
+    }
+
+    pub async fn objects_get_blob_chunk(
+        &self,
+        hash: &str,
+        offset: u64,
+        length: usize,
+    ) -> Result<BlobChunkResponse> {
+        let body = serde_json::json!({
+            "object_hashes": [],
+            "blob_hashes": [],
+            "blob_chunk": {"hash": hash, "offset": offset, "length": length},
+        });
+        let response = self
+            .signed_post_with_response_limit(
+                "/objects/get",
+                &body,
+                length.saturating_mul(2).saturating_add(4096),
+            )
+            .await?;
+        let chunk: BlobChunkResponse = serde_json::from_value(
+            response
+                .get("blob_chunk")
+                .cloned()
+                .context("objects/get response missing blob_chunk")?,
+        )?;
+        chunk.validate(hash, offset, length)?;
+        Ok(chunk)
+    }
+
+    /// Stream one typed blob through bounded authenticated responses. The
+    /// caller supplies the destination; no full blob is ever represented in a
+    /// JSON body or heap allocation. Returns the verified byte count.
+    pub async fn stream_blob<W: std::io::Write>(
+        &self,
+        hash: &str,
+        destination: &mut W,
+    ) -> Result<u64> {
+        use sha2::{Digest as _, Sha256};
+
+        if !is_canonical_hash(hash) {
+            anyhow::bail!("cannot stream an invalid blob hash");
+        }
+        let mut offset = 0_u64;
+        let mut declared_total = None;
+        let mut digest = Sha256::new();
+        loop {
+            let chunk = self
+                .objects_get_blob_chunk(
+                    hash,
+                    offset,
+                    crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
+                )
+                .await?;
+            if chunk.kind == "missing" {
+                anyhow::bail!("remote blob {hash} is absent");
+            }
+            let total = chunk
+                .total_size
+                .context("remote blob chunk omitted total size")?;
+            if declared_total
+                .replace(total)
+                .is_some_and(|prior| prior != total)
+            {
+                anyhow::bail!("remote blob changed size during transfer");
+            }
+            let bytes = chunk.decoded_data()?;
+            destination.write_all(&bytes)?;
+            digest.update(&bytes);
+            offset = offset
+                .checked_add(u64::try_from(bytes.len())?)
+                .context("remote blob transfer size overflow")?;
+            if chunk.eof == Some(true) {
+                if offset != total {
+                    anyhow::bail!("remote blob EOF contradicts its total size");
+                }
+                break;
+            }
+        }
+        let actual = format!("{:x}", digest.finalize());
+        if actual != hash {
+            anyhow::bail!("remote blob hash mismatch: expected {hash}, got {actual}");
+        }
+        Ok(offset)
     }
 
     /// Fetch CAS entries while bounding each HTTP response body. Callers that
@@ -418,11 +558,17 @@ impl RemoteClient {
     /// that includes base64/JSON overhead without allowing unbounded buffering.
     pub async fn objects_get_with_response_limit(
         &self,
-        hashes: &[String],
+        object_hashes: &[String],
+        blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
-        self.objects_get_with_response_limit_inner(hashes, max_response_bytes, None)
-            .await
+        self.objects_get_with_response_limit_inner(
+            object_hashes,
+            blob_hashes,
+            max_response_bytes,
+            None,
+        )
+        .await
     }
 
     /// Fetch one or more bounded object batches for bundle transfer. Every
@@ -430,11 +576,12 @@ impl RemoteClient {
     /// wall-clock timeout; generic CAS callers retain their existing behavior.
     pub async fn objects_get_bundle_batch_with_response_limit(
         &self,
-        hashes: &[String],
+        blob_hashes: &[String],
         max_response_bytes: usize,
     ) -> Result<ObjectsGetResponse> {
         self.objects_get_with_response_limit_inner(
-            hashes,
+            &[],
+            blob_hashes,
             max_response_bytes,
             Some(BUNDLE_TRANSFER_REQUEST_TIMEOUT),
         )
@@ -443,32 +590,55 @@ impl RemoteClient {
 
     async fn objects_get_with_response_limit_inner(
         &self,
-        hashes: &[String],
+        object_hashes: &[String],
+        blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: Option<std::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
-        if hashes_request_body_size(hashes) > HASH_REQUEST_BODY_BUDGET_BYTES {
+        if typed_hashes_request_body_size(object_hashes, blob_hashes)
+            > HASH_REQUEST_BODY_BUDGET_BYTES
+        {
             let mut entries = Vec::new();
-            for chunk in chunk_hashes_for_body_budget(hashes, HASH_REQUEST_BODY_BUDGET_BYTES) {
+            for chunk in
+                chunk_typed_hashes_for_body_budget(object_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
+            {
                 entries.extend(
-                    self.objects_get_once(&chunk, max_response_bytes, total_timeout)
+                    self.objects_get_once(&chunk, &[], max_response_bytes, total_timeout)
+                        .await?
+                        .entries,
+                );
+            }
+            for chunk in
+                chunk_typed_hashes_for_body_budget(blob_hashes, HASH_REQUEST_BODY_BUDGET_BYTES)
+            {
+                entries.extend(
+                    self.objects_get_once(&[], &chunk, max_response_bytes, total_timeout)
                         .await?
                         .entries,
                 );
             }
             return Ok(ObjectsGetResponse { entries });
         }
-        self.objects_get_once(hashes, max_response_bytes, total_timeout)
-            .await
+        self.objects_get_once(
+            object_hashes,
+            blob_hashes,
+            max_response_bytes,
+            total_timeout,
+        )
+        .await
     }
 
     async fn objects_get_once(
         &self,
-        hashes: &[String],
+        object_hashes: &[String],
+        blob_hashes: &[String],
         max_response_bytes: usize,
         total_timeout: Option<std::time::Duration>,
     ) -> Result<ObjectsGetResponse> {
-        let body = serde_json::json!({ "hashes": hashes });
+        let body = serde_json::json!({
+            "object_hashes": object_hashes,
+            "blob_hashes": blob_hashes,
+        });
         let resp = match total_timeout {
             Some(timeout) => {
                 self.signed_post_with_response_limit_and_timeout(
@@ -502,7 +672,7 @@ impl RemoteClient {
             })
             .collect();
         let response = ObjectsGetResponse { entries };
-        response.validate_against_request(hashes)?;
+        response.validate_against_request(object_hashes, blob_hashes)?;
         Ok(response)
     }
 
@@ -1023,10 +1193,6 @@ impl RemoteClient {
     }
 }
 
-fn hashes_request_body_size(hashes: &[String]) -> usize {
-    serde_json::json!({ "hashes": hashes }).to_string().len()
-}
-
 fn typed_hashes_request_body_size(object_hashes: &[String], blob_hashes: &[String]) -> usize {
     serde_json::json!({
         "object_hashes": object_hashes,
@@ -1067,33 +1233,6 @@ fn chunk_typed_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) ->
     if !current.is_empty() {
         chunks.push(current);
     }
-    chunks
-}
-
-fn chunk_hashes_for_body_budget(hashes: &[String], budget_bytes: usize) -> Vec<Vec<String>> {
-    if hashes.is_empty() {
-        return Vec::new();
-    }
-
-    let empty_body_size = hashes_request_body_size(&[]);
-    let mut chunks = Vec::new();
-    let mut current = Vec::new();
-    let mut current_size = empty_body_size;
-
-    for hash in hashes {
-        let entry_size = hash.len() + 2 + usize::from(!current.is_empty()); // quotes + comma
-        if !current.is_empty() && current_size + entry_size > budget_bytes {
-            chunks.push(std::mem::take(&mut current));
-            current_size = empty_body_size;
-        }
-        current_size += hash.len() + 2 + usize::from(!current.is_empty());
-        current.push(hash.clone());
-    }
-
-    if !current.is_empty() {
-        chunks.push(current);
-    }
-
     chunks
 }
 
@@ -1319,23 +1458,101 @@ pub struct ObjectsGetResponse {
     pub entries: Vec<CasEntry>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobChunkResponse {
+    pub hash: String,
+    pub kind: String,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub total_size: Option<u64>,
+    #[serde(default)]
+    pub eof: Option<bool>,
+    #[serde(default)]
+    pub data: Option<String>,
+}
+
+impl BlobChunkResponse {
+    fn validate(&self, expected_hash: &str, expected_offset: u64, max_length: usize) -> Result<()> {
+        if self.hash != expected_hash {
+            anyhow::bail!("objects/get blob chunk changed the requested hash");
+        }
+        match self.kind.as_str() {
+            "missing"
+                if self.offset.is_none()
+                    && self.total_size.is_none()
+                    && self.eof.is_none()
+                    && self.data.is_none() => {}
+            "blob_chunk" => {
+                if self.offset != Some(expected_offset)
+                    || self.total_size.is_none()
+                    || self.eof.is_none()
+                {
+                    anyhow::bail!("objects/get returned incomplete blob chunk metadata");
+                }
+                let encoded = self
+                    .data
+                    .as_deref()
+                    .context("objects/get blob chunk has no data")?;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .context("objects/get blob chunk is not valid base64")?;
+                if decoded.len() > max_length {
+                    anyhow::bail!("objects/get blob chunk exceeds requested length");
+                }
+                let total_size = self.total_size.expect("checked above");
+                if decoded.is_empty()
+                    && !(expected_offset == 0 && total_size == 0 && self.eof == Some(true))
+                {
+                    anyhow::bail!("objects/get blob chunk made no progress");
+                }
+                let end = expected_offset
+                    .checked_add(u64::try_from(decoded.len())?)
+                    .context("objects/get blob chunk range overflow")?;
+                if end > total_size || self.eof != Some(end == total_size) {
+                    anyhow::bail!("objects/get blob chunk has contradictory range/EOF metadata");
+                }
+            }
+            _ => anyhow::bail!("objects/get returned an invalid blob chunk shape"),
+        }
+        Ok(())
+    }
+
+    pub fn decoded_data(&self) -> Result<Vec<u8>> {
+        let encoded = self.data.as_deref().context("blob chunk is missing")?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .context("blob chunk is not valid base64")
+    }
+}
+
 impl ObjectsGetResponse {
-    pub fn validate_against_request(&self, requested: &[String]) -> Result<()> {
-        let requested: std::collections::BTreeSet<&str> =
-            requested.iter().map(String::as_str).collect();
-        let mut seen = std::collections::BTreeSet::new();
+    pub fn validate_against_request(
+        &self,
+        requested_objects: &[String],
+        requested_blobs: &[String],
+    ) -> Result<()> {
+        let requested_objects: std::collections::BTreeSet<&str> =
+            requested_objects.iter().map(String::as_str).collect();
+        let requested_blobs: std::collections::BTreeSet<&str> =
+            requested_blobs.iter().map(String::as_str).collect();
+        let mut seen_objects = std::collections::BTreeSet::new();
+        let mut seen_blobs = std::collections::BTreeSet::new();
         for entry in &self.entries {
             if !is_canonical_hash(&entry.hash) {
                 anyhow::bail!("invalid objects/get entry hash {}", entry.hash);
             }
-            if !requested.contains(entry.hash.as_str()) {
-                anyhow::bail!("objects/get returned unexpected hash {}", entry.hash);
-            }
-            if !seen.insert(entry.hash.as_str()) {
-                anyhow::bail!("objects/get returned duplicate hash {}", entry.hash);
-            }
             match entry.kind.as_str() {
                 "object" if entry.value.is_some() && entry.data.is_none() => {
+                    if !requested_objects.contains(entry.hash.as_str())
+                        || !seen_objects.insert(entry.hash.as_str())
+                    {
+                        anyhow::bail!(
+                            "objects/get returned unexpected or duplicate object {}",
+                            entry.hash
+                        );
+                    }
                     let canonical =
                         lillux::canonical_json(entry.value.as_ref().expect("value checked above"))?;
                     let actual = lillux::sha256_hex(canonical.as_bytes());
@@ -1348,6 +1565,14 @@ impl ObjectsGetResponse {
                     }
                 }
                 "blob" if entry.data.is_some() && entry.value.is_none() => {
+                    if !requested_blobs.contains(entry.hash.as_str())
+                        || !seen_blobs.insert(entry.hash.as_str())
+                    {
+                        anyhow::bail!(
+                            "objects/get returned unexpected or duplicate blob {}",
+                            entry.hash
+                        );
+                    }
                     let bytes = base64::engine::general_purpose::STANDARD
                         .decode(entry.data.as_ref().expect("data checked above"))
                         .context("invalid base64 in objects/get blob entry")?;
@@ -1360,13 +1585,37 @@ impl ObjectsGetResponse {
                         );
                     }
                 }
-                "missing" if entry.value.is_none() && entry.data.is_none() => {}
+                "missing_object" if entry.value.is_none() && entry.data.is_none() => {
+                    if !requested_objects.contains(entry.hash.as_str())
+                        || !seen_objects.insert(entry.hash.as_str())
+                    {
+                        anyhow::bail!(
+                            "objects/get returned unexpected or duplicate missing object {}",
+                            entry.hash
+                        );
+                    }
+                }
+                "missing_blob" if entry.value.is_none() && entry.data.is_none() => {
+                    if !requested_blobs.contains(entry.hash.as_str())
+                        || !seen_blobs.insert(entry.hash.as_str())
+                    {
+                        anyhow::bail!(
+                            "objects/get returned unexpected or duplicate missing blob {}",
+                            entry.hash
+                        );
+                    }
+                }
                 other => anyhow::bail!("invalid objects/get entry kind/shape: {other}"),
             }
         }
-        for hash in requested {
-            if !seen.contains(hash) {
-                anyhow::bail!("objects/get response missing requested hash {hash}");
+        for hash in requested_objects {
+            if !seen_objects.contains(hash) {
+                anyhow::bail!("objects/get response missing requested object hash {hash}");
+            }
+        }
+        for hash in requested_blobs {
+            if !seen_blobs.contains(hash) {
+                anyhow::bail!("objects/get response missing requested blob hash {hash}");
             }
         }
         Ok(())
@@ -2291,6 +2540,14 @@ pub struct BlobUpload {
     pub data: String,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BlobChunkUpload {
+    pub hash: String,
+    pub total_size: u64,
+    pub offset: u64,
+    pub data: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2391,14 +2648,14 @@ mod tests {
     }
 
     #[test]
-    fn chunk_hashes_respects_body_budget() {
+    fn chunk_typed_hashes_respects_body_budget() {
         let hashes: Vec<String> = (0..100).map(|i| format!("{:064x}", i)).collect();
-        let chunks = chunk_hashes_for_body_budget(&hashes, 512);
+        let chunks = chunk_typed_hashes_for_body_budget(&hashes, 512);
 
         assert!(chunks.len() > 1);
         assert_eq!(chunks.iter().map(Vec::len).sum::<usize>(), hashes.len());
         for chunk in chunks {
-            assert!(hashes_request_body_size(&chunk) <= 512);
+            assert!(typed_hashes_request_body_size(&chunk, &[]) <= 512);
         }
     }
 

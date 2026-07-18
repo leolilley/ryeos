@@ -1403,13 +1403,11 @@ pub(crate) async fn dispatch_method(
     // projection and executor preparation may be substantial; the daemon's
     // recovery sweep must see a durable launch claim throughout that created
     // window rather than classifying the row as an orphan.
-    let _launch_claim = request
-        .parent_execution_context
-        .is_none()
-        .then(|| {
-            crate::execution::launch_claim::ThreadLaunchClaim::acquire_fresh(state, &thread_id)
-        })
-        .transpose()
+    let launch_claim =
+        crate::execution::launch_claim::ThreadLaunchClaim::acquire_fresh(state, &thread_id)
+            .map_err(DispatchError::Internal)?;
+    let launch_owner = launch_claim
+        .canonical_owner()
         .map_err(DispatchError::Internal)?;
     let created = if let Some(parent) = request.parent_execution_context.as_ref() {
         let durable_parent = state
@@ -1433,7 +1431,7 @@ pub(crate) async fn dispatch_method(
                 launch_mode: request.launch_mode.to_string(),
                 current_site_id: ctx.plan_ctx.current_site_id.clone(),
                 origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-                upstream_thread_id: Some(durable_parent.thread_id),
+                upstream_thread_id: Some(durable_parent.thread_id.clone()),
                 requested_by: Some(request.acting_principal.to_string()),
                 project_root: Some(
                     request
@@ -1441,6 +1439,11 @@ pub(crate) async fn dispatch_method(
                         .canonicalize()
                         .unwrap_or_else(|_| request.project_path.to_path_buf()),
                 ),
+                base_project_snapshot_hash: state
+                    .state_store
+                    .authoritative_project_generation(&durable_parent.thread_id)
+                    .map_err(DispatchError::Internal)?
+                    .and_then(|(base, result)| result.or(base)),
                 usage_subject: request.usage_subject.clone(),
                 usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
                 captured_history_policy: None,
@@ -1480,13 +1483,15 @@ pub(crate) async fn dispatch_method(
         ) {
             Ok(inherited_stop) => inherited_stop,
             Err(error) => {
-                let cleanup = finalize_child_link_failure_if_current(
+                let cleanup = finalize_method_thread_if_needed(
                     state,
                     &thread_id,
-                    json!({
+                    &launch_owner,
+                    "failed",
+                    Some(json!({
                         "code": "child_link_failed",
                         "reason": error.to_string(),
-                    }),
+                    })),
                 )
                 .map_err(|cleanup_error| {
                     DispatchError::Internal(anyhow::anyhow!(
@@ -1494,15 +1499,13 @@ pub(crate) async fn dispatch_method(
                         parent.parent_thread_id
                     ))
                 })?;
-                // Settled means this row is terminal; NotCurrent means another
-                // concurrent owner advanced it. In either case this request no
-                // longer owns cancellation authority over that lifecycle row.
-                lifecycle_owner.disarm();
-                if !cleanup.is_settled() {
+                if cleanup.is_settled() {
+                    lifecycle_owner.disarm();
+                } else {
                     tracing::warn!(
                         thread_id,
                         parent_thread_id = %parent.parent_thread_id,
-                        "child-link cleanup refused because another launch owner advanced the row"
+                        "child-link cleanup preserved for daemon shutdown recovery"
                     );
                 }
                 return Err(DispatchError::Internal(anyhow::anyhow!(
@@ -1560,6 +1563,14 @@ pub(crate) async fn dispatch_method(
         serde_json::Value::Null,
         0,
     );
+    if !state
+        .callback_tokens
+        .set_launch_owner(&cap.token, launch_owner.clone())
+    {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "method callback capability disappeared before owner binding"
+        )));
+    }
     lifecycle_owner.track_callback_token(cap.token.clone());
 
     // 9. Mint thread-auth authority only when the verified runtime protocol
@@ -1822,10 +1833,12 @@ pub(crate) async fn dispatch_method(
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = thread_id.clone();
+        let process_launch_owner = launch_owner.clone();
         let process_handle = tokio::task::spawn_blocking(move || {
             crate::execution::process_attachment::run_lillux_attached(
                 &process_state,
                 &process_thread_id,
+                &process_launch_owner,
                 subprocess_request,
                 workspace_lifeline,
             )
@@ -1904,6 +1917,7 @@ pub(crate) async fn dispatch_method(
         let finalization = finalize_method_thread_if_needed(
             state,
             &thread_id,
+            &launch_owner,
             "completed",
             Some(output.clone()),
         )
@@ -1951,6 +1965,7 @@ pub(crate) async fn dispatch_method(
         Err(err) => match finalize_method_thread_if_needed(
             state,
             &thread_id,
+            &launch_owner,
             "failed",
             Some(json!({
                 "code": err.code(),
@@ -1996,9 +2011,16 @@ pub(crate) enum MethodFinalizeOutcome {
     PreservedForShutdown,
 }
 
+impl MethodFinalizeOutcome {
+    pub(crate) fn is_settled(self) -> bool {
+        self != Self::PreservedForShutdown
+    }
+}
+
 pub(crate) fn finalize_method_thread_if_needed(
     state: &AppState,
     thread_id: &str,
+    launch_owner: &str,
     status: &str,
     result: Option<Value>,
 ) -> anyhow::Result<MethodFinalizeOutcome> {
@@ -2013,7 +2035,7 @@ pub(crate) fn finalize_method_thread_if_needed(
     };
     match state
         .threads
-        .finalize_if_nonterminal(&finalize_params(thread_id, status, result))?
+        .finalize_if_nonterminal_owned(&finalize_params(thread_id, status, result), launch_owner)?
     {
         FinalizeIfNonterminalOutcome::Finalized(thread) if stop_terminal(&thread.status) => {
             Ok(MethodFinalizeOutcome::DurableStopSettled)

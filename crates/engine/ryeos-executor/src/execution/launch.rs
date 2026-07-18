@@ -1123,7 +1123,7 @@ struct PreparedManagedLaunchAuthority {
     checkpoint_dir: Option<PathBuf>,
     is_resume: bool,
     launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
-    pending_project_snapshot: Option<super::PendingProjectSnapshot>,
+    pending_project_snapshot: Option<super::CapturedProjectGeneration>,
 }
 
 /// Whether the exact authority audit for this launch is already part of the
@@ -1394,6 +1394,7 @@ async fn prepare_managed_launch_authority(
         );
         let must_pin_local_snapshot = original_pushed_head_ref.is_none()
             && has_local_project_context
+            && params.provenance.captured_snapshot_hash().is_none()
             && (native_resume.is_some() || params.provenance.workspace_lifeline().is_some())
             && capture_project_snapshot;
         if must_pin_local_snapshot {
@@ -1401,6 +1402,7 @@ async fn prepare_managed_launch_authority(
                 super::capture_live_project_snapshot(
                     params.state,
                     params.project_path,
+                    &params.resolved.origin_site_id,
                     "managed_runtime_resume_pin",
                 )
                 .map_err(|error| {
@@ -1410,8 +1412,58 @@ async fn prepare_managed_launch_authority(
                     ))
                 })?,
             );
+            let generation = pending_project_snapshot
+                .as_ref()
+                .expect("captured generation was assigned above");
+            tracing::debug!(
+                snapshot_hash = %generation.snapshot_hash,
+                tree_hash = %generation.tree_hash,
+                policy_hash = %generation.policy_hash,
+                "captured exact managed-launch project generation"
+            );
         }
         let mut metadata = metadata_template.cloned().unwrap_or_default();
+        let inherited_stable_project_identity = pending_project_snapshot
+            .as_ref()
+            .map(|generation| generation.stable_project_identity.clone())
+            .or_else(|| {
+                metadata_template
+                    .and_then(|template| template.resume_context.as_ref())
+                    .and_then(|resume| resume.stable_project_identity.clone())
+            });
+        let stable_project_identity = match inherited_stable_project_identity {
+            Some(identity) => Some(identity),
+            None if matches!(
+                &params.resolved.plan_context.project_context,
+                ryeos_engine::contracts::ProjectContext::None
+            ) =>
+            {
+                None
+            }
+            None => Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    params.provenance.original_project_path(),
+                    &params.resolved.origin_site_id,
+                )
+                .map_err(BuildAndLaunchError::Internal)?,
+            ),
+        };
+        let local_overlay_root = pending_project_snapshot
+            .as_ref()
+            .and_then(|generation| generation.local_overlay_root.clone())
+            .or_else(|| {
+                metadata_template
+                    .and_then(|template| template.resume_context.as_ref())
+                    .and_then(|resume| resume.local_overlay_root.clone())
+            })
+            .or_else(|| {
+                matches!(
+                    &params.provenance,
+                    ryeos_app::execution_provenance::ExecutionProvenance::RootLiveFs { .. }
+                        | ryeos_app::execution_provenance::ExecutionProvenance::BorrowedChildLiveFs { .. }
+                )
+                .then(|| params.provenance.original_project_path().to_path_buf())
+            });
         metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
             kind: params.resolved.kind.clone(),
             item_ref: params.resolved.item_ref.clone(),
@@ -1419,9 +1471,17 @@ async fn prepare_managed_launch_authority(
             launch_mode: params.resolved.launch_mode.clone(),
             parameters: params.parameters.clone(),
             project_context: params.resolved.plan_context.project_context.clone(),
+            stable_project_identity,
+            local_overlay_root,
             original_snapshot_hash: pending_project_snapshot
                 .as_ref()
-                .map(|publication| publication.hash.clone())
+                .map(|publication| publication.snapshot_hash.clone())
+                .or_else(|| {
+                    params
+                        .provenance
+                        .captured_snapshot_hash()
+                        .map(str::to_owned)
+                })
                 .or_else(|| {
                     metadata_template
                         .and_then(|template| template.resume_context.as_ref())
@@ -1475,10 +1535,19 @@ async fn prepare_managed_launch_authority(
 struct FinalizeFailedOnDrop<'a> {
     state: &'a AppState,
     thread_id: String,
+    launch_owner: String,
     /// The launch failure, captured by the wrapper before the guard drops so
     /// the terminal `thread_failed` event carries the cause. `None` only on a
     /// panic/cancellation mid-launch, where no error value exists to record.
     error: Option<Value>,
+}
+
+fn current_launch_owner(state: &AppState, thread_id: &str) -> Result<String> {
+    state
+        .state_store
+        .get_launch_claim(thread_id)?
+        .map(|claim| claim.claimed_by)
+        .ok_or_else(|| anyhow::anyhow!("thread {thread_id} has no current launch owner"))
 }
 
 impl Drop for FinalizeFailedOnDrop<'_> {
@@ -1513,6 +1582,7 @@ impl Drop for FinalizeFailedOnDrop<'_> {
         if let Err(error) = crate::dispatch::finalize_method_thread_if_needed(
             self.state,
             &self.thread_id,
+            &self.launch_owner,
             "failed",
             self.error.take(),
         ) {
@@ -1594,6 +1664,7 @@ async fn run_claimed_thread_row(
     params: BuildAndLaunchParams<'_>,
     thread: ryeos_app::state_store::ThreadDetail,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
+    let launch_owner = current_launch_owner(params.state, &thread.thread_id)?;
     // Existing-row paths (native resume/reconcile and rows created by their
     // dedicated lifecycle) must recompute launch authority for every attempt.
     // No persisted runtime data or admission output is accepted here.
@@ -1616,6 +1687,7 @@ async fn run_claimed_thread_row(
             if let Err(cleanup_error) = crate::dispatch::finalize_method_thread_if_needed(
                 params.state,
                 &thread.thread_id,
+                &launch_owner,
                 "failed",
                 Some(terminal_error),
             ) {
@@ -1643,6 +1715,7 @@ async fn run_claimed_thread_row_with_authority(
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let state = params.state;
     let thread_id = thread.thread_id.clone();
+    let launch_owner = current_launch_owner(state, &thread_id)?;
     // Persistence-first net: any failure below finalizes the thread `failed`
     // WITH its cause on the terminal event — a spawn-phase death must never
     // settle as an empty `thread_failed` the operator cannot diagnose. Paths
@@ -1651,6 +1724,7 @@ async fn run_claimed_thread_row_with_authority(
     let mut guard = FinalizeFailedOnDrop {
         state,
         thread_id: thread_id.clone(),
+        launch_owner: launch_owner.clone(),
         error: None,
     };
     // Declared after the persistence guard so reverse drop order exact-stops
@@ -1662,6 +1736,7 @@ async fn run_claimed_thread_row_with_authority(
         thread,
         authority,
         launch_audit,
+        &launch_owner,
         &mut lifecycle_owner,
     )
     .await;
@@ -1679,6 +1754,7 @@ async fn run_claimed_thread_row_inner(
     thread: ryeos_app::state_store::ThreadDetail,
     authority: PreparedManagedLaunchAuthority,
     launch_audit: LaunchAuditDisposition,
+    launch_owner: &str,
     lifecycle_owner: &mut super::process_attachment::LifecycleOwnerGuard,
 ) -> Result<NativeLaunchResult, BuildAndLaunchError> {
     let BuildAndLaunchParams {
@@ -1980,6 +2056,24 @@ async fn run_claimed_thread_row_inner(
         current_depth,
     );
     lifecycle_owner.track_callback_token(cap.token.clone());
+    let launch_owner = state
+        .state_store
+        .get_launch_claim(&thread_id)
+        .map_err(BuildAndLaunchError::Internal)?
+        .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed launch has no durable launch owner"
+            ))
+        })?
+        .claimed_by;
+    if !state
+        .callback_tokens
+        .set_launch_owner(&cap.token, launch_owner)
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "callback capability disappeared before launch-owner binding"
+        )));
+    }
     // Carry the thread's authoritative chain root on the cap (it defaults to
     // thread_id / root until set here).
     if !state
@@ -2280,20 +2374,23 @@ async fn run_claimed_thread_row_inner(
             // which is dropped. Without this the operator only ever sees a bare
             // "failed" and is locked out of why the thread died. `{err:#}` keeps
             // the full cause chain (e.g. "missing required secret …").
-            let _ = state.threads.finalize_thread(&ThreadFinalizeParams {
-                thread_id: thread_id.clone(),
-                status: "failed".to_string(),
-                outcome_code: Some("pre_runtime_failure".to_string()),
-                result: None,
-                error: Some(json!({
-                    "code": "pre_runtime_failure",
-                    "message": format!("{err:#}"),
-                })),
-                metadata: None,
-                artifacts: Vec::new(),
-                final_cost: None,
-                summary_json: None,
-            });
+            let _ = state.threads.finalize_thread_owned(
+                &ThreadFinalizeParams {
+                    thread_id: thread_id.clone(),
+                    status: "failed".to_string(),
+                    outcome_code: Some("pre_runtime_failure".to_string()),
+                    result: None,
+                    error: Some(json!({
+                        "code": "pre_runtime_failure",
+                        "message": format!("{err:#}"),
+                    })),
+                    metadata: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    summary_json: None,
+                },
+                launch_owner,
+            );
             let failed_meta = ThreadMeta {
                 status: "failed".to_string(),
                 completed_at: Some(lillux::time::iso8601_now()),
@@ -3199,7 +3296,7 @@ async fn launch_successor_inner_with_claim(
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
     // Claim the launch FIRST — the sole authorization to spawn, and the
     // serialization point for the status + budget guards below.
-    let _claim = match prepared_claim {
+    let claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, successor_id)? {
             ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
@@ -3210,6 +3307,9 @@ async fn launch_successor_inner_with_claim(
             }
         },
     };
+    let launch_owner = claim
+        .canonical_owner()
+        .map_err(BuildAndLaunchError::Internal)?;
 
     // Status guard under the claim: ONLY a `created` row is launchable. A
     // successor already `running`/terminal (a duplicate trigger, or a stale-lease
@@ -3282,6 +3382,7 @@ async fn launch_successor_inner_with_claim(
                 &state,
                 successor_id,
                 &successor_chain_root_id,
+                &launch_owner,
                 json!({
                     "error": format!("continuation auto-launch budget exhausted ({attempts}/{max})")
                 }),
@@ -3315,6 +3416,7 @@ async fn launch_successor_inner_with_claim(
                 &state,
                 successor_id,
                 &successor_chain_root_id,
+                &launch_owner,
                 json!({ "error": e.to_string() }),
             ) {
                 return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -3595,7 +3697,7 @@ async fn launch_existing_native_resume_with_claim(
     thread_id: &str,
     prepared_claim: Option<ThreadLaunchClaim>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    let _claim = match prepared_claim {
+    let claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, thread_id)? {
             ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
@@ -3604,6 +3706,9 @@ async fn launch_existing_native_resume_with_claim(
             }
         },
     };
+    let launch_owner = claim
+        .canonical_owner()
+        .map_err(BuildAndLaunchError::Internal)?;
 
     let thread = match state.threads.get_thread(thread_id) {
         Ok(Some(t)) => t,
@@ -3644,6 +3749,7 @@ async fn launch_existing_native_resume_with_claim(
                 &state,
                 thread_id,
                 &child_chain_root_id,
+                &launch_owner,
                 json!({ "error": e.to_string() }),
             ) {
                 return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -3934,7 +4040,7 @@ async fn launch_follow_child_with_claim(
     prepared_child: Option<PreparedFollowChildLaunch>,
     prepared_claim: Option<ThreadLaunchClaim>,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    let _claim = match prepared_claim {
+    let claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, child_id)? {
             ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
@@ -3943,6 +4049,9 @@ async fn launch_follow_child_with_claim(
             }
         },
     };
+    let launch_owner = claim
+        .canonical_owner()
+        .map_err(BuildAndLaunchError::Internal)?;
 
     let thread = match state.threads.get_thread(child_id) {
         Ok(Some(t)) => t,
@@ -3962,20 +4071,20 @@ async fn launch_follow_child_with_claim(
         .launch_window_is_cancelled(&thread.chain_root_id)?
     {
         let chain_root = thread.chain_root_id.clone();
-        let cancelled =
-            state
-                .threads
-                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: thread.thread_id.clone(),
-                    status: "cancelled".into(),
-                    outcome_code: Some("cancelled".into()),
-                    result: None,
-                    error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
-                    metadata: None,
-                    artifacts: Vec::new(),
-                    final_cost: None,
-                    summary_json: None,
-                });
+        let cancelled = state.threads.finalize_thread_owned(
+            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                thread_id: thread.thread_id.clone(),
+                status: "cancelled".into(),
+                outcome_code: Some("cancelled".into()),
+                result: None,
+                error: Some(json!({"reason":"ancestor_cancelled_before_launch"})),
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            },
+            &launch_owner,
+        );
         cancelled?;
         state.state_store.discard_window_member(&chain_root)?;
         kick_follow_resume_if_ready(&state, &chain_root);
@@ -4023,6 +4132,7 @@ async fn launch_follow_child_with_claim(
                 &state,
                 child_id,
                 child_id,
+                &launch_owner,
                 json!({ "error": e.to_string() }),
             ) {
                 return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -4045,10 +4155,16 @@ pub fn finalize_failed_and_kick_follow(
     state: &AppState,
     thread_id: &str,
     child_chain_root_id: &str,
+    launch_owner: &str,
     error: Value,
 ) -> anyhow::Result<()> {
-    let outcome =
-        crate::dispatch::finalize_method_thread_if_needed(state, thread_id, "failed", Some(error))?;
+    let outcome = crate::dispatch::finalize_method_thread_if_needed(
+        state,
+        thread_id,
+        launch_owner,
+        "failed",
+        Some(error),
+    )?;
     if outcome != crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown {
         kick_follow_resume_if_ready(state, child_chain_root_id);
         kick_launch_window_for_terminal(state, child_chain_root_id);
@@ -4469,7 +4585,7 @@ async fn launch_follow_resume_successor_with_claim(
 
     // Claim the successor launch — the serialization point (concurrent reconcile +
     // live drives) and the sole authorization to run it.
-    let _claim = match prepared_claim {
+    let claim = match prepared_claim {
         Some(claim) => claim,
         None => match ThreadLaunchClaim::acquire(&state, &successor_id)? {
             ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
@@ -4502,6 +4618,9 @@ async fn launch_follow_resume_successor_with_claim(
             }
         },
     };
+    let launch_owner = claim
+        .canonical_owner()
+        .map_err(BuildAndLaunchError::Internal)?;
 
     let result = launch_follow_resume_claimed(&state, &waiter, &successor_id).await;
 
@@ -4539,6 +4658,7 @@ async fn launch_follow_resume_successor_with_claim(
                 &state,
                 &successor_id,
                 &waiter.parent_chain_root_id,
+                &launch_owner,
                 json!({ "error": e.to_string() }),
             ) {
                 return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(

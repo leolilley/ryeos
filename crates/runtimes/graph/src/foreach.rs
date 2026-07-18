@@ -80,6 +80,33 @@ fn fold_launch_window(
     }
 }
 
+fn stamp_detached_operation(
+    action: &mut Value,
+    graph_run_id: &str,
+    node: &str,
+    step: u32,
+    item_index: usize,
+) {
+    if action.get("thread").and_then(Value::as_str) != Some("detached") {
+        return;
+    }
+    let identity = lillux::canonical_json(&serde_json::json!({
+        "graph_run_id": graph_run_id,
+        "node": node,
+        "step": step,
+        "item_index": item_index,
+        "kind": "detached_foreach_action"
+    }))
+    .expect("fixed foreach operation identity is canonical JSON");
+    action
+        .as_object_mut()
+        .expect("rendered foreach action is validated as an object")
+        .insert(
+            "operation_id".to_string(),
+            Value::String(lillux::sha256_hex(identity.as_bytes())),
+        );
+}
+
 /// Outcome of running every iteration of a foreach node.
 ///
 /// The runner does NOT mutate the graph's `suppressed_errors` or `state`
@@ -456,7 +483,7 @@ pub async fn run_foreach_sequential(
     let mut candidate_state = state.clone();
     let execution = exec_ctx.map(ExecutionContext::as_context_value);
 
-    for item in items {
+    for (item_index, item) in items.iter().enumerate() {
         if cancel_flag
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
@@ -506,6 +533,7 @@ pub async fn run_foreach_sequential(
             }
         };
         fold_launch_window(node, &mut rendered, graph_run_id, current_node);
+        stamp_detached_operation(&mut rendered, graph_run_id, current_node, step, item_index);
         // Missing paths are handled by rye-expr/1 before this point. Explicit
         // JSON nulls are authored values and remain in the action payload.
         let item_dispatch_id = rendered
@@ -893,7 +921,7 @@ pub async fn run_foreach_parallel(
     // child result behind one slow early handle, defeating the result budget.
     // A batch keeps at most max_concurrency result envelopes resident while
     // preserving deterministic collect ordering.
-    'batches: for chunk in items.chunks(max_conc) {
+    'batches: for (batch_index, chunk) in items.chunks(max_conc).enumerate() {
         if cancel_flag
             .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
@@ -904,7 +932,7 @@ pub async fn run_foreach_parallel(
         let mut launch_budget = RuntimeJsonArrayBudget::new(format!(
             "node {current_node}.parallel foreach launch batch"
         ));
-        for item in chunk {
+        for (chunk_index, item) in chunk.iter().enumerate() {
             let action = match &compiled.action {
                 Some(action) => action,
                 None => continue,
@@ -933,6 +961,13 @@ pub async fn run_foreach_parallel(
                     }
                 };
             fold_launch_window(node, &mut rendered, graph_run_id, current_node);
+            stamp_detached_operation(
+                &mut rendered,
+                graph_run_id,
+                current_node,
+                step,
+                batch_index * max_conc + chunk_index,
+            );
             if let Err(error) = launch_budget.append(&rendered) {
                 work.push(ParallelWork::Ready(ParallelItem::Failure {
                     diagnostic: bounded_parallel_diagnostic(format!(

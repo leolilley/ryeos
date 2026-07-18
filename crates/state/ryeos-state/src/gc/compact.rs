@@ -652,10 +652,9 @@ mod tests {
         created_at: &str,
     ) -> String {
         let snapshot = ProjectSnapshot {
-            project_manifest_hash: make_hash(&format!("manifest-{label}")),
-            user_manifest_hash: None,
+            project_tree_hash: make_hash(&format!("tree-{label}")),
+            effective_policy_hash: make_hash(&format!("policy-{label}")),
             message: None,
-            project_sync_scope: crate::project_sync::ProjectSyncScope::FullProject,
             parent_hashes: parents.iter().map(|parent| (*parent).to_string()).collect(),
             created_at: created_at.to_string(),
             source: source.to_string(),
@@ -665,10 +664,9 @@ mod tests {
 
     fn snapshot_info(hash: &str, source: &str, parents: &[&str], created_at: &str) -> SnapshotInfo {
         let snapshot = ProjectSnapshot {
-            project_manifest_hash: make_hash(&format!("manifest-{hash}")),
-            user_manifest_hash: None,
+            project_tree_hash: make_hash(&format!("tree-{hash}")),
+            effective_policy_hash: make_hash(&format!("policy-{hash}")),
             message: None,
-            project_sync_scope: crate::project_sync::ProjectSyncScope::FullProject,
             parent_hashes: parents.iter().map(|parent| (*parent).to_string()).collect(),
             created_at: created_at.to_string(),
             source: source.to_string(),
@@ -693,10 +691,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let snapshot = ProjectSnapshot {
-            project_manifest_hash: make_hash("strict-manifest"),
-            user_manifest_hash: None,
+            project_tree_hash: make_hash("strict-tree"),
+            effective_policy_hash: make_hash("strict-policy"),
             message: None,
-            project_sync_scope: crate::project_sync::ProjectSyncScope::FullProject,
             parent_hashes: Vec::new(),
             created_at: "2026-07-14T00:00:00Z".to_string(),
             source: "manual_push".to_string(),
@@ -729,10 +726,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let mut value = ProjectSnapshot {
-            project_manifest_hash: make_hash("time-manifest"),
-            user_manifest_hash: None,
+            project_tree_hash: make_hash("time-tree"),
+            effective_policy_hash: make_hash("time-policy"),
             message: None,
-            project_sync_scope: crate::project_sync::ProjectSyncScope::FullProject,
             parent_hashes: Vec::new(),
             created_at: "2026-07-14T00:00:00Z".to_string(),
             source: "manual_push".to_string(),

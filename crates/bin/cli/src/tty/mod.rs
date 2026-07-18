@@ -418,11 +418,9 @@ fn write_lines(
 ) -> io::Result<()> {
     for line in lines {
         if let Some(width) = terminal_width {
-            writeln!(
-                out,
-                "{}",
-                clamp_visible(line, width.saturating_sub(1).max(1))
-            )?;
+            for wrapped in wrap_words(line, width.saturating_sub(1).max(1)) {
+                writeln!(out, "{wrapped}")?;
+            }
         } else {
             writeln!(out, "{line}")?;
         }
@@ -1745,8 +1743,9 @@ mod tests {
         let mut tty = Vec::new();
         write_lines(&mut tty, std::slice::from_ref(&line), Some(80)).expect("write tty line");
         let tty = String::from_utf8(tty).expect("utf-8 output");
-        assert!(tty.ends_with("...\n"));
-        assert!(visible_width(tty.trim_end()) < 80);
+        assert!(tty.contains("inventory build failed"));
+        assert_eq!(tty.lines().collect::<String>(), line);
+        assert!(tty.lines().all(|line| visible_width(line) < 80));
     }
 
     #[test]

@@ -84,6 +84,7 @@ mod integration_tests {
             upstream_thread_id: upstream.map(|s| s.to_string()),
             requested_by: Some("user:test".to_string()),
             project_root: None,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: (thread_id == chain_root_id)
@@ -288,6 +289,14 @@ mod integration_tests {
                         project_context: ProjectContext::LocalPath {
                             path: std::path::PathBuf::from("/tmp/p"),
                         },
+                        stable_project_identity: Some(
+                            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                                std::path::Path::new("/tmp/p"),
+                                "site:test",
+                            )
+                            .unwrap(),
+                        ),
+                        local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
                         original_snapshot_hash: None,
                         original_pushed_head_ref: None,
                         state_root: None,
@@ -588,6 +597,7 @@ mod integration_tests {
                     group_leader_start_time_ticks: 20,
                 },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
             )
             .expect("attach_thread_process should succeed");
     }
@@ -1376,6 +1386,14 @@ mod integration_tests {
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
+            stable_project_identity: Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    std::path::Path::new("/tmp/p"),
+                    "site:test",
+                )
+                .unwrap(),
+            ),
+            local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -1496,6 +1514,14 @@ mod integration_tests {
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
+            stable_project_identity: Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    std::path::Path::new("/tmp/p"),
+                    "site:test",
+                )
+                .unwrap(),
+            ),
+            local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -2168,6 +2194,7 @@ mod integration_tests {
                     group_leader_start_time_ticks: 10,
                 },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
             )
             .expect_err("attach_process on a terminal thread must fail loudly");
         assert_eq!(

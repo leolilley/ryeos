@@ -25,32 +25,46 @@ fn store_fixture(state: &ryeos_app::state::AppState) -> (String, String, Vec<u8>
     let cas = lillux::cas::CasStore::new(state.state_store.cas_root().unwrap());
     let blob = b"hello closure".to_vec();
     let blob_hash = cas.store_blob(&blob).unwrap();
-    let item_hash = cas
-        .store_object(&json!({
-            "kind": "item_source",
-            "item_ref": ".ai/directives/test/closure.md",
-            "content_blob_hash": blob_hash,
-            "integrity": "none",
-            "signature_info": null,
-            "mode": null,
-        }))
-        .unwrap();
-    let manifest_hash = cas
-        .store_object(&json!({
-            "kind": "source_manifest",
-            "item_source_hashes": {
-                ".ai/directives/test/closure.md": item_hash,
+    let file_hash = cas
+        .store_object(
+            &ryeos_state::objects::ProjectFile {
+                blob_hash: blob_hash.clone(),
+                size: blob.len() as u64,
+                normalized_mode: 0o644,
             }
-        }))
+            .to_value(),
+        )
+        .unwrap();
+    let tree_hash = cas
+        .store_object(
+            &ryeos_state::objects::ProjectTree {
+                files: std::collections::BTreeMap::from([(
+                    ".ai/directives/test/closure.md".to_string(),
+                    file_hash,
+                )]),
+            }
+            .to_value(),
+        )
+        .unwrap();
+    let policy_hash = cas
+        .store_object(
+            &ryeos_state::objects::ProjectSnapshotPolicy::new(
+                ryeos_state::project_sync::ProjectSyncScope::FullProject,
+                Vec::new(),
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap()
+            .to_value(),
+        )
         .unwrap();
     let snapshot_hash = cas
         .store_object(&json!({
             "kind": "project_snapshot",
             "schema": ryeos_state::objects::ProjectSnapshot::SCHEMA,
-            "project_manifest_hash": manifest_hash,
-            "user_manifest_hash": null,
+            "project_tree_hash": tree_hash,
+            "effective_policy_hash": policy_hash,
             "message": null,
-            "project_sync_scope": "full_project",
             "parent_hashes": [],
             "created_at": "2026-05-29T00:00:00Z",
             "source": "test",

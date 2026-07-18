@@ -1249,6 +1249,7 @@ mod tests {
             thread_id: "T-test".to_string(),
             project_path: "/project".to_string(),
             action: ActionPayload {
+                operation_id: None,
                 item_id: "my/tool".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),

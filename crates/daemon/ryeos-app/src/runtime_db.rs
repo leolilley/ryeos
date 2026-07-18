@@ -70,6 +70,8 @@ pub struct RuntimeInfo {
     #[serde(skip_serializing)]
     pub process_identity: Option<ExecutionProcessIdentity>,
     #[serde(skip_serializing)]
+    pub process_dead_observed_at_ms: Option<i64>,
+    #[serde(skip_serializing)]
     pub stop_requested_at_ms: Option<i64>,
     #[serde(skip_serializing)]
     pub stop_intent: Option<StopIntent>,
@@ -85,7 +87,10 @@ pub struct RuntimeThreadHistoryDiscardReport {
     pub thread_runtime: usize,
     pub thread_commands: usize,
     pub hook_dispatch_ledger: usize,
+    pub detached_spawn_intents: usize,
     pub thread_launch_claims: usize,
+    pub thread_launch_epochs: usize,
+    pub execution_workspaces: usize,
     pub follow_waiters: usize,
     pub follow_waiter_children: usize,
     pub thread_child_links: usize,
@@ -98,7 +103,10 @@ impl RuntimeThreadHistoryDiscardReport {
         self.thread_runtime
             + self.thread_commands
             + self.hook_dispatch_ledger
+            + self.detached_spawn_intents
             + self.thread_launch_claims
+            + self.thread_launch_epochs
+            + self.execution_workspaces
             + self.follow_waiters
             + self.follow_waiter_children
             + self.thread_child_links
@@ -283,6 +291,14 @@ pub enum HookDispatchReservation {
     PendingUnknown,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedSpawnIntent {
+    pub operation_id: String,
+    pub parent_thread_id: String,
+    pub request_hash: String,
+    pub child_thread_id: String,
+}
+
 /// Validate the closed command vocabulary at the durable database boundary.
 ///
 /// Service callers use this same policy for an early error, but every direct
@@ -327,6 +343,51 @@ pub struct LaunchClaim {
     pub claimed_at_ms: i64,
     pub lease_expires_at_ms: i64,
     pub claimed_by: String,
+    pub owner: LaunchOwner,
+}
+
+/// Canonical durable fencing identity for one launch attempt. The JSON form is
+/// stored in the existing `claimed_by` column so the cutover does not weaken
+/// the runtime database's exact-schema ownership checks.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchOwner {
+    pub thread_id: String,
+    pub monotonic_launch_epoch: u64,
+    pub unpredictable_nonce: String,
+    pub daemon_generation_id: String,
+}
+
+pub fn daemon_generation_id() -> &'static str {
+    static GENERATION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    GENERATION.get_or_init(|| {
+        format!(
+            "daemon-{}-{}",
+            std::process::id(),
+            crate::thread_lifecycle::new_thread_id()
+        )
+    })
+}
+
+#[derive(Debug, Clone)]
+pub struct WorkspaceRecord {
+    pub workspace_id: String,
+    pub thread_id: Option<String>,
+    pub launch_owner: Option<String>,
+    pub backend_id: Option<String>,
+    pub backend_version: Option<String>,
+    pub pinned_root_identities: Option<String>,
+    pub mount_identity: Option<String>,
+    pub lower_snapshot: String,
+    /// Post-freeze snapshot bound atomically with the owning thread's
+    /// ResumeContext. Present only once a `freezing` workspace has a durable
+    /// generation from which recovery may continue.
+    pub frozen_snapshot_hash: Option<String>,
+    pub root_path: String,
+    pub state: String,
+    pub process_identity: Option<String>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 /// Phase of a follow waiter. The row exists only while the follow is active —
@@ -442,9 +503,6 @@ impl FollowWaiterSummary {
 }
 
 const SCHEMA_SQL: &str = r#"
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
-
 CREATE TABLE IF NOT EXISTS thread_runtime (
     thread_id TEXT PRIMARY KEY,
     chain_root_id TEXT NOT NULL,
@@ -454,6 +512,7 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
     launch_metadata TEXT,
     resume_attempts INTEGER NOT NULL DEFAULT 0,
     process_identity TEXT,
+    process_dead_observed_at_ms INTEGER,
     stop_requested_at_ms INTEGER,
     stop_intent TEXT
 );
@@ -499,6 +558,14 @@ CREATE TABLE IF NOT EXISTS hook_dispatch_ledger (
 CREATE INDEX IF NOT EXISTS idx_hook_dispatch_ledger_chain_root
     ON hook_dispatch_ledger(chain_root_id);
 
+CREATE TABLE IF NOT EXISTS detached_spawn_intent (
+    operation_id TEXT PRIMARY KEY,
+    parent_thread_id TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    child_thread_id TEXT NOT NULL UNIQUE,
+    created_at_ms INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS thread_launch_claim (
     thread_id TEXT PRIMARY KEY,
     claim_id TEXT NOT NULL,
@@ -506,6 +573,31 @@ CREATE TABLE IF NOT EXISTS thread_launch_claim (
     lease_expires_at_ms INTEGER NOT NULL,
     claimed_by TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS thread_launch_epoch (
+    thread_id TEXT PRIMARY KEY,
+    last_epoch INTEGER NOT NULL CHECK (last_epoch > 0)
+);
+
+CREATE TABLE IF NOT EXISTS execution_workspace (
+    workspace_id TEXT PRIMARY KEY,
+    thread_id TEXT,
+    launch_owner TEXT,
+    backend_id TEXT,
+    lower_snapshot TEXT NOT NULL,
+    frozen_snapshot_hash TEXT,
+    root_path TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('reserved', 'constructing', 'ready', 'active', 'freezing', 'destroying', 'closing', 'closed', 'orphaned')),
+    process_identity TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    backend_version TEXT,
+    pinned_root_identities TEXT,
+    mount_identity TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_execution_workspace_thread
+    ON execution_workspace(thread_id);
 
 CREATE TABLE IF NOT EXISTS follow_waiter (
     follow_key TEXT PRIMARY KEY,
@@ -640,6 +732,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     sqlite_schema::ColumnSpec {
                         name: "process_identity",
                         col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_dead_observed_at_ms",
+                        col_type: "INTEGER",
                         pk: false,
                         not_null: false,
                     },
@@ -794,6 +892,41 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "detached_spawn_intent",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "operation_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "parent_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "request_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "thread_launch_claim",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -825,6 +958,112 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_launch_epoch",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "last_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "execution_workspace",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "workspace_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_owner",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "backend_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "lower_snapshot",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "frozen_snapshot_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "root_path",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "process_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "backend_version",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "pinned_root_identities",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "mount_identity",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },
@@ -1108,6 +1347,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_execution_workspace_thread",
+                table: "execution_workspace",
+                columns: &["thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_thread_commands_thread_status",
                 table: "thread_commands",
                 columns: &["thread_id", "status"],
@@ -1153,14 +1398,6 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
     }
 }
 
-fn runtime_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>> {
-    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let columns = statement
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(columns)
-}
-
 fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
     let mut statement = conn.prepare(
         "SELECT name FROM sqlite_master
@@ -1172,106 +1409,93 @@ fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
     Ok(tables)
 }
 
-fn current_runtime_schema_object_sql(names: &[&str]) -> Result<BTreeMap<String, String>> {
-    let reference =
-        Connection::open_in_memory().context("open current runtime schema reference")?;
-    reference
-        .execute_batch(SCHEMA_SQL)
-        .context("build current runtime schema reference")?;
-    let mut objects = BTreeMap::new();
-    for name in names {
-        let sql = reference
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE name=?1 AND sql IS NOT NULL",
-                [name],
-                |row| row.get::<_, String>(0),
-            )
-            .with_context(|| format!("read current runtime schema object `{name}`"))?;
-        objects.insert((*name).to_string(), sql);
-    }
-    Ok(objects)
-}
-
-fn normalize_migrated_launch_metadata(raw: &str) -> Result<String> {
-    let mut value: Value = serde_json::from_str(raw).context("decode stored launch metadata")?;
+fn validate_current_launch_metadata(raw: &str) -> Result<()> {
+    let value: Value = serde_json::from_str(raw).context("decode stored launch metadata")?;
     let object = value
-        .as_object_mut()
+        .as_object()
         .ok_or_else(|| anyhow::anyhow!("stored launch metadata must be an object"))?;
     let schema_version = object
         .get("schema_version")
         .and_then(Value::as_u64)
         .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
-    if !matches!(schema_version, 1..=3) {
-        bail!("unsupported stored launch metadata schema_version `{schema_version}`");
-    }
-    object.insert(
-        "schema_version".to_string(),
-        Value::from(LAUNCH_METADATA_SCHEMA_VERSION),
-    );
-    for field in [
-        "cancellation_mode",
-        "native_resume",
-        "checkpoint_dir",
-        "resume_context",
-        "continuation_source_thread_id",
-        "sealed_root_request",
-        "follow_parent_context",
-        "follow_launch_window",
-        "isolation",
-    ] {
-        object.entry(field.to_string()).or_insert(Value::Null);
-    }
-    if let Some(resume) = object
-        .get_mut("resume_context")
-        .and_then(Value::as_object_mut)
-    {
-        resume
-            .entry("ref_bindings".to_string())
-            .or_insert_with(|| Value::Object(Default::default()));
-        for field in [
-            "original_snapshot_hash",
-            "original_pushed_head_ref",
-            "state_root",
-            "executor_ref",
-            "runtime_ref",
-        ] {
-            resume.entry(field.to_string()).or_insert(Value::Null);
-        }
-        resume
-            .entry("execution_hints".to_string())
-            .or_insert_with(|| serde_json::json!({"values": {}}));
-        resume
-            .entry("effective_caps".to_string())
-            .or_insert_with(|| Value::Array(Vec::new()));
-    }
-    let decoded: RuntimeLaunchMetadata =
-        serde_json::from_value(value.clone()).context("validate migrated launch metadata")?;
-    if decoded.schema_version != LAUNCH_METADATA_SCHEMA_VERSION {
+    if schema_version != u64::from(LAUNCH_METADATA_SCHEMA_VERSION) {
         bail!(
-            "migrated launch metadata schema_version is {}, expected {}",
-            decoded.schema_version,
-            LAUNCH_METADATA_SCHEMA_VERSION
+            "stored launch metadata schema_version `{schema_version}` is unsupported by the strict v{LAUNCH_METADATA_SCHEMA_VERSION} execution model; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting"
         );
     }
-    lillux::canonical_json(&value).context("canonicalize migrated launch metadata")
+    let decoded: RuntimeLaunchMetadata =
+        serde_json::from_value(value.clone()).context("validate current launch metadata")?;
+    if let Some(resume) = &decoded.resume_context {
+        resume.authoritative_project_identity()?;
+    }
+    let canonical =
+        lillux::canonical_json(&value).context("canonicalize current launch metadata")?;
+    if canonical != raw {
+        bail!(
+            "stored launch metadata is not canonical under the strict v{LAUNCH_METADATA_SCHEMA_VERSION} execution model"
+        );
+    }
+    Ok(())
 }
 
-/// Forward-migrate the one deployed owned runtime schema into the exact current
-/// schema. The transaction either reaches the complete-schema assertion and
-/// commits, or rolls back every DDL/data change.
-fn migrate_owned_runtime_db(conn: &Connection, path: &Path) -> Result<()> {
+fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<String> {
+    let value = serde_json::to_value(metadata).context("encode current launch metadata")?;
+    lillux::canonical_json(&value).context("canonicalize current launch metadata")
+}
+
+fn initialize_current_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .context("begin atomic runtime schema initialization")?;
+    sqlite_schema::init_owned(&tx, &runtime_schema_spec(), SCHEMA_SQL, path)?;
+    assert_current_runtime_schema(&tx, path)?;
+    tx.commit()
+        .context("commit atomic runtime schema initialization")
+}
+
+fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .context("begin atomic runtime schema/data validation")?;
+    assert_current_runtime_schema(&tx, path)?;
+    let rows = {
+        let mut statement = tx.prepare(
+            "SELECT thread_id,launch_metadata FROM thread_runtime
+             WHERE launch_metadata IS NOT NULL",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (thread_id, raw) in rows {
+        validate_current_launch_metadata(&raw)
+            .with_context(|| format!("validate launch metadata for thread `{thread_id}`"))?;
+    }
+    tx.commit()
+        .context("finish atomic runtime schema/data validation")
+}
+
+/// Destructively replace an owned predecessor runtime schema with the exact
+/// current empty schema. This is not an open-time migration: the only caller is
+/// the explicitly confirmed offline all-thread-history reset. No predecessor
+/// row or continuation fact is interpreted or carried forward.
+fn reset_owned_runtime_schema(conn: &Connection, path: &Path) -> Result<()> {
     let app_id: i32 = conn
         .query_row("PRAGMA application_id", [], |row| row.get(0))
-        .context("read runtime database application_id before migration")?;
+        .context("read runtime database application_id before explicit reset")?;
     if app_id != RUNTIME_APP_ID {
-        return sqlite_schema::assert_owned(conn, &runtime_schema_spec(), path);
+        bail!(
+            "runtime database application_id is {app_id}, expected {RUNTIME_APP_ID}; refusing explicit reset of {}",
+            path.display()
+        );
     }
     let integrity: String = conn
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
-        .context("verify runtime database integrity before migration")?;
+        .context("verify runtime database integrity before explicit reset")?;
     if integrity != "ok" {
         bail!(
-            "runtime database integrity check failed before migration for {}: {integrity}",
+            "runtime database integrity check failed before explicit reset for {}: {integrity}",
             path.display()
         );
     }
@@ -1282,299 +1506,38 @@ fn migrate_owned_runtime_db(conn: &Connection, path: &Path) -> Result<()> {
         .iter()
         .map(|table| table.name.to_string())
         .collect::<BTreeSet<_>>();
-    let mut allowed_predecessor_tables = expected_tables.clone();
-    allowed_predecessor_tables.remove("hook_dispatch_ledger");
     let actual_tables = runtime_user_tables(conn)?;
-    if actual_tables != allowed_predecessor_tables {
-        bail!("runtime database is neither current nor the recognized owned predecessor schema");
-    }
-
-    let legacy_waiter_columns = [
-        "follow_key",
-        "parent_thread_id",
-        "parent_chain_root_id",
-        "parent_successor_thread_id",
-        "follow_node",
-        "graph_run_id",
-        "step_count",
-        "frontier_id",
-        "child_thread_id",
-        "child_chain_root_id",
-        "child_terminal_thread_id",
-        "child_terminal_status",
-        "terminal_envelope",
-        "phase",
-        "created_at_ms",
-        "updated_at_ms",
-        "fanout",
-        "expected_children",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-    let legacy_child_columns = [
-        "follow_key",
-        "item_index",
-        "item_ref",
-        "spec_hash",
-        "child_thread_id",
-        "child_chain_root_id",
-        "terminal_thread_id",
-        "terminal_status",
-        "terminal_envelope",
-        "created_at_ms",
-        "updated_at_ms",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-    let actual_waiter_columns = runtime_table_columns(conn, "follow_waiter")?;
-    let actual_child_columns = runtime_table_columns(conn, "follow_waiter_child")?;
-    let current_waiter_columns = spec
-        .tables
-        .iter()
-        .find(|table| table.name == "follow_waiter")
-        .expect("runtime schema has follow_waiter")
-        .columns
-        .iter()
-        .map(|column| column.name.to_string())
-        .collect::<Vec<_>>();
-    let current_child_columns = spec
-        .tables
-        .iter()
-        .find(|table| table.name == "follow_waiter_child")
-        .expect("runtime schema has follow_waiter_child")
-        .columns
-        .iter()
-        .map(|column| column.name.to_string())
-        .collect::<Vec<_>>();
-    let legacy_follow_schema = actual_waiter_columns == legacy_waiter_columns
-        && actual_child_columns == legacy_child_columns;
-    let current_follow_schema = actual_waiter_columns == current_waiter_columns
-        && actual_child_columns == current_child_columns;
-    if !legacy_follow_schema && !current_follow_schema {
-        bail!("runtime database has an unrecognized follow schema");
-    }
-    for table in spec.tables.iter().filter(|table| {
-        !matches!(
-            table.name,
-            "hook_dispatch_ledger" | "follow_waiter" | "follow_waiter_child"
-        )
-    }) {
-        let expected = table
-            .columns
-            .iter()
-            .map(|column| column.name.to_string())
-            .collect::<Vec<_>>();
-        if runtime_table_columns(conn, table.name)? != expected {
-            bail!(
-                "runtime database predecessor table `{}` has an unrecognized column shape",
-                table.name
-            );
-        }
-    }
-
-    // The predecessor did not persist the sealed root authority now required
-    // to resume a child safely. Only a `reserved` waiter with no parent
-    // successor is pre-commit: the parent suspension never committed, so the
-    // reservation may be rolled back. Any later phase is durable workflow
-    // state and must stop migration before mutation rather than be guessed at
-    // or discarded.
-    let rolled_back_legacy_follows = if legacy_follow_schema {
-        let committed: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM follow_waiter
-             WHERE phase != 'reserved' OR parent_successor_thread_id IS NOT NULL",
-            [],
-            |row| row.get(0),
-        )?;
-        if committed != 0 {
-            bail!(
-                "runtime database contains {committed} committed legacy follow operation(s) that require explicit recovery"
-            );
-        }
-        conn.query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))?
-    } else {
-        0
-    };
-    tracing::info!(
-        database = %path.display(),
-        legacy_follow_schema,
-        incomplete_follow_reservations = rolled_back_legacy_follows,
-        "starting recognized runtime database schema migration"
-    );
-
-    let schema_sql = current_runtime_schema_object_sql(&[
-        "thread_runtime",
-        "idx_thread_runtime_chain_root",
-        "hook_dispatch_ledger",
-        "idx_hook_dispatch_ledger_chain_root",
-        "follow_waiter",
-        "idx_follow_waiter_successor",
-        "follow_waiter_child",
-        "idx_follow_waiter_child_chain2",
-        "launch_window",
-        "idx_launch_window_key",
-    ])?;
-    let tx = conn.unchecked_transaction()?;
-    if legacy_follow_schema {
-        tx.execute_batch(
-            "DROP INDEX idx_thread_runtime_chain_root;
-             DROP INDEX idx_follow_waiter_successor;
-             DROP INDEX idx_follow_waiter_child_chain;
-             DROP INDEX idx_follow_waiter_child_chain2;
-             DROP INDEX idx_launch_window_key;
-             ALTER TABLE thread_runtime RENAME TO __ryeos_old_thread_runtime;
-             ALTER TABLE follow_waiter RENAME TO __ryeos_old_follow_waiter;
-             ALTER TABLE follow_waiter_child RENAME TO __ryeos_old_follow_waiter_child;
-             ALTER TABLE launch_window RENAME TO __ryeos_old_launch_window;",
-        )?;
-    }
-    let rebuilt_objects = if legacy_follow_schema {
-        &[
-            "thread_runtime",
-            "idx_thread_runtime_chain_root",
-            "follow_waiter",
-            "idx_follow_waiter_successor",
-            "follow_waiter_child",
-            "idx_follow_waiter_child_chain2",
-            "launch_window",
-            "idx_launch_window_key",
-        ][..]
-    } else {
-        &[][..]
-    };
-    for name in rebuilt_objects.iter().copied().chain([
-        "hook_dispatch_ledger",
-        "idx_hook_dispatch_ledger_chain_root",
-    ]) {
-        tx.execute_batch(
-            schema_sql
-                .get(name)
-                .ok_or_else(|| anyhow::anyhow!("missing current schema SQL for `{name}`"))?,
-        )?;
-    }
-    if legacy_follow_schema {
-        tx.execute_batch(
-            "INSERT INTO thread_runtime (
-                 thread_id,chain_root_id,pid,pgid,metadata,launch_metadata,
-                 resume_attempts,process_identity,stop_requested_at_ms,stop_intent
-             )
-             SELECT thread_id,chain_root_id,pid,pgid,metadata,launch_metadata,
-                    resume_attempts,process_identity,stop_requested_at_ms,stop_intent
-               FROM __ryeos_old_thread_runtime;
-
-             -- A launch window owned by an aborted pre-commit reservation is
-             -- part of that reservation's write-set. Preserve all unrelated
-             -- windows and all runtime/history/link rows so ordinary startup
-             -- reconciliation and retention still see the child identities.
-             INSERT INTO launch_window (
-                 child_chain_root_id,window_key,width,created_at_ms,launched_at_ms,cancelled_at_ms
-             )
-             SELECT window.child_chain_root_id,window.window_key,window.width,
-                    window.created_at_ms,window.launched_at_ms,window.cancelled_at_ms
-               FROM __ryeos_old_launch_window AS window
-              WHERE NOT EXISTS (
-                  SELECT 1 FROM __ryeos_old_follow_waiter_child AS child
-                   WHERE child.child_chain_root_id = window.child_chain_root_id
-              );
-
-             DROP TABLE __ryeos_old_follow_waiter_child;
-             DROP TABLE __ryeos_old_follow_waiter;
-             DROP TABLE __ryeos_old_launch_window;
-             DROP TABLE __ryeos_old_thread_runtime;",
-        )?;
-    }
-
-    let metadata_rows = {
-        let mut statement = tx.prepare(
-            "SELECT thread_id,launch_metadata FROM thread_runtime
-             WHERE launch_metadata IS NOT NULL",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let migrated_launch_metadata_rows = metadata_rows.len();
-    tracing::info!(
-        database = %path.display(),
-        rows = migrated_launch_metadata_rows,
-        "normalizing persisted runtime launch metadata during schema migration"
-    );
-    for (thread_id, raw) in metadata_rows {
-        let migrated = normalize_migrated_launch_metadata(&raw)
-            .with_context(|| format!("migrate launch metadata for thread `{thread_id}`"))?;
-        tx.execute(
-            "UPDATE thread_runtime SET launch_metadata=?2 WHERE thread_id=?1",
-            params![thread_id, migrated],
-        )?;
-    }
-    assert_current_runtime_schema(&tx, path)?;
-    tx.commit()?;
-    tracing::info!(
-        database = %path.display(),
-        launch_metadata_rows = migrated_launch_metadata_rows,
-        rolled_back_follow_reservations = rolled_back_legacy_follows,
-        "runtime database schema migration committed"
-    );
-    if rolled_back_legacy_follows != 0 {
-        tracing::warn!(
-            rolled_back = rolled_back_legacy_follows,
-            "rolled back incomplete pre-commit follow reservations during runtime schema migration"
+    let unexpected_tables = actual_tables
+        .difference(&expected_tables)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !unexpected_tables.is_empty() {
+        bail!(
+            "owned runtime database contains unexpected tables {:?}; refusing destructive reset of {}",
+            unexpected_tables,
+            path.display()
         );
     }
-    Ok(())
-}
 
-/// Normalize versioned launch-metadata payloads even when the enclosing
-/// SQLite table/index schema is already current. JSON shape changes do not
-/// create a structural SQLite mismatch, so they need their own owned-data
-/// migration gate before startup decodes recovery rows.
-fn migrate_owned_launch_metadata(conn: &Connection, path: &Path) -> Result<()> {
-    let metadata_rows = {
-        let mut statement = conn.prepare(
-            "SELECT thread_id,launch_metadata FROM thread_runtime
-             WHERE launch_metadata IS NOT NULL",
-        )?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
-    };
-    let mut replacements = Vec::new();
-    for (thread_id, raw) in metadata_rows {
-        let migrated = normalize_migrated_launch_metadata(&raw)
-            .with_context(|| format!("migrate launch metadata for thread `{thread_id}`"))?;
-        if migrated != raw {
-            replacements.push((thread_id, migrated));
-        }
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .context("begin atomic explicit runtime reset")?;
+    for table in actual_tables.iter().rev() {
+        tx.execute_batch(&format!("DROP TABLE \"{table}\";"))
+            .with_context(|| format!("drop owned runtime table `{table}` during explicit reset"))?;
     }
-    if replacements.is_empty() {
-        return Ok(());
-    }
-    tracing::info!(
-        database = %path.display(),
-        rows = replacements.len(),
-        "normalizing persisted runtime launch metadata"
-    );
-    let tx = conn.unchecked_transaction()?;
-    for (thread_id, migrated) in replacements {
-        tx.execute(
-            "UPDATE thread_runtime SET launch_metadata=?2 WHERE thread_id=?1",
-            params![thread_id, migrated],
-        )?;
-    }
+    sqlite_schema::init_owned(&tx, &spec, SCHEMA_SQL, path)?;
+    tx.execute("DELETE FROM sqlite_sequence", [])
+        .context("clear runtime sequence state during explicit reset")?;
+    assert_current_runtime_schema(&tx, path)?;
     tx.commit()
-        .context("commit runtime launch-metadata migration")?;
+        .context("commit atomic explicit runtime reset")?;
+    tracing::warn!(database = %path.display(), "explicitly reset incompatible runtime history without migration");
     Ok(())
 }
 
 pub struct RuntimeDb {
     conn: Connection,
+    reset_required: bool,
     _directory: Option<lillux::PinnedDirectory>,
     _directory_lock: Option<lillux::secure_fs::PinnedDirectoryLock>,
     _database_file: Option<File>,
@@ -1769,6 +1732,28 @@ fn validate_new_hook_dispatch(seed: &NewHookDispatch) -> Result<()> {
     Ok(())
 }
 
+fn validate_detached_spawn_intent(
+    operation_id: &str,
+    parent_thread_id: &str,
+    request_hash: &str,
+    child_thread_id: &str,
+) -> Result<()> {
+    validate_sha256("detached operation_id", operation_id)?;
+    validate_sha256("detached request_hash", request_hash)?;
+    for (field, value) in [
+        ("parent_thread_id", parent_thread_id),
+        ("child_thread_id", child_thread_id),
+    ] {
+        if value.is_empty() {
+            bail!("detached spawn {field} cannot be empty");
+        }
+        if value.len() > 4 * 1024 {
+            bail!("detached spawn {field} exceeds 4096 byte limit");
+        }
+    }
+    Ok(())
+}
+
 fn decode_completed_hook_response(
     dispatch_key: &str,
     response_json: Option<&[u8]>,
@@ -1806,11 +1791,12 @@ fn decode_completed_hook_response(
 impl RuntimeDb {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
-        let spec = runtime_schema_spec();
-        sqlite_schema::init_owned(&conn, &spec, SCHEMA_SQL, Path::new(":memory:"))?;
-        assert_current_runtime_schema(&conn, Path::new(":memory:"))?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")
+            .context("enable in-memory runtime database foreign keys")?;
+        initialize_current_runtime_schema(&conn, Path::new(":memory:"))?;
         Ok(Self {
             conn,
+            reset_required: false,
             _directory: None,
             _directory_lock: None,
             _database_file: None,
@@ -1840,7 +1826,10 @@ impl RuntimeDb {
                 thread_runtime: count(&self.conn, "thread_runtime")?,
                 thread_commands: count(&self.conn, "thread_commands")?,
                 hook_dispatch_ledger: count(&self.conn, "hook_dispatch_ledger")?,
+                detached_spawn_intents: count(&self.conn, "detached_spawn_intent")?,
                 thread_launch_claims: count(&self.conn, "thread_launch_claim")?,
+                thread_launch_epochs: count(&self.conn, "thread_launch_epoch")?,
+                execution_workspaces: count(&self.conn, "execution_workspace")?,
                 follow_waiters: count(&self.conn, "follow_waiter")?,
                 follow_waiter_children: count(&self.conn, "follow_waiter_child")?,
                 thread_child_links: count(&self.conn, "thread_child_link")?,
@@ -1855,10 +1844,13 @@ impl RuntimeDb {
             follow_waiters: conn.execute("DELETE FROM follow_waiter", [])?,
             thread_commands: conn.execute("DELETE FROM thread_commands", [])?,
             thread_launch_claims: conn.execute("DELETE FROM thread_launch_claim", [])?,
+            thread_launch_epochs: conn.execute("DELETE FROM thread_launch_epoch", [])?,
+            execution_workspaces: conn.execute("DELETE FROM execution_workspace", [])?,
             thread_child_links: conn.execute("DELETE FROM thread_child_link", [])?,
             launch_windows: conn.execute("DELETE FROM launch_window", [])?,
             seat_leases: conn.execute("DELETE FROM seat_lease", [])?,
             hook_dispatch_ledger: conn.execute("DELETE FROM hook_dispatch_ledger", [])?,
+            detached_spawn_intents: conn.execute("DELETE FROM detached_spawn_intent", [])?,
             thread_runtime: conn.execute("DELETE FROM thread_runtime", [])?,
         };
         conn.execute(
@@ -1936,6 +1928,79 @@ impl RuntimeDb {
         };
         tx.commit()?;
         Ok(reservation)
+    }
+
+    /// Bind one logical detached action to exactly one child identity. The
+    /// binding precedes every workspace freeze and child-row mutation, so a
+    /// callback retry after any crash boundary reuses the same identity.
+    pub fn reserve_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+        parent_thread_id: &str,
+        request_hash: &str,
+        proposed_child_thread_id: &str,
+    ) -> Result<String> {
+        validate_detached_spawn_intent(
+            operation_id,
+            parent_thread_id,
+            request_hash,
+            proposed_child_thread_id,
+        )?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO detached_spawn_intent(
+                operation_id, parent_thread_id, request_hash, child_thread_id, created_at_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(operation_id) DO NOTHING",
+            params![
+                operation_id,
+                parent_thread_id,
+                request_hash,
+                proposed_child_thread_id,
+                lillux::time::timestamp_millis(),
+            ],
+        )?;
+        let (stored_parent, stored_request, child_thread_id): (String, String, String) = tx
+            .query_row(
+                "SELECT parent_thread_id, request_hash, child_thread_id
+                   FROM detached_spawn_intent WHERE operation_id=?1",
+                params![operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        if stored_parent != parent_thread_id || stored_request != request_hash {
+            bail!(
+                "detached operation `{operation_id}` was reused with different parent or request authority"
+            );
+        }
+        tx.commit()?;
+        Ok(child_thread_id)
+    }
+
+    pub fn detached_spawn_intents(&self) -> Result<Vec<DetachedSpawnIntent>> {
+        let mut statement = self.conn.prepare(
+            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id
+               FROM detached_spawn_intent ORDER BY created_at_ms, operation_id",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok(DetachedSpawnIntent {
+                    operation_id: row.get(0)?,
+                    parent_thread_id: row.get(1)?,
+                    request_hash: row.get(2)?,
+                    child_thread_id: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(anyhow::Error::from)?;
+        for intent in &intents {
+            validate_detached_spawn_intent(
+                &intent.operation_id,
+                &intent.parent_thread_id,
+                &intent.request_hash,
+                &intent.child_thread_id,
+            )?;
+        }
+        Ok(intents)
     }
 
     /// Seal the exact callback response for a previously reserved dispatch.
@@ -2020,7 +2085,13 @@ impl RuntimeDb {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        Self::open_bound(path, true)
+        Self::open_bound(path, true, false)
+    }
+
+    /// Explicit destructive-reset counterpart for an offline caller that owns
+    /// the database parent namespace but cannot share its pinned authority.
+    pub(crate) fn open_for_explicit_history_reset(path: &Path) -> Result<Self> {
+        Self::open_bound(path, true, true)
     }
 
     /// Open the persisted runtime database for offline projection recovery
@@ -2028,7 +2099,7 @@ impl RuntimeDb {
     /// this as fail-closed liveness authority, so an absent or stale database
     /// must never be replaced by a fresh empty one.
     pub fn open_existing_current(path: &Path) -> Result<Self> {
-        Self::open_bound(path, false)
+        Self::open_bound(path, false, false)
     }
 
     /// Open the live runtime store beneath the daemon's already pinned and
@@ -2038,7 +2109,18 @@ impl RuntimeDb {
         directory: lillux::PinnedDirectory,
         directory_lock: lillux::PinnedDirectoryLock,
     ) -> Result<Self> {
-        Self::open_bound_in_directory(path, true, directory, directory_lock)
+        Self::open_bound_in_directory(path, true, false, directory, directory_lock)
+    }
+
+    /// Open beneath an already pinned offline namespace, destructively
+    /// resetting an incompatible owned runtime schema only when the operator
+    /// has explicitly confirmed retirement of all thread history.
+    pub(crate) fn open_for_explicit_history_reset_with_namespace_authority(
+        path: &Path,
+        directory: lillux::PinnedDirectory,
+        directory_lock: lillux::PinnedDirectoryLock,
+    ) -> Result<Self> {
+        Self::open_bound_in_directory(path, true, true, directory, directory_lock)
     }
 
     /// Strict, non-creating counterpart used by offline GC dry-runs while the
@@ -2048,10 +2130,10 @@ impl RuntimeDb {
         directory: lillux::PinnedDirectory,
         directory_lock: lillux::PinnedDirectoryLock,
     ) -> Result<Self> {
-        Self::open_bound_in_directory(path, false, directory, directory_lock)
+        Self::open_bound_in_directory(path, false, false, directory, directory_lock)
     }
 
-    fn open_bound(path: &Path, allow_create: bool) -> Result<Self> {
+    fn open_bound(path: &Path, allow_create: bool, explicit_history_reset: bool) -> Result<Self> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let directory = if allow_create {
             lillux::PinnedDirectory::open_or_create(parent)
@@ -2067,12 +2149,19 @@ impl RuntimeDb {
         let directory_lock = directory
             .lock_exclusive()
             .context("lock runtime database parent")?;
-        Self::open_bound_in_directory(path, allow_create, directory, directory_lock)
+        Self::open_bound_in_directory(
+            path,
+            allow_create,
+            explicit_history_reset,
+            directory,
+            directory_lock,
+        )
     }
 
     fn open_bound_in_directory(
         path: &Path,
         allow_create: bool,
+        explicit_history_reset: bool,
         directory: lillux::PinnedDirectory,
         directory_lock: lillux::PinnedDirectoryLock,
     ) -> Result<Self> {
@@ -2142,16 +2231,47 @@ impl RuntimeDb {
         )?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")
             .context("enable runtime database foreign keys")?;
-
         if created {
-            sqlite_schema::init_owned(&conn, &runtime_schema_spec(), SCHEMA_SQL, path)?;
-        } else if allow_create && assert_current_runtime_schema(&conn, path).is_err() {
-            migrate_owned_runtime_db(&conn, path)?;
+            conn.execute_batch("PRAGMA journal_mode=WAL;")
+                .context("establish WAL for the current runtime store")?;
         }
-        assert_current_runtime_schema(&conn, path)?;
-        if allow_create {
-            migrate_owned_launch_metadata(&conn, path)?;
+
+        let mut reset_required = false;
+        if created {
+            initialize_current_runtime_schema(&conn, path)?;
+        } else if let Err(error) = validate_current_runtime_store(&conn, path) {
+            if !explicit_history_reset {
+                return Err(error).context(format!(
+                    "runtime database requires the explicit no-backcompat reset; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting ({})",
+                    path.display()
+                ));
+            }
+            // Do not mutate yet. Offline GC first publishes the authoritative
+            // cross-store discard intent; only then may it call
+            // `apply_explicit_history_reset` on this pinned handle.
+            reset_required = true;
         }
+        if reset_required {
+            let integrity: String = conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .context("verify incompatible runtime database integrity before reset")?;
+            if integrity != "ok" {
+                bail!(
+                    "runtime database integrity check failed for {}: {integrity}",
+                    path.display()
+                );
+            }
+            return Ok(Self {
+                conn,
+                reset_required: true,
+                _directory: Some(directory),
+                _directory_lock: Some(directory_lock),
+                _database_file: Some(database_file),
+                _wal_file: wal_before,
+                _shm_file: shm_before,
+            });
+        }
+        validate_current_runtime_store(&conn, path)?;
         let integrity: String = conn
             .query_row("PRAGMA integrity_check", [], |row| row.get(0))
             .context("verify runtime database integrity")?;
@@ -2207,12 +2327,33 @@ impl RuntimeDb {
 
         Ok(Self {
             conn,
+            reset_required: false,
             _directory: Some(directory),
             _directory_lock: Some(directory_lock),
             _database_file: Some(database_file),
             _wal_file: Some(wal_file),
             _shm_file: Some(shm_file),
         })
+    }
+
+    pub fn requires_explicit_history_reset(&self) -> bool {
+        self.reset_required
+    }
+
+    /// Apply the already-confirmed destructive schema cutover. Callers must
+    /// publish their authoritative cross-store discard intent before invoking
+    /// this method; opening the pinned handle never performs this mutation.
+    pub fn apply_explicit_history_reset(&mut self, path: &Path) -> Result<()> {
+        if !self.reset_required {
+            return Ok(());
+        }
+        self.conn
+            .execute_batch("PRAGMA journal_mode=WAL;")
+            .context("establish WAL for explicitly reset runtime store")?;
+        reset_owned_runtime_schema(&self.conn, path)?;
+        validate_current_runtime_store(&self.conn, path)?;
+        self.reset_required = false;
+        Ok(())
     }
 
     pub fn insert_thread_runtime(&self, thread_id: &str, chain_root_id: &str) -> Result<()> {
@@ -2235,7 +2376,7 @@ impl RuntimeDb {
         chain_root_id: &str,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
-        let launch_metadata_json = serde_json::to_string(launch_metadata)
+        let launch_metadata_json = encode_current_launch_metadata(launch_metadata)
             .context("failed to encode continuation launch_metadata")?;
         let tx = self.conn.unchecked_transaction()?;
         let existing = tx
@@ -2321,7 +2462,7 @@ impl RuntimeDb {
         chain_root_id: &str,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<bool> {
-        let launch_metadata_json = serde_json::to_string(launch_metadata)
+        let launch_metadata_json = encode_current_launch_metadata(launch_metadata)
             .context("failed to encode continuation launch_metadata for cleanup")?;
         Ok(self.conn.execute(
             "DELETE FROM thread_runtime
@@ -2679,6 +2820,10 @@ impl RuntimeDb {
             }
             for thread_id in cleanup_thread_ids {
                 deleted += self.conn.execute(
+                    "DELETE FROM detached_spawn_intent WHERE parent_thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
                     "DELETE FROM thread_commands WHERE thread_id=?1",
                     params![&thread_id],
                 )?;
@@ -2793,7 +2938,7 @@ impl RuntimeDb {
             // Once a stop is tombstoned, keep the exact repeat idempotent but do
             // not mutate launch metadata during cancellation.
             if stop_requested_at_ms.is_none() && !launch_metadata.is_empty() {
-                let lm_json = serde_json::to_string(launch_metadata)
+                let lm_json = encode_current_launch_metadata(launch_metadata)
                     .context("failed to encode launch_metadata")?;
                 self.conn.execute(
                     "UPDATE thread_runtime SET launch_metadata = ?2 WHERE thread_id = ?1",
@@ -2827,8 +2972,8 @@ impl RuntimeDb {
             }
             return Ok(());
         }
-        let lm_json =
-            serde_json::to_string(launch_metadata).context("failed to encode launch_metadata")?;
+        let lm_json = encode_current_launch_metadata(launch_metadata)
+            .context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime
                 SET pid = ?2, pgid = ?3, launch_metadata = ?4, process_identity = ?5
@@ -2877,10 +3022,42 @@ impl RuntimeDb {
             .context("failed to encode process_identity for compare-and-clear")?;
         Ok(self.conn.execute(
             "UPDATE thread_runtime
-                SET pid = NULL, pgid = NULL, process_identity = NULL
+                SET pid = NULL, pgid = NULL, process_identity = NULL,
+                    process_dead_observed_at_ms = NULL
               WHERE thread_id = ?1 AND process_identity = ?2",
             params![thread_id, identity_json],
         )? > 0)
+    }
+
+    /// Persist the first live-sweep observation that one exact attached
+    /// process group is gone. Repeated observations return the same timestamp;
+    /// a replaced attachment returns `None` and is never affected.
+    pub fn observe_dead_process_if_matches(
+        &self,
+        thread_id: &str,
+        process_identity: &ExecutionProcessIdentity,
+        observed_at_ms: i64,
+    ) -> Result<Option<i64>> {
+        let identity_json = serde_json::to_string(process_identity)
+            .context("encode process identity for dead-owner observation")?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE thread_runtime
+                SET process_dead_observed_at_ms = COALESCE(process_dead_observed_at_ms, ?3)
+              WHERE thread_id=?1 AND process_identity=?2",
+            params![thread_id, identity_json, observed_at_ms],
+        )?;
+        let observed = tx
+            .query_row(
+                "SELECT process_dead_observed_at_ms FROM thread_runtime
+                  WHERE thread_id=?1 AND process_identity=?2",
+                params![thread_id, identity_json],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        tx.commit()?;
+        Ok(observed)
     }
 
     pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
@@ -2903,8 +3080,8 @@ impl RuntimeDb {
         thread_id: &str,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
-        let lm_json =
-            serde_json::to_string(launch_metadata).context("failed to encode launch_metadata")?;
+        let lm_json = encode_current_launch_metadata(launch_metadata)
+            .context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime SET launch_metadata = ?2 WHERE thread_id = ?1",
             params![thread_id, lm_json],
@@ -2924,7 +3101,7 @@ impl RuntimeDb {
             .conn
             .query_row(
                 "SELECT pid, pgid, launch_metadata, process_identity,
-                        stop_requested_at_ms, stop_intent
+                        process_dead_observed_at_ms, stop_requested_at_ms, stop_intent
                    FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
@@ -2932,20 +3109,30 @@ impl RuntimeDb {
                     let pgid: Option<i64> = row.get(1)?;
                     let lm_text: Option<String> = row.get(2)?;
                     let identity_text: Option<String> = row.get(3)?;
-                    let stop_requested_at_ms: Option<i64> = row.get(4)?;
-                    let stop_intent: Option<String> = row.get(5)?;
+                    let process_dead_observed_at_ms: Option<i64> = row.get(4)?;
+                    let stop_requested_at_ms: Option<i64> = row.get(5)?;
+                    let stop_intent: Option<String> = row.get(6)?;
                     Ok((
                         pid,
                         pgid,
                         lm_text,
                         identity_text,
+                        process_dead_observed_at_ms,
                         stop_requested_at_ms,
                         stop_intent,
                     ))
                 },
             )
             .optional()?;
-        let Some((pid, pgid, lm_text, identity_text, stop_requested_at_ms, stop_intent)) = raw
+        let Some((
+            pid,
+            pgid,
+            lm_text,
+            identity_text,
+            process_dead_observed_at_ms,
+            stop_requested_at_ms,
+            stop_intent,
+        )) = raw
         else {
             return Ok(None);
         };
@@ -2957,8 +3144,8 @@ impl RuntimeDb {
                         bail!(
                             "launch_metadata schema_version mismatch for thread {thread_id}: \
                              persisted={}; expected={}; payload_len={}. \
-                             Refusing to operate on stale schema. Preserve runtime state and \
-                             use the supported runtime database migration or recovery path.",
+                             Refusing to operate on stale schema. Stop the daemon and run the \
+                             explicit confirmed thread-history/project-HEAD reset.",
                             m.schema_version,
                             LAUNCH_METADATA_SCHEMA_VERSION,
                             s.len(),
@@ -2973,8 +3160,8 @@ impl RuntimeDb {
                     bail!(
                         "failed to decode launch_metadata for thread {thread_id}: {err:#} \
                          (payload_len={}). Corrupt or foreign row. \
-                         Preserve runtime state and use the supported runtime database \
-                         migration or recovery path.",
+                         Preserve runtime state or run the explicit confirmed \
+                         thread-history/project-HEAD reset.",
                         s.len(),
                     );
                 }
@@ -3012,6 +3199,9 @@ impl RuntimeDb {
                 "incomplete process attachment for thread {thread_id}: pid/pgid/identity must be all present or all absent"
             );
         }
+        if process_dead_observed_at_ms.is_some() && process_identity.is_none() {
+            bail!("thread {thread_id} has a dead-process observation without an attached identity");
+        }
         let stop_intent = stop_intent.as_deref().map(StopIntent::parse).transpose()?;
         if stop_requested_at_ms.is_some() != stop_intent.is_some() {
             bail!(
@@ -3022,6 +3212,7 @@ impl RuntimeDb {
             pid,
             pgid,
             process_identity,
+            process_dead_observed_at_ms,
             stop_requested_at_ms,
             stop_intent,
             launch_metadata,
@@ -3098,23 +3289,47 @@ impl RuntimeDb {
         &self,
         thread_id: &str,
         claim_id: &str,
-        claimed_by: &str,
+        daemon_generation_id: &str,
     ) -> Result<LaunchClaimOutcome> {
         let now_ms = lillux::time::timestamp_millis();
-        // Keep the existing column at an explicit non-expiring sentinel so
-        // diagnostics and pin readers retain one current-format shape.
-        let changed = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let already_claimed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_launch_claim WHERE thread_id=?1)",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        if already_claimed {
+            tx.rollback()?;
+            return Ok(LaunchClaimOutcome::AlreadyClaimed);
+        }
+        let next_epoch: i64 = tx.query_row(
+            "INSERT INTO thread_launch_epoch(thread_id,last_epoch) VALUES (?1,1)
+             ON CONFLICT(thread_id) DO UPDATE SET last_epoch=last_epoch+1
+             RETURNING last_epoch",
+            params![thread_id],
+            |row| row.get(0),
+        )?;
+        let owner = LaunchOwner {
+            thread_id: thread_id.to_string(),
+            monotonic_launch_epoch: u64::try_from(next_epoch)
+                .context("launch epoch cannot be represented")?,
+            unpredictable_nonce: claim_id.to_string(),
+            daemon_generation_id: daemon_generation_id.to_string(),
+        };
+        let owner_json = lillux::canonical_json(&serde_json::to_value(&owner)?)?;
+        let changed = tx.execute(
             "INSERT INTO thread_launch_claim
                  (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
              VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(thread_id) DO NOTHING",
-            params![thread_id, claim_id, now_ms, i64::MAX, claimed_by],
+            params![thread_id, claim_id, now_ms, i64::MAX, owner_json],
         )?;
-        Ok(if changed == 1 {
-            LaunchClaimOutcome::Claimed
-        } else {
-            LaunchClaimOutcome::AlreadyClaimed
-        })
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(LaunchClaimOutcome::AlreadyClaimed);
+        }
+        tx.commit()?;
+        Ok(LaunchClaimOutcome::Claimed)
     }
 
     /// Release a launch claim the caller owns (matched by `claim_id`), e.g. when
@@ -3129,32 +3344,456 @@ impl RuntimeDb {
         Ok(removed > 0)
     }
 
-    /// Delete ALL launch claims. Called once at daemon startup (before reconcile
-    /// dispatches): a restart proves every prior in-process launcher is gone, so
-    /// every surviving claim is stale. Returns the count removed.
-    pub fn clear_all_launch_claims(&self) -> Result<usize> {
-        Ok(self.conn.execute("DELETE FROM thread_launch_claim", [])?)
-    }
-
     /// Read the current launch claim for a thread, if any. The reconciler uses
     /// this to tell an unlaunched successor from one owned by a launch task.
     pub fn get_launch_claim(&self, thread_id: &str) -> Result<Option<LaunchClaim>> {
-        self.conn
+        let claim = self
+            .conn
             .query_row(
                 "SELECT thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by
                    FROM thread_launch_claim WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
+                    let claimed_by: String = row.get(4)?;
+                    let owner = serde_json::from_str(&claimed_by).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
                     Ok(LaunchClaim {
                         thread_id: row.get(0)?,
                         claim_id: row.get(1)?,
                         claimed_at_ms: row.get(2)?,
                         lease_expires_at_ms: row.get(3)?,
-                        claimed_by: row.get(4)?,
+                        claimed_by,
+                        owner,
                     })
                 },
             )
             .optional()
+            .map_err(anyhow::Error::from)?;
+        if let Some(claim) = claim.as_ref() {
+            let canonical_owner = lillux::canonical_json(&serde_json::to_value(&claim.owner)?)?;
+            let persisted_epoch: i64 = self.conn.query_row(
+                "SELECT last_epoch FROM thread_launch_epoch WHERE thread_id=?1",
+                params![&claim.thread_id],
+                |row| row.get(0),
+            )?;
+            if claim.owner.thread_id != claim.thread_id
+                || claim.owner.unpredictable_nonce != claim.claim_id
+                || claim.owner.monotonic_launch_epoch == 0
+                || claim.owner.daemon_generation_id.is_empty()
+                || claim.owner.monotonic_launch_epoch != u64::try_from(persisted_epoch)?
+                || canonical_owner != claim.claimed_by
+            {
+                bail!("durable launch owner fields contradict their claim row");
+            }
+        }
+        Ok(claim)
+    }
+
+    pub fn reserve_workspace(
+        &self,
+        workspace_id: &str,
+        lower_snapshot: &str,
+        root_path: &str,
+    ) -> Result<()> {
+        let now = lillux::time::timestamp_millis();
+        let changed = self.conn.execute(
+            "INSERT INTO execution_workspace
+                (workspace_id, lower_snapshot, root_path, state, created_at_ms, updated_at_ms)
+             VALUES (?1, ?2, ?3, 'reserved', ?4, ?4)
+             ON CONFLICT(workspace_id) DO NOTHING",
+            params![workspace_id, lower_snapshot, root_path, now],
+        )?;
+        if changed == 0 {
+            let existing = self
+                .workspace(workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace reservation disappeared"))?;
+            if existing.lower_snapshot != lower_snapshot
+                || existing.root_path != root_path
+                || !matches!(existing.state.as_str(), "reserved" | "constructing")
+                || existing.process_identity.is_some()
+                || (existing.state == "reserved"
+                    && (existing.thread_id.is_some() || existing.launch_owner.is_some()))
+            {
+                bail!("workspace {workspace_id} cannot adopt a conflicting durable reservation");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn claim_workspace_construction(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE execution_workspace
+                SET thread_id=?2, launch_owner=?3, updated_at_ms=?4
+              WHERE workspace_id=?1 AND thread_id IS NULL AND launch_owner IS NULL
+                AND state='constructing'",
+            params![
+                workspace_id,
+                thread_id,
+                launch_owner,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        if changed != 1 {
+            let existing = self
+                .workspace(workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} disappeared"))?;
+            if existing.thread_id.as_deref() != Some(thread_id)
+                || existing.launch_owner.as_deref() != Some(launch_owner)
+                || existing.state != "constructing"
+            {
+                bail!("workspace {workspace_id} cannot claim construction ownership");
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist the exact signed adapter selection before invoking any
+    /// backend lifecycle operation. A crash after this point can only be
+    /// reconciled by the same backend build; recovery never guesses which
+    /// implementation may have created external workspace state.
+    pub fn prepare_workspace_backend(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+        backend_id: &str,
+        backend_version: &str,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE execution_workspace
+                SET backend_id=?4, backend_version=?5, updated_at_ms=?6
+              WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
+                AND state='constructing'
+                AND (backend_id IS NULL OR backend_id=?4)
+                AND (backend_version IS NULL OR backend_version=?5)",
+            params![
+                workspace_id,
+                thread_id,
+                launch_owner,
+                backend_id,
+                backend_version,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        if changed != 1 {
+            let existing = self
+                .workspace(workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} disappeared"))?;
+            if existing.thread_id.as_deref() != Some(thread_id)
+                || existing.launch_owner.as_deref() != Some(launch_owner)
+                || existing.backend_id.as_deref() != Some(backend_id)
+                || existing.backend_version.as_deref() != Some(backend_version)
+                || existing.state != "constructing"
+            {
+                bail!(
+                    "workspace {workspace_id} cannot record the selected backend before construction"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn bind_workspace(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: Option<&str>,
+        backend_id: Option<&str>,
+        backend_version: Option<&str>,
+        pinned_root_identities: Option<&str>,
+        mount_identity: Option<&str>,
+    ) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE execution_workspace
+                SET backend_id=?4,
+                    backend_version=?5, pinned_root_identities=?6, mount_identity=?7,
+                    state='ready', updated_at_ms=?8
+              WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
+                AND state='constructing'",
+            params![
+                workspace_id,
+                thread_id,
+                launch_owner,
+                backend_id,
+                backend_version,
+                pinned_root_identities,
+                mount_identity,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        if changed != 1 {
+            let existing = self
+                .workspace(workspace_id)?
+                .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} disappeared"))?;
+            if existing.thread_id.as_deref() != Some(thread_id)
+                || existing.launch_owner.as_deref() != launch_owner
+                || existing.backend_id.as_deref() != backend_id
+                || existing.backend_version.as_deref() != backend_version
+                || existing.pinned_root_identities.as_deref() != pinned_root_identities
+                || existing.mount_identity.as_deref() != mount_identity
+                || existing.state != "ready"
+            {
+                bail!("workspace {workspace_id} cannot be bound from its current state");
+            }
+        }
+        Ok(())
+    }
+
+    pub fn transition_workspace(
+        &self,
+        workspace_id: &str,
+        expected: &[&str],
+        next: &str,
+        process_identity: Option<&str>,
+    ) -> Result<()> {
+        if expected.is_empty() {
+            bail!("workspace transition requires an expected state");
+        }
+        let placeholders = std::iter::repeat_n("?", expected.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE execution_workspace
+                SET state=?2, process_identity=COALESCE(?3, process_identity), updated_at_ms=?4
+              WHERE workspace_id=?1 AND state IN ({placeholders})"
+        );
+        let now = lillux::time::timestamp_millis();
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            workspace_id.into(),
+            next.into(),
+            process_identity.map_or(rusqlite::types::Value::Null, Into::into),
+            now.into(),
+        ];
+        values.extend(expected.iter().map(|value| (*value).into()));
+        let changed = self
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(values))?;
+        if changed != 1 {
+            bail!("workspace {workspace_id} cannot transition to {next}");
+        }
+        Ok(())
+    }
+
+    pub fn transition_workspace_owned(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+        expected: &[&str],
+        next: &str,
+        process_identity: Option<&str>,
+    ) -> Result<()> {
+        if expected.is_empty() {
+            bail!("workspace transition requires an expected state");
+        }
+        let placeholders = (7..7 + expected.len())
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "UPDATE execution_workspace
+                SET state=?2, process_identity=COALESCE(?3, process_identity), updated_at_ms=?4
+              WHERE workspace_id=?1 AND thread_id=?5 AND launch_owner=?6
+                AND state IN ({placeholders})"
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            workspace_id.into(),
+            next.into(),
+            process_identity.map_or(rusqlite::types::Value::Null, Into::into),
+            lillux::time::timestamp_millis().into(),
+            thread_id.into(),
+            launch_owner.into(),
+        ];
+        values.extend(expected.iter().map(|value| (*value).into()));
+        let changed = self
+            .conn
+            .execute(&sql, rusqlite::params_from_iter(values))?;
+        if changed != 1 {
+            bail!("stale launch owner cannot transition workspace {workspace_id} to {next}");
+        }
+        Ok(())
+    }
+
+    /// Atomically publish the result of a callback freeze into both durable
+    /// recovery authorities. The workspace row is the lifecycle journal; the
+    /// thread launch metadata is the native-resume seed. They must never name
+    /// different generations after a crash.
+    pub fn bind_frozen_workspace_generation(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        launch_owner: &str,
+        snapshot_hash: &str,
+    ) -> Result<()> {
+        validate_sha256("frozen workspace snapshot hash", snapshot_hash)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)
+            .context("begin atomic frozen workspace binding")?;
+        let claim_owner: Option<String> = tx
+            .query_row(
+                "SELECT claimed_by FROM thread_launch_claim WHERE thread_id=?1",
+                params![thread_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if claim_owner.as_deref() != Some(launch_owner) {
+            bail!("stale launch owner cannot bind frozen workspace {workspace_id}");
+        }
+        let (workspace_thread, workspace_owner, state, lower_snapshot, existing_frozen): (
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            Option<String>,
+        ) = tx
+            .query_row(
+                "SELECT thread_id, launch_owner, state, lower_snapshot, frozen_snapshot_hash
+                   FROM execution_workspace WHERE workspace_id=?1",
+                params![workspace_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} disappeared"))?;
+        if workspace_thread.as_deref() != Some(thread_id)
+            || workspace_owner.as_deref() != Some(launch_owner)
+            || state != "freezing"
+            || existing_frozen
+                .as_deref()
+                .is_some_and(|existing| existing != snapshot_hash)
+        {
+            bail!("workspace {workspace_id} cannot bind a conflicting frozen generation");
+        }
+        let launch_metadata_json: Option<String> = tx
+            .query_row(
+                "SELECT launch_metadata FROM thread_runtime WHERE thread_id=?1",
+                params![thread_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow::anyhow!("thread_runtime row missing for {thread_id}"))?;
+        let launch_metadata_json = launch_metadata_json.ok_or_else(|| {
+            anyhow::anyhow!("thread {thread_id} has no launch metadata for frozen workspace")
+        })?;
+        let mut launch_metadata: RuntimeLaunchMetadata =
+            serde_json::from_str(&launch_metadata_json)
+                .context("decode launch metadata while binding frozen workspace")?;
+        if launch_metadata.schema_version != LAUNCH_METADATA_SCHEMA_VERSION {
+            bail!("launch metadata schema mismatch while binding frozen workspace");
+        }
+        let resume = launch_metadata.resume_context.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("thread {thread_id} has no ResumeContext for frozen workspace")
+        })?;
+        match existing_frozen.as_deref() {
+            Some(_) if resume.original_snapshot_hash.as_deref() != Some(snapshot_hash) => {
+                bail!("frozen workspace and ResumeContext snapshot hashes contradict");
+            }
+            None if resume.durable_project_snapshot_hash() != Some(lower_snapshot.as_str()) => {
+                bail!("workspace lower snapshot and predecessor ResumeContext contradict");
+            }
+            _ => {}
+        }
+        resume.original_snapshot_hash = Some(snapshot_hash.to_string());
+        resume.original_pushed_head_ref = None;
+        let launch_metadata_json = encode_current_launch_metadata(&launch_metadata)?;
+        let workspace_updated = tx.execute(
+            "UPDATE execution_workspace
+                SET frozen_snapshot_hash=?4, updated_at_ms=?5
+              WHERE workspace_id=?1 AND thread_id=?2 AND launch_owner=?3
+                AND state='freezing'
+                AND (frozen_snapshot_hash IS NULL OR frozen_snapshot_hash=?4)",
+            params![
+                workspace_id,
+                thread_id,
+                launch_owner,
+                snapshot_hash,
+                lillux::time::timestamp_millis()
+            ],
+        )?;
+        let runtime_updated = tx.execute(
+            "UPDATE thread_runtime SET launch_metadata=?2 WHERE thread_id=?1",
+            params![thread_id, launch_metadata_json],
+        )?;
+        if workspace_updated != 1 || runtime_updated != 1 {
+            bail!("frozen workspace binding lost its durable owner rows");
+        }
+        tx.commit()
+            .context("commit atomic frozen workspace binding")
+    }
+
+    pub fn workspace(&self, workspace_id: &str) -> Result<Option<WorkspaceRecord>> {
+        self.conn
+            .query_row(
+                "SELECT workspace_id, thread_id, launch_owner, backend_id, backend_version,
+                        pinned_root_identities, mount_identity, lower_snapshot,
+                        frozen_snapshot_hash, root_path, state, process_identity, created_at_ms, updated_at_ms
+                   FROM execution_workspace WHERE workspace_id=?1",
+                params![workspace_id],
+                |row| {
+                    Ok(WorkspaceRecord {
+                        workspace_id: row.get(0)?,
+                        thread_id: row.get(1)?,
+                        launch_owner: row.get(2)?,
+                        backend_id: row.get(3)?,
+                        backend_version: row.get(4)?,
+                        pinned_root_identities: row.get(5)?,
+                        mount_identity: row.get(6)?,
+                        lower_snapshot: row.get(7)?,
+                        frozen_snapshot_hash: row.get(8)?,
+                        root_path: row.get(9)?,
+                        state: row.get(10)?,
+                        process_identity: row.get(11)?,
+                        created_at_ms: row.get(12)?,
+                        updated_at_ms: row.get(13)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn open_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT workspace_id, thread_id, launch_owner, backend_id, backend_version,
+                    pinned_root_identities, mount_identity, lower_snapshot,
+                    frozen_snapshot_hash, root_path, state, process_identity, created_at_ms, updated_at_ms
+               FROM execution_workspace WHERE state != 'closed' ORDER BY created_at_ms",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(WorkspaceRecord {
+                workspace_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                launch_owner: row.get(2)?,
+                backend_id: row.get(3)?,
+                backend_version: row.get(4)?,
+                pinned_root_identities: row.get(5)?,
+                mount_identity: row.get(6)?,
+                lower_snapshot: row.get(7)?,
+                frozen_snapshot_hash: row.get(8)?,
+                root_path: row.get(9)?,
+                state: row.get(10)?,
+                process_identity: row.get(11)?,
+                created_at_ms: row.get(12)?,
+                updated_at_ms: row.get(13)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
@@ -4876,6 +5515,41 @@ mod tests {
     }
 
     #[test]
+    fn detached_spawn_intent_reuses_one_child_and_rejects_request_drift() {
+        let db = RuntimeDb::new_in_memory().unwrap();
+        let operation_id = "d".repeat(64);
+        let request_hash = "e".repeat(64);
+        assert_eq!(
+            db.reserve_detached_spawn_intent(
+                &operation_id,
+                "T-parent",
+                &request_hash,
+                "T-child-first",
+            )
+            .unwrap(),
+            "T-child-first"
+        );
+        assert_eq!(
+            db.reserve_detached_spawn_intent(
+                &operation_id,
+                "T-parent",
+                &request_hash,
+                "T-child-retry",
+            )
+            .unwrap(),
+            "T-child-first"
+        );
+        assert!(db
+            .reserve_detached_spawn_intent(
+                &operation_id,
+                "T-parent",
+                &"f".repeat(64),
+                "T-child-retry",
+            )
+            .is_err());
+    }
+
+    #[test]
     fn hook_dispatch_pending_survives_restart_and_completed_replays_to_successor() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
@@ -5624,8 +6298,8 @@ mod tests {
         assert!(db.launch_window_cancelled_members().unwrap().is_empty());
     }
 
-    /// Unknown owned state must still fail without mutation. Migration is
-    /// limited to explicitly recognized deployed predecessor schemas.
+    /// Unknown owned state must fail without mutation. Normal open never
+    /// performs a predecessor migration.
     #[test]
     fn open_rejects_unrecognized_owned_db_without_mutating_it() {
         let tmp = TempDir::new().unwrap();
@@ -5680,9 +6354,7 @@ mod tests {
         let error = RuntimeDb::open(&path)
             .err()
             .expect("owned stale runtime database must be rejected");
-        assert!(error
-            .to_string()
-            .contains("recognized owned predecessor schema"));
+        assert!(error.to_string().contains("explicit no-backcompat reset"));
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let added: i64 = conn
             .query_row(
@@ -5695,26 +6367,19 @@ mod tests {
     }
 
     #[test]
-    fn open_migrates_recognized_runtime_predecessor_without_archiving_state() {
+    fn open_rejects_pre_v4_runtime_metadata_without_mutating_owned_state() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
         rewrite_as_recognized_runtime_predecessor(&db, "reserved", None);
         drop(db);
 
-        let migrated = RuntimeDb::open(&path).unwrap();
-        let info = migrated
-            .get_runtime_info("T-legacy-child")
-            .unwrap()
-            .expect("runtime row must survive migration");
-        let metadata = info
-            .launch_metadata
-            .expect("stored launch metadata must survive migration");
-        assert_eq!(metadata.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
-        assert!(metadata.resume_context.is_none());
-        assert!(metadata.isolation.is_none());
-        let child_links: i64 = migrated
-            .conn
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("pre-v4 launch authority must require the explicit reset action");
+        assert!(error.to_string().contains("--discard-thread-history"));
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let child_links: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM thread_child_link WHERE child_thread_id='T-legacy-child'",
                 [],
@@ -5722,18 +6387,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(child_links, 1);
-        let incomplete_follows: i64 = migrated
-            .conn
+        let incomplete_follows: i64 = conn
             .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(incomplete_follows, 0);
-        let incomplete_windows: i64 = migrated
-            .conn
+        assert_eq!(incomplete_follows, 1);
+        let incomplete_windows: i64 = conn
             .query_row("SELECT COUNT(*) FROM launch_window", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(incomplete_windows, 0);
-        let hook_table: i64 = migrated
-            .conn
+        assert_eq!(incomplete_windows, 1);
+        let hook_table: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
                  WHERE type='table' AND name='hook_dispatch_ledger'",
@@ -5741,15 +6403,12 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(hook_table, 1);
-        assert!(
-            path.is_file(),
-            "migration must retain the original database"
-        );
+        assert_eq!(hook_table, 0, "failed migration must roll back its DDL");
+        assert!(path.is_file(), "failed migration must retain the database");
     }
 
     #[test]
-    fn open_migrates_launch_metadata_when_sqlite_schema_is_already_current() {
+    fn open_rejects_old_launch_metadata_when_sqlite_schema_is_current() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -5771,19 +6430,14 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let migrated = RuntimeDb::open(&path).unwrap();
-        let metadata = migrated
-            .get_runtime_info("T-pre-isolation")
-            .unwrap()
-            .expect("runtime row must survive migration")
-            .launch_metadata
-            .expect("launch metadata must survive migration");
-        assert_eq!(metadata.schema_version, LAUNCH_METADATA_SCHEMA_VERSION);
-        assert!(metadata.isolation.is_none());
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("old launch metadata must not be assigned invented v4 authority");
+        assert!(error.to_string().contains("--discard-thread-history"));
     }
 
     #[test]
-    fn committed_legacy_follow_blocks_migration_without_mutation() {
+    fn committed_legacy_follow_requires_reset_without_interpretation_or_mutation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -5792,8 +6446,8 @@ mod tests {
 
         let error = RuntimeDb::open(&path)
             .err()
-            .expect("committed legacy follow requires explicit recovery");
-        assert!(error.to_string().contains("committed legacy follow"));
+            .expect("committed legacy follow requires explicit reset");
+        assert!(error.to_string().contains("explicit no-backcompat reset"));
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let follows: i64 = conn
             .query_row("SELECT COUNT(*) FROM follow_waiter", [], |row| row.get(0))
@@ -5808,6 +6462,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hook_table, 0);
+    }
+
+    #[test]
+    fn explicit_history_reset_replaces_legacy_runtime_schema_without_migrating_rows() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        rewrite_as_recognized_runtime_predecessor(&db, "waiting", Some("T-successor"));
+        drop(db);
+
+        let directory = lillux::PinnedDirectory::open(tmp.path())
+            .unwrap()
+            .expect("temporary directory exists");
+        let lock = directory.lock_exclusive().unwrap();
+        let mut reset = RuntimeDb::open_for_explicit_history_reset_with_namespace_authority(
+            &path, directory, lock,
+        )
+        .unwrap();
+
+        assert!(reset.requires_explicit_history_reset());
+        reset.apply_explicit_history_reset(&path).unwrap();
+        assert!(!reset.requires_explicit_history_reset());
+        assert_current_runtime_schema(&reset.conn, &path).unwrap();
+        assert_eq!(
+            reset.discard_all_thread_history(true).unwrap().total_rows(),
+            0
+        );
+        assert!(reset.open_workspaces().unwrap().is_empty());
     }
 
     #[test]
@@ -5840,6 +6522,13 @@ mod tests {
                  INSERT INTO thread_launch_claim
                      (thread_id, claim_id, claimed_at_ms, lease_expires_at_ms, claimed_by)
                      VALUES ('T-root', 'claim-1', 1, 2, 'test');
+                 INSERT INTO thread_launch_epoch (thread_id, last_epoch)
+                     VALUES ('T-root', 1);
+                 INSERT INTO execution_workspace
+                     (workspace_id, thread_id, lower_snapshot, root_path, state,
+                      created_at_ms, updated_at_ms)
+                     VALUES ('workspace-1', 'T-root', 'snapshot-1', '/tmp/workspace-1',
+                             'orphaned', 1, 1);
                  INSERT INTO follow_waiter
                      (follow_key, parent_thread_id, parent_chain_root_id, follow_node,
                       graph_run_id, step_count, phase, created_at_ms, updated_at_ms)
@@ -5863,11 +6552,14 @@ mod tests {
             .unwrap();
 
         let preview = db.discard_all_thread_history(true).unwrap();
-        assert_eq!(preview.total_rows(), 9);
-        assert_eq!(db.discard_all_thread_history(true).unwrap().total_rows(), 9);
+        assert_eq!(preview.total_rows(), 11);
+        assert_eq!(
+            db.discard_all_thread_history(true).unwrap().total_rows(),
+            11
+        );
 
         let removed = db.discard_all_thread_history(false).unwrap();
-        assert_eq!(removed.total_rows(), 9);
+        assert_eq!(removed.total_rows(), 11);
         assert_eq!(db.discard_all_thread_history(true).unwrap().total_rows(), 0);
         drop(db);
 

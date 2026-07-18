@@ -2814,6 +2814,7 @@ dependencies = [
  "glob",
  "libc",
  "lillux",
+ "rand",
  "rusqlite",
  "ryeos-tracing",
  "serde",
