@@ -20,10 +20,16 @@ ARG BUILD_DATE=unknown
 ENV RYEOS_VCS_REF=$VCS_REF
 ENV RYEOS_BUILD_DATE=$BUILD_DATE
 
+# BuildKit may retain COPY-provided directories in a lower overlay layer.
+# Materialize bundles in the writable layer so atomic directory exchanges
+# operate within one rename domain during publication.
 RUN --mount=type=secret,id=publisher-key,required=true \
     --mount=type=cache,id=ryeos-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=ryeos-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=ryeos-cargo-target,target=/build/target-cache,sharing=locked \
+    cp -a bundles .bundles-writable && \
+    rm -rf bundles && \
+    mv .bundles-writable bundles && \
     test -n "$VERSION" && \
     test -n "$SOURCE_DATE_EPOCH" && \
     test -s /run/secrets/publisher-key && \
