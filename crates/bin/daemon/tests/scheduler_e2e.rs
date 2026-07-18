@@ -701,23 +701,21 @@ async fn scheduler_deregister_stops_fires() {
         "deregistered schedule should not appear in list"
     );
 
-    // A boundary already claimed before deregistration linearizes may remain
-    // visible. No new claim may appear after the successful response.
-    let count_after_deregister = fire_count(&h, "dereg-stop")
-        .await
-        .expect("show_fires after deregister");
-    let stable = observe_fire_count_stable(
-        &h,
-        "dereg-stop",
-        count_after_deregister,
-        3,
-        Duration::from_secs(3),
-    )
-    .await;
-    assert!(
-        stable,
-        "deregistered schedule should not produce additional fires"
-    );
+    // `show_fires` is owner-authorized through the live schedule spec and
+    // therefore returns not-found after deregistration. Inspect the durable
+    // fire projection instead: completion may still update an already-claimed
+    // row, but the successful response is the fence after which no new fire
+    // identity may be claimed.
+    let count_after_deregister =
+        projected_fire_count(&h, "dereg-stop").expect("read projected fires after deregister");
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            projected_fire_count(&h, "dereg-stop"),
+            Some(count_after_deregister),
+            "deregistered schedule should not claim additional fires"
+        );
+    }
 }
 
 // ── Schedule ID reuse blocked ──────────────────────────────────────────────
@@ -1065,6 +1063,25 @@ async fn fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
         return None;
     }
     body.get("result")?.get("total")?.as_u64()
+}
+
+fn projected_fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
+    let path = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("scheduler.sqlite3");
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
+            [schedule_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()?;
+    u64::try_from(count).ok()
 }
 
 /// Observe `show_fires` over a time window, checking that the fire count
