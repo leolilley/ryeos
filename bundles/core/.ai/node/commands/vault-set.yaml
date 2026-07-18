@@ -1,8 +1,12 @@
-# ryeos:signed:2026-06-19T05:40:59Z:9a891cf88db92cade396b21ebdfed6964539a94812db67e565bc95d5d18dfd32:o+Ab2dTSstXWIcNBJ+7TvR6j7P9xwCZk9qP5Q+ZBEu7mjTwp0oSe8vXVsXdu+TWAYjdDFuFrz657JjvfqzTTAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:7faaa00fe93da271ad474242575987af02951bd5bff9b915282cdf0f6dfa6a82:coE2SMoWwjQew/mjiniZrs32/W4cPCXPDO4+MH6uvSzRHskiFlUByv83tauG+kF4VXnpsZcpSdRly1H34/ZvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - vault
 - set
 description: Set a secret in the node vault
+forms:
+- slots:
+  - field: name
+  - field: value
 dispatch:
   kind: execute_ref
   execute: service:vault/set

@@ -499,7 +499,6 @@ pub async fn run(
     screen: TtyScreen,
 ) -> std::result::Result<(), CliError> {
     let project = resolve_project_for_display(explicit_project);
-    let operator_problem = resolve_operator(app_root);
     let remote_url = remote_daemon_url();
 
     let mut loading_frame = 0;
@@ -508,13 +507,7 @@ pub async fn run(
         &loading_projection(screen, &project, loading_frame),
         0,
     )?;
-    let live = build_live_projection(
-        app_root,
-        &project,
-        operator_problem.as_deref(),
-        screen,
-        remote_url.as_deref(),
-    );
+    let live = build_live_projection(app_root, &project, screen, remote_url.as_deref());
     tokio::pin!(live);
     let mut ticker = tokio::time::interval(theme::SPINNER_TICK_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -656,45 +649,45 @@ fn loading_projection(
 async fn build_live_projection(
     app_root: &Path,
     project: &ProjectDisplay,
-    operator_problem: Option<&str>,
     screen: TtyScreen,
     remote_url: Option<&str>,
 ) -> TtyHomeFile {
-    let mut node = match remote_url {
-        Some(remote_url) => TtyNodeSummary {
-            status: "remote override".to_string(),
-            detail: Some(format!("RYEOSD_URL={remote_url}")),
-        },
-        None => lifecycle_summary(app_root).await,
-    };
-    let snapshot = crate::node_descriptors::load_verified_snapshot(app_root);
-    let (command_count, has_tui_command, verified_items) = match snapshot {
-        Ok(snapshot) => {
-            let rows = crate::help::command_rows(
-                &snapshot,
-                app_root,
-                project.key.as_deref().unwrap_or("."),
-            );
-            let has_tui_command = rows.iter().any(|command| command.tokens == "tui");
-            (
-                Some(
-                    snapshot.commands.len()
-                        + crate::lifecycle_commands::local_command_descriptors().len(),
-                ),
-                has_tui_command,
-                rows.into_iter()
-                    .map(|row| command_item(vec![row.tokens], row.description))
-                    .collect(),
-            )
+    // Keep all disk-heavy verification and effective-item resolution off the
+    // async render task. Otherwise this future blocks the `select!` in `run`
+    // and the loading spinner cannot repaint until discovery is already done.
+    // Lifecycle probing and command discovery are independent, so start both
+    // immediately and let their latency overlap.
+    let lifecycle_root = app_root.to_path_buf();
+    let remote_url = remote_url.map(str::to_owned);
+    let node_task = tokio::spawn(async move {
+        match remote_url {
+            Some(remote_url) => TtyNodeSummary {
+                status: "remote override".to_string(),
+                detail: Some(format!("RYEOSD_URL={remote_url}")),
+            },
+            None => lifecycle_summary(lifecycle_root).await,
         }
-        Err(_) => (
-            Some(crate::lifecycle_commands::local_command_descriptors().len()),
-            false,
-            Vec::new(),
-        ),
-    };
+    });
 
-    if let Some(problem) = operator_problem {
+    let discovery_root = app_root.to_path_buf();
+    let project_key = project.key.clone();
+    let discovery_task = tokio::task::spawn_blocking(move || {
+        build_command_projection(&discovery_root, project_key.as_deref())
+    });
+
+    let (node, commands) = tokio::join!(node_task, discovery_task);
+    let mut node = node.unwrap_or_else(|error| TtyNodeSummary {
+        status: "status error".to_string(),
+        detail: Some(format!("lifecycle status task failed: {error}")),
+    });
+    let commands = commands.unwrap_or_else(|error| CommandProjection {
+        command_count: Some(crate::lifecycle_commands::local_command_descriptors().len()),
+        has_tui_command: false,
+        verified_items: Vec::new(),
+        operator_problem: Some(format!("command discovery task failed: {error}")),
+    });
+
+    if let Some(problem) = commands.operator_problem.as_deref() {
         node.detail = Some(match node.detail {
             Some(detail) => format!("{detail}; {problem}"),
             None => problem.to_string(),
@@ -708,26 +701,69 @@ async fn build_live_projection(
             node,
             project: Some(TtyProjectSummary::from_project(project)),
             commands: TtyCommandSummary {
-                count: command_count,
-                detail: command_count
+                count: commands.command_count,
+                detail: commands
+                    .command_count
                     .is_none()
                     .then(|| "run `ryeos node doctor` for diagnostics".to_string()),
             },
-            items: screen_items(screen, has_tui_command, verified_items),
+            items: screen_items(screen, commands.has_tui_command, commands.verified_items),
         },
     }
 }
 
-async fn lifecycle_summary(app_root: &Path) -> TtyNodeSummary {
-    let env = match LocalLifecycleEnv::load(Some(app_root.to_path_buf())) {
-        Ok(env) => env,
-        Err(err) => {
-            return TtyNodeSummary {
-                status: "config error".to_string(),
-                detail: Some(err.to_string()),
+#[derive(Debug)]
+struct CommandProjection {
+    command_count: Option<usize>,
+    has_tui_command: bool,
+    verified_items: Vec<TtyItem>,
+    operator_problem: Option<String>,
+}
+
+fn build_command_projection(app_root: &Path, project_key: Option<&str>) -> CommandProjection {
+    let operator_problem = resolve_operator(app_root);
+    match crate::node_descriptors::load_verified_snapshot(app_root) {
+        Ok(snapshot) => {
+            let rows = crate::help::command_rows(&snapshot, app_root, project_key.unwrap_or("."));
+            CommandProjection {
+                command_count: Some(
+                    snapshot.commands.len()
+                        + crate::lifecycle_commands::local_command_descriptors().len(),
+                ),
+                has_tui_command: rows.iter().any(|command| command.tokens == "tui"),
+                verified_items: rows
+                    .into_iter()
+                    .map(|row| command_item(vec![row.tokens], row.description))
+                    .collect(),
+                operator_problem,
             }
         }
-    };
+        Err(_) => CommandProjection {
+            command_count: Some(crate::lifecycle_commands::local_command_descriptors().len()),
+            has_tui_command: false,
+            verified_items: Vec::new(),
+            operator_problem,
+        },
+    }
+}
+
+async fn lifecycle_summary(app_root: PathBuf) -> TtyNodeSummary {
+    let env =
+        match tokio::task::spawn_blocking(move || LocalLifecycleEnv::load(Some(app_root))).await {
+            Ok(Ok(env)) => env,
+            Ok(Err(err)) => {
+                return TtyNodeSummary {
+                    status: "config error".to_string(),
+                    detail: Some(err.to_string()),
+                };
+            }
+            Err(err) => {
+                return TtyNodeSummary {
+                    status: "config error".to_string(),
+                    detail: Some(format!("lifecycle config task failed: {err}")),
+                };
+            }
+        };
     let controller = LifecycleController::from_env(env);
     match controller.status().await {
         Ok(LifecycleStatus::NotInitialized { diagnostics }) => TtyNodeSummary {

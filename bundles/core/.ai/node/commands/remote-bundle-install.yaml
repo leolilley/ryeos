@@ -1,8 +1,14 @@
-# ryeos:signed:2026-06-19T05:40:59Z:bf18855ab00e9ddd85e6fa06847e04612a5431b18d9146fd09232e45da4f54da:9TeZTLCGniiyAzmKx81RvYv4pUieIMjzckKRweHmaXHxgEIfVGcBzNJhWfLT+XR1ZANfJvJ9+2LILAyrit0LCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:25f60a61796bb59964fa7ee9867ef17adf324076b27da1afe9785da73e0bb095:c1N1ZcKeMegBL9bBLcnBiPVX67et3CWfcXFUbKFLgXG8vygH1v7+mQZbGSEEzEc97twdqAn33Sn9m/i4Pl1sBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - bundle-install
 description: Install a bundle from a remote node
+forms:
+- slots:
+  - field: remote
+  - field: bundle_name
+- slots:
+  - field: bundle_name
 dispatch:
   kind: execute_ref
   execute: service:remote/bundle-install

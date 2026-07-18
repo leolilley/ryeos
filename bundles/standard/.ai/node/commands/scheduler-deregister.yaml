@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:32ec16bde336337546a8fea89dba35cb30a6839c22e359957464781bec51f7d1:D9DmzLECSQxitwlV/hjCc1dmsaNTc+IIFkUoJAkRr3rDtc24iHLiQsBHxd7xRLEU2ao/v5GIC1ChiYTt9aEgDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:474e71bdc1da9a73d44be4ca6ee296d2b74d86325c94ae49db4a1b4c57d1a5c7:kG12ATuPLJqoCvW0EJsIIbbOiT1idD+sUkPrDQbe23v6qiiQ4goOgGr19BMItAvrugs/e+ZYzt4LDFDFVPkoAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - deregister
 description: Remove a schedule spec
+forms:
+- slots:
+  - field: schedule_id
 dispatch:
   kind: execute_ref
   execute: service:scheduler/deregister

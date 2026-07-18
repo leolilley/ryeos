@@ -1270,7 +1270,8 @@ async fn prepare_managed_launch_authority(
         },
     )
     .map_err(BuildAndLaunchError::from)?;
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(params.project_path));
+    let dotenv_dirs =
+        ryeos_app::vault::dotenv_search_dirs(Some(params.provenance.original_project_path()));
     let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
     merge_prepared_secret_requirements(
         &mut secret_requirements,
@@ -2733,7 +2734,7 @@ async fn prepare_follow_child_launch_inner(
         &applicability,
         &admission_primary,
         &resume.ref_bindings,
-        provenance.effective_path(),
+        &provenance,
         &admission_context,
         state,
     )

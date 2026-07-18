@@ -1925,8 +1925,10 @@ async fn run_service_standalone(
     )
     .context("reconcile interrupted bundle transactions")?;
 
-    // Two-phase node-config bootstrap (same as daemon-start path)
-    let (engine, node_config_snapshot, isolation) = bootstrap::load_node_config_two_phase(config)?;
+    // Two-phase node-config bootstrap without daemon callback-socket authority:
+    // standalone mode does not bind the configured UDS listener.
+    let (engine, node_config_snapshot, isolation) =
+        bootstrap::load_node_config_two_phase_standalone(config)?;
     let node_history_policy = {
         let roots = engine.resolution_roots(Some(config.app_root.clone()));
         let parsers = engine.effective_parser_dispatcher(Some(&config.app_root))?;

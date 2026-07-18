@@ -3364,12 +3364,17 @@ pub fn admit_launch_contract(
     applicability: &LaunchContractApplicability,
     primary: &ResolvedItem,
     ref_bindings: &BTreeMap<String, String>,
-    project_path: &Path,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<(), DispatchError> {
-    let Some(prepared) =
-        prepare_launch_contract(applicability, primary, ref_bindings, project_path, ctx)?
+    let Some(prepared) = prepare_launch_contract(
+        applicability,
+        primary,
+        ref_bindings,
+        provenance.effective_path(),
+        ctx,
+    )?
     else {
         return Ok(());
     };
@@ -3382,7 +3387,8 @@ pub fn admit_launch_contract(
     );
     names.sort();
     names.dedup();
-    let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(project_path));
+    let dotenv_dirs =
+        ryeos_app::vault::dotenv_search_dirs(Some(provenance.original_project_path()));
     ryeos_app::vault::read_required_secrets(
         state.vault.as_ref(),
         &ctx.principal_fingerprint,

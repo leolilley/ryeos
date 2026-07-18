@@ -320,7 +320,7 @@ pub enum DispatchError {
 /// and resume paths so the wording cannot drift between them.
 pub fn required_secret_remediation(env_var: &str) -> String {
     format!(
-        "Set `{env_var}` via `ryeos vault set --name {env_var} --value <value>`, \
+        "Set `{env_var}` via `ryeos vault set {env_var} <value>`, \
          a daemon/service environment variable, or a project/operator `.env`"
     )
 }
@@ -486,7 +486,7 @@ mod tests {
 
         let rem = required_secret_remediation("ZEN_API_KEY");
         assert!(
-            rem.contains("ryeos vault set --name ZEN_API_KEY --value <value>"),
+            rem.contains("ryeos vault set ZEN_API_KEY <value>"),
             "got: {rem}"
         );
         assert!(rem.contains("environment variable"), "got: {rem}");

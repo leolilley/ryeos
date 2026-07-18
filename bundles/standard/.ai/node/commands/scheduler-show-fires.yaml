@@ -1,9 +1,12 @@
-# ryeos:signed:2026-06-19T05:40:59Z:c6446f2a073dc04378f8c55faea5397b6673dc4246763fd9dac51a7111d866ab:qOxva5u1XDhv8cq3ixJFuPpdjqq9Aoiaa/TjcJhKet6uQXCuKB5AKqyo3hxEwh+FcGcUn7CTiweijP/P0NbKAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:5a7b34979bad991c910b8911f6ae8b4b0de572ceb6e1aed55f5d2331bc54199f:JLaijY/Gb5s/v4+0qzCQZP+1s5YM0FMZSxKN/PIButy4SIx1y3oBklSq1RP9N6l05rbfwwY8n0b/lWQROO8mAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - show
 - fires
 description: Show fire history for a schedule
+forms:
+- slots:
+  - field: schedule_id
 dispatch:
   kind: execute_ref
   execute: service:scheduler/show_fires

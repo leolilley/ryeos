@@ -591,25 +591,22 @@ config:
     Ok(())
 }
 
-fn plant_seq_child_b(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
-    let graphs_dir = project_dir.join(".ai/graphs");
-    std::fs::create_dir_all(&graphs_dir)?;
-    let body = r#"category: ""
-version: "1.0.0"
-config:
-  start: workb
-  nodes:
-    workb:
-      node_type: gate
-      next:
-        type: conditional
-        branches:
-          - to: fin
-    fin:
-      node_type: return
+fn plant_seq_directive_child_b(project_dir: &Path, signer: &SigningKey) -> anyhow::Result<()> {
+    let directives_dir = project_dir.join(".ai/directives");
+    std::fs::create_dir_all(&directives_dir)?;
+    let body = r#"---
+name: child_b
+category: ""
+description: "resumed-successor dotenv overlay e2e child"
+required_secrets:
+  - OVERLAY_CHAIN_SECRET
+model:
+  tier: general
+---
+Reply with a short acknowledgement.
 "#;
-    let signed = lillux::signature::sign_content(body, signer, "#", None);
-    std::fs::write(graphs_dir.join("child_b.yaml"), signed)?;
+    let signed = lillux::signature::sign_content(body, signer, "<!--", Some("-->"));
+    std::fs::write(directives_dir.join("child_b.md"), signed)?;
     Ok(())
 }
 
@@ -623,7 +620,7 @@ requires:
   capabilities:
     declared:
       - ryeos.execute.graph.child_a
-      - ryeos.execute.graph.child_b
+      - ryeos.execute.directive.child_b
 config:
   start: fetch1
   nodes:
@@ -641,8 +638,9 @@ config:
       node_type: action
       follow: true
       action:
-        item_id: "graph:child_b"
-        ref_bindings: {}
+        item_id: "directive:child_b"
+        ref_bindings:
+          model: "directive:child_b"
         params: {}
       next:
         type: unconditional
@@ -657,8 +655,16 @@ config:
 
 #[tokio::test(flavor = "multi_thread")]
 async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
+    let mock = MockProvider::start(vec![MockResponse::Text("child b completed".into())]).await;
+    let mock_url = mock.base_url.clone();
     let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
         register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-follow-overlay-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )?;
         plant_vault_with_zen_key(state_path)?;
         Ok(())
     };
@@ -673,8 +679,20 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
     .expect("start daemon");
 
     let project = tempfile::tempdir().expect("project tempdir");
+    // Only the second child needs this project-local secret. It is spawned by
+    // the continuation successor after the first follow suspend/resume, so the
+    // launch proves that materialized live-FS provenance retained the original
+    // project as its `.env` overlay source. The fixture vault deliberately does
+    // not contain this name.
+    std::fs::write(
+        project.path().join(".env"),
+        "OVERLAY_CHAIN_SECRET=project-overlay-value\n",
+    )
+    .expect("plant project dotenv overlay");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant model routing");
     plant_seq_child_a(project.path(), &fixture.publisher).expect("plant child_a");
-    plant_seq_child_b(project.path(), &fixture.publisher).expect("plant child_b");
+    plant_seq_directive_child_b(project.path(), &fixture.publisher)
+        .expect("plant directive child_b");
     plant_parent_sequential_graph(project.path(), &fixture.publisher).expect("plant parent");
 
     let post_fut = h.post_execute(
@@ -706,9 +724,9 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
         .expect("parent thread id")
         .to_string();
 
-    // Full sequence resolved when THREE graphs have completed: child_a, child_b, and
-    // the final parent successor (past fetch2). The suspended parent + the first
-    // successor (suspended at fetch2) are `continued`, never `graph_completed`.
+    // Full sequence resolved when TWO graphs have completed (child_a and the final
+    // parent successor) and the directive child_b has completed. The suspended
+    // parent + first successor are `continued`, never `graph_completed`.
     let deadline = Instant::now() + Duration::from_secs(90);
     let events = loop {
         let events = all_events(&h.state_path);
@@ -716,13 +734,20 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
             .iter()
             .filter(|(_, et, _)| et == "graph_completed")
             .count();
-        if completed >= 3 {
+        let child_b_thread = events.iter().find_map(|(thread_id, event_type, payload)| {
+            (event_type == "thread_created"
+                && payload.get("item_ref").and_then(Value::as_str) == Some("directive:child_b"))
+            .then_some(thread_id)
+        });
+        let child_b_completed = child_b_thread
+            .is_some_and(|thread_id| thread_has_event(&events, thread_id, "thread_completed"));
+        if completed >= 2 && child_b_completed {
             break events;
         }
         if Instant::now() >= deadline {
             let stderr = h.drain_stderr_nonblocking().await;
             panic!(
-                "sequential follow did not complete (graph_completed={completed}/3).\nevents={events:#?}\n--- daemon stderr ---\n{stderr}"
+                "sequential follow did not complete (graph_completed={completed}/2, directive_child_completed={child_b_completed}).\nevents={events:#?}\n--- daemon stderr ---\n{stderr}"
             );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -735,11 +760,17 @@ async fn graph_follow_two_sequential_nodes_suspend_and_resume_in_order() {
             .any(|t| thread_has_event(&events, &t, "thread_completed")),
         "child_a must run `worka` to completion; events={events:#?}"
     );
+    let child_b_thread = events
+        .iter()
+        .find_map(|(thread_id, event_type, payload)| {
+            (event_type == "thread_created"
+                && payload.get("item_ref").and_then(Value::as_str) == Some("directive:child_b"))
+            .then_some(thread_id)
+        })
+        .expect("directive child_b thread");
     assert!(
-        threads_that_ran(&events, "workb")
-            .into_iter()
-            .any(|t| thread_has_event(&events, &t, "thread_completed")),
-        "child_b must run `workb` to completion; events={events:#?}"
+        thread_has_event(&events, child_b_thread, "thread_completed"),
+        "directive child_b must complete with its project dotenv secret; events={events:#?}"
     );
 
     // EXACTLY two follow suspends, at fetch1 then fetch2, on DISTINCT threads: the

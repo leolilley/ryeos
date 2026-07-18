@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:3f65d21bfdedab26319cb34593bfc276bfd268d1d79c23c158de5afc5631942b:/ujU6ZDcia9k59s8AQnzVHxxtMZC/LclvUovQOhcFn26mWLrsjw46t5AZX1COix+M4yYCTOKcHvzF7H5w3izDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:c7d5c3947ef6b51a40da12f01331e4f322ff11b5f3a049bf902334a08ca14b3c:Y5a5nsXlhyZ9FI5rvo/Huf3MzQBdI8NdF5IX2Gky+QeuyzZDqvI/GC7iAweH4djgzfO4mRLr9JMyjTkPwRMnAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - children
 description: List a thread's direct children
+forms:
+- slots:
+  - field: thread_id
 dispatch:
   kind: execute_ref
   execute: service:threads/children

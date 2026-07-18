@@ -2493,10 +2493,13 @@ fn execution_provenance_from_resume_context(
                 "resolve_pinned_snapshot_context must return a request-owned checkout guard",
             );
             let effective_path = ctx.effective_path.clone();
-            let provenance =
-                ExecutionProvenance::root_live_fs(effective_path.clone(), ctx.request_engine)
-                    .with_workspace_lifeline(Some(lifeline))
-                    .with_state_root(resume.state_root.clone());
+            let provenance = ExecutionProvenance::root_materialized_live_fs(
+                effective_path.clone(),
+                original_path.to_path_buf(),
+                ctx.request_engine,
+                lifeline,
+            )
+            .with_state_root(resume.state_root.clone());
             tracing::info!(
                 snapshot_hash,
                 effective_path = %effective_path.display(),
@@ -2813,8 +2816,9 @@ pub async fn run_existing_detached(
     }
 
     // ── Vault preflight (post-CAS) ──────────────────────────────────
-    // Run after prepare_cas_context so dotenv overlay follows the exact
-    // materialized project used by this spawn.
+    // Run after prepare_cas_context so execution has its exact materialized
+    // project. Secret overlays remain operator input outside the immutable
+    // snapshot and therefore resolve from the provenance's original project.
     {
         let secret_requirements = crate::execution::launch::build_secret_requirements(
             &params.resolved.resolved_item.metadata.required_secrets,
@@ -2823,7 +2827,8 @@ pub async fn run_existing_detached(
             .iter()
             .map(|req| req.name.clone())
             .collect();
-        let dotenv_dirs = ryeos_app::vault::dotenv_search_dirs(Some(&effective_path));
+        let dotenv_dirs =
+            ryeos_app::vault::dotenv_search_dirs(Some(params.provenance.original_project_path()));
         let vault_bindings = ryeos_app::vault::read_required_secrets(
             state.vault.as_ref(),
             &params.acting_principal,

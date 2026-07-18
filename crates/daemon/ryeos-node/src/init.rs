@@ -882,9 +882,11 @@ fn validate_command_registration_seed_body(path: &Path, body: &str) -> Result<()
 
 /// Discover bundles in a source directory.
 ///
-/// Scans immediate children of `source_dir` for directories containing
-/// a `.ai/` subdirectory. Hidden directories (starting with `.`) and
-/// names that don't pass [`is_valid_bundle_name`] are skipped.
+/// Scans immediate children of `source_dir` for published bundle trees
+/// containing `.ai/manifest.yaml`. A directory containing only release source
+/// material (for example `manifest.source.yaml`) is not installable and is not
+/// part of the initialized generation. Hidden directories (starting with `.`)
+/// and names that don't pass [`is_valid_bundle_name`] are skipped.
 /// Returns `(name, source_path)` pairs sorted by name for
 /// deterministic registration order.
 fn discover_bundles(source_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -921,7 +923,11 @@ fn discover_bundles(source_dir: &Path) -> Result<Vec<(String, PathBuf)>> {
         }
 
         let child_path = entry.path();
-        if child_path.join(ryeos_engine::AI_DIR).is_dir() {
+        if child_path
+            .join(ryeos_engine::AI_DIR)
+            .join("manifest.yaml")
+            .is_file()
+        {
             bundles.push((name_str.into_owned(), child_path));
         }
     }
@@ -1417,15 +1423,21 @@ mod tests {
         );
     }
 
+    fn create_discoverable_bundle(path: &Path) {
+        let ai_dir = path.join(ryeos_engine::AI_DIR);
+        fs::create_dir_all(&ai_dir).unwrap();
+        fs::write(ai_dir.join("manifest.yaml"), "name: fixture\n").unwrap();
+    }
+
     #[test]
     fn discover_bundles_skips_hidden_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        // Create a hidden dir with .ai/ — should be skipped
+        // A hidden published tree is still skipped.
         let hidden = tmp.path().join(".hidden");
-        fs::create_dir_all(hidden.join(".ai")).unwrap();
-        // Create a valid bundle
+        create_discoverable_bundle(&hidden);
+        // Create a valid published bundle.
         let valid = tmp.path().join("my-bundle");
-        fs::create_dir_all(valid.join(".ai")).unwrap();
+        create_discoverable_bundle(&valid);
 
         let bundles = discover_bundles(tmp.path()).unwrap();
         assert_eq!(bundles.len(), 1);
@@ -1435,11 +1447,11 @@ mod tests {
     #[test]
     fn discover_bundles_skips_non_bundle_dirs() {
         let tmp = tempfile::tempdir().unwrap();
-        // Dir without .ai/ — not a bundle
+        // Dir without a published manifest — not a bundle.
         fs::create_dir_all(tmp.path().join("not-a-bundle")).unwrap();
-        // Valid bundle
+        // Valid published bundle.
         let valid = tmp.path().join("real-bundle");
-        fs::create_dir_all(valid.join(".ai")).unwrap();
+        create_discoverable_bundle(&valid);
 
         let bundles = discover_bundles(tmp.path()).unwrap();
         assert_eq!(bundles.len(), 1);
@@ -1457,14 +1469,24 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Invalid names
         for invalid in &["has.dot", "UPPER", "has space", "has/slash"] {
-            fs::create_dir_all(tmp.path().join(invalid).join(".ai")).unwrap();
+            create_discoverable_bundle(&tmp.path().join(invalid));
         }
         // Valid name
-        fs::create_dir_all(tmp.path().join("valid-bundle").join(".ai")).unwrap();
+        create_discoverable_bundle(&tmp.path().join("valid-bundle"));
 
         let bundles = discover_bundles(tmp.path()).unwrap();
         assert_eq!(bundles.len(), 1);
         assert_eq!(bundles[0].0, "valid-bundle");
+    }
+
+    #[test]
+    fn discover_bundles_skips_release_source_only_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai_dir = tmp.path().join("prototype").join(ryeos_engine::AI_DIR);
+        fs::create_dir_all(&ai_dir).unwrap();
+        fs::write(ai_dir.join("manifest.source.yaml"), "name: prototype\n").unwrap();
+
+        assert!(discover_bundles(tmp.path()).unwrap().is_empty());
     }
 
     #[test]

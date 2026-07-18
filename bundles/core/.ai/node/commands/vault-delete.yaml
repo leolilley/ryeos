@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:550d1719cdc2cc48cb2142f0c62f72140c59ee748bd6856e6215971fd4ed54a2:Jot4zytlh+9glp4OTiRqINYr2eYp2mH/5AJStvkmE6sXvK63hqBLtPRSmeZXg/MOqfWRvKNVV9eh1Yj1MjJiDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:72f5468f0011a799ea36a293587286f260abbe39341409a255f7747c131d594e:ScXK696lSkRftWGNb3Em/DW/y9XKcMGKxhgYXg9rLcW4ZVVrw6+PAhPPpMoBUbE9Jdmu/zQOHzTmSXYiIIw2Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - vault
 - delete
 description: Delete a secret from the node vault
+forms:
+- slots:
+  - field: name
 dispatch:
   kind: execute_ref
   execute: service:vault/delete

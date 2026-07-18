@@ -116,6 +116,7 @@ jobs:
       - name: Run release qualification gate
         env:
           GATE_BUILD_JOBS: 2
+          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
           GATE_TEST_THREADS: 2
         run: ./scripts/gate.sh --refresh-bundles
 

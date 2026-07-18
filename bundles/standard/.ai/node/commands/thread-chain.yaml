@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:f6468197a48a5b9335c5e45a8773bb14ca71f3cb8575dba459bf7f58342dd450:WhZgTffAzG9wGKI315bULFpZY6oZgpZN5J7sC734eQTzQoCQcxnHQUX/cJW7Qo2tV2J7n2+mpviOB0S7XNEmDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:dd60b5b0802f080030a9de416c83e712b9a362e5d4e1b25576d4b363ec944d8a:5I6X9WLFoPcLyuEY6vqzEoQM8GZa73LmjcJHgH+3kwZJxdCcZ4CclHqbWjd7eQbPxVD+aHq0b7/cVWjpjfjpBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - chain
 description: Get the parent chain for a thread (root -> ... -> thread)
+forms:
+- slots:
+  - field: thread_id
 dispatch:
   kind: execute_ref
   execute: service:threads/chain

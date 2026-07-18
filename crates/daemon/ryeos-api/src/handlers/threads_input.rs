@@ -380,7 +380,7 @@ fn admit_resume_launch(
         &applicability,
         &primary,
         &resume.ref_bindings,
-        params.provenance.effective_path(),
+        &params.provenance,
         &exec_ctx,
         state,
     )

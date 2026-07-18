@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:bfd844d85dbc8b3f1b54f83a98e5d3f89f5617787fd7b9c714380e30dbc87c2d:g8Fnodm34LoCgcxFHfOZmjLt2i8FPaSwfM+2aRxYjVIHpESBlny44vwE6Snh9t179zHzcfB8jUlQpGZ7fUyfCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:16a694ce9b0680a1d26c1d90cb44651b3462375fd2798f215f47adba778985c4:dbFDMD1+FB/65sGYTtgDO03i7XQbReQwr3ojr8WX8zukzFCdBx/6RWtq/lQ0j43NnZ5aJ8ng6GXKvKoFycWpDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - explain
 description: Explain a schedule's current planning state
+forms:
+- slots:
+  - field: schedule_id
 dispatch:
   kind: execute_ref
   execute: service:scheduler/explain

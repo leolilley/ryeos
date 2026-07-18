@@ -1,8 +1,12 @@
-# ryeos:signed:2026-06-19T05:40:59Z:1f8fb9235deda26310cd3518c041cf9b5e407ff05775fe1d28fb745697447e32:EP9DR6n2+iM2QOhAebOAb2sx3VGkXydpkTz4Y3XPygMdJL0d6R/dce0WDMVupJjXNRC0eh1PWlZDVWhz99y1BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:dbde38f3eee89b237de76eac9b1c794396c1112e7393574c043557805f3e2b16:Ygm9KTJkuvYvUrt7nvo6wxkDjoW0ZZlXKUvgdsdTwLgHUO5ACAQYO92K3Tq2D3PM0uA28b/PUKB6/wvWlR1/AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - commands
 - submit
 description: Submit a runtime command (e.g. cancel) to a thread
+forms:
+- slots:
+  - field: thread_id
+  - field: command_type
 dispatch:
   kind: execute_ref
   execute: service:commands/submit

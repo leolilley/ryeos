@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-21T03:54:09Z:13b0a94eb443eb1ea2420ccf5440e45bd41aed41f5f1fd68f9c5742fdc749025:sjSpciFvUAiQGzsYkNOkfP2JgUNyr+1/0WdStgSxRjzyyOnKgwKiDHJVKIMGtN1zn1W58rIso83h7L37V1naAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:f9402c83622d8181f268271f54950d6e9aa0b19d0497f0b7729a73e1d2b6969b:C+D2/VSCsT2LPShz3tm/FFF4E2rs2C+18Pl+gAiOXcz4MxSpV3iOA6eOw3wEyWKreuLGJkxelQOP5Ns/+xD5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - receipts
 description: Show per-node graph receipts for a thread
+forms:
+- slots:
+  - field: thread_id
 dispatch:
   kind: execute_ref
   execute: service:threads/receipts

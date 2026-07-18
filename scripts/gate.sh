@@ -74,7 +74,17 @@ if [[ "$refresh_bundles" == "1" ]]; then
     gate_info "explicitly refreshing bundles (bundle-set: $bundle_set)"
     # --all: gate is a deliberate full bundle-set refresh; populate-bundles.sh
     # refuses an implicit full build without it.
-    "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --all
+    if [[ -n "${GATE_BUNDLE_TARGET_DIR:-}" ]]; then
+        gate_info "using disposable bundle-build target: $GATE_BUNDLE_TARGET_DIR"
+        CARGO_TARGET_DIR="$GATE_BUNDLE_TARGET_DIR" \
+            "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --all
+        # Bundle binaries and signed manifests have been staged into their
+        # source trees. The optimized build graph is no longer needed by the
+        # test profile and must not compete with it for hosted-runner disk.
+        "$CARGO" clean --target-dir "$GATE_BUNDLE_TARGET_DIR"
+    else
+        "$ROOT/scripts/populate-bundles.sh" --key "$KEY" --owner "$OWNER" --bundle-set "$bundle_set" --all
+    fi
 elif [[ "$skip_tests" == "1" ]]; then
     gate_fail "--no-tests without --refresh-bundles has nothing to do"
     gate_fail "pass --refresh-bundles --no-tests for the old populate-only behavior"

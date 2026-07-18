@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:e1bf10a4e4b5f9fe64689a031131c16d7377e4de07ca51d74cde34d0ceecd2c4:Ihys8Jjmuh/mWmobaRwiUkPhYFHQSNz8MjDRxw4YSHFGd+b7DAiYmfkLlOY7nlaO3w2NuYqvRPRTVB3ZbPSDDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:bf162df6c7da5165086140b0acb442b0af27871a88b1f053c4321eb6467cb20d:Jd6Q8osT6R9FyfnrdNUMw6zEIZaNE0v2adcohbKEsSqW3utpevM9J5xOnK67+YCbmq9cLOa7P7X5EE6b1cF5AQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - resume
 description: Resume a paused schedule
+forms:
+- slots:
+  - field: schedule_id
 dispatch:
   kind: execute_ref
   execute: service:scheduler/resume
