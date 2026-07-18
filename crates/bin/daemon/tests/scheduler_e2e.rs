@@ -627,9 +627,20 @@ async fn scheduler_pause_prevents_fires() {
     .await;
     assert!(status.is_success());
 
-    // Observe show_fires for 3 consecutive checks over 3s — count should
-    // stay at 1, proving no new fires appeared after pause.
-    let stable = observe_fire_count_stable(&h, "pause-no-fire", 1, 3, Duration::from_secs(3)).await;
+    // A boundary already claimed before the pause write gate linearizes may
+    // legitimately be visible now. From the successful pause response onward,
+    // however, the count must remain stable.
+    let count_after_pause = fire_count(&h, "pause-no-fire")
+        .await
+        .expect("show_fires after pause");
+    let stable = observe_fire_count_stable(
+        &h,
+        "pause-no-fire",
+        count_after_pause,
+        3,
+        Duration::from_secs(3),
+    )
+    .await;
     assert!(
         stable,
         "paused schedule should not produce additional fires"
@@ -690,9 +701,19 @@ async fn scheduler_deregister_stops_fires() {
         "deregistered schedule should not appear in list"
     );
 
-    // Observe show_fires for 3 consecutive checks over 3s — count should
-    // stay at 1, proving no new fires appeared after deregister.
-    let stable = observe_fire_count_stable(&h, "dereg-stop", 1, 3, Duration::from_secs(3)).await;
+    // A boundary already claimed before deregistration linearizes may remain
+    // visible. No new claim may appear after the successful response.
+    let count_after_deregister = fire_count(&h, "dereg-stop")
+        .await
+        .expect("show_fires after deregister");
+    let stable = observe_fire_count_stable(
+        &h,
+        "dereg-stop",
+        count_after_deregister,
+        3,
+        Duration::from_secs(3),
+    )
+    .await;
     assert!(
         stable,
         "deregistered schedule should not produce additional fires"
@@ -1029,6 +1050,21 @@ async fn poll_for_fires_count(
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+async fn fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
+    let (status, body) = exec(
+        h,
+        "service:scheduler/show_fires",
+        json!({
+            "schedule_id": schedule_id,
+        }),
+    )
+    .await;
+    if !status.is_success() {
+        return None;
+    }
+    body.get("result")?.get("total")?.as_u64()
 }
 
 /// Observe `show_fires` over a time window, checking that the fire count

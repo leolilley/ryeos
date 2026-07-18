@@ -85,7 +85,24 @@ fn stage_core_handler_binaries(registry: &Path) {
         "ryeos-core-tools",
     ] {
         let path = bin_dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\necho test {name}\n")).unwrap();
+        let script = if name == "rye-parser-yaml-document" {
+            r###"#!/bin/sh
+request="$(cat)"
+case "$request" in
+  *'"command":"validate_parser_config"'*)
+    response='{"result":"validate_ok"}'
+    ;;
+  *)
+    response='{"result":"parse_ok","value":{"version":"1"}}'
+    ;;
+esac
+printf '%s\n' "$response"
+"###
+            .to_string()
+        } else {
+            format!("#!/bin/sh\necho test {name}\n")
+        };
+        std::fs::write(&path, script).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -231,13 +248,11 @@ fn declarative_publish_requires_trust_for_registry_signed_by_different_key() {
     );
 }
 
-/// A publish must never sweep node runtime state into the sign report. The
-/// `node` kind's directory is `.ai/node`, which also holds `.ai/node/schedules`
-/// and `.ai/node/routes` — runtime-owned prefixes a running daemon writes. The
-/// runtime-owned floor excludes them before extension checks, so they never
-/// become items and never raise namespace warnings.
+/// Bundle publication authors declarative node configuration, but must never
+/// sweep signing secrets into the sign report. Project/operator signing uses a
+/// narrower ownership boundary and continues to exclude node-owned paths.
 #[test]
-fn publish_excludes_runtime_owned_node_paths_from_sign_report() {
+fn publish_signs_bundle_node_configuration_and_excludes_secrets() {
     if !core_bundle().join(ryeos_engine::AI_DIR).is_dir() {
         eprintln!("skipping: bundles/core not found");
         return;
@@ -247,7 +262,8 @@ fn publish_excludes_runtime_owned_node_paths_from_sign_report() {
     let bundle = create_declarative_bundle(tmp.path());
     let registry = prepare_core_registry(tmp.path(), &key);
 
-    // Seed node runtime state that the `node` kind walk would otherwise sweep.
+    // Seed bundle-authored node configuration and secret material. Declarative
+    // node items must be publisher-signed; secrets must remain outside the walk.
     let ai = bundle.join(ryeos_engine::AI_DIR);
     for (rel, body) in [
         ("node/schedules/nightly.yaml", "version: \"1\"\n"),
@@ -258,6 +274,9 @@ fn publish_excludes_runtime_owned_node_paths_from_sign_report() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, body).unwrap();
     }
+    let secret = ai.join("config/keys/signing/private_key.yaml");
+    std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
+    std::fs::write(&secret, "version: \"1\"\nprivate_key: secret\n").unwrap();
 
     let report = run_publish_once(&bundle, &registry, &key);
 
@@ -271,28 +290,51 @@ fn publish_excludes_runtime_owned_node_paths_from_sign_report() {
     {
         refs.push(outcome.item_ref.as_str());
     }
-    for r in &refs {
+    for expected in [
+        "node:schedules/nightly",
+        "node:routes/inbound",
+        "node:bundles/core",
+    ] {
         assert!(
-            !r.contains("schedules") && !r.contains("routes") && !r.contains("bundles"),
-            "runtime-owned node path leaked into sign report as `{r}`"
+            refs.contains(&expected),
+            "bundle-authored node item `{expected}` missing from sign report: {refs:?}"
         );
     }
     assert!(
+        refs.iter()
+            .all(|item_ref| !item_ref.contains("private_key")),
+        "secret material leaked into sign report: {refs:?}"
+    );
+    assert!(
         report.sign_report.warnings.is_empty(),
-        "runtime-owned exclusion should leave the namespace lint clean, got: {:?}",
+        "bundle node configuration should leave the namespace lint clean, got: {:?}",
         report.sign_report.warnings
     );
-    // The runtime YAMLs must remain unsigned on disk — a bundle publish must
-    // not author node runtime state.
-    let scheduled = std::fs::read_to_string(ai.join("node/schedules/nightly.yaml")).unwrap();
+    for rel in [
+        "node/schedules/nightly.yaml",
+        "node/routes/inbound.yaml",
+        "node/bundles/core.yaml",
+    ] {
+        let body = std::fs::read_to_string(ai.join(rel)).unwrap();
+        assert!(
+            lillux::signature::parse_signature_line(
+                body.lines().next().unwrap_or_default(),
+                "#",
+                None
+            )
+            .is_some(),
+            "bundle-authored node configuration `{rel}` must be signed"
+        );
+    }
+    let secret_body = std::fs::read_to_string(secret).unwrap();
     assert!(
         lillux::signature::parse_signature_line(
-            scheduled.lines().next().unwrap_or_default(),
+            secret_body.lines().next().unwrap_or_default(),
             "#",
             None
         )
         .is_none(),
-        "node runtime state must not be signed by publish"
+        "signing secret must remain unsigned"
     );
 }
 
