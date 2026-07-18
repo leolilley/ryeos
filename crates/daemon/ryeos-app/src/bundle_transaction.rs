@@ -104,7 +104,12 @@ impl BundleRegistryMutationLock {
 impl BundleRegistryReadLock {
     pub fn acquire(app_root: &Path) -> Result<Self> {
         let target = app_root.join(".ai/bundles");
-        let lock = lillux::SharedFileLock::acquire_existing(&target)?;
+        // The first read of an otherwise empty installed registry must establish
+        // the same coordination anchor used by future writers. Requiring a
+        // pre-existing anchor makes valid offline/disabled-isolation nodes fail
+        // before they can observe the empty generation, while proceeding
+        // unlocked would race the first bundle installation.
+        let lock = lillux::SharedFileLock::acquire(&target)?;
         Ok(Self { _lock: lock })
     }
 }
@@ -501,6 +506,18 @@ fn valid_bundle_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use rand::rngs::OsRng;
+
+    #[test]
+    fn first_registry_reader_establishes_shared_writer_anchor() {
+        let root = tempfile::tempdir().unwrap();
+
+        let reader = BundleRegistryReadLock::acquire(root.path()).unwrap();
+        assert!(root.path().join(".ai/.bundles.lock").is_file());
+        assert!(!root.path().join(".ai/bundles").exists());
+        drop(reader);
+
+        drop(BundleRegistryMutationLock::acquire(root.path()).unwrap());
+    }
 
     #[test]
     fn startup_reconciles_activated_present_transaction() {

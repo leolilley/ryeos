@@ -608,6 +608,30 @@ pub fn load_node_config_two_phase(
     Arc<NodeConfigSnapshot>,
     Arc<ryeos_engine::isolation::IsolationRuntime>,
 )> {
+    load_node_config_two_phase_with_socket(config, Some(&config.uds_path))
+}
+
+/// Standalone service execution has no daemon callback listener to capture.
+/// Its isolation snapshot must therefore omit callback-socket authority rather
+/// than attempting to pin the configured-but-unbound daemon socket path.
+pub fn load_node_config_two_phase_standalone(
+    config: &Config,
+) -> Result<(
+    Arc<Engine>,
+    Arc<NodeConfigSnapshot>,
+    Arc<ryeos_engine::isolation::IsolationRuntime>,
+)> {
+    load_node_config_two_phase_with_socket(config, None)
+}
+
+fn load_node_config_two_phase_with_socket(
+    config: &Config,
+    daemon_socket: Option<&Path>,
+) -> Result<(
+    Arc<Engine>,
+    Arc<NodeConfigSnapshot>,
+    Arc<ryeos_engine::isolation::IsolationRuntime>,
+)> {
     let app_root = &config.app_root;
 
     // Freeze the installed namespace from the first signed registration read
@@ -665,11 +689,17 @@ pub fn load_node_config_two_phase(
             )
         })
         .context("Phase 1: resolve selected isolation backend")?;
-    let isolation = ryeos_engine::isolation::IsolationRuntime::load_for_daemon(
-        app_root,
-        &config.uds_path,
-        isolation_backend,
-    )
+    let isolation = match daemon_socket {
+        Some(daemon_socket) => ryeos_engine::isolation::IsolationRuntime::load_for_daemon(
+            app_root,
+            daemon_socket,
+            isolation_backend,
+        ),
+        None => ryeos_engine::isolation::IsolationRuntime::load_with_backend(
+            app_root,
+            isolation_backend,
+        ),
+    }
     .context("Phase 1: load node isolation policy")?;
     let isolation = Arc::new(ryeos_app::engine_init::retain_daemon_generation(
         isolation,
