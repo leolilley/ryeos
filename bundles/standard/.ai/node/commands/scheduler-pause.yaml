@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:fb803a5b182baf89a97b3b9ea5f5b525b02c0f8cdae57d2b66671558697042cd:CGk9WHsEssayIvE9Q3gnJj5HcfIU0EpTK4E2AOJUwT0HZZG+B/blQkq4vqrePW/zdcFXGgTtFk7WTVz7pkEnBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:160651a4d90ecebb2013d1841f990c55b02bf28a264c2c364fb5419352892e11:yqgqrmE+gEWsIOJ3smvUbY0aF5b0egFgzcB/3q0e9mt89chNW6xVgdJqqyTOejbvAdNuTfg+TmSmtiQnbM7iDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - scheduler
 - pause
 description: Pause a schedule
+forms:
+- slots:
+  - field: schedule_id
 dispatch:
   kind: execute_ref
   execute: service:scheduler/pause

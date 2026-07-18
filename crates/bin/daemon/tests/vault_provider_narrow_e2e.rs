@@ -185,7 +185,7 @@ async fn missing_selected_secret_fails_before_provider_request() {
     //
     // The body carries the structured RequiredSecretMissing surface:
     //   - "ZEN_API_KEY"
-    //   - "ryeos vault set --name ZEN_API_KEY --value <value>"
+    //   - "ryeos vault set ZEN_API_KEY <value>"
 
     // Start mock but expect it to receive ZERO requests.
     let mock = MockProvider::start(vec![MockResponse::Text("should not be called".into())]).await;
@@ -263,7 +263,7 @@ async fn missing_selected_secret_fails_before_provider_request() {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     assert!(
-        remediation.contains("ryeos vault set --name ZEN_API_KEY --value <value>"),
+        remediation.contains("ryeos vault set ZEN_API_KEY <value>"),
         "remediation must include the vault set command; got: {remediation}"
     );
 
@@ -365,7 +365,7 @@ async fn resume_missing_selected_secret_fails_with_typed_error() {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     assert!(
-        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
+        remediation.contains("ryeos vault set ZEN_API_KEY"),
         "remediation must contain the vault set command; got: {remediation}"
     );
 
@@ -945,7 +945,7 @@ async fn execute_stream_emits_structured_required_secret_missing_stream_error() 
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     assert!(
-        remediation.contains("ryeos vault set --name ZEN_API_KEY"),
+        remediation.contains("ryeos vault set ZEN_API_KEY"),
         "remediation must contain vault set command; got: {remediation}"
     );
     assert!(

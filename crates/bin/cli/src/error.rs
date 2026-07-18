@@ -90,6 +90,11 @@ pub enum CliError {
     /// provided path could not be canonicalized.
     #[error("project resolution: {0}")]
     ProjectResolution(String),
+
+    /// The matched command requires a project, so `--no-project` is not a
+    /// valid recovery choice.
+    #[error("project resolution: {0}")]
+    ProjectRequired(String),
 }
 
 impl CliError {
@@ -126,12 +131,42 @@ impl CliError {
             Self::ProjectResolution(_) => {
                 diagnostic.heading = Some("PROJECT RESOLUTION FAILED".to_string());
                 diagnostic.hint = Some(crate::tty::Hint::new(
-                    "pass `--project <DIR>` or `--no-project` explicitly",
+                    "pass `--project <DIR>` or `--no-project` explicitly; either selector may appear before or after the command"
+                ));
+            }
+            Self::ProjectRequired(_) => {
+                diagnostic.heading = Some("PROJECT RESOLUTION FAILED".to_string());
+                diagnostic.hint = Some(crate::tty::Hint::new(
+                    "run from the intended project or pass `--project <DIR>` explicitly",
                 ));
             }
             Self::Reported { .. } => {}
             _ => {}
         }
         diagnostic
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_project_error_does_not_recommend_no_project() {
+        let diagnostic =
+            CliError::ProjectRequired("command 'bundle-smoke' requires a project".into())
+                .diagnostic();
+        let hint = diagnostic.hint.expect("project resolution hint").0;
+        assert!(hint.contains("--project <DIR>"));
+        assert!(!hint.contains("--no-project"));
+    }
+
+    #[test]
+    fn optional_project_error_documents_both_global_selector_positions() {
+        let diagnostic = CliError::ProjectResolution("project not found".into()).diagnostic();
+        let hint = diagnostic.hint.expect("project resolution hint").0;
+        assert!(hint.contains("--project <DIR>"));
+        assert!(hint.contains("--no-project"));
+        assert!(hint.contains("before or after"));
     }
 }

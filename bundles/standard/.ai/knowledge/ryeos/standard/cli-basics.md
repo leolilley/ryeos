@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:46a8ee775b507363a7cb3682f36d18cf5bcf3fe2d6e8077239d2865e0a935b77:6vsOhIiJb69ZARmH/rJIokRq0nPXUDrlfF47mfDveYUcGRe5OS2LC8/4UAzEUNWaC2gVDRvJwStpBYbUa+9ZAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-18T03:52:40Z:2bcec77de805cfd00df8600ed263127040b6a842fa126feafa5f15469b72b3e6:xN5gMqUwXRT6o75LAcDblF3h7dQKCldliqNcbjSlaSgABKt/2hnX+g1XRDEPwHFa13A3sLbzREkPaqR9u+b8Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [cli, quickstart, reference, llm, execute, remote, threads, offline]
@@ -280,7 +280,7 @@ Inspect thread history with standard thread verbs:
 ryeos thread list
 ryeos thread get T-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ryeos thread tail T-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-ryeos events replay --thread-id T-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+ryeos events replay T-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 ```
 
 If a command returns a thread id and then fails later, inspect the thread
@@ -292,9 +292,9 @@ Do not pass secrets in normal parameters unless the item specifically
 requires it. Put secrets in the node vault and let config reference them.
 
 ```bash
-ryeos vault set --name API_KEY --value "$API_KEY"
+ryeos vault set API_KEY "$API_KEY"
 ryeos vault list
-ryeos vault delete --name API_KEY
+ryeos vault delete API_KEY
 ```
 
 For local operator maintenance outside the daemon, `ryeos-core-tools`
@@ -307,7 +307,7 @@ printf '%s' "$API_KEY" | ryeos-core-tools vault put --name API_KEY --value-stdin
 Remote vault commands exist too, but require remote authorization:
 
 ```bash
-ryeos remote vault-set prod --name API_KEY --value "$API_KEY"
+ryeos remote vault-set prod API_KEY "$API_KEY"
 ryeos remote vault-list prod
 ```
 

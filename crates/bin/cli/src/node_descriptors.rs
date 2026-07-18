@@ -86,6 +86,18 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn source_command(bundle: &str, file: &str) -> ryeos_runtime::CommandDef {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../bundles")
+            .join(bundle)
+            .join(".ai/node/commands")
+            .join(file);
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        serde_yaml::from_str(&source)
+            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()))
+    }
+
     #[test]
     fn exposes_snapshot_commands_without_legacy_alias_conversion() {
         let snapshot = NodeConfigSnapshot {
@@ -134,5 +146,121 @@ mod tests {
             commands[0].command.project.as_ref().unwrap().resolution,
             ryeos_runtime::CommandProjectResolution::Optional
         );
+    }
+
+    #[test]
+    fn subject_oriented_commands_bind_their_natural_positional_forms() {
+        let cases = [
+            (
+                "core",
+                "vault-set.yaml",
+                vec!["API_KEY", "secret"],
+                serde_json::json!({"name": "API_KEY", "value": "secret"}),
+            ),
+            (
+                "core",
+                "vault-delete.yaml",
+                vec!["API_KEY"],
+                serde_json::json!({"name": "API_KEY"}),
+            ),
+            (
+                "core",
+                "remote-bundle-install.yaml",
+                vec!["prod", "standard"],
+                serde_json::json!({"remote": "prod", "bundle_name": "standard"}),
+            ),
+            (
+                "core",
+                "remote-bundle-install.yaml",
+                vec!["standard"],
+                serde_json::json!({"bundle_name": "standard"}),
+            ),
+            (
+                "standard",
+                "thread-cancel.yaml",
+                vec!["T-123"],
+                serde_json::json!({"thread_id": "T-123"}),
+            ),
+            (
+                "standard",
+                "thread-get.yaml",
+                vec!["T-123"],
+                serde_json::json!({"thread_id": "T-123"}),
+            ),
+            (
+                "standard",
+                "thread-chain.yaml",
+                vec!["T-123"],
+                serde_json::json!({"thread_id": "T-123"}),
+            ),
+            (
+                "standard",
+                "thread-children.yaml",
+                vec!["T-123"],
+                serde_json::json!({"thread_id": "T-123"}),
+            ),
+            (
+                "standard",
+                "thread-receipts.yaml",
+                vec!["T-123"],
+                serde_json::json!({"thread_id": "T-123"}),
+            ),
+            (
+                "standard",
+                "events-replay.yaml",
+                vec!["T-123"],
+                serde_json::json!({"thread_id": "T-123"}),
+            ),
+            (
+                "standard",
+                "events-chain-replay.yaml",
+                vec!["T-root"],
+                serde_json::json!({"chain_root_id": "T-root"}),
+            ),
+            (
+                "standard",
+                "scheduler-pause.yaml",
+                vec!["nightly"],
+                serde_json::json!({"schedule_id": "nightly"}),
+            ),
+            (
+                "standard",
+                "scheduler-resume.yaml",
+                vec!["nightly"],
+                serde_json::json!({"schedule_id": "nightly"}),
+            ),
+            (
+                "standard",
+                "scheduler-explain.yaml",
+                vec!["nightly"],
+                serde_json::json!({"schedule_id": "nightly"}),
+            ),
+            (
+                "standard",
+                "scheduler-deregister.yaml",
+                vec!["nightly"],
+                serde_json::json!({"schedule_id": "nightly"}),
+            ),
+            (
+                "standard",
+                "scheduler-show-fires.yaml",
+                vec!["nightly"],
+                serde_json::json!({"schedule_id": "nightly"}),
+            ),
+            (
+                "standard",
+                "commands-submit.yaml",
+                vec!["T-123", "cancel"],
+                serde_json::json!({"thread_id": "T-123", "command_type": "cancel"}),
+            ),
+        ];
+
+        for (bundle, file, argv, expected) in cases {
+            let command = source_command(bundle, file);
+            let argv = argv.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let actual = ryeos_runtime::arg_binder::bind_argv_with_command(&argv, Some(&command))
+                .unwrap_or_else(|error| panic!("bind {bundle}/{file}: {error}"));
+            assert_eq!(actual, expected, "unexpected binding for {bundle}/{file}");
+        }
     }
 }

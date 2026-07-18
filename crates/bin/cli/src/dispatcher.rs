@@ -23,8 +23,12 @@ use crate::presenter::Presenter;
 )]
 pub struct Cli {
     /// Project root (overrides cwd).
-    #[arg(short, long)]
+    #[arg(short, long, conflicts_with = "no_project")]
     project: Option<PathBuf>,
+
+    /// Resolve against installed bundles without a project.
+    #[arg(long, conflicts_with = "project")]
+    no_project: bool,
 
     /// Verbose tracing output.
     #[arg(long)]
@@ -136,13 +140,19 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         }
     };
 
+    // `--project` and `--no-project` are global selectors when written before
+    // the command, while descriptor binding also accepts them after the
+    // command. Normalize the global no-project choice into the same tail form
+    // so every dispatch path observes one data-driven project policy.
+    let dispatch_rest = rest_with_global_no_project(&cli.rest, cli.no_project);
+
     // 5. Descriptor-driven offline dispatch.
     //    For commands whose service descriptor declares availability: offline,
     //    run the in-process handler. Returns None to fall through to daemon.
     let mut presenter = Presenter::for_console(console);
 
     if let Some(outcome) = crate::offline_dispatch::try_offline_dispatch(
-        &cli.rest,
+        &dispatch_rest,
         &app_root,
         body_project_path.as_deref().unwrap_or("."),
         snapshot,
@@ -165,7 +175,8 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     //    service-schema `project` field, while global `-p/--project` before
     //    the command remains supported by clap above.
 
-    let mut resolved = resolve_command_for_daemon(&cli.rest, snapshot, cli.project.as_deref())?;
+    let mut resolved =
+        resolve_command_for_daemon(&dispatch_rest, snapshot, cli.project.as_deref())?;
     let mut presenter = Presenter::for_console(console);
     let item_ref_for_contract = resolved.item_ref.clone();
     normalize_resolved_parameters(
@@ -285,6 +296,14 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
 
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
     stdout_is_tty && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
+}
+
+fn rest_with_global_no_project(rest: &[String], no_project: bool) -> Vec<String> {
+    let mut normalized = rest.to_vec();
+    if no_project && !normalized.iter().any(|token| token == "--no-project") {
+        normalized.push("--no-project".to_string());
+    }
+    normalized
 }
 
 pub fn forces_plain_output(rest: &[String]) -> bool {
@@ -875,7 +894,7 @@ fn apply_project_policy(
         .and_then(|value| value.as_bool())
         .unwrap_or(false);
     if no_project && !project.no_project_flag {
-        return Err(CliError::ProjectResolution(format!(
+        return Err(CliError::ProjectRequired(format!(
             "command '{}' does not accept --no-project",
             command.name
         )));
@@ -906,7 +925,7 @@ fn apply_project_policy(
         && project_path.is_none()
         && !no_project
     {
-        return Err(CliError::ProjectResolution(format!(
+        return Err(CliError::ProjectRequired(format!(
             "command '{}' requires a project",
             command.name
         )));
@@ -1023,7 +1042,7 @@ fn canonicalize_tokens_with_commands_policy_and_project(
         }
         CommandProjectResolution::Required => {
             if canonical_tail.iter().any(|t| t == "--no-project") {
-                return Err(CliError::ProjectResolution(
+                return Err(CliError::ProjectRequired(
                     "this command requires a project; do not pass --no-project".into(),
                 ));
             }
@@ -1032,7 +1051,7 @@ fn canonicalize_tokens_with_commands_policy_and_project(
                 default_project,
             )?;
             if canonical_tail.iter().any(|t| t == "--no-project") {
-                return Err(CliError::ProjectResolution(
+                return Err(CliError::ProjectRequired(
                     "this command requires a project; run it from a directory containing .ai/ \
                      or pass --project <path>"
                         .into(),
@@ -1305,7 +1324,28 @@ fn discover_app_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Parser as _;
     use ryeos_runtime::CommandArgumentKind;
+
+    #[test]
+    fn no_project_is_a_global_selector_before_the_command() {
+        let cli = Cli::try_parse_from(["ryeos", "--no-project", "execute", "service:node/status"])
+            .expect("global --no-project should parse before the command");
+        assert!(cli.no_project);
+        assert_eq!(cli.rest, s(&["execute", "service:node/status"]));
+        assert_eq!(
+            rest_with_global_no_project(&cli.rest, cli.no_project),
+            s(&["execute", "service:node/status", "--no-project"])
+        );
+    }
+
+    #[test]
+    fn global_no_project_does_not_duplicate_trailing_selector() {
+        assert_eq!(
+            rest_with_global_no_project(&s(&["execute", "item:x", "--no-project"]), true),
+            s(&["execute", "item:x", "--no-project"])
+        );
+    }
 
     #[test]
     fn plain_output_flags_force_plain_tty_presentation() {

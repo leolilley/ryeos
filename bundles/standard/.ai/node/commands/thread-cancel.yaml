@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-29T05:47:01Z:0b78d2c4f503f3daea7c96b1f7c7fe378d77c22701dea04c2a09da03af16c72a:dJVztNQgmjOyfQltnlNeUUh0H4ZWPBRbb4ALKk7Hx0e3ZLFsJVXczqJJRpBlY+yVQzDulbjymNCSEW4vFbD9DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:bba4e43d8e71ac9c8eae97c3cd45f5e0dcba4de9261478bc0d8446c392824fb3:2hq5HcE0Jc9HY4SYkNv5zCD+36eF8tk+ZtKDnT6Hqb6rp5Nsvt6/w6AAFQ6MBF/ONn8mwQMtmrQVIOQNsDDWDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - cancel
 description: Cancel a running thread by id
+forms:
+- slots:
+  - field: thread_id
 dispatch:
   kind: execute_ref
   execute: service:threads/cancel

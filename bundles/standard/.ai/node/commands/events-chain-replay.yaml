@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:37f3d17f9a43fd493e19305c3103238ed88cfa61ad5f93c20c08acfd7d5174a3:I3a4BZ+C96RhH0zuaiHIRBwAqcaKYQah3m+Vpx9Gj5qYL+smFWR9Rr6mA0wutuXzaotaX6cuCFjmLxAOEPAkAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:ebe114a66f1d10b22bd8d1608f9a5db7a06181a894168839b88c051154398501:vMOYX8RDOTr2iUz/5Kw04c95nS8O3oTzKJwvgP8gKul+6bwlgRfA40+WH+TspervJhMrwkfjcaVkZ8JNCW+VAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - events
 - chain-replay
 description: Replay events across an entire chain (root and descendants)
+forms:
+- slots:
+  - field: chain_root_id
 dispatch:
   kind: execute_ref
   execute: service:events/chain_replay

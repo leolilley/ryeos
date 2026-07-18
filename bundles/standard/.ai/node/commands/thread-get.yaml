@@ -1,8 +1,11 @@
-# ryeos:signed:2026-06-19T05:40:59Z:666c29cb7041f15040f9cf756a20c9738e288400f2f149c5a9d75047d92f348c:DZYBTyjycuyN+8KOzBtYNPxuQSKetm66goWDyOq9G6+t0lA4hpHphDE9eZ1OmlaycifJBli31gJvPfV7RvjiBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T03:52:40Z:c31493984defe53cba17584f4bab9fe4c147f9a956b418adf39957a30c169aa4:LAE43vWh2WuI/r0Q04IkdA5OHIYTzAU/2CjTDpZpN5XDkSMolhYDJst7+EnuUfaJtC5Ng6f9BvZ03oQOjIfuDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - thread
 - get
 description: Get a single thread's metadata by id
+forms:
+- slots:
+  - field: thread_id
 dispatch:
   kind: execute_ref
   execute: service:threads/get
