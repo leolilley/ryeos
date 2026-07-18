@@ -1070,7 +1070,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 &applicability,
                 &primary,
                 &request.ref_bindings,
-                &project_ctx.effective_path,
+                &provenance,
                 &exec_ctx,
                 &state,
             ) {

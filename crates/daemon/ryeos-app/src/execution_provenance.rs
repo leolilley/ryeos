@@ -39,13 +39,20 @@ pub struct ProvenanceSeal(());
 /// permitting explicit variant matching by consumers.
 #[derive(Clone)]
 pub enum ExecutionProvenance {
-    /// Top-level run against the live filesystem. No CAS temp dir to
-    /// pin and no snapshot lineage to fold back.
+    /// Top-level run with live-filesystem lineage. It normally executes from
+    /// the live project; a resumed pinned local snapshot executes from a
+    /// daemon materialization while retaining the live project as its overlay
+    /// source. It never owns pushed-head foldback lineage.
     RootLiveFs {
         request_engine: Arc<Engine>,
-        /// Live project root. Doubles as effective_path and
-        /// original_project_path.
+        /// Directory used for resolution and execution. Usually the live
+        /// project root; for a resumed pinned local snapshot this is the
+        /// daemon-owned materialized checkout.
         project_path: PathBuf,
+        /// Live project that supplied the execution. Kept distinct from the
+        /// materialized checkout so local operator overlays such as `.env`
+        /// remain available to resumed successors and their callback children.
+        original_project_path: PathBuf,
         /// Present only when the live-fs path is a daemon-created ephemeral
         /// workspace (for example `--no-project`). The runner transfers this
         /// lifeline into detached execution ownership.
@@ -74,11 +81,13 @@ pub enum ExecutionProvenance {
         __seal: ProvenanceSeal,
     },
 
-    /// Callback child of a `RootLiveFs` parent. The child runs in the
-    /// parent's live tree. No lifeline, no snapshot lineage.
+    /// Callback child of a `RootLiveFs` parent. It inherits the parent's exact
+    /// execution workspace and distinct live overlay source, if materialized.
+    /// It owns no snapshot lineage.
     BorrowedChildLiveFs {
         request_engine: Arc<Engine>,
         project_path: PathBuf,
+        original_project_path: PathBuf,
         workspace_lifeline: Option<Arc<TempDirGuard>>,
         /// Inherited runtime state-root override; children of a run whose
         /// state was redirected keep writing state to the same place.
@@ -103,8 +112,46 @@ impl ExecutionProvenance {
     pub fn root_live_fs(project_path: PathBuf, request_engine: Arc<Engine>) -> Self {
         Self::RootLiveFs {
             request_engine,
+            original_project_path: project_path.clone(),
             project_path,
             workspace_lifeline: None,
+            state_root: None,
+            __seal: ProvenanceSeal(()),
+        }
+    }
+
+    /// Construct live-filesystem lineage over a daemon-owned materialization
+    /// of a pinned local snapshot.
+    ///
+    /// Resolution and execution use `effective_path`, while operator overlays
+    /// intentionally continue to resolve from `original_project_path`. This is
+    /// not pushed-head provenance: it owns no remote HEAD or foldback lineage.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `workspace_lifeline` is disarmed or names a path other than
+    /// `effective_path`.
+    pub fn root_materialized_live_fs(
+        effective_path: PathBuf,
+        original_project_path: PathBuf,
+        request_engine: Arc<Engine>,
+        workspace_lifeline: Arc<TempDirGuard>,
+    ) -> Self {
+        match workspace_lifeline.path() {
+            Some(path) if path == effective_path => {}
+            Some(path) => panic!(
+                "ExecutionProvenance::root_materialized_live_fs: lifeline path {} \
+                 does not match effective_path {}",
+                path.display(),
+                effective_path.display(),
+            ),
+            None => panic!("ExecutionProvenance::root_materialized_live_fs: lifeline is disarmed"),
+        }
+        Self::RootLiveFs {
+            request_engine,
+            project_path: effective_path,
+            original_project_path,
+            workspace_lifeline: Some(workspace_lifeline),
             state_root: None,
             __seal: ProvenanceSeal(()),
         }
@@ -237,6 +284,7 @@ impl ExecutionProvenance {
             Self::RootLiveFs {
                 request_engine,
                 project_path,
+                original_project_path,
                 workspace_lifeline,
                 state_root,
                 ..
@@ -244,12 +292,14 @@ impl ExecutionProvenance {
             | Self::BorrowedChildLiveFs {
                 request_engine,
                 project_path,
+                original_project_path,
                 workspace_lifeline,
                 state_root,
                 ..
             } => Self::BorrowedChildLiveFs {
                 request_engine: request_engine.clone(),
                 project_path: project_path.clone(),
+                original_project_path: original_project_path.clone(),
                 workspace_lifeline: workspace_lifeline.clone(),
                 state_root: state_root.clone(),
                 __seal: ProvenanceSeal(()),
@@ -297,12 +347,19 @@ impl ExecutionProvenance {
         }
     }
 
-    /// The caller-side project root. For LiveFs variants this equals
-    /// `effective_path()`.
+    /// The caller-side live project root. Ordinary live-FS execution uses the
+    /// same path for execution and overlays; a resumed pinned local snapshot
+    /// executes from a materialized checkout while retaining this source path.
     pub fn original_project_path(&self) -> &Path {
         match self {
-            Self::RootLiveFs { project_path, .. }
-            | Self::BorrowedChildLiveFs { project_path, .. } => project_path.as_path(),
+            Self::RootLiveFs {
+                original_project_path,
+                ..
+            }
+            | Self::BorrowedChildLiveFs {
+                original_project_path,
+                ..
+            } => original_project_path.as_path(),
             Self::RootPushedHead {
                 original_project_path,
                 ..
@@ -450,6 +507,34 @@ mod tests {
         assert!(matches!(p, ExecutionProvenance::RootLiveFs { .. }));
         assert_eq!(p.project_source(), ProjectSourceKind::LiveFs);
         assert!(!p.is_borrowed_child());
+    }
+
+    #[test]
+    fn materialized_live_fs_preserves_overlay_source_for_borrowed_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let effective_path = dir.path().to_path_buf();
+        let lifeline = Arc::new(TempDirGuard::new(effective_path.clone()));
+        let original_path = PathBuf::from("/home/operator/project");
+        let parent = ExecutionProvenance::root_materialized_live_fs(
+            effective_path.clone(),
+            original_path.clone(),
+            engine(),
+            lifeline,
+        );
+
+        assert_eq!(parent.effective_path(), effective_path);
+        assert_eq!(parent.original_project_path(), original_path);
+        assert_eq!(parent.project_source(), ProjectSourceKind::LiveFs);
+        assert!(!parent.is_borrowed_child());
+
+        let child = parent.clone_for_borrowed_child();
+        assert!(matches!(
+            child,
+            ExecutionProvenance::BorrowedChildLiveFs { .. }
+        ));
+        assert_eq!(child.effective_path(), effective_path);
+        assert_eq!(child.original_project_path(), original_path);
+        assert!(child.is_borrowed_child());
     }
 
     #[test]
