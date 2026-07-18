@@ -291,10 +291,7 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
             // and must be signed by this publisher. Only secret key material is
             // excluded here; project/operator signing applies the broader
             // node-runtime ownership policy at its separate boundary.
-            if crate::actions::runtime_owned::is_never_signable_secret_file(
-                &file_path,
-                &ai_dir,
-            ) {
+            if crate::actions::runtime_owned::is_never_signable_secret_file(&file_path, &ai_dir) {
                 continue;
             }
 
