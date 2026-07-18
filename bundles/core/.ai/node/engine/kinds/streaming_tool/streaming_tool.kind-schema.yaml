@@ -1,8 +1,9 @@
-# ryeos:signed:2026-07-15T07:49:04Z:be42c05e86fe54a57e2158cb64d01705636d086ea20344b9e5e7b6c7be3ab78f:6IyrkBZ3is18fFwhehGrdd817CGg7yssYabFpXBn5+3h6ReRB3oI8TfHdkBTcqmVk06SJUFfJZrKSmP2PhBFAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-17T05:31:30Z:2699ea4742fcee55e9cc414e09890ec02ad3cf34e33e00035eaec68799a72d3f:Tr6qvmBaAV1rWNgofhvcf7od8p1kybQz+zKTGNN2RoXmnhqFyigD65sGpOF7Lq7cyPkP5Wf/f3+2K7P2mLNVBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/streaming_tool"
 version: "1.0.0"
 location:
   directory: tools
+  excluded_directories: [lib]
 effective_trust:
   include_references: false
 resolution: []

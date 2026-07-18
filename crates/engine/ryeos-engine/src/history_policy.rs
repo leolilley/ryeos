@@ -746,6 +746,7 @@ mod tests {
     fn kind_schema(opted_in: bool) -> KindSchema {
         KindSchema {
             directory: "services".to_string(),
+            excluded_directories: Vec::new(),
             extensions: Vec::new(),
             extraction_rules: HashMap::new(),
             resolution: Vec::new(),

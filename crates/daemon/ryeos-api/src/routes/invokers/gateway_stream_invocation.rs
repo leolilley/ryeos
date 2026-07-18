@@ -316,6 +316,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         })?;
         let mut options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
+            project_path.as_path(),
             req.ref_bindings,
         )
         .map_err(|error| {

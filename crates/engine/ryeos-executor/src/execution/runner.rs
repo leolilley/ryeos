@@ -1244,20 +1244,23 @@ pub async fn run_inline(
 ) -> Result<InlineResult> {
     let mut guard = ExecutionGuard::new(state.clone());
 
-    // Create and track thread.
-    // When the caller pre-minted a thread id (e.g. an SSE subscriber
-    // registered against a known id before launch), use it verbatim
-    // so the persistence-first contract holds: the very first
-    // `thread_started` event lands under the id the subscriber sees.
-    let created = match params.pre_minted_thread_id.as_deref() {
-        Some(id) => state
-            .threads
-            .create_root_thread_with_id(id, &params.resolved),
-        None => state.threads.create_root_thread(&params.resolved),
-    }
-    .inspect_err(|_e| {
-        guard.cleanup();
-    })?;
+    // Pre-mint and reserve the launch ID before its row is published. An SSE
+    // caller's supplied ID remains exact; ordinary roots receive the same
+    // persistence-first ownership boundary.
+    let thread_id = params
+        .pre_minted_thread_id
+        .clone()
+        .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
+    let _launch_claim = ThreadLaunchClaim::acquire_fresh(&state, &thread_id)?;
+    let created = state
+        .threads
+        .create_root_thread_with_id(&thread_id, &params.resolved)
+        .map_err(|error| {
+            anyhow::anyhow!("persist admitted inline root before runtime preparation: {error:#}")
+        })
+        .inspect_err(|_e| {
+            guard.cleanup();
+        })?;
     guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
@@ -1327,8 +1330,15 @@ pub async fn run_inline(
         }
     };
 
-    // Update project context if CAS checkout changed the path
-    if effective_path != params.provenance.effective_path() {
+    // A fresh root's PlanContext is sealed admission authority, not its mutable
+    // execution location. CAS may materialize a different workspace (including
+    // no-project scratch execution), but that path belongs to provenance only.
+    // Internal/recovery requests without a fresh admission retain the older
+    // path-substitution behavior until they rebuild their own authoritative
+    // context.
+    if params.resolved.root_admission.is_none()
+        && effective_path != params.provenance.effective_path()
+    {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
@@ -1337,7 +1347,7 @@ pub async fn run_inline(
     if let Err(error) = verify_fresh_root_admission(&params) {
         guard.fail_thread("history_policy_changed");
         guard.cleanup();
-        return Err(error);
+        return Err(error.context("revalidate admitted inline root after CAS preparation"));
     }
 
     // Spawn — use the per-request engine (pushed_head overlay or
@@ -1660,17 +1670,21 @@ pub async fn run_detached(
 ) -> Result<DetachedResult> {
     let mut guard = ExecutionGuard::new(state.clone());
 
-    // Create and track thread.
-    // See `run_inline` for why pre_minted_thread_id is honored.
-    let created = match params.pre_minted_thread_id.as_deref() {
-        Some(id) => state
-            .threads
-            .create_root_thread_with_id(id, &params.resolved),
-        None => state.threads.create_root_thread(&params.resolved),
-    }
-    .inspect_err(|_e| {
-        guard.cleanup();
-    })?;
+    // See `run_inline` for the pre-publish launch reservation contract.
+    let thread_id = params
+        .pre_minted_thread_id
+        .clone()
+        .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
+    let launch_claim = ThreadLaunchClaim::acquire_fresh(&state, &thread_id)?;
+    let created = state
+        .threads
+        .create_root_thread_with_id(&thread_id, &params.resolved)
+        .map_err(|error| {
+            anyhow::anyhow!("persist admitted detached root before runtime preparation: {error:#}")
+        })
+        .inspect_err(|_e| {
+            guard.cleanup();
+        })?;
     guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
@@ -1740,8 +1754,10 @@ pub async fn run_detached(
         }
     };
 
-    // Update project context if CAS checkout changed the path
-    if effective_path != params.provenance.effective_path() {
+    // Keep fresh admitted planning authority sealed; see `run_inline`.
+    if params.resolved.root_admission.is_none()
+        && effective_path != params.provenance.effective_path()
+    {
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
@@ -1750,7 +1766,7 @@ pub async fn run_detached(
     if let Err(error) = verify_fresh_root_admission(&params) {
         guard.fail_thread("history_policy_changed");
         guard.cleanup();
-        return Err(error);
+        return Err(error.context("revalidate admitted detached root after CAS preparation"));
     }
 
     // Capture thread details before moving guard
@@ -1874,7 +1890,7 @@ pub async fn run_detached(
         None,  // prior_status_for_mark_running
         bg_cb_token,
         bg_tat_token,
-        None,
+        Some(launch_claim),
     ));
 
     // Every execution input and cleanup guard is now owned by the scheduled

@@ -64,6 +64,8 @@ struct OpenRequest {
     /// The client item operating the seat (audit executor).
     #[serde(default)]
     client_ref: Option<String>,
+    /// Canonical project context presented by this terminal seat.
+    project_path: std::path::PathBuf,
 }
 
 pub async fn handle_open(
@@ -78,11 +80,17 @@ pub async fn handle_open(
     let client_ref = req
         .client_ref
         .unwrap_or_else(|| "client:ryeos/tui".to_string());
+    let project_path = req.project_path.canonicalize().map_err(|error| {
+        HandlerError::BadRequest(format!(
+            "canonicalize seat project path `{}`: {error}",
+            req.project_path.display()
+        ))
+    })?;
     let root_admission = ryeos_app::thread_lifecycle::admit_non_execution_root(
         &state.engine,
         &state.node_history_policy,
         &surface_ref,
-        &state.config.app_root,
+        &project_path,
         &caller,
         ctx.scopes.clone(),
         state.threads.site_id(),
@@ -271,12 +279,14 @@ pub async fn handle_touch(
 
 // ── seat/list ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ListRequest {
     /// Optional surface filter — only seats presenting this surface.
     #[serde(default)]
     surface_ref: Option<String>,
+    /// Canonical project context; seats never reattach across projects.
+    project_path: std::path::PathBuf,
 }
 
 /// List the caller's RUNNING seat sessions, freshest first. Discovery for
@@ -288,18 +298,22 @@ pub async fn handle_list(
     state: Arc<AppState>,
 ) -> Result<Value> {
     let caller = require_operator(&ctx)?;
-    let req: ListRequest = if params.is_null() {
-        ListRequest::default()
-    } else {
-        serde_json::from_value(params)
-            .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?
-    };
+    let req: ListRequest = serde_json::from_value(params)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid request: {e}")))?;
+    let project_path = req.project_path.canonicalize().map_err(|error| {
+        HandlerError::BadRequest(format!(
+            "canonicalize seat project path `{}`: {error}",
+            req.project_path.display()
+        ))
+    })?;
+    let project_path = project_path.to_string_lossy();
     let mut seats: Vec<_> = state
         .state_store
         .list_threads_filtered(200, Some(&caller))
         .map_err(|e| HandlerError::Internal(e.to_string()))?
         .into_iter()
         .filter(|thread| thread.kind == SEAT_KIND && thread.status == "running")
+        .filter(|thread| thread.project_root.as_deref() == Some(project_path.as_ref()))
         .filter(|thread| {
             req.surface_ref
                 .as_deref()

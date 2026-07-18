@@ -301,7 +301,10 @@ pub(super) fn sign_bundle_items_with_trust_in_place(
             if kind_schema.spec_for(&format!(".{ext}")).is_none() {
                 continue;
             }
-            if is_bundle_tool_runtime_lib(&file_path, &kind_dir, kind_schema) {
+            if file_path
+                .strip_prefix(&kind_dir)
+                .is_ok_and(|relative| kind_schema.excludes_relative_path(relative))
+            {
                 continue;
             }
 
@@ -598,32 +601,6 @@ fn derive_bare_id(
     }
 }
 
-/// Runtime support modules live below `.ai/tools/**/lib/` so runtime descriptors
-/// can pass `{runtime_dir}/lib` to controlled launchers. They are source
-/// dependencies of the runtime item, not standalone `tool:`/`streaming_tool:`
-/// item roots, so the bundle item signer must not path-anchor them as tools.
-fn is_bundle_tool_runtime_lib(
-    file_path: &Path,
-    kind_dir: &Path,
-    kind_schema: &ryeos_engine::kind_registry::KindSchema,
-) -> bool {
-    if kind_schema.directory != "tools" {
-        return false;
-    }
-    is_tools_python_lib_path(file_path, kind_dir)
-}
-
-fn is_tools_python_lib_path(file_path: &Path, kind_dir: &Path) -> bool {
-    if file_path.extension().and_then(|e| e.to_str()) != Some("py") {
-        return false;
-    }
-    let Ok(rel) = file_path.strip_prefix(kind_dir) else {
-        return false;
-    };
-    rel.components()
-        .any(|component| component.as_os_str() == "lib")
-}
-
 /// Recursively collect all files under a directory.
 fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -636,28 +613,5 @@ fn collect_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
         } else if path.is_file() {
             out.push(path);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn skips_python_runtime_lib_dependencies_under_tools() {
-        let kind_dir = Path::new("/bundle/.ai/tools");
-
-        assert!(is_tools_python_lib_path(
-            Path::new("/bundle/.ai/tools/ryeos/core/runtimes/python/lib/support.py"),
-            kind_dir,
-        ));
-        assert!(!is_tools_python_lib_path(
-            Path::new("/bundle/.ai/tools/ryeos/core/verbs/list.py"),
-            kind_dir,
-        ));
-        assert!(!is_tools_python_lib_path(
-            Path::new("/bundle/.ai/tools/ryeos/core/runtimes/python/function.yaml"),
-            kind_dir,
-        ));
     }
 }

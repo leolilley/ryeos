@@ -51,6 +51,13 @@ fi
 grep -q 'RYEOS VERIFY plain phase' "$tmp/plain"
 grep -q 'plain update' "$tmp/plain"
 
+NO_COLOR=1 TERM=xterm RYEOS_TTY=always RYEOS_TERM_SPINNER_INTERVAL=0.05 bash -c \
+    'source "$1"; ryeos_term_init; ryeos_term_begin VERIFY "quiet doctor"; sleep 1.2; ryeos_term_cleanup' \
+    _ "$helper" 2>"$tmp/animated"
+grep -q '⠋' "$tmp/animated"
+grep -q '⠙' "$tmp/animated"
+grep -q '·  1s' "$tmp/animated"
+
 status=0
 RYEOS_TTY=never ryeos_term_run RUN child -- bash -c 'exit 23' \
     >/dev/null 2>"$tmp/failure" || status=$?
@@ -123,7 +130,7 @@ grep -q 'RUN COMPLETE' "$tmp/nested"
 grep -q 'resuming' "$tmp/nested"
 grep -q 'INSTALL COMPLETE' "$tmp/nested"
 
-TERM=xterm RYEOS_TTY=always bash -c \
+env -u NO_COLOR TERM=xterm RYEOS_TTY=always bash -c \
     'source "$1"; ryeos_term_init; ryeos_term_run RUN first -- true; ryeos_term_run RUN second -- true' \
     _ "$helper" 2>"$tmp/sequential"
 if grep -q 'resuming' "$tmp/sequential"; then

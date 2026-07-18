@@ -822,6 +822,11 @@ pub struct EffectiveTrustPolicy {
 pub struct KindSchema {
     /// The `.ai/` subdirectory name, e.g. `"tools"`, `"directives"`
     pub directory: String,
+    /// Directory basenames below `directory` that contain auxiliary files,
+    /// not canonical items of this kind. Discovery and bundle signing both
+    /// consume this declaration so support code cannot be mistaken for an
+    /// item by one path while being deliberately skipped by the other.
+    pub excluded_directories: Vec<String>,
     /// Ordered extension specs — extension priority during resolution
     /// is the order declared in the schema
     pub extensions: Vec<ExtensionSpec>,
@@ -889,6 +894,16 @@ pub struct KindSchema {
 }
 
 impl KindSchema {
+    /// Whether a path relative to this kind's root crosses a schema-declared
+    /// auxiliary directory and therefore must not be treated as an item.
+    pub fn excludes_relative_path(&self, relative: &std::path::Path) -> bool {
+        relative.components().any(|component| {
+            self.excluded_directories
+                .iter()
+                .any(|excluded| component.as_os_str() == std::ffi::OsStr::new(excluded))
+        })
+    }
+
     /// Get just the extension strings.
     pub fn extension_strs(&self) -> Vec<&str> {
         self.extensions.iter().map(|s| s.ext.as_str()).collect()
@@ -1182,14 +1197,34 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
             reason: format!("cannot parse YAML {display}: {e}"),
         })?;
 
-    let directory = data
+    let location = data
         .get("location")
-        .and_then(|v| v.get("directory"))
+        .ok_or_else(|| EngineError::SchemaLoaderError {
+            reason: format!("{display}: missing required field `location.directory`"),
+        })?;
+    let directory = location
+        .get("directory")
         .and_then(|v| v.as_str())
         .map(|s| s.to_owned())
         .ok_or_else(|| EngineError::SchemaLoaderError {
             reason: format!("{display}: missing required field `location.directory`"),
         })?;
+    let excluded_directories =
+        parse_optional_string_seq(location, "excluded_directories", display)?;
+    for excluded in &excluded_directories {
+        if excluded.is_empty()
+            || excluded == "."
+            || excluded == ".."
+            || excluded.contains('/')
+            || excluded.contains('\\')
+        {
+            return Err(EngineError::SchemaLoaderError {
+                reason: format!(
+                    "{display}: `location.excluded_directories` entries must be plain directory basenames, got `{excluded}`"
+                ),
+            });
+        }
+    }
 
     let resolution = parse_top_level_resolution(&data, display)?;
     let effective_trust = parse_effective_trust_policy(&data, display)?;
@@ -1317,6 +1352,7 @@ fn parse_kind_schema_content(display: &str, content: &str) -> Result<KindSchema,
 
     Ok(KindSchema {
         directory,
+        excluded_directories,
         extensions,
         extraction_rules,
         resolution,
@@ -2236,6 +2272,7 @@ mod tests {
     const TOOL_SCHEMA: &str = "\
 location:
   directory: tools
+  excluded_directories: [lib]
 formats:
   - extensions: [\".py\"]
     parser: parser:ryeos/core/python/tool-header
@@ -2478,6 +2515,7 @@ metadata:
         let reg = KindRegistry::load_base(&[tmp], &ts).unwrap();
 
         assert_eq!(reg.directory("tool"), Some("tools"));
+        assert_eq!(reg.get("tool").unwrap().excluded_directories, ["lib"]);
         assert_eq!(reg.directory("directive"), Some("directives"));
         assert_eq!(
             reg.get("directive")

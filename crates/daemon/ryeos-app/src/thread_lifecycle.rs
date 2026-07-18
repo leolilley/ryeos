@@ -1437,6 +1437,14 @@ impl RootExecutionAdmission {
         &self.ref_bindings
     }
 
+    /// Exact planning authority captured during synchronous admission.
+    /// Background launchers must reuse this value rather than reconstructing a
+    /// project identity from the execution workspace (which is intentionally
+    /// distinct for no-project scratch execution).
+    pub fn plan_context(&self) -> &PlanContext {
+        &self.plan_context
+    }
+
     pub fn project_root(&self) -> Option<&Path> {
         match &self.plan_context.project_context {
             ProjectContext::LocalPath { path } => Some(path.as_path()),
@@ -1631,8 +1639,20 @@ impl RootExecutionAdmission {
     pub fn ensure_matches_request(&self, request: &ResolvedExecutionRequest) -> Result<()> {
         self.validate()?;
         if !same_plan_context(&self.plan_context, &request.plan_context) {
+            let mismatches = plan_context_mismatches(&self.plan_context, &request.plan_context);
+            let project_context_detail = if mismatches.contains(&"project_context") {
+                format!(
+                    "; project_context admitted={}, request={}",
+                    project_context_kind(&self.plan_context.project_context),
+                    project_context_kind(&request.plan_context.project_context)
+                )
+            } else {
+                String::new()
+            };
             bail!(
-                "resolved execution request planning authority does not match the sealed root admission"
+                "resolved execution request planning authority does not match the sealed root admission (mismatched fields: {}{})",
+                mismatches.join(", "),
+                project_context_detail
             );
         }
         if request.usage_subject != self.usage_subject
@@ -1676,12 +1696,39 @@ impl RootExecutionAdmission {
 }
 
 fn same_plan_context(left: &PlanContext, right: &PlanContext) -> bool {
-    left.requested_by == right.requested_by
-        && left.project_context == right.project_context
-        && left.current_site_id == right.current_site_id
-        && left.origin_site_id == right.origin_site_id
-        && left.execution_hints == right.execution_hints
-        && left.validate_only == right.validate_only
+    plan_context_mismatches(left, right).is_empty()
+}
+
+fn plan_context_mismatches(left: &PlanContext, right: &PlanContext) -> Vec<&'static str> {
+    let mut mismatches = Vec::new();
+    if left.requested_by != right.requested_by {
+        mismatches.push("requested_by");
+    }
+    if left.project_context != right.project_context {
+        mismatches.push("project_context");
+    }
+    if left.current_site_id != right.current_site_id {
+        mismatches.push("current_site_id");
+    }
+    if left.origin_site_id != right.origin_site_id {
+        mismatches.push("origin_site_id");
+    }
+    if left.execution_hints != right.execution_hints {
+        mismatches.push("execution_hints");
+    }
+    if left.validate_only != right.validate_only {
+        mismatches.push("validate_only");
+    }
+    mismatches
+}
+
+fn project_context_kind(context: &ProjectContext) -> &'static str {
+    match context {
+        ProjectContext::None => "none",
+        ProjectContext::LocalPath { .. } => "local_path",
+        ProjectContext::SnapshotHash { .. } => "snapshot_hash",
+        ProjectContext::ProjectRef { .. } => "project_ref",
+    }
 }
 
 fn plan_principal_identifier(context: &PlanContext) -> &str {

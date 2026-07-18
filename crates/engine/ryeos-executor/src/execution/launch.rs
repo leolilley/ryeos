@@ -1542,6 +1542,11 @@ pub async fn build_and_launch(
         &authority.resolution,
         &authority.prepared_launch,
     )?;
+    // Reserve the pre-minted ID before publishing the row. The reservation is
+    // moved through the whole launch and drops automatically if creation or
+    // preparation fails.
+    let _launch_claim = ThreadLaunchClaim::acquire_fresh(params.state, &thread_id)
+        .map_err(BuildAndLaunchError::Internal)?;
     let thread = match params.previous_thread_id {
         Some(source) => params
             .state

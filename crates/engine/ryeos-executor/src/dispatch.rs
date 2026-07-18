@@ -1357,6 +1357,37 @@ pub(crate) async fn dispatch_method(
         .map_err(DispatchError::Internal)?
     };
 
+    // Accepted launch is an admission acknowledgement, so every rejection
+    // that depends only on the invoked root must be settled before a durable
+    // row is published or its id is handed back. Corpus construction can be
+    // deferred, but corpus scope does not weaken the invoked root's trust
+    // boundary.
+    match method_decl.scope {
+        MethodScope::SingleRoot => crate::execution::launch::enforce_effective_trust(
+            root_admission.resolution_output().effective_trust_class,
+            &canonical_ref.to_string(),
+            kind,
+        )?,
+        MethodScope::Corpus => {
+            let root = hop_verified.as_ref().ok_or_else(|| {
+                DispatchError::InvalidRef(
+                    canonical_ref.to_string(),
+                    "requested ref did not resolve/verify; a corpus method still requires a valid invoked ref to authorize the call"
+                        .to_string(),
+                )
+            })?;
+            if matches!(
+                root.trust_class,
+                ryeos_engine::contracts::TrustClass::Unsigned
+            ) {
+                return Err(crate::execution::launch::effective_trust_unsigned_error(
+                    &canonical_ref.to_string(),
+                    kind,
+                ));
+            }
+        }
+    }
+
     // 8. Mint the thread record + callback token. Honor a pre-minted
     //    thread id when the caller supplied one: the SSE/gateway source
     //    mints the id up front so it can subscribe to the event hub
@@ -1368,6 +1399,18 @@ pub(crate) async fn dispatch_method(
         .pre_minted_thread_id
         .clone()
         .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
+    // Reserve fresh root ownership before publishing the method row. Corpus
+    // projection and executor preparation may be substantial; the daemon's
+    // recovery sweep must see a durable launch claim throughout that created
+    // window rather than classifying the row as an orphan.
+    let _launch_claim = request
+        .parent_execution_context
+        .is_none()
+        .then(|| {
+            crate::execution::launch_claim::ThreadLaunchClaim::acquire_fresh(state, &thread_id)
+        })
+        .transpose()
+        .map_err(DispatchError::Internal)?;
     let created = if let Some(parent) = request.parent_execution_context.as_ref() {
         let durable_parent = state
             .threads
@@ -1485,6 +1528,15 @@ pub(crate) async fn dispatch_method(
                 parent.parent_thread_id
             )));
         }
+    }
+
+    // The row is durable and the daemon-owned dispatch task now holds its
+    // lifecycle guard. Every remaining preparation/spawn failure passes through
+    // the guarded cleanup below and finalizes this exact row, so an accepted
+    // caller can safely receive the pre-minted id without waiting for corpus
+    // projection, executor materialization, or process scheduling.
+    if let Some(handoff) = launch_handoff {
+        handoff.publish(thread_id.clone());
     }
 
     // Generate callback token. The method child borrows the dispatch
@@ -1778,14 +1830,6 @@ pub(crate) async fn dispatch_method(
                 workspace_lifeline,
             )
         });
-
-        // The durable method row and its complete subprocess request are now
-        // owned by the scheduled blocking task. This is the method-runtime
-        // equivalent of the managed LaunchEnvelope handoff: accepted callers
-        // may expose the pre-minted id without waiting for method completion.
-        if let Some(handoff) = launch_handoff {
-            handoff.publish(thread_id.clone());
-        }
 
         let result = process_handle
         .await

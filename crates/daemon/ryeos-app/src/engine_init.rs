@@ -1119,6 +1119,12 @@ mod isolation_generation_tests {
     fn write_policy(app_root: &std::path::Path, mode: ryeos_engine::isolation::IsolationMode) {
         let mut policy = ryeos_engine::isolation::IsolationPolicy::default_disabled();
         policy.mode = mode;
+        if mode == ryeos_engine::isolation::IsolationMode::Enforce {
+            policy.backend = Some(ryeos_isolation_protocol::IsolationBackendSelection {
+                bundle: "example-isolation-backend".to_string(),
+                implementation: "example".to_string(),
+            });
+        }
         let path = app_root
             .join(ryeos_engine::AI_DIR)
             .join(ryeos_engine::isolation::ISOLATION_POLICY_RELATIVE_PATH);

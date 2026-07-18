@@ -120,7 +120,7 @@ async fn ui_seat_append_replay_and_close_round_trip() {
 }
 
 #[tokio::test]
-async fn read_only_actions_allow_session_local_seat_services() {
+async fn read_only_actions_allow_unrecorded_session_local_seat_services() {
     let (_tmp, state) = build_test_state_with_live_bundles();
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
@@ -141,6 +141,9 @@ async fn read_only_actions_allow_session_local_seat_services() {
 
     assert_eq!(result["status"], "executed");
     assert_eq!(result["result"]["thread"]["kind"], "service_run");
-    assert_eq!(result["result"]["thread"]["recorded"].as_bool(), Some(true));
+    assert_eq!(
+        result["result"]["thread"]["recorded"].as_bool(),
+        Some(false)
+    );
     assert!(result["result"]["result"]["thread_id"].is_string());
 }

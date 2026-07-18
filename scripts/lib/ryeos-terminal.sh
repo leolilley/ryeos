@@ -11,10 +11,13 @@ _RYEOS_TERM_ACTIVE=0
 _RYEOS_TERM_SUSPENDED=0
 _RYEOS_TERM_VERB=""
 _RYEOS_TERM_LABEL=""
+_RYEOS_TERM_DETAIL=""
 _RYEOS_TERM_STARTED=0
+_RYEOS_TERM_SPINNER_PID=""
 _RYEOS_TERM_DEPTH=0
 declare -a _RYEOS_TERM_STACK_VERB=()
 declare -a _RYEOS_TERM_STACK_LABEL=()
+declare -a _RYEOS_TERM_STACK_DETAIL=()
 declare -a _RYEOS_TERM_STACK_STARTED=()
 _RYEOS_TERM_TRAPS=0
 _RYEOS_TERM_PREV_EXIT=""
@@ -54,7 +57,17 @@ _ryeos_term_elapsed() {
     fi
 }
 
+_ryeos_term_stop_spinner() {
+    local pid="$_RYEOS_TERM_SPINNER_PID"
+    _RYEOS_TERM_SPINNER_PID=""
+    if [[ -n "$pid" ]]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+}
+
 _ryeos_term_clear() {
+    _ryeos_term_stop_spinner
     if [[ "$_RYEOS_TERM_ACTIVE" == 1 && "$_RYEOS_TERM_MODE" == tty ]]; then
         printf '\r\033[2K' >&2
     fi
@@ -240,7 +253,7 @@ _ryeos_term_glyph() {
         success:1) printf '◆' ;;
         warning:1) printf '▲' ;;
         failure:1) printf '✕' ;;
-        active:1) printf '⠹' ;;
+        active:1) printf '%s' "${2:-⠹}" ;;
         info:1) printf '•' ;;
         success:0) printf 'OK' ;;
         warning:0) printf 'WARN' ;;
@@ -250,12 +263,47 @@ _ryeos_term_glyph() {
     esac
 }
 
+_ryeos_term_render_active() {
+    local frame="${1:-⠹}" suffix="" message elapsed message_limit
+    [[ -n "$_RYEOS_TERM_DETAIL" ]] && suffix="  ·  $_RYEOS_TERM_DETAIL"
+    elapsed="$(_ryeos_term_elapsed)"
+    message_limit=$(( _RYEOS_TERM_WIDTH - 25 - ${#elapsed} ))
+    (( _RYEOS_TERM_WIDTH <= 30 )) && message_limit=$(( _RYEOS_TERM_WIDTH - 10 - ${#_RYEOS_TERM_VERB} ))
+    message="$(_ryeos_term_clamp "$_RYEOS_TERM_LABEL$suffix" "$message_limit")"
+    if [[ "$_RYEOS_TERM_WIDTH" -le 30 ]]; then
+        printf '\r\033[2K%s RYEOS %s %s' \
+            "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active "$frame")")" \
+            "$_RYEOS_TERM_VERB" "$message" >&2
+    else
+        printf '\r\033[2K%s  RYEOS  %-7s  %s  ·  %s' \
+            "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active "$frame")")" \
+            "$_RYEOS_TERM_VERB" "$message" "$elapsed" >&2
+    fi
+}
+
+_ryeos_term_start_spinner() {
+    [[ "$_RYEOS_TERM_MODE" == tty && "$_RYEOS_TERM_ACTIVE" == 1 && "$_RYEOS_TERM_SUSPENDED" == 0 ]] || return 0
+    _ryeos_term_stop_spinner
+    (
+        local frame_index=0
+        local interval="${RYEOS_TERM_SPINNER_INTERVAL:-0.1}"
+        local -a frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+        trap - EXIT INT TERM
+        while sleep "$interval"; do
+            _ryeos_term_render_active "${frames[$frame_index]}"
+            frame_index=$(( (frame_index + 1) % ${#frames[@]} ))
+        done
+    ) &
+    _RYEOS_TERM_SPINNER_PID=$!
+}
+
 ryeos_term_begin() {
     local verb="$1" label="$2" label_limit
     if [[ "$_RYEOS_TERM_ACTIVE" == 1 || "$_RYEOS_TERM_SUSPENDED" == 1 ]]; then
         _ryeos_term_clear
         _RYEOS_TERM_STACK_VERB[_RYEOS_TERM_DEPTH]="$_RYEOS_TERM_VERB"
         _RYEOS_TERM_STACK_LABEL[_RYEOS_TERM_DEPTH]="$_RYEOS_TERM_LABEL"
+        _RYEOS_TERM_STACK_DETAIL[_RYEOS_TERM_DEPTH]="$_RYEOS_TERM_DETAIL"
         _RYEOS_TERM_STACK_STARTED[_RYEOS_TERM_DEPTH]="$_RYEOS_TERM_STARTED"
         _RYEOS_TERM_DEPTH=$(( _RYEOS_TERM_DEPTH + 1 ))
     fi
@@ -265,40 +313,30 @@ ryeos_term_begin() {
     label="$(_ryeos_term_clamp "$label" "$label_limit")"
     _RYEOS_TERM_VERB="$verb"
     _RYEOS_TERM_LABEL="$label"
+    _RYEOS_TERM_DETAIL=""
     _RYEOS_TERM_STARTED="$(_ryeos_term_now)"
     _RYEOS_TERM_ACTIVE=1
-    if [[ "$_RYEOS_TERM_MODE" == tty && "$_RYEOS_TERM_WIDTH" -le 30 ]]; then
-        printf '\r\033[2K%s RYEOS %s %s' \
-            "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
-            "$verb" "$label" >&2
-    elif [[ "$_RYEOS_TERM_MODE" == tty ]]; then
-        printf '\r\033[2K%s  RYEOS  %-7s  %s' \
-            "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
-            "$verb" "$label" >&2
+    if [[ "$_RYEOS_TERM_MODE" == tty ]]; then
+        _ryeos_term_render_active
+        _ryeos_term_start_spinner
     else
         printf 'RYEOS %s %s\n' "$verb" "$label" >&2
     fi
 }
 
 ryeos_term_update() {
-    local label="$1" detail="${2:-}" suffix="" message elapsed message_limit
-    [[ -n "$detail" ]] && suffix="  ·  $detail"
-    elapsed="$(_ryeos_term_elapsed)"
-    message_limit=$(( _RYEOS_TERM_WIDTH - 25 - ${#elapsed} ))
-    (( _RYEOS_TERM_WIDTH <= 30 )) && message_limit=$(( _RYEOS_TERM_WIDTH - 10 - ${#_RYEOS_TERM_VERB} ))
-    message="$(_ryeos_term_clamp "$label$suffix" "$message_limit")"
+    local label="$1" detail="${2:-}" message message_limit suffix=""
+    _ryeos_term_stop_spinner
     _RYEOS_TERM_LABEL="$label"
-    if [[ "$_RYEOS_TERM_MODE" == tty && "$_RYEOS_TERM_WIDTH" -le 30 ]]; then
-        printf '\r\033[2K%s RYEOS %s %s' \
-            "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
-            "$_RYEOS_TERM_VERB" "$message" >&2
+    _RYEOS_TERM_DETAIL="$detail"
+    if [[ "$_RYEOS_TERM_MODE" == tty ]]; then
         _RYEOS_TERM_ACTIVE=1
-    elif [[ "$_RYEOS_TERM_MODE" == tty ]]; then
-        printf '\r\033[2K%s  RYEOS  %-7s  %s  ·  %s' \
-            "$(_ryeos_term_tone "$_RYEOS_TERM_TONE_ACTIVE" "$(_ryeos_term_glyph active)")" \
-            "$_RYEOS_TERM_VERB" "$message" "$elapsed" >&2
-        _RYEOS_TERM_ACTIVE=1
+        _ryeos_term_render_active
+        _ryeos_term_start_spinner
     else
+        [[ -n "$detail" ]] && suffix="  ·  $detail"
+        message_limit=$(( _RYEOS_TERM_WIDTH - 25 ))
+        message="$(_ryeos_term_clamp "$label$suffix" "$message_limit")"
         printf 'RYEOS %s %s\n' "$_RYEOS_TERM_VERB" "$message" >&2
     fi
 }
@@ -329,10 +367,12 @@ ryeos_term_end() {
         _RYEOS_TERM_DEPTH="$parent_index"
         _RYEOS_TERM_VERB="${_RYEOS_TERM_STACK_VERB[$parent_index]}"
         _RYEOS_TERM_LABEL="${_RYEOS_TERM_STACK_LABEL[$parent_index]}"
+        _RYEOS_TERM_DETAIL="${_RYEOS_TERM_STACK_DETAIL[$parent_index]}"
         _RYEOS_TERM_STARTED="${_RYEOS_TERM_STACK_STARTED[$parent_index]}"
         _RYEOS_TERM_SUSPENDED=0
         unset "_RYEOS_TERM_STACK_VERB[$parent_index]"
         unset "_RYEOS_TERM_STACK_LABEL[$parent_index]"
+        unset "_RYEOS_TERM_STACK_DETAIL[$parent_index]"
         unset "_RYEOS_TERM_STACK_STARTED[$parent_index]"
         ryeos_term_update "$_RYEOS_TERM_LABEL" "resuming"
     fi

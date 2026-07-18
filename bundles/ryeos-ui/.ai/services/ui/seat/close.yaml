@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T02:18:23Z:d1a802b4f18174a8fc0ca27f67ca5290309ac41fefdfd0f14ec17153398842e8:KHS1Cuq/DNru2cArufN0QKijHJOSkGGdXpIfVEhmSTTNCLvBy+fBu/aAddu5jy7uVT+LyCsB3GHWX9ftTKmCAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-17T08:16:32Z:ba46e64c7231cf41d0d20f0e3c67aabd59f7f5f5f87cb4aac15a19e4bc6b3cfb:mwZ+zDqYEdO+8ELyaIWyaLpDTNuDLeeUNBRWGfAsFUcJXXEHGos5wjGXYo5pz8EQ862WbyAbhuBQ9LC1uZLwAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat-close
 version: "1.0.0"
@@ -6,4 +6,5 @@ description: Finalize the session's seat thread; closed seats refuse further eve
 endpoint: ui.seat.close
 ui_read_only: true
 ui_dispatch: session_local
+record_thread: false
 availability: daemon_only

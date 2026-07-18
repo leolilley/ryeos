@@ -216,8 +216,11 @@ pub struct ResumeIntent {
 }
 
 /// Complete result of one indexed active-thread reconciliation pass.
-/// `active_thread_ids` is the exact initial `created|running` set, including
-/// rows classified into follow/window ownership rather than a resume intent.
+/// `active_thread_ids` is the initial `created|running` set owned by process
+/// recovery, including rows classified into follow/window ownership rather
+/// than a resume intent. Daemon-owned non-execution roots are deliberately
+/// absent: their subsystem owns their lifecycle and process recovery has no
+/// claim/process invariant to prove for them.
 #[derive(Debug, Clone)]
 pub struct ActiveThreadReconcileReport {
     pub active_thread_ids: BTreeSet<String>,
@@ -360,6 +363,10 @@ async fn reconcile_active_threads_inner(
         .list_threads_by_status(&["created", "running"])?;
     let active_thread_ids = running_threads
         .iter()
+        .filter(|thread| {
+            let kind_profile = state.threads.kind_profiles().get(&thread.kind);
+            !is_daemon_owned_non_execution_thread(thread, kind_profile)
+        })
         .map(|thread| thread.thread_id.clone())
         .collect::<BTreeSet<_>>();
     for thread_id in state.state_store.list_attached_thread_ids()? {

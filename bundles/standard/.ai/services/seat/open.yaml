@@ -1,8 +1,13 @@
-# ryeos:signed:2026-07-03T09:54:32Z:a95122dcbb0c2227ab669b105c4aaa9d2876ad573b85726685cf5790a560c915:h5ZCAQ0fgOGAA4DCJuUBdBSeYbc/6Csh1p06dSdHwGI7LdDVIqO8WcbMtfLOAe0BSyK3TBQdFRiUrk7G5SeNDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-17T08:29:12Z:a012c3e9b2b5114317c16779b1ebca2e4ed8426d368dacd32bbef0bc74b80592:ZtV+qlKigeh0u4Oi/gIRJD0vYhNUOFmOCEDDHf7geaXREGHZX1/kDlfrdKeXqwkPFIqCIcuc9hwmvN73jdoyAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 name: seat/open
 version: "1.0.0"
 description: Mint a seat session thread - the seat is itself a thread, braided and replayable
 endpoint: seat.open
+record_thread: false
 availability: daemon_only
 required_caps: ["ryeos.execute.service.seat/open"]
+schema:
+  surface_ref: string
+  client_ref: string?
+  project_path: string
