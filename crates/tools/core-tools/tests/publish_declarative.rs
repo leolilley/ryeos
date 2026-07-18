@@ -276,7 +276,7 @@ fn publish_signs_bundle_node_configuration_and_excludes_secrets() {
     }
     let secret = ai.join("config/keys/signing/private_key.yaml");
     std::fs::create_dir_all(secret.parent().unwrap()).unwrap();
-    std::fs::write(&secret, "version: \"1\"\nprivate_key: secret\n").unwrap();
+    std::fs::write(&secret, "version: \"1\"\n").unwrap();
 
     let report = run_publish_once(&bundle, &registry, &key);
 
