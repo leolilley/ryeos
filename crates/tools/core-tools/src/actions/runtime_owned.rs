@@ -1,14 +1,13 @@
 //! Runtime-owned path policy for the signing surfaces.
 //!
-//! Bundle publishing and operator signing both walk `.ai/` trees. Some `.ai/`
-//! subtrees are node runtime state or signing secrets, not authoring source:
-//! a node writes them while it runs, and they must never be signed as items.
-//! Signing them turns daemon state (schedules, routes, thread output, keys)
-//! into a bulk of failed items and false namespace warnings.
+//! Bundle publishing and operator signing both walk `.ai/` trees, but they have
+//! different ownership boundaries. In a project tree, node runtime state and
+//! signing secrets are not authoring source. In a bundle tree, declarative
+//! node configuration is authoring source and must be signed by the bundle
+//! publisher, while secret keys remain categorically excluded.
 //!
-//! This is the single sync-policy floor (`ryeos_state::project_sync`) reused
-//! for the signing surfaces. No path list is duplicated here — the policy
-//! lives in exactly one place.
+//! Both boundaries reuse the sync-policy classifier in
+//! `ryeos_state::project_sync`; no path list is duplicated here.
 
 use std::path::Path;
 
