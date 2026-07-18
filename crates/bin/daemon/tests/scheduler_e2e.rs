@@ -1098,22 +1098,7 @@ async fn observe_fire_count_stable(
     let interval = window / consecutive as u32;
     for _ in 0..consecutive {
         tokio::time::sleep(interval).await;
-        let (status, body) = exec(
-            h,
-            "service:scheduler/show_fires",
-            json!({
-                "schedule_id": schedule_id,
-            }),
-        )
-        .await;
-        if !status.is_success() {
-            continue;
-        }
-        let total = body
-            .get("result")
-            .and_then(|r| r["total"].as_u64())
-            .unwrap_or(u64::MAX);
-        if total != expected_count {
+        if fire_count(h, schedule_id).await != Some(expected_count) {
             return false;
         }
     }
