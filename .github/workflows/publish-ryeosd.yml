@@ -120,7 +120,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Scan release tree for secrets
+      - name: Scan release revision for secrets
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_workspace_tests }}
         env:
           GITLEAKS_ARCHIVE_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
@@ -134,7 +134,7 @@ jobs:
           echo "${GITLEAKS_ARCHIVE_SHA256}  ${ARCHIVE}" | sha256sum --check --strict
           mkdir -p "$INSTALL_DIR"
           tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" gitleaks
-          "$INSTALL_DIR/gitleaks" dir --redact --verbose "$GITHUB_WORKSPACE"
+          "$INSTALL_DIR/gitleaks" git --redact --verbose --log-opts=-1 "$GITHUB_WORKSPACE"
 
       - name: Run release qualification gate
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_workspace_tests }}
