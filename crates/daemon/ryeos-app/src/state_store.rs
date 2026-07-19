@@ -5529,26 +5529,12 @@ impl StateStore {
 
     pub fn bind_execution_workspace(
         &self,
-        workspace_id: &str,
-        thread_id: &str,
-        launch_owner: Option<&str>,
-        backend_id: Option<&str>,
-        backend_version: Option<&str>,
-        pinned_root_identities: Option<&str>,
-        mount_identity: Option<&str>,
+        binding: runtime_db::WorkspaceBinding<'_>,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        g.runtime_db.bind_workspace(
-            workspace_id,
-            thread_id,
-            launch_owner,
-            backend_id,
-            backend_version,
-            pinned_root_identities,
-            mount_identity,
-        )
+        let _admission = Self::authorize_runtime_pin_for_thread(&g, binding.thread_id)?;
+        g.runtime_db.bind_workspace(binding)
     }
 
     pub fn claim_execution_workspace_construction(
@@ -7230,6 +7216,7 @@ mod tests {
         let source = "T-source";
         let mut record = thread_record("T-successor", "T-root");
         record.upstream_thread_id = Some(source.to_string());
+        record.base_project_snapshot_hash = Some("a".repeat(64));
         let resume = continuation_resume_context(ProjectContext::LocalPath {
             path: PathBuf::from("/work/project"),
         });
@@ -7250,6 +7237,7 @@ mod tests {
 
         let mut successor = thread_record("T-successor", "T-root");
         successor.project_root = Some(PathBuf::from("/work/project"));
+        successor.base_project_snapshot_hash = Some("a".repeat(64));
         let resume = continuation_resume_context(ProjectContext::LocalPath {
             path: PathBuf::from("/work/project"),
         });

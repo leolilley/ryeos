@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ryeos_app::runtime_db::WorkspaceState;
 
 use ryeos_state::objects::{ProjectSnapshotPolicy, ProjectTree};
@@ -428,18 +428,34 @@ fn pinned_output_parent(
 
 /// Capture the authoritative post-execution tree under the exact immutable
 /// policy that produced the base generation.
-pub fn fold_back_outputs(
-    authority: &ryeos_state::PinnedStateAuthority,
-    cas_mutation_guard: &ryeos_state::CasMutationGuard,
-    isolation: &ryeos_engine::isolation::IsolationRuntime,
-    workspace_id: &str,
-    launch_owner: &str,
-    working_dir: &Path,
-    pre_tree_hash: &str,
-    policy_hash: &str,
-    base_snapshot_hash: &str,
-    workspace_record: &ryeos_app::runtime_db::WorkspaceRecord,
+pub(crate) struct FoldBackOutputsParams<'a> {
+    pub authority: &'a ryeos_state::PinnedStateAuthority,
+    pub cas_mutation_guard: &'a ryeos_state::CasMutationGuard,
+    pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
+    pub workspace_id: &'a str,
+    pub launch_owner: &'a str,
+    pub working_dir: &'a Path,
+    pub pre_tree_hash: &'a str,
+    pub policy_hash: &'a str,
+    pub base_snapshot_hash: &'a str,
+    pub workspace_record: &'a ryeos_app::runtime_db::WorkspaceRecord,
+}
+
+pub(crate) fn fold_back_outputs(
+    params: FoldBackOutputsParams<'_>,
 ) -> Result<(Option<String>, PendingCasPublication)> {
+    let FoldBackOutputsParams {
+        authority,
+        cas_mutation_guard,
+        isolation,
+        workspace_id,
+        launch_owner,
+        working_dir,
+        pre_tree_hash,
+        policy_hash,
+        base_snapshot_hash,
+        workspace_record,
+    } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
     let mut staged_roots = authority
@@ -465,15 +481,15 @@ pub fn fold_back_outputs(
         );
     }
     let lifecycle = isolation
-        .workspace_lifecycle_pinned(
-            ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
+        .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
             workspace_id,
             launch_owner,
-            base_snapshot_hash,
-            &layout.lower,
-            &layout.upper,
-            &layout.work,
-        )
+            lower_snapshot: base_snapshot_hash,
+            lower_path: &layout.lower,
+            upper_path: &layout.upper,
+            work_path: &layout.work,
+        })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(
         &lifecycle.response.pinned_root_identities,
@@ -537,7 +553,7 @@ pub fn fold_back_outputs(
 // Pinned authority, held CAS guard, signed head identity, and both snapshot
 // hashes remain explicit at the compare-and-swap fold-back boundary.
 #[allow(clippy::too_many_arguments)]
-pub fn advance_after_foldback(
+pub(crate) fn advance_after_foldback(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     state_db: &ryeos_state::StateDb,
@@ -573,7 +589,7 @@ pub fn advance_after_foldback(
 }
 
 /// Publish one immutable result generation over a verified workspace delta.
-pub fn store_foldback_snapshot(
+pub(crate) fn store_foldback_snapshot(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     new_tree_hash: &str,
@@ -671,18 +687,18 @@ pub(crate) fn seal_callback_workspace_generation(
         .write_barrier
         .try_acquire()
         .map_err(|error| anyhow::anyhow!("acquire callback generation write permit: {error}"))?;
-    let (next_tree, mut publication) = fold_back_outputs(
-        &authority,
-        &guard,
-        &state.isolation,
+    let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
+        authority: &authority,
+        cas_mutation_guard: &guard,
+        isolation: &state.isolation,
         workspace_id,
         launch_owner,
-        &workspace.root,
-        &snapshot.project_tree_hash,
-        &snapshot.effective_policy_hash,
+        working_dir: &workspace.root,
+        pre_tree_hash: &snapshot.project_tree_hash,
+        policy_hash: &snapshot.effective_policy_hash,
         base_snapshot_hash,
-        &record,
-    )?;
+        workspace_record: &record,
+    })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
             &authority,
@@ -745,18 +761,18 @@ pub fn recover_interrupted_workspace_freeze(
         .write_barrier
         .try_acquire()
         .map_err(|error| anyhow::anyhow!("acquire recovery freeze write permit: {error}"))?;
-    let (next_tree, mut publication) = fold_back_outputs(
-        &authority,
-        &guard,
-        &state.isolation,
-        &record.workspace_id,
+    let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
+        authority: &authority,
+        cas_mutation_guard: &guard,
+        isolation: &state.isolation,
+        workspace_id: &record.workspace_id,
         launch_owner,
-        Path::new(&record.root_path),
-        &base.project_tree_hash,
-        &base.effective_policy_hash,
-        &record.lower_snapshot,
-        record,
-    )?;
+        working_dir: Path::new(&record.root_path),
+        pre_tree_hash: &base.project_tree_hash,
+        policy_hash: &base.effective_policy_hash,
+        base_snapshot_hash: &record.lower_snapshot,
+        workspace_record: record,
+    })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
             &authority,

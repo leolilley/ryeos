@@ -446,7 +446,7 @@ impl ClosureCas<'_> {
         match self {
             Self::Path(root) => read_cas_file_no_follow(root, "objects", hash, ".json", max_bytes),
             Self::Pinned(cas) => {
-                let Some((mut file, size)) = cas.open_object(hash)? else {
+                let Some((file, size)) = cas.open_object(hash)? else {
                     return Ok(None);
                 };
                 if size > max_bytes {

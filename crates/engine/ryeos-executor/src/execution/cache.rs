@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read as _, Seek as _};
+#[cfg(unix)]
+use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::sync::{Mutex, OnceLock};
@@ -67,7 +69,10 @@ pub struct MaterializationCache {
 /// into a lower tree. Linking uses this descriptor, never a second path walk.
 pub struct VerifiedContentFile {
     file: fs::File,
+    parent: lillux::secure_fs::PinnedDirectory,
+    name: std::ffi::OsString,
     path: PathBuf,
+    _build_lock: fs::File,
 }
 
 impl VerifiedContentFile {
@@ -77,7 +82,7 @@ impl VerifiedContentFile {
         destination_name: &OsStr,
     ) -> Result<()> {
         destination_parent
-            .link_regular_descriptor(destination_name, &self.file)
+            .link_regular_from(destination_name, &self.parent, &self.name, &self.file)
             .with_context(|| {
                 format!(
                     "link verified cache inode {} to {}",
@@ -142,7 +147,10 @@ impl MaterializationCache {
             let verified = verify_opened_cached_file(existing, &target, file)?;
             return Ok(VerifiedContentFile {
                 file: verified,
+                parent,
+                name: target_name.to_os_string(),
                 path: target,
+                _build_lock: build_lock,
             });
         }
         let staging_name = std::ffi::OsString::from(format!(
@@ -151,18 +159,20 @@ impl MaterializationCache {
             std::process::id(),
             rand::random::<u64>()
         ));
-        let staging = parent.descriptor_child_path(&staging_name)?;
-        let size =
-            match cas.materialize_blob_to_new_file(&file.blob_hash, &staging, file.normalized_mode)
-            {
-                Ok(size) => size,
-                Err(error) => {
-                    if let Some(staged) = parent.open_regular(&staging_name, false)? {
-                        parent.remove_if_same(&staging_name, &staged)?;
-                    }
-                    return Err(error);
+        let size = match cas.materialize_blob_to_new_regular(
+            &file.blob_hash,
+            &parent,
+            &staging_name,
+            file.normalized_mode,
+        ) {
+            Ok(size) => size,
+            Err(error) => {
+                if let Some(staged) = parent.open_regular(&staging_name, false)? {
+                    parent.remove_if_same(&staging_name, &staged)?;
                 }
-            };
+                return Err(error);
+            }
+        };
         let staging_file = parent
             .open_regular(&staging_name, false)?
             .ok_or_else(|| anyhow::anyhow!("content-cache staging file disappeared"))?;
@@ -184,7 +194,10 @@ impl MaterializationCache {
                 remember_verified_descriptor(&target_file, file)?;
                 return Ok(VerifiedContentFile {
                     file: target_file,
+                    parent,
+                    name: target_name.to_os_string(),
                     path: target,
+                    _build_lock: build_lock,
                 });
             }
             Ok(false) => {}
@@ -200,7 +213,10 @@ impl MaterializationCache {
         let verified = verify_opened_cached_file(existing, &target, file)?;
         Ok(VerifiedContentFile {
             file: verified,
+            parent,
+            name: target_name.to_os_string(),
             path: target,
+            _build_lock: build_lock,
         })
     }
 
@@ -219,9 +235,8 @@ impl MaterializationCache {
         snapshot_hash: &str,
     ) -> Result<()> {
         validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
-        let staging_path = staging.descriptor_path()?;
-        let completion = inspect_tree(&staging_path, snapshot_hash)?;
-        sync_directory_tree(&staging_path)?;
+        let completion = inspect_pinned_tree(staging, snapshot_hash)?;
+        staging.sync_tree()?;
         let final_name = OsStr::new(snapshot_hash);
         match cache_root.rename_child_directory_noreplace(staging_name, final_name, staging) {
             Ok(()) => self.write_completion_marker(&completion),
@@ -313,8 +328,14 @@ impl MaterializationCache {
     pub fn mark_complete(&self, snapshot_hash: &str) -> Result<()> {
         let dir = self.cache_dir(snapshot_hash);
         validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
-        let completion = inspect_tree(&dir, snapshot_hash)?;
-        sync_directory_tree(&dir)?;
+        let directory = lillux::PinnedDirectory::open(&dir)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "materialization cache generation is missing or is not a directory: {}",
+                dir.display()
+            )
+        })?;
+        let completion = inspect_pinned_tree(&directory, snapshot_hash)?;
+        directory.sync_tree()?;
         self.write_completion_marker(&completion)
     }
 
@@ -611,10 +632,22 @@ fn cached_tree_hash(
 }
 
 fn inspect_tree(root: &Path, snapshot_hash: &str) -> Result<CompletionMarker> {
+    let directory = lillux::PinnedDirectory::open(root)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "materialization cache generation is missing or is not a directory: {}",
+            root.display()
+        )
+    })?;
+    inspect_pinned_tree(&directory, snapshot_hash)
+}
+
+fn inspect_pinned_tree(
+    root: &lillux::PinnedDirectory,
+    snapshot_hash: &str,
+) -> Result<CompletionMarker> {
     let mut directories = BTreeSet::new();
     let mut files = BTreeMap::new();
-    let found = lillux::visit_regular_files_no_follow(
-        root,
+    root.visit_regular_files(
         |relative, directory| {
             if directory {
                 let path = relative.to_str().ok_or_else(|| {
@@ -653,7 +686,7 @@ fn inspect_tree(root: &Path, snapshot_hash: &str) -> Result<CompletionMarker> {
             ) {
                 anyhow::bail!(
                     "materialization cache entry has non-canonical mode {normalized_mode:#o}: {}",
-                    root.join(relative).display()
+                    root.path().join(relative).display()
                 );
             }
             let entry = CachedTreeEntry {
@@ -667,12 +700,6 @@ fn inspect_tree(root: &Path, snapshot_hash: &str) -> Result<CompletionMarker> {
             Ok(())
         },
     )?;
-    if !found {
-        anyhow::bail!(
-            "materialization cache generation is missing or is not a directory: {}",
-            root.display()
-        );
-    }
     Ok(CompletionMarker {
         kind: COMPLETION_MARKER_KIND.to_owned(),
         schema: COMPLETION_MARKER_SCHEMA,
@@ -794,45 +821,6 @@ fn read_completion_marker_file(
         );
     }
     Ok(marker)
-}
-
-fn sync_directory_tree(root: &Path) -> Result<()> {
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let metadata = fs::symlink_metadata(entry.path())?;
-        if metadata.file_type().is_dir() {
-            sync_directory_tree(&entry.path())?;
-        } else if metadata.file_type().is_file() {
-            let file = open_regular_no_follow(&entry.path())?.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cache entry disappeared while syncing: {}",
-                    entry.path().display()
-                )
-            })?;
-            file.sync_all()?;
-        } else {
-            anyhow::bail!(
-                "materialization cache contains a symlink or special file: {}",
-                entry.path().display()
-            );
-        }
-    }
-    sync_directory(root)
-}
-
-fn sync_directory(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let directory = fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-            .open(path)?;
-        directory.sync_all()?;
-    }
-    #[cfg(not(unix))]
-    fs::File::open(path)?.sync_all()?;
-    Ok(())
 }
 
 fn open_regular_no_follow(path: &Path) -> Result<Option<fs::File>> {
@@ -958,7 +946,7 @@ fn digest_verified_identity(file: &mut fs::File) -> Result<(String, fs::Metadata
             .lock()
             .map_err(|_| anyhow::anyhow!("verified cache identity lock is poisoned"))?
             .insert(after, digest.clone());
-        return Ok((digest, after_metadata));
+        Ok((digest, after_metadata))
     }
     #[cfg(not(unix))]
     Ok((digest, file.metadata()?))
@@ -1045,7 +1033,7 @@ fn verify_cached_file_metadata(
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        use std::os::unix::fs::PermissionsExt as _;
         if metadata.permissions().mode() & 0o777 != expected.normalized_mode {
             anyhow::bail!(
                 "immutable content cache entry has wrong mode: {}",

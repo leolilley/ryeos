@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use tokio::task;
 
@@ -623,7 +623,7 @@ fn prepare_cas_context(
     launch_owner: &ryeos_app::runtime_db::LaunchOwner,
     guard: &mut ExecutionGuard,
 ) -> Result<PreparedCasContext> {
-    let prepared = match provenance {
+    let prepared_result: Result<PreparedCasContext> = match provenance {
         ExecutionProvenance::BorrowedChildLiveFs {
             project_path,
             workspace_lifeline,
@@ -762,7 +762,8 @@ fn prepare_cas_context(
                 tree_publication: None,
             })
         }
-    }?;
+    };
+    let prepared = prepared_result?;
     bind_workspace_if_unbound(state, provenance, thread_id, launch_owner)?;
     Ok(prepared)
 }
@@ -811,27 +812,29 @@ fn bind_workspace_if_unbound(
         )?;
         let created = state
             .isolation
-            .workspace_lifecycle(
-                ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+            .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+                operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
                 workspace_id,
-                &launch_owner_json,
-                &record.lower_snapshot,
-                &layout.lower,
-                &layout.upper,
-                &layout.work,
-            )
+                launch_owner: &launch_owner_json,
+                lower_snapshot: &record.lower_snapshot,
+                lower_path: &layout.lower,
+                upper_path: &layout.upper,
+                work_path: &layout.work,
+            })
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let pinned_root_identities =
             lillux::canonical_json(&serde_json::to_value(&created.pinned_root_identities)?)?;
-        state.state_store.bind_execution_workspace(
-            workspace_id,
-            thread_id,
-            Some(&launch_owner_json),
-            Some(&created.backend_id),
-            Some(&created.backend_version),
-            Some(&pinned_root_identities),
-            Some(&created.mount_identity),
-        )?;
+        state
+            .state_store
+            .bind_execution_workspace(ryeos_app::runtime_db::WorkspaceBinding {
+                workspace_id,
+                thread_id,
+                launch_owner: Some(&launch_owner_json),
+                backend_id: Some(&created.backend_id),
+                backend_version: Some(&created.backend_version),
+                pinned_root_identities: Some(&pinned_root_identities),
+                mount_identity: Some(&created.mount_identity),
+            })?;
     } else if record.state != WorkspaceState::Ready
         || record.thread_id.as_deref() != Some(thread_id)
         || record.launch_owner.as_deref() != Some(launch_owner_json.as_str())
@@ -920,15 +923,15 @@ fn close_owned_workspace(
     )?;
     let destroyed = state
         .isolation
-        .workspace_lifecycle(
-            ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
+        .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
             workspace_id,
             launch_owner,
-            &record.lower_snapshot,
-            &layout.lower,
-            &layout.upper,
-            &layout.work,
-        )
+            lower_snapshot: &record.lower_snapshot,
+            lower_path: &layout.lower,
+            upper_path: &layout.upper,
+            work_path: &layout.work,
+        })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(&destroyed.pinned_root_identities)?)?;
     if record.backend_id.as_deref() != Some(destroyed.backend_id.as_str())
@@ -1036,19 +1039,20 @@ fn post_execution_foldback(
         .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error}"))?;
 
     // Fold back changes
-    let (output_tree_hash, mut publication) = crate::execution::fold_back_outputs(
-        &authority,
-        &cas_mutation_guard,
-        &state.isolation,
-        workspace_id,
-        launch_owner,
-        working_dir,
-        pre_tree_hash,
-        pre_policy_hash,
-        base_snapshot_hash,
-        &workspace_record,
-    )
-    .context("freeze, validate, and publish authoritative project delta")?;
+    let (output_tree_hash, mut publication) =
+        crate::execution::fold_back_outputs(crate::execution::FoldBackOutputsParams {
+            authority: &authority,
+            cas_mutation_guard: &cas_mutation_guard,
+            isolation: &state.isolation,
+            workspace_id,
+            launch_owner,
+            working_dir,
+            pre_tree_hash,
+            policy_hash: pre_policy_hash,
+            base_snapshot_hash,
+            workspace_record: &workspace_record,
+        })
+        .context("freeze, validate, and publish authoritative project delta")?;
 
     let snapshot_hash = if let Some(ref new_tree_hash) = output_tree_hash {
         if !advance_head {
@@ -1194,16 +1198,30 @@ fn release_snapshot_publication(
 /// On failure, hard-kill the spawned process group and settle the durable
 /// lifecycle intent. Explicit Cancel/Kill and daemon shutdown must not be
 /// overwritten by a generic attachment failure.
-fn attach_or_kill(
-    state: &AppState,
-    thread_id: &str,
+struct AttachOrKillParams<'a> {
+    state: &'a AppState,
+    thread_id: &'a str,
     spawned_pid: u32,
     spawned_pgid: i64,
-    process_identity: &ryeos_app::process::ExecutionProcessIdentity,
-    launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
-    failed_outcome_code: &str,
-    launch_owner: &str,
+    process_identity: &'a ryeos_app::process::ExecutionProcessIdentity,
+    launch_metadata: &'a ryeos_app::launch_metadata::RuntimeLaunchMetadata,
+    failed_outcome_code: &'a str,
+    launch_owner: &'a str,
+}
+
+fn attach_or_kill(
+    params: AttachOrKillParams<'_>,
 ) -> std::result::Result<(), ExecutionCleanupFailure> {
+    let AttachOrKillParams {
+        state,
+        thread_id,
+        spawned_pid,
+        spawned_pgid,
+        process_identity,
+        launch_metadata,
+        failed_outcome_code,
+        launch_owner,
+    } = params;
     if let Err(err) = state.threads.attach_process_owned(
         &ThreadAttachProcessParams {
             thread_id: thread_id.to_string(),
@@ -1933,16 +1951,16 @@ pub async fn run_inline(
     };
 
     // Attach process — on failure, kill the child + finalize.
-    if let Err(failure) = attach_or_kill(
-        &state,
-        &running.thread_id,
-        spawned.pid,
-        spawned.pgid,
-        &spawned.process_identity,
-        &spawned.launch_metadata,
-        "attach_failed",
-        &inline_launch_owner,
-    ) {
+    if let Err(failure) = attach_or_kill(AttachOrKillParams {
+        state: &state,
+        thread_id: &running.thread_id,
+        spawned_pid: spawned.pid,
+        spawned_pgid: spawned.pgid,
+        process_identity: &spawned.process_identity,
+        launch_metadata: &spawned.launch_metadata,
+        failed_outcome_code: "attach_failed",
+        launch_owner: &inline_launch_owner,
+    }) {
         if failure.cleanup_disarms_guard() {
             guard.mark_finalized();
         }
@@ -2019,7 +2037,9 @@ pub async fn run_inline(
             WorkspaceState::Freezing,
             None,
         )
-        .inspect_err(|_| guard.fail_thread("workspace_freeze_failed"))?;
+        .inspect_err(|_| {
+            guard.fail_thread("workspace_freeze_failed");
+        })?;
         match (
             pre_tree_hash.as_deref(),
             pre_policy_hash.as_deref(),
@@ -2044,7 +2064,9 @@ pub async fn run_inline(
                     execution_dir: Some(&workspace),
                     completion: &completion,
                 })
-                .inspect_err(|_| guard.fail_thread("foldback_failed"))?;
+                .inspect_err(|_| {
+                    guard.fail_thread("foldback_failed");
+                })?;
                 let snapshot_hash = pending.snapshot_hash().to_string();
                 pending_project_result = Some(pending);
                 Some(snapshot_hash)
@@ -2162,7 +2184,7 @@ pub async fn run_detached(
         pre_tree_hash,
         pre_policy_hash,
         resume_snapshot_hash,
-        head_base_snapshot_hash,
+        head_base_snapshot_hash: _,
         tree_publication,
     } = prepare_cas_context(
         &state,
@@ -2329,7 +2351,6 @@ pub async fn run_detached(
     let bg_pre_tree_hash = pre_tree_hash;
     let bg_pre_policy_hash = pre_policy_hash;
     let bg_resume_snapshot_hash = resume_snapshot_hash;
-    let bg_head_base_snapshot_hash = head_base_snapshot_hash;
     let bg_tree_publication = tree_publication;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_resume_snapshot_pin = params.provenance.is_borrowed_child();
@@ -2359,7 +2380,6 @@ pub async fn run_detached(
         bg_pre_tree_hash,
         bg_pre_policy_hash,
         bg_resume_snapshot_hash,
-        bg_head_base_snapshot_hash,
         bg_tree_publication,
         bg_project_path,
         bg_pushed_head_ref,
@@ -2415,7 +2435,7 @@ pub async fn run_detached(
         bg_state, bg_chain_root_id, bg_resolved, bg_prepared_plan, bg_engine, bg_vault,
         bg_protocol_env_bindings, bg_acting_principal, bg_pre_tree_hash,
         bg_pre_policy_hash,
-        bg_resume_snapshot_hash, bg_head_base_snapshot_hash, bg_tree_publication,
+        bg_resume_snapshot_hash, bg_tree_publication,
         bg_project_path, bg_original_pushed_head_ref, bg_state_root,
         bg_isolation_project_authority, bg_isolation_daemon_socket_path, bg_temp_dir,
         bg_skip_resume_snapshot_pin, bg_owns_pushed_head_lineage, bg_runtime_state_dir,
@@ -2442,7 +2462,6 @@ async fn dispatch_detached_bg_task(
     bg_pre_tree_hash: Option<String>,
     bg_pre_policy_hash: Option<String>,
     bg_resume_snapshot_hash: Option<String>,
-    bg_head_base_snapshot_hash: Option<String>,
     mut bg_tree_publication: Option<super::PendingCasPublication>,
     bg_project_path: Option<PathBuf>,
     bg_original_pushed_head_ref: Option<ryeos_app::launch_metadata::OriginalPushedHeadRef>,
@@ -2507,7 +2526,7 @@ async fn dispatch_detached_bg_task(
     let protocol_env_for_spawn = bg_protocol_env_bindings;
     let snap_for_spawn = bg_resume_snapshot_hash.clone();
     let pushed_head_ref_for_spawn = bg_original_pushed_head_ref;
-    let stable_project_identity_for_spawn = bg_project_path
+    let stable_project_identity_for_spawn = match bg_project_path
         .as_deref()
         .map(|path| {
             ryeos_app::launch_metadata::StableProjectIdentity::from_path(
@@ -2515,7 +2534,33 @@ async fn dispatch_detached_bg_task(
                 &res_for_spawn.origin_site_id,
             )
         })
-        .transpose()?;
+        .transpose()
+    {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::error!(
+                phase = log_phase,
+                thread_id = %bg_thread_id,
+                %error,
+                "derive stable project identity before detached spawn"
+            );
+            if let Err(cleanup_error) = fail_thread_static_owned(
+                &bg_state,
+                &bg_thread_id,
+                "project_identity_failed",
+                &launch_owner,
+            ) {
+                tracing::error!(
+                    phase = log_phase,
+                    thread_id = %bg_thread_id,
+                    error = %cleanup_error,
+                    "project identity failure cleanup did not settle"
+                );
+            }
+            drop(bg_temp_dir.take());
+            return;
+        }
+    };
     let local_overlay_root_for_spawn = if pushed_head_ref_for_spawn.is_none() {
         bg_project_path.clone()
     } else {
@@ -2645,16 +2690,16 @@ async fn dispatch_detached_bg_task(
     };
 
     // Attach process — on failure, kill the child + finalize.
-    if let Err(failure) = attach_or_kill(
-        &bg_state,
-        &bg_thread_id,
-        spawned.pid,
-        spawned.pgid,
-        &spawned.process_identity,
-        &spawned.launch_metadata,
-        attach_outcome_code,
-        &launch_owner,
-    ) {
+    if let Err(failure) = attach_or_kill(AttachOrKillParams {
+        state: &bg_state,
+        thread_id: &bg_thread_id,
+        spawned_pid: spawned.pid,
+        spawned_pgid: spawned.pgid,
+        process_identity: &spawned.process_identity,
+        launch_metadata: &spawned.launch_metadata,
+        failed_outcome_code: attach_outcome_code,
+        launch_owner: &launch_owner,
+    }) {
         tracing::error!(
             phase = log_phase,
             thread_id = %bg_thread_id,
@@ -3438,7 +3483,7 @@ pub async fn run_existing_detached(
         pre_tree_hash,
         pre_policy_hash,
         resume_snapshot_hash,
-        head_base_snapshot_hash,
+        head_base_snapshot_hash: _,
         tree_publication,
     } = match prepare_cas_context(
         &state,
@@ -3593,7 +3638,6 @@ pub async fn run_existing_detached(
     let bg_pre_tree_hash = pre_tree_hash;
     let bg_pre_policy_hash = pre_policy_hash;
     let bg_resume_snapshot_hash = resume_snapshot_hash;
-    let bg_head_base_snapshot_hash = head_base_snapshot_hash;
     let bg_tree_publication = tree_publication;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_resume_snapshot_pin = params.provenance.is_borrowed_child();
@@ -3623,7 +3667,6 @@ pub async fn run_existing_detached(
         bg_pre_tree_hash,
         bg_pre_policy_hash,
         bg_resume_snapshot_hash,
-        bg_head_base_snapshot_hash,
         bg_tree_publication,
         bg_project_path,
         bg_pushed_head_ref,

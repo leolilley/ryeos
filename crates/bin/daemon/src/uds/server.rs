@@ -1445,6 +1445,96 @@ mod tests {
         )
     }
 
+    fn bind_test_callback_owner(
+        state: &AppState,
+        mut capability: ryeos_app::callback_token::CallbackCapability,
+    ) -> ryeos_app::callback_token::CallbackCapability {
+        let claim = match state
+            .state_store
+            .get_launch_claim(&capability.thread_id)
+            .expect("read test launch claim")
+        {
+            Some(claim) => claim,
+            None => {
+                let claim_id = format!("test-callback-{}", capability.thread_id);
+                assert!(matches!(
+                    state
+                        .state_store
+                        .claim_thread_launch(
+                            &capability.thread_id,
+                            &claim_id,
+                            "test-daemon-generation",
+                        )
+                        .expect("claim test callback launch"),
+                    ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+                ));
+                state
+                    .state_store
+                    .get_launch_claim(&capability.thread_id)
+                    .expect("read claimed test launch")
+                    .expect("claimed test launch exists")
+            }
+        };
+        assert!(state
+            .callback_tokens
+            .set_launch_owner(&capability.token, claim.claimed_by.clone()));
+        capability.launch_owner = Some(claim.claimed_by);
+        capability
+    }
+
+    fn generate_test_callback(
+        state: &AppState,
+        thread_id: &str,
+        project_path: std::path::PathBuf,
+        ttl: std::time::Duration,
+        effective_caps: Vec<String>,
+        provenance: TestProvenance,
+        root_content_digest: String,
+    ) -> ryeos_app::callback_token::CallbackCapability {
+        bind_test_callback_owner(
+            state,
+            state.callback_tokens.generate(
+                thread_id,
+                project_path,
+                ttl,
+                effective_caps,
+                provenance,
+                root_content_digest,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_test_callback_with_context(
+        state: &AppState,
+        thread_id: &str,
+        project_path: std::path::PathBuf,
+        ttl: std::time::Duration,
+        effective_caps: Vec<String>,
+        provenance: TestProvenance,
+        effective_bundle_id: Option<String>,
+        item_ref: Option<String>,
+        root_content_digest: String,
+        hard_limits: serde_json::Value,
+        depth: u32,
+    ) -> ryeos_app::callback_token::CallbackCapability {
+        bind_test_callback_owner(
+            state,
+            state.callback_tokens.generate_with_context(
+                thread_id,
+                project_path,
+                ttl,
+                effective_caps,
+                provenance,
+                effective_bundle_id,
+                item_ref,
+                root_content_digest,
+                hard_limits,
+                depth,
+            ),
+        )
+    }
+
     /// Build a minimal AppState for UDS dispatch tests.
     fn setup_app_state() -> (TempDir, AppState) {
         std::env::set_var("HOSTNAME", "testhost");
@@ -1888,7 +1978,8 @@ mod tests {
         // threads.create is internal — call service directly
         state.threads.create_thread_for_test(&params).unwrap();
 
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -2065,7 +2156,8 @@ mod tests {
                 },
             )
             .unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            state,
             "P",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
@@ -2160,7 +2252,7 @@ mod tests {
             upstream_thread_id: upstream.map(Into::into),
             requested_by: Some("user:test".to_string()),
             project_root: Some(std::path::PathBuf::from("/tmp/p")),
-            base_project_snapshot_hash: None,
+            base_project_snapshot_hash: Some("a".repeat(64)),
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
@@ -2177,6 +2269,7 @@ mod tests {
         };
         let mut parent = make_create_params("P", "P");
         parent.project_root = Some(std::path::PathBuf::from("/tmp/p"));
+        parent.base_project_snapshot_hash = Some("a".repeat(64));
         state.threads.create_thread_for_test(&parent).unwrap();
         state.threads.mark_running("P").unwrap();
         state
@@ -2202,7 +2295,7 @@ mod tests {
                             .unwrap(),
                         ),
                         local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
-                        original_snapshot_hash: None,
+                        original_snapshot_hash: Some("a".repeat(64)),
                         original_pushed_head_ref: None,
                         state_root: None,
                         current_site_id: "site:test".into(),
@@ -2515,11 +2608,27 @@ mod tests {
             .unwrap();
         state.threads.mark_running("Cnr").unwrap();
         arm_waiting_follow(&state, "wk-nr", "Cnr");
+        assert!(matches!(
+            state
+                .state_store
+                .claim_thread_launch("Cnr", "claim-nr", "test-generation")
+                .unwrap(),
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+        ));
+        let launch_owner = state
+            .state_store
+            .get_launch_claim("Cnr")
+            .unwrap()
+            .map(|claim| {
+                lillux::canonical_json(&serde_json::to_value(claim.owner).unwrap()).unwrap()
+            })
+            .unwrap();
 
         ryeos_executor::execution::launch::finalize_failed_and_kick_follow(
             &state,
             "Cnr",
             "Cnr",
+            &launch_owner,
             json!({ "error": "resume rebuild failed" }),
         )
         .unwrap();
@@ -2607,6 +2716,7 @@ mod tests {
                     artifacts: vec![],
                     final_cost: None,
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                 },
             )
             .unwrap();
@@ -3156,7 +3266,8 @@ mod tests {
         // The child SELF-finalizes via the runtime callback wire (not the executor
         // fallback), carrying a `directive_return`-style result plus its structured
         // outputs + warnings.
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "C",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
@@ -3291,7 +3402,8 @@ mod tests {
             .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
         state.threads.mark_running("P").unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "P",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
@@ -3473,7 +3585,8 @@ mod tests {
     async fn runtime_finalize_revokes_callback_but_events_remain_replayable() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-events-1");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-events-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3556,7 +3669,8 @@ mod tests {
         // hub so SSE subscribers tail in real time.
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-stream-1");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-stream-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3603,7 +3717,8 @@ mod tests {
     async fn ephemeral_append_event_bridges_without_replay_persistence() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-ephemeral-1");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-ephemeral-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3663,7 +3778,8 @@ mod tests {
     async fn lifecycle_event_cannot_be_ephemeral() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-ephemeral-bad");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-ephemeral-bad",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3703,7 +3819,8 @@ mod tests {
         // the runtime's emission sequence verbatim.
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-stream-2");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-stream-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3769,7 +3886,8 @@ mod tests {
         )
         .unwrap();
         create_running_test_thread(&state, "T-bundle-1");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-bundle-1",
             project.path().to_path_buf(),
             std::time::Duration::from_secs(300),
@@ -3866,7 +3984,8 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-bundle-deny");
         create_running_test_thread(&state, "T-bundle-deny-2");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-bundle-deny",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3903,7 +4022,8 @@ mod tests {
             rpc_err(&caller_bundle_id).message
         );
 
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-bundle-deny-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3943,7 +4063,8 @@ mod tests {
     async fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-vault-1");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4038,7 +4159,8 @@ mod tests {
         create_running_test_thread(&state, "T-vault-deny");
         create_running_test_thread(&state, "T-vault-deny-2");
         create_running_test_thread(&state, "T-vault-deny-3");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-deny",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4074,7 +4196,8 @@ mod tests {
             rpc_err(&caller_bundle_id).message
         );
 
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-deny-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4108,7 +4231,8 @@ mod tests {
             rpc_err(&missing_cap).message
         );
 
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-deny-3",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4149,7 +4273,8 @@ mod tests {
             .create_thread_for_test(&make_create_params("T-cmd-1", "T-cmd-1"))
             .unwrap();
 
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-cmd-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4231,7 +4356,8 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("T-tat-missing", "T-tat-missing"))
             .unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-tat-missing",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4273,7 +4399,8 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("T-tat-wrong", "T-tat-wrong"))
             .unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-tat-wrong",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4310,7 +4437,8 @@ mod tests {
     async fn dispatch_action_with_correct_token_uses_server_side_principal() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-tat-ok");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-tat-ok",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4398,7 +4526,8 @@ mod tests {
     async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-caps-empty");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-caps-empty",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4445,7 +4574,8 @@ mod tests {
     async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-caps-wild");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-caps-wild",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4499,7 +4629,8 @@ mod tests {
             .create_thread_for_test(&make_create_params("T-facets-1", "T-facets-1"))
             .unwrap();
 
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-facets-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4544,7 +4675,8 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("T-succ", "T-pred"))
             .unwrap();
-        state.callback_tokens.generate(
+        generate_test_callback(
+            state,
             "T-succ",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),

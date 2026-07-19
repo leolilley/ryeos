@@ -2056,19 +2056,9 @@ async fn run_claimed_thread_row_inner(
         current_depth,
     );
     lifecycle_owner.track_callback_token(cap.token.clone());
-    let launch_owner = state
-        .state_store
-        .get_launch_claim(&thread_id)
-        .map_err(BuildAndLaunchError::Internal)?
-        .ok_or_else(|| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed launch has no durable launch owner"
-            ))
-        })?
-        .claimed_by;
     if !state
         .callback_tokens
-        .set_launch_owner(&cap.token, launch_owner)
+        .set_launch_owner(&cap.token, launch_owner.to_owned())
     {
         return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
             "callback capability disappeared before launch-owner binding"

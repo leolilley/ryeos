@@ -390,6 +390,20 @@ pub struct WorkspaceRecord {
     pub updated_at_ms: i64,
 }
 
+/// Complete durable evidence published when a constructed workspace becomes
+/// ready. Grouping these same-shaped optional values prevents call-site
+/// argument reordering while preserving the journal's explicit nullable
+/// representation for pre-bind recovery.
+pub struct WorkspaceBinding<'a> {
+    pub workspace_id: &'a str,
+    pub thread_id: &'a str,
+    pub launch_owner: Option<&'a str>,
+    pub backend_id: Option<&'a str>,
+    pub backend_version: Option<&'a str>,
+    pub pinned_root_identities: Option<&'a str>,
+    pub mount_identity: Option<&'a str>,
+}
+
 /// Canonical durable execution-workspace lifecycle. SQLite stores the stable
 /// snake-case spelling, while every Rust reader and transition uses this type
 /// so an unknown state fails at the persistence boundary.
@@ -1552,11 +1566,12 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
             "SELECT thread_id,launch_metadata FROM thread_runtime
              WHERE launch_metadata IS NOT NULL",
         )?;
-        statement
+        let rows = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
     };
     for (thread_id, raw) in rows {
         validate_current_launch_metadata(&raw)
@@ -2071,7 +2086,7 @@ impl RuntimeDb {
             "SELECT operation_id, parent_thread_id, request_hash, child_thread_id
                FROM detached_spawn_intent ORDER BY created_at_ms, operation_id",
         )?;
-        statement
+        let intents = statement
             .query_map([], |row| {
                 Ok(DetachedSpawnIntent {
                     operation_id: row.get(0)?,
@@ -3604,16 +3619,16 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn bind_workspace(
-        &self,
-        workspace_id: &str,
-        thread_id: &str,
-        launch_owner: Option<&str>,
-        backend_id: Option<&str>,
-        backend_version: Option<&str>,
-        pinned_root_identities: Option<&str>,
-        mount_identity: Option<&str>,
-    ) -> Result<()> {
+    pub fn bind_workspace(&self, binding: WorkspaceBinding<'_>) -> Result<()> {
+        let WorkspaceBinding {
+            workspace_id,
+            thread_id,
+            launch_owner,
+            backend_id,
+            backend_version,
+            pinned_root_identities,
+            mount_identity,
+        } = binding;
         let changed = self.conn.execute(
             "UPDATE execution_workspace
                 SET backend_id=?4,
@@ -3672,12 +3687,18 @@ impl RuntimeDb {
         );
         let now = lillux::time::timestamp_millis();
         let mut values: Vec<rusqlite::types::Value> = vec![
-            workspace_id.into(),
-            next.as_str().into(),
-            process_identity.map_or(rusqlite::types::Value::Null, Into::into),
+            workspace_id.to_owned().into(),
+            next.as_str().to_owned().into(),
+            process_identity.map_or(rusqlite::types::Value::Null, |value| {
+                value.to_owned().into()
+            }),
             now.into(),
         ];
-        values.extend(expected.iter().map(|value| value.as_str().into()));
+        values.extend(
+            expected
+                .iter()
+                .map(|value| rusqlite::types::Value::from(value.as_str().to_owned())),
+        );
         let changed = self
             .conn
             .execute(&sql, rusqlite::params_from_iter(values))?;
@@ -3710,14 +3731,20 @@ impl RuntimeDb {
                 AND state IN ({placeholders})"
         );
         let mut values: Vec<rusqlite::types::Value> = vec![
-            workspace_id.into(),
-            next.as_str().into(),
-            process_identity.map_or(rusqlite::types::Value::Null, Into::into),
+            workspace_id.to_owned().into(),
+            next.as_str().to_owned().into(),
+            process_identity.map_or(rusqlite::types::Value::Null, |value| {
+                value.to_owned().into()
+            }),
             lillux::time::timestamp_millis().into(),
-            thread_id.into(),
-            launch_owner.into(),
+            thread_id.to_owned().into(),
+            launch_owner.to_owned().into(),
         ];
-        values.extend(expected.iter().map(|value| value.as_str().into()));
+        values.extend(
+            expected
+                .iter()
+                .map(|value| rusqlite::types::Value::from(value.as_str().to_owned())),
+        );
         let changed = self
             .conn
             .execute(&sql, rusqlite::params_from_iter(values))?;
@@ -7040,7 +7067,13 @@ mod tests {
         // The live claim still belongs to the first caller.
         let claim = db.get_launch_claim("t1").unwrap().expect("claim present");
         assert_eq!(claim.claim_id, "c1");
-        assert_eq!(claim.claimed_by, "daemon-a");
+        assert_eq!(claim.owner.thread_id, "t1");
+        assert_eq!(claim.owner.unpredictable_nonce, "c1");
+        assert_eq!(claim.owner.daemon_generation_id, "daemon-a");
+        assert_eq!(
+            claim.claimed_by,
+            lillux::canonical_json(&serde_json::to_value(&claim.owner).unwrap()).unwrap()
+        );
     }
 
     #[test]
@@ -7057,7 +7090,13 @@ mod tests {
         );
         let claim = db.get_launch_claim("t1").unwrap().expect("claim present");
         assert_eq!(claim.claim_id, "c1");
-        assert_eq!(claim.claimed_by, "daemon-a");
+        assert_eq!(claim.owner.thread_id, "t1");
+        assert_eq!(claim.owner.unpredictable_nonce, "c1");
+        assert_eq!(claim.owner.daemon_generation_id, "daemon-a");
+        assert_eq!(
+            claim.claimed_by,
+            lillux::canonical_json(&serde_json::to_value(&claim.owner).unwrap()).unwrap()
+        );
         assert_eq!(claim.lease_expires_at_ms, i64::MAX);
     }
 

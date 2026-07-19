@@ -145,7 +145,7 @@ impl ExecutionProvenance {
         captured_snapshot_hash: String,
     ) -> Self {
         match workspace_lifeline.path() {
-            Some(path) if workspace_root_owns_effective_path(path, &effective_path) => {}
+            Some(path) if workspace_root_owns_effective_path(&path, &effective_path) => {}
             Some(path) => panic!(
                 "ExecutionProvenance::root_materialized_live_fs: lifeline path {} \
                  does not match effective_path {}",
@@ -177,7 +177,7 @@ impl ExecutionProvenance {
     ) -> Self {
         if let Some(lifeline) = &workspace_lifeline {
             match lifeline.path() {
-                Some(path) if workspace_root_owns_effective_path(path, self.effective_path()) => {}
+                Some(path) if workspace_root_owns_effective_path(&path, self.effective_path()) => {}
                 Some(path) => panic!(
                     "ExecutionProvenance::with_workspace_lifeline: lifeline path {} \
                      does not match effective_path {}",
@@ -261,7 +261,7 @@ impl ExecutionProvenance {
         snapshot_hash: String,
     ) -> Self {
         match workspace_lifeline.path() {
-            Some(p) if workspace_root_owns_effective_path(p, &effective_path) => {}
+            Some(p) if workspace_root_owns_effective_path(&p, &effective_path) => {}
             Some(p) => panic!(
                 "ExecutionProvenance::root_pushed_head: lifeline path {} \
                  does not match effective_path {} — caller mis-paired \

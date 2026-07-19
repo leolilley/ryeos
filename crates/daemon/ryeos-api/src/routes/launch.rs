@@ -134,10 +134,6 @@ impl DispatchLaunchOptions {
         self.captured_generation = captured;
         self
     }
-
-    pub(crate) fn project_path(&self) -> &std::path::Path {
-        &self.project_path
-    }
 }
 
 /// Run the same schema-driven dispatch walk used by the background task and

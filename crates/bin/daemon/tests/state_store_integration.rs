@@ -659,6 +659,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -713,6 +714,7 @@ mod integration_tests {
             error_json: Some(err.clone()),
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         store
@@ -843,6 +845,7 @@ mod integration_tests {
                 metadata: None,
             }],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -958,6 +961,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1036,6 +1040,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1109,6 +1114,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1276,6 +1282,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1917,6 +1924,7 @@ mod integration_tests {
                 metadata: Some(serde_json::json!({"lines": 10})),
             }],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -2060,6 +2068,7 @@ mod integration_tests {
                 metadata: None,
             }],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: Some(ryeos_engine::contracts::FinalCost {
                 turns: 3,
                 input_tokens: 1500,
@@ -2174,6 +2183,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         store
@@ -2241,6 +2251,7 @@ mod integration_tests {
             error_json: Some(serde_json::json!({"reason": "test_cancel"})),
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -2292,6 +2303,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         store
@@ -2306,6 +2318,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         let err = store
@@ -2340,6 +2353,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 

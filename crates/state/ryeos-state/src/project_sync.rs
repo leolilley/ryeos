@@ -46,7 +46,10 @@ pub fn absent_project_snapshot_source_hashes(
         "schema": 1,
         "patterns": node_patterns,
     }))?;
-    source_hashes.insert("node_additions".to_string(), hex_sha256(&node_identity));
+    source_hashes.insert(
+        "node_additions".to_string(),
+        hex_sha256(node_identity.as_bytes()),
+    );
     Ok(source_hashes)
 }
 
@@ -461,6 +464,12 @@ pub fn validate_project_manifest_path(
             "manifest path '{}' is under node-owned runtime prefix '{}' and cannot be deployed",
             rel_path,
             prefix
+        );
+    }
+    if is_project_snapshot_floor_excluded(rel_path) {
+        anyhow::bail!(
+            "manifest path '{}' is a RyeOS transaction artifact and cannot be deployed",
+            rel_path
         );
     }
 

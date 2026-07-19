@@ -88,6 +88,21 @@ pub struct PinnedWorkspaceLifecycleResult {
     pub upper: lillux::PinnedDirectory,
 }
 
+/// One descriptor-relative workspace adapter invocation. Keeping the durable
+/// identity and its three host-side roots in one value prevents lifecycle call
+/// sites from accidentally reordering otherwise homogeneous string/path
+/// arguments.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkspaceLifecycleInvocation<'a> {
+    pub operation: WorkspaceLifecycleOperation,
+    pub workspace_id: &'a str,
+    pub launch_owner: &'a str,
+    pub lower_snapshot: &'a str,
+    pub lower_path: &'a Path,
+    pub upper_path: &'a Path,
+    pub work_path: &'a Path,
+}
+
 impl std::fmt::Debug for IsolationRuntime {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -771,24 +786,10 @@ impl IsolationRuntime {
     /// backend-native overlay representation is interpreted.
     pub fn workspace_lifecycle(
         &self,
-        operation: WorkspaceLifecycleOperation,
-        workspace_id: &str,
-        launch_owner: &str,
-        lower_snapshot: &str,
-        lower_path: &Path,
-        upper_path: &Path,
-        work_path: &Path,
+        invocation: WorkspaceLifecycleInvocation<'_>,
     ) -> Result<AdapterWorkspaceResponse, EngineError> {
-        self.workspace_lifecycle_pinned(
-            operation,
-            workspace_id,
-            launch_owner,
-            lower_snapshot,
-            lower_path,
-            upper_path,
-            work_path,
-        )
-        .map(|result| result.response)
+        self.workspace_lifecycle_pinned(invocation)
+            .map(|result| result.response)
     }
 
     /// Invoke the workspace adapter and retain the exact upper root it saw.
@@ -796,14 +797,17 @@ impl IsolationRuntime {
     /// mutation evidence.
     pub fn workspace_lifecycle_pinned(
         &self,
-        operation: WorkspaceLifecycleOperation,
-        workspace_id: &str,
-        launch_owner: &str,
-        lower_snapshot: &str,
-        lower_path: &Path,
-        upper_path: &Path,
-        work_path: &Path,
+        invocation: WorkspaceLifecycleInvocation<'_>,
     ) -> Result<PinnedWorkspaceLifecycleResult, EngineError> {
+        let WorkspaceLifecycleInvocation {
+            operation,
+            workspace_id,
+            launch_owner,
+            lower_snapshot,
+            lower_path,
+            upper_path,
+            work_path,
+        } = invocation;
         #[cfg(not(unix))]
         {
             let _ = (
@@ -1754,139 +1758,141 @@ impl IsolationRuntime {
         let mut authorities = Vec::new();
         let mut mounts = Vec::new();
         let mut authority_handles = Vec::new();
-        let mut add_mount = |prefix: &str,
-                             index: usize,
-                             handle: Arc<std::fs::File>,
-                             destination: &Path,
-                             access: IsolationMountAccess,
-                             purpose: IsolationAuthorityPurpose,
-                             layer: u32|
-         -> Result<IsolationAuthorityId, EngineError> {
-            let id = IsolationAuthorityId::new(format!("{prefix}-{index}"))
-                .map_err(|error| refused(error.to_string()))?;
-            let inherited_fd = mount_fd_arg(&handle)
-                .parse::<u32>()
-                .map_err(|error| refused(format!("invalid authority descriptor: {error}")))?;
-            authorities.push(IsolationAuthority {
-                id: id.clone(),
-                inherited_fd,
-                purpose,
-            });
-            mounts.push(IsolationMount {
-                source: id.clone(),
-                destination: IsolationPath::new(destination.to_string_lossy().into_owned())
-                    .map_err(|error| refused(error.to_string()))?,
-                access,
-                layer,
-            });
-            authority_handles.push(handle);
-            Ok(id)
-        };
-
-        let mut system_readable_mounts = Vec::new();
-        for path in ["/usr", "/bin", "/lib", "/lib64"] {
-            let destination = PathBuf::from(path);
-            if destination.exists() {
-                let source = canonicalize_launch_path("system runtime mount", &destination)?;
-                let source_handle = pin_mount_source("system runtime mount", &source)?;
-                system_readable_mounts.push(ReadableMount {
-                    source,
-                    destination,
-                    source_handle,
+        let target_authority = {
+            let mut add_mount = |prefix: &str,
+                                 index: usize,
+                                 handle: Arc<std::fs::File>,
+                                 destination: &Path,
+                                 access: IsolationMountAccess,
+                                 purpose: IsolationAuthorityPurpose,
+                                 layer: u32|
+             -> Result<IsolationAuthorityId, EngineError> {
+                let id = IsolationAuthorityId::new(format!("{prefix}-{index}"))
+                    .map_err(|error| refused(error.to_string()))?;
+                let inherited_fd = mount_fd_arg(&handle)
+                    .parse::<u32>()
+                    .map_err(|error| refused(format!("invalid authority descriptor: {error}")))?;
+                authorities.push(IsolationAuthority {
+                    id: id.clone(),
+                    inherited_fd,
+                    purpose,
                 });
-            }
-        }
-        for path in [
-            "/etc/hosts",
-            "/etc/nsswitch.conf",
-            "/etc/resolv.conf",
-            "/etc/ssl",
-        ] {
-            let destination = PathBuf::from(path);
-            if destination.exists() {
-                let source = canonicalize_launch_path("system configuration mount", &destination)?;
-                let source_handle = pin_mount_source("system configuration mount", &source)?;
-                system_readable_mounts.push(ReadableMount {
-                    source,
-                    destination,
-                    source_handle,
+                mounts.push(IsolationMount {
+                    source: id.clone(),
+                    destination: IsolationPath::new(destination.to_string_lossy().into_owned())
+                        .map_err(|error| refused(error.to_string()))?,
+                    access,
+                    layer,
                 });
-            }
-        }
+                authority_handles.push(handle);
+                Ok(id)
+            };
 
-        for (index, mount) in writable_mounts.iter().enumerate() {
-            add_mount(
-                "writable",
-                index,
-                mount.source_handle.clone(),
-                &mount.destination,
-                IsolationMountAccess::Writable,
-                IsolationAuthorityPurpose::WritableMount,
-                10,
-            )?;
-        }
-        for (index, mount) in readable_mounts
-            .iter()
-            .filter(|mount| !verified_code_mounts.contains(mount))
-            .enumerate()
-        {
-            add_mount(
-                "readable",
-                index,
-                mount.source_handle.clone(),
-                &mount.destination,
-                IsolationMountAccess::ReadOnly,
-                IsolationAuthorityPurpose::ReadOnlyMount,
-                20,
-            )?;
-        }
-        for (index, mount) in system_readable_mounts.iter().enumerate() {
-            add_mount(
-                "system",
-                index,
-                mount.source_handle.clone(),
-                &mount.destination,
-                IsolationMountAccess::ReadOnly,
-                IsolationAuthorityPurpose::ReadOnlyMount,
-                20,
-            )?;
-        }
-        let mut target_authority = None;
-        for (index, mount) in verified_code_mounts.iter().enumerate() {
-            let is_target = mount.destination == command_path;
-            let id = add_mount(
-                "verified",
-                index,
-                mount.source_handle.clone(),
-                &mount.destination,
-                IsolationMountAccess::ReadOnly,
-                if is_target {
-                    IsolationAuthorityPurpose::Executable
-                } else {
-                    IsolationAuthorityPurpose::ReadOnlyMount
-                },
-                30,
-            )?;
-            if is_target {
-                target_authority = Some(id);
+            let mut system_readable_mounts = Vec::new();
+            for path in ["/usr", "/bin", "/lib", "/lib64"] {
+                let destination = PathBuf::from(path);
+                if destination.exists() {
+                    let source = canonicalize_launch_path("system runtime mount", &destination)?;
+                    let source_handle = pin_mount_source("system runtime mount", &source)?;
+                    system_readable_mounts.push(ReadableMount {
+                        source,
+                        destination,
+                        source_handle,
+                    });
+                }
             }
-        }
-        let target_authority = match target_authority {
-            Some(id) => id,
-            None => {
-                let command_handle = pin_mount_source("target executable", &canonical_command)?;
+            for path in [
+                "/etc/hosts",
+                "/etc/nsswitch.conf",
+                "/etc/resolv.conf",
+                "/etc/ssl",
+            ] {
+                let destination = PathBuf::from(path);
+                if destination.exists() {
+                    let source =
+                        canonicalize_launch_path("system configuration mount", &destination)?;
+                    let source_handle = pin_mount_source("system configuration mount", &source)?;
+                    system_readable_mounts.push(ReadableMount {
+                        source,
+                        destination,
+                        source_handle,
+                    });
+                }
+            }
+
+            for (index, mount) in writable_mounts.iter().enumerate() {
                 add_mount(
-                    "target",
-                    0,
-                    command_handle,
-                    &command_path,
+                    "writable",
+                    index,
+                    mount.source_handle.clone(),
+                    &mount.destination,
+                    IsolationMountAccess::Writable,
+                    IsolationAuthorityPurpose::WritableMount,
+                    10,
+                )?;
+            }
+            for (index, mount) in readable_mounts
+                .iter()
+                .filter(|mount| !verified_code_mounts.contains(mount))
+                .enumerate()
+            {
+                add_mount(
+                    "readable",
+                    index,
+                    mount.source_handle.clone(),
+                    &mount.destination,
                     IsolationMountAccess::ReadOnly,
-                    IsolationAuthorityPurpose::Executable,
-                    40,
-                )?
+                    IsolationAuthorityPurpose::ReadOnlyMount,
+                    20,
+                )?;
+            }
+            for (index, mount) in system_readable_mounts.iter().enumerate() {
+                add_mount(
+                    "system",
+                    index,
+                    mount.source_handle.clone(),
+                    &mount.destination,
+                    IsolationMountAccess::ReadOnly,
+                    IsolationAuthorityPurpose::ReadOnlyMount,
+                    20,
+                )?;
+            }
+            let mut target_authority = None;
+            for (index, mount) in verified_code_mounts.iter().enumerate() {
+                let is_target = mount.destination == command_path;
+                let id = add_mount(
+                    "verified",
+                    index,
+                    mount.source_handle.clone(),
+                    &mount.destination,
+                    IsolationMountAccess::ReadOnly,
+                    if is_target {
+                        IsolationAuthorityPurpose::Executable
+                    } else {
+                        IsolationAuthorityPurpose::ReadOnlyMount
+                    },
+                    30,
+                )?;
+                if is_target {
+                    target_authority = Some(id);
+                }
+            }
+            match target_authority {
+                Some(id) => id,
+                None => {
+                    let command_handle = pin_mount_source("target executable", &canonical_command)?;
+                    add_mount(
+                        "target",
+                        0,
+                        command_handle,
+                        &command_path,
+                        IsolationMountAccess::ReadOnly,
+                        IsolationAuthorityPurpose::Executable,
+                        40,
+                    )?
+                }
             }
         };
-        drop(add_mount);
 
         let project_workspace_plan = if let Some(workspace) = project_workspace {
             let lower = IsolationAuthorityId::new("workspace-lower")

@@ -123,6 +123,7 @@ fn state_store_write_path_emits_state_spans() {
                     artifacts: vec![],
                     final_cost: None,
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                 },
             )
             .expect("finalize_thread");

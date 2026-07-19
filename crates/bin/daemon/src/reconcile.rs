@@ -319,7 +319,7 @@ fn dead_identity_safe_to_clear(
     match execution_identity_is_current_boot(identity) {
         Ok(false) => true,
         Ok(true)
-            if ryeos_app::process::process_group_presence(identity.pgid)
+            if ryeos_app::process::process_group_presence(identity.pgid())
                 == IdentityLiveness::DeadOrStale =>
         {
             true
@@ -1301,15 +1301,15 @@ fn cleanup_dead_execution_workspace(
             Some(
                 state
                     .isolation
-                    .workspace_lifecycle(
-                        ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
-                        &workspace.workspace_id,
+                    .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+                        operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+                        workspace_id: &workspace.workspace_id,
                         launch_owner,
-                        &workspace.lower_snapshot,
-                        &layout.lower,
-                        &layout.upper,
-                        &layout.work,
-                    )
+                        lower_snapshot: &workspace.lower_snapshot,
+                        lower_path: &layout.lower,
+                        upper_path: &layout.upper,
+                        work_path: &layout.work,
+                    })
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?,
             )
         } else {
@@ -1317,15 +1317,15 @@ fn cleanup_dead_execution_workspace(
         };
     let response = state
         .isolation
-        .workspace_lifecycle(
-            ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
-            &workspace.workspace_id,
+        .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
+            workspace_id: &workspace.workspace_id,
             launch_owner,
-            &workspace.lower_snapshot,
-            &layout.lower,
-            &layout.upper,
-            &layout.work,
-        )
+            lower_snapshot: &workspace.lower_snapshot,
+            lower_path: &layout.lower,
+            upper_path: &layout.upper,
+            work_path: &layout.work,
+        })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(&response.pinned_root_identities)?)?;
     let expected_pinned = match recovered_create.as_ref() {

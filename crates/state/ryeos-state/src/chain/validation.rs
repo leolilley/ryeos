@@ -1417,17 +1417,35 @@ mod tests {
     }
 
     #[test]
-    fn created_non_continuation_cannot_carry_project_snapshot_hashes() {
+    fn created_roots_and_continuations_may_carry_only_base_project_snapshots() {
         let mut fresh = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
         fresh.base_project_snapshot_hash = Some("11".repeat(32));
-        let error =
-            normalize_and_validate_new_thread(&mut fresh, "T-root", "2026-01-01T00:00:00Z", None)
-                .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("only for a continuation successor"));
+        normalize_and_validate_new_thread(&mut fresh, "T-root", "2026-01-01T00:00:00Z", None)
+            .unwrap();
 
         let mut continuation = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
+        continuation.upstream_thread_id = Some("T-root".into());
+        continuation.base_project_snapshot_hash = Some("11".repeat(32));
+        normalize_and_validate_new_thread(
+            &mut continuation,
+            "T-root",
+            "2026-01-01T00:00:00Z",
+            Some("T-root"),
+        )
+        .unwrap();
+
+        continuation.upstream_thread_id = Some("T-other".into());
+        let error = normalize_and_validate_new_thread(
+            &mut continuation,
+            "T-root",
+            "2026-01-01T00:00:00Z",
+            Some("T-root"),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not match continuation source"));
+
         continuation.upstream_thread_id = Some("T-root".into());
         continuation.result_project_snapshot_hash = Some("22".repeat(32));
         let error = normalize_and_validate_new_thread(

@@ -657,7 +657,7 @@ pub fn wait_for_exact_group_quiesced(
                     continue;
                 };
                 match read_process_stat(pid) {
-                    Ok(stat) if stat.pgrp == identity.pgid => {
+                    Ok(stat) if stat.pgrp == identity.pgid() => {
                         observed_members += 1;
                         if matches!(stat.state, 'T' | 't') {
                             members.push(ExecutionProcessIdentity {
@@ -689,7 +689,7 @@ pub fn wait_for_exact_group_quiesced(
             if std::time::Instant::now() >= deadline {
                 anyhow::bail!(
                     "execution group {} did not reach a provable stopped state",
-                    identity.pgid
+                    identity.pgid()
                 );
             }
             std::thread::sleep(Duration::from_millis(5));

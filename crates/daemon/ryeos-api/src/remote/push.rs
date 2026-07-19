@@ -340,25 +340,6 @@ pub(crate) struct SnapshotCasClosure {
     pub blob_hashes: Vec<String>,
 }
 
-pub(crate) fn collect_snapshot_hashes(
-    cas: &CasStore,
-    snapshot_hash: &str,
-) -> Result<SnapshotCasClosure> {
-    let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
-    let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
-        cas,
-        [snapshot_hash.to_string()],
-        limits,
-    )?;
-    if !report.is_complete() {
-        anyhow::bail!("project snapshot CAS closure is incomplete: {report:?}");
-    }
-    Ok(SnapshotCasClosure {
-        object_hashes: report.object_hashes.into_iter().collect(),
-        blob_hashes: report.blob_hashes.into_iter().collect(),
-    })
-}
-
 pub(crate) fn collect_snapshot_upload_hashes(
     cas: &CasStore,
     snapshot_hash: &str,

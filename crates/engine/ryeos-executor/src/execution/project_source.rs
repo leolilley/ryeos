@@ -48,20 +48,6 @@ impl From<ryeos_app::engine_cache::BuildWaitError> for ProjectSourceError {
     }
 }
 
-fn load_live_bundle_roots(state: &AppState) -> Result<Vec<PathBuf>, ProjectSourceError> {
-    let daemon_engine = &state.engine;
-    let loader = ryeos_app::node_config::loader::BootstrapLoader {
-        app_root: state.config.app_root.as_path(),
-        trust_store: &daemon_engine.node_trust_store,
-    };
-    let records = loader.load_bundle_section().map_err(|e| {
-        ProjectSourceError::Other(format!(
-            "failed to load live bundle registry for per-request engine rebuild: {e}"
-        ))
-    })?;
-    Ok(records.into_iter().map(|r| r.path).collect())
-}
-
 /// How the project root is determined for execution.
 ///
 /// Tagged enum — callers specify `{ "kind": "live_fs" }` or
@@ -187,16 +173,16 @@ pub fn resolve_project_context(
             let authority = crate::execution::pinned_state_authority(state)?;
             let cas_mutation_guard = authority.acquire_shared_guard()?;
             authority.ensure_guard(&cas_mutation_guard)?;
-            resolve_pinned_snapshot_context_admitted(
+            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
                 state,
-                &authority,
-                &cas_mutation_guard,
-                &snapshot_hash,
+                authority: &authority,
+                cas_mutation_guard: &cas_mutation_guard,
+                snapshot_hash: &snapshot_hash,
                 original_path,
                 checkout_id,
-                ProjectSource::LiveFs,
-                Some(captured),
-            )?
+                source: ProjectSource::LiveFs,
+                captured_generation: Some(captured),
+            })?
         }
         ProjectSource::PushedHead => {
             let authority = crate::execution::pinned_state_authority(state)?;
@@ -224,16 +210,16 @@ pub fn resolve_project_context(
                     project_path: project_str.to_string(),
                 })?;
 
-            resolve_pinned_snapshot_context_admitted(
+            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
                 state,
-                &authority,
-                &cas_mutation_guard,
-                &snap_hash,
+                authority: &authority,
+                cas_mutation_guard: &cas_mutation_guard,
+                snapshot_hash: &snap_hash,
                 original_path,
                 checkout_id,
-                ProjectSource::PushedHead,
-                None,
-            )?
+                source: ProjectSource::PushedHead,
+                captured_generation: None,
+            })?
         }
     };
 
@@ -266,28 +252,42 @@ pub fn resolve_pinned_snapshot_context(
     let authority = crate::execution::pinned_state_authority(state)?;
     let cas_mutation_guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&cas_mutation_guard)?;
-    resolve_pinned_snapshot_context_admitted(
+    resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
         state,
-        &authority,
-        &cas_mutation_guard,
+        authority: &authority,
+        cas_mutation_guard: &cas_mutation_guard,
         snapshot_hash,
         original_path,
         checkout_id,
-        ProjectSource::PushedHead,
-        None,
-    )
+        source: ProjectSource::PushedHead,
+        captured_generation: None,
+    })
+}
+
+struct PinnedSnapshotContextParams<'a> {
+    state: &'a AppState,
+    authority: &'a ryeos_state::PinnedStateAuthority,
+    cas_mutation_guard: &'a ryeos_state::CasMutationGuard,
+    snapshot_hash: &'a str,
+    original_path: PathBuf,
+    checkout_id: &'a str,
+    source: ProjectSource,
+    captured_generation: Option<super::CapturedProjectGeneration>,
 }
 
 fn resolve_pinned_snapshot_context_admitted(
-    state: &AppState,
-    authority: &ryeos_state::PinnedStateAuthority,
-    cas_mutation_guard: &ryeos_state::CasMutationGuard,
-    snapshot_hash: &str,
-    original_path: PathBuf,
-    checkout_id: &str,
-    source: ProjectSource,
-    captured_generation: Option<super::CapturedProjectGeneration>,
+    params: PinnedSnapshotContextParams<'_>,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
+    let PinnedSnapshotContextParams {
+        state,
+        authority,
+        cas_mutation_guard,
+        snapshot_hash,
+        original_path,
+        checkout_id,
+        source,
+        captured_generation,
+    } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
 
@@ -300,7 +300,7 @@ fn resolve_pinned_snapshot_context_admitted(
                 snapshot_hash
             ))
         })?;
-    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
+    ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
     // ── 1. Build the request-owned COW workspace lower ──────────────
     let runtime_cache = state.config.runtime_root().cache();
@@ -375,21 +375,18 @@ fn resolve_pinned_snapshot_context_admitted(
     let request_engine = state.engine_cache.get_or_insert_with(
         cache_key,
         || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
-            // Re-read live bundle roots from the same signed
-            // registry used by daemon startup. Only runs on cache
-            // miss (generation bump invalidates the key), so the
-            // read cost is bounded.
-            let bundle_roots = load_live_bundle_roots(state)?;
-            let built = ryeos_app::engine_init::build_engine_for_roots(
-                &state.config,
-                &bundle_roots,
-                Some(immutable_project_root.as_path()),
-                None,
-                Arc::clone(&state.isolation),
-            )
-            .map_err(|e| {
-                ProjectSourceError::CheckoutFailed(format!("per-request engine build failed: {e}"))
-            })?;
+            // Installed executor registries are admitted once at the daemon
+            // generation boundary. Derive only the project trust view here;
+            // rebuilding the node engine would duplicate admission and could
+            // observe a different ambient registry generation.
+            let built = state
+                .engine
+                .for_project_root(immutable_project_root.as_path(), None)
+                .map_err(|e| {
+                    ProjectSourceError::CheckoutFailed(format!(
+                        "per-request project trust derivation failed: {e}"
+                    ))
+                })?;
 
             Ok((Arc::new(built), None))
         },
@@ -602,12 +599,14 @@ mod canonical_project_ref_tests {
     fn borrowed_constructor_errors_when_dir_missing() {
         let missing =
             std::env::temp_dir().join(format!("ryeos-missing-borrowed-{}", rand::random::<u64>()));
-        let err = ResolvedProjectContext::borrowed(
+        let err = match ResolvedProjectContext::borrowed(
             missing.clone(),
             PathBuf::from("/original"),
             minimal_engine(),
-        )
-        .unwrap_err();
+        ) {
+            Ok(_) => panic!("missing borrowed directory was accepted"),
+            Err(error) => error,
+        };
         let msg = err.to_string();
         assert!(msg.contains("borrowed working dir"));
         assert!(msg.contains(missing.to_str().unwrap()));

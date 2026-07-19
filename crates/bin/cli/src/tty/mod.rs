@@ -418,7 +418,7 @@ fn write_lines(
 ) -> io::Result<()> {
     for line in lines {
         if let Some(width) = terminal_width {
-            for wrapped in wrap_words(line, width.saturating_sub(1).max(1)) {
+            for wrapped in wrap_visible_preserving(line, width.saturating_sub(1).max(1)) {
                 writeln!(out, "{wrapped}")?;
             }
         } else {
@@ -426,6 +426,46 @@ fn write_lines(
         }
     }
     out.flush()
+}
+
+fn wrap_visible_preserving(value: &str, max_width: usize) -> Vec<&str> {
+    if value.is_empty() {
+        return vec![value];
+    }
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut width = 0;
+    let mut escape = 0_u8;
+    for (index, ch) in value.char_indices() {
+        let ch_width = match escape {
+            1 if ch == '[' => {
+                escape = 2;
+                0
+            }
+            1 => {
+                escape = 0;
+                0
+            }
+            2 if ('@'..='~').contains(&ch) => {
+                escape = 0;
+                0
+            }
+            2 => 0,
+            _ if ch == '\x1b' => {
+                escape = 1;
+                0
+            }
+            _ => ch.width().unwrap_or(0),
+        };
+        if ch_width > 0 && width + ch_width > max_width {
+            lines.push(&value[start..index]);
+            start = index;
+            width = 0;
+        }
+        width += ch_width;
+    }
+    lines.push(&value[start..]);
+    lines
 }
 
 pub(crate) fn visible_width(value: &str) -> usize {
