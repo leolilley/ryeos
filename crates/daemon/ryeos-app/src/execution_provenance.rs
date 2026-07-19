@@ -39,33 +39,24 @@ pub struct ProvenanceSeal(());
 /// permitting explicit variant matching by consumers.
 #[derive(Clone)]
 pub enum ExecutionProvenance {
-    /// Top-level run with live-filesystem lineage. It normally executes from
-    /// the live project; a resumed pinned local snapshot executes from a
-    /// daemon materialization while retaining the live project as its overlay
-    /// source. It never owns pushed-head foldback lineage.
+    /// Top-level run with live-filesystem authority.
     RootLiveFs {
         request_engine: Arc<Engine>,
-        /// Directory used for resolution and execution. Usually the live
-        /// project root; for a resumed pinned local snapshot this is the
-        /// daemon-owned materialized checkout.
+        /// Directory used for resolution and execution.
         project_path: PathBuf,
-        /// Live project that supplied the execution. Kept distinct from the
-        /// materialized checkout so local operator overlays such as `.env`
-        /// remain available to resumed successors and their callback children.
+        /// Canonical live project that supplied the execution.
         original_project_path: PathBuf,
         /// Present only when the live-fs path is a daemon-created ephemeral
         /// workspace (for example `--no-project`). The runner transfers this
         /// lifeline into detached execution ownership.
         workspace_lifeline: Option<Arc<TempDirGuard>>,
-        /// Immutable project generation captured before resolution. `None` is
-        /// reserved for explicitly non-durable/internal live previews.
-        captured_snapshot_hash: Option<String>,
         /// Deliberate runtime state-root override (`/execute` `state_root`):
         /// item resolution stays anchored at `project_path` while the
         /// runtime-state project path advertised to the child (callback
         /// token + `RYEOSD_PROJECT_PATH`) points here. `None` = state
         /// lives under the project as usual.
         state_root: Option<PathBuf>,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         __seal: ProvenanceSeal,
     },
 
@@ -81,6 +72,7 @@ pub enum ExecutionProvenance {
         effective_path: PathBuf,
         workspace_lifeline: Arc<TempDirGuard>,
         snapshot_hash: String,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         __seal: ProvenanceSeal,
     },
 
@@ -92,10 +84,10 @@ pub enum ExecutionProvenance {
         project_path: PathBuf,
         original_project_path: PathBuf,
         workspace_lifeline: Option<Arc<TempDirGuard>>,
-        captured_snapshot_hash: Option<String>,
         /// Inherited runtime state-root override; children of a run whose
         /// state was redirected keep writing state to the same place.
         state_root: Option<PathBuf>,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         __seal: ProvenanceSeal,
     },
 
@@ -108,59 +100,31 @@ pub enum ExecutionProvenance {
         effective_path: PathBuf,
         workspace_lifeline: Arc<TempDirGuard>,
         base_snapshot_hash: String,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         __seal: ProvenanceSeal,
     },
 }
 
 impl ExecutionProvenance {
+    pub fn execution_project_authority(
+        &self,
+        capability_ceiling: &[String],
+    ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
+        self.project_authority()
+            .clone()
+            .with_capability_ceiling(capability_ceiling.to_vec())
+    }
+
     /// Construct Root provenance for a live filesystem execution.
     pub fn root_live_fs(project_path: PathBuf, request_engine: Arc<Engine>) -> Self {
+        let project_authority = default_live_project_authority(&project_path);
         Self::RootLiveFs {
             request_engine,
             original_project_path: project_path.clone(),
             project_path,
             workspace_lifeline: None,
-            captured_snapshot_hash: None,
             state_root: None,
-            __seal: ProvenanceSeal(()),
-        }
-    }
-
-    /// Construct live-filesystem lineage over a daemon-owned materialization
-    /// of a pinned local snapshot.
-    ///
-    /// Resolution and execution use `effective_path`, while operator overlays
-    /// intentionally continue to resolve from `original_project_path`. This is
-    /// not pushed-head provenance: it owns no remote HEAD or foldback lineage.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `workspace_lifeline` is disarmed or names a path other than
-    /// `effective_path`.
-    pub fn root_materialized_live_fs(
-        effective_path: PathBuf,
-        original_project_path: PathBuf,
-        request_engine: Arc<Engine>,
-        workspace_lifeline: Arc<TempDirGuard>,
-        captured_snapshot_hash: String,
-    ) -> Self {
-        match workspace_lifeline.path() {
-            Some(path) if workspace_root_owns_effective_path(&path, &effective_path) => {}
-            Some(path) => panic!(
-                "ExecutionProvenance::root_materialized_live_fs: lifeline path {} \
-                 does not match effective_path {}",
-                path.display(),
-                effective_path.display(),
-            ),
-            None => panic!("ExecutionProvenance::root_materialized_live_fs: lifeline is disarmed"),
-        }
-        Self::RootLiveFs {
-            request_engine,
-            project_path: effective_path,
-            original_project_path,
-            workspace_lifeline: Some(workspace_lifeline),
-            captured_snapshot_hash: Some(captured_snapshot_hash),
-            state_root: None,
+            project_authority,
             __seal: ProvenanceSeal(()),
         }
     }
@@ -276,14 +240,101 @@ impl ExecutionProvenance {
             ),
         }
 
+        let project_authority = default_pinned_project_authority(
+            &original_project_path,
+            &snapshot_hash,
+            ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+        );
         Self::RootPushedHead {
             request_engine,
             original_project_path,
             effective_path,
             workspace_lifeline,
             snapshot_hash,
+            project_authority,
             __seal: ProvenanceSeal(()),
         }
+    }
+
+    pub fn with_project_authority(
+        mut self,
+        authority: ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> anyhow::Result<Self> {
+        authority.validate()?;
+        let projected_root = authority.project_root_projection();
+        let projected_snapshot = authority.base_snapshot_projection();
+        if projected_root != Some(self.original_project_path())
+            && !matches!(
+                &authority,
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless
+            )
+        {
+            anyhow::bail!(
+                "execution project authority root does not match provenance root: authority {:?}, provenance {}",
+                projected_root,
+                self.original_project_path().display()
+            );
+        }
+        if projected_snapshot != self.pinned_snapshot_hash() {
+            anyhow::bail!(
+                "execution project authority snapshot does not match provenance snapshot: authority {:?}, provenance {:?}",
+                projected_snapshot,
+                self.pinned_snapshot_hash()
+            );
+        }
+        match &mut self {
+            Self::RootLiveFs {
+                project_authority: slot,
+                ..
+            }
+            | Self::RootPushedHead {
+                project_authority: slot,
+                ..
+            }
+            | Self::BorrowedChildLiveFs {
+                project_authority: slot,
+                ..
+            }
+            | Self::BorrowedChildPushedHead {
+                project_authority: slot,
+                ..
+            } => *slot = authority,
+        }
+        Ok(self)
+    }
+
+    pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {
+        match self {
+            Self::RootLiveFs {
+                project_authority, ..
+            }
+            | Self::RootPushedHead {
+                project_authority, ..
+            }
+            | Self::BorrowedChildLiveFs {
+                project_authority, ..
+            }
+            | Self::BorrowedChildPushedHead {
+                project_authority, ..
+            } => project_authority,
+        }
+    }
+
+    pub fn advances_project_head(&self) -> bool {
+        matches!(
+            self.project_authority(),
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                realization: ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication:
+                        ryeos_state::objects::PinnedTerminalPublication::AdvanceHead { .. },
+                },
+                ..
+            }
+        )
+    }
+
+    pub fn environment_authority(&self) -> ryeos_state::objects::EnvironmentAuthority {
+        self.project_authority().environment().clone()
     }
 
     /// Derive borrowed-callback-child provenance from this parent.
@@ -294,8 +345,8 @@ impl ExecutionProvenance {
                 project_path,
                 original_project_path,
                 workspace_lifeline,
-                captured_snapshot_hash,
                 state_root,
+                project_authority,
                 ..
             }
             | Self::BorrowedChildLiveFs {
@@ -303,16 +354,16 @@ impl ExecutionProvenance {
                 project_path,
                 original_project_path,
                 workspace_lifeline,
-                captured_snapshot_hash,
                 state_root,
+                project_authority,
                 ..
             } => Self::BorrowedChildLiveFs {
                 request_engine: request_engine.clone(),
                 project_path: project_path.clone(),
                 original_project_path: original_project_path.clone(),
                 workspace_lifeline: workspace_lifeline.clone(),
-                captured_snapshot_hash: captured_snapshot_hash.clone(),
                 state_root: state_root.clone(),
+                project_authority: child_authority(project_authority),
                 __seal: ProvenanceSeal(()),
             },
             Self::RootPushedHead {
@@ -321,6 +372,7 @@ impl ExecutionProvenance {
                 effective_path,
                 workspace_lifeline,
                 snapshot_hash,
+                project_authority,
                 ..
             } => Self::BorrowedChildPushedHead {
                 request_engine: request_engine.clone(),
@@ -328,6 +380,7 @@ impl ExecutionProvenance {
                 effective_path: effective_path.clone(),
                 workspace_lifeline: workspace_lifeline.clone(),
                 base_snapshot_hash: snapshot_hash.clone(),
+                project_authority: child_authority(project_authority),
                 __seal: ProvenanceSeal(()),
             },
             Self::BorrowedChildPushedHead {
@@ -336,6 +389,7 @@ impl ExecutionProvenance {
                 effective_path,
                 workspace_lifeline,
                 base_snapshot_hash,
+                project_authority,
                 ..
             } => Self::BorrowedChildPushedHead {
                 request_engine: request_engine.clone(),
@@ -343,6 +397,7 @@ impl ExecutionProvenance {
                 effective_path: effective_path.clone(),
                 workspace_lifeline: workspace_lifeline.clone(),
                 base_snapshot_hash: base_snapshot_hash.clone(),
+                project_authority: child_authority(project_authority),
                 __seal: ProvenanceSeal(()),
             },
         }
@@ -356,32 +411,16 @@ impl ExecutionProvenance {
         workspace_lifeline: Arc<TempDirGuard>,
     ) -> Self {
         match self {
-            Self::RootLiveFs {
-                request_engine,
-                original_project_path,
-                captured_snapshot_hash,
-                state_root,
-                ..
+            Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => {
+                panic!(
+                    "live direct provenance cannot acquire a replacement workspace; pin the child explicitly"
+                )
             }
-            | Self::BorrowedChildLiveFs {
-                request_engine,
-                original_project_path,
-                captured_snapshot_hash,
-                state_root,
-                ..
-            } => Self::BorrowedChildLiveFs {
-                request_engine: request_engine.clone(),
-                project_path: effective_path,
-                original_project_path: original_project_path.clone(),
-                workspace_lifeline: Some(workspace_lifeline),
-                captured_snapshot_hash: captured_snapshot_hash.clone(),
-                state_root: state_root.clone(),
-                __seal: ProvenanceSeal(()),
-            },
             Self::RootPushedHead {
                 request_engine,
                 original_project_path,
                 snapshot_hash,
+                project_authority,
                 ..
             } => Self::BorrowedChildPushedHead {
                 request_engine: request_engine.clone(),
@@ -389,12 +428,14 @@ impl ExecutionProvenance {
                 effective_path,
                 workspace_lifeline,
                 base_snapshot_hash: snapshot_hash.clone(),
+                project_authority: child_authority(project_authority),
                 __seal: ProvenanceSeal(()),
             },
             Self::BorrowedChildPushedHead {
                 request_engine,
                 original_project_path,
                 base_snapshot_hash,
+                project_authority,
                 ..
             } => Self::BorrowedChildPushedHead {
                 request_engine: request_engine.clone(),
@@ -402,9 +443,42 @@ impl ExecutionProvenance {
                 effective_path,
                 workspace_lifeline,
                 base_snapshot_hash: base_snapshot_hash.clone(),
+                project_authority: child_authority(project_authority),
                 __seal: ProvenanceSeal(()),
             },
         }
+    }
+
+    pub fn clone_for_pinned_child_workspace(
+        &self,
+        effective_path: PathBuf,
+        workspace_lifeline: Arc<TempDirGuard>,
+        snapshot_hash: String,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> anyhow::Result<Self> {
+        match workspace_lifeline.path() {
+            Some(root) if workspace_root_owns_effective_path(&root, &effective_path) => {}
+            Some(root) => anyhow::bail!(
+                "pinned child workspace lifeline {} does not own {}",
+                root.display(),
+                effective_path.display()
+            ),
+            None => anyhow::bail!("pinned child workspace lifeline is disarmed"),
+        }
+        if project_authority.base_snapshot_projection() != Some(snapshot_hash.as_str()) {
+            anyhow::bail!("pinned child authority does not match child snapshot");
+        }
+        let provenance = Self::BorrowedChildPushedHead {
+            request_engine: self.request_engine().clone(),
+            original_project_path: self.original_project_path().to_path_buf(),
+            effective_path,
+            workspace_lifeline,
+            base_snapshot_hash: snapshot_hash,
+            project_authority,
+            __seal: ProvenanceSeal(()),
+        };
+        provenance.project_authority().validate()?;
+        Ok(provenance)
     }
 
     /// The engine to use for resolution / verification / execution.
@@ -451,19 +525,11 @@ impl ExecutionProvenance {
         }
     }
 
-    /// Exact immutable generation used to resolve and execute this live-fs
-    /// lineage. Pushed-head roots expose the same authority through their
-    /// mandatory snapshot hash. Borrowed children inherit the parent's pin.
-    pub fn captured_snapshot_hash(&self) -> Option<&str> {
+    /// Exact immutable generation used by pinned provenance. Live provenance
+    /// never carries an optional snapshot that can change its semantics.
+    pub fn pinned_snapshot_hash(&self) -> Option<&str> {
         match self {
-            Self::RootLiveFs {
-                captured_snapshot_hash,
-                ..
-            }
-            | Self::BorrowedChildLiveFs {
-                captured_snapshot_hash,
-                ..
-            } => captured_snapshot_hash.as_deref(),
+            Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => None,
             Self::RootPushedHead { snapshot_hash, .. } => Some(snapshot_hash),
             Self::BorrowedChildPushedHead {
                 base_snapshot_hash, ..
@@ -486,21 +552,26 @@ impl ExecutionProvenance {
     pub fn isolation_project_authority(
         &self,
     ) -> ryeos_engine::isolation::IsolationProjectAuthority {
-        match self {
-            Self::RootLiveFs {
-                captured_snapshot_hash: Some(_),
-                ..
-            }
-            | Self::BorrowedChildLiveFs {
-                captured_snapshot_hash: Some(_),
-                ..
-            } => ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace,
-            Self::RootPushedHead { .. } | Self::BorrowedChildPushedHead { .. } => {
+        match self.project_authority() {
+            ryeos_state::objects::ExecutionProjectAuthority::Projectless => {
                 ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
-            Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => {
-                ryeos_engine::isolation::IsolationProjectAuthority::External
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                access: ryeos_state::objects::LiveProjectAccess::ReadOnly,
+                ..
             }
+            | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+                ..
+            } => ryeos_engine::isolation::IsolationProjectAuthority::ReadOnly,
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ..
+            } => ryeos_engine::isolation::IsolationProjectAuthority::External,
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+                ..
+            } => ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace,
         }
     }
 
@@ -539,11 +610,59 @@ impl ExecutionProvenance {
     }
 }
 
-/// A legacy checkout guard owns the effective directory directly. A COW
-/// workspace guard owns its private root while the immutable lower exposed to
-/// resolution is one direct child. Accept exactly those two layouts; a broad
-/// ancestor test would let an unrelated shared temp root masquerade as the
-/// workspace lifetime authority.
+fn child_authority(
+    authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> ryeos_state::objects::ExecutionProjectAuthority {
+    authority
+        .clone()
+        .for_child()
+        .expect("validated parent project authority must derive a valid child authority")
+}
+
+fn default_live_project_authority(
+    project_path: &Path,
+) -> ryeos_state::objects::ExecutionProjectAuthority {
+    let authority_id =
+        lillux::sha256_hex(format!("live-project\0{}", project_path.display()).as_bytes());
+    ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+        authority_id: authority_id.clone(),
+        authored_project_identity: format!("local:{}", project_path.display()),
+        canonical_root: project_path.to_path_buf(),
+        access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
+        environment: ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+            project_authority_id: authority_id,
+            source_identity: format!("dotenv:{}", project_path.join(".env").display()),
+            include_operator_vault: true,
+            allowed_names: Vec::new(),
+        },
+        capability_ceiling: Vec::new(),
+        child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+    }
+}
+
+fn default_pinned_project_authority(
+    original_project_path: &Path,
+    snapshot_hash: &str,
+    terminal_publication: ryeos_state::objects::PinnedTerminalPublication,
+) -> ryeos_state::objects::ExecutionProjectAuthority {
+    ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+        stable_project_identity: format!("local:{}", original_project_path.display()),
+        display_path: Some(original_project_path.to_path_buf()),
+        snapshot_hash: snapshot_hash.to_owned(),
+        realization: ryeos_state::objects::PinnedProjectRealization::Cow {
+            terminal_publication,
+        },
+        environment: ryeos_state::objects::EnvironmentAuthority::None,
+        capability_ceiling: Vec::new(),
+        child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+    }
+}
+
+/// A direct checkout guard owns the effective directory. A COW workspace guard
+/// owns its private root while the immutable lower exposed to resolution is one
+/// direct child. Accept exactly those two layouts; a broad ancestor test would
+/// let an unrelated shared temp root masquerade as the workspace lifetime
+/// authority.
 fn workspace_root_owns_effective_path(root: &Path, effective: &Path) -> bool {
     root == effective
         || (effective.parent() == Some(root)
@@ -579,14 +698,7 @@ impl std::fmt::Debug for ExecutionProvenance {
             .field(
                 "snapshot_hash",
                 &match self {
-                    Self::RootLiveFs {
-                        captured_snapshot_hash,
-                        ..
-                    }
-                    | Self::BorrowedChildLiveFs {
-                        captured_snapshot_hash,
-                        ..
-                    } => captured_snapshot_hash.as_deref(),
+                    Self::RootLiveFs { .. } | Self::BorrowedChildLiveFs { .. } => None,
                     Self::RootPushedHead { snapshot_hash, .. } => Some(snapshot_hash.as_str()),
                     Self::BorrowedChildPushedHead {
                         base_snapshot_hash, ..
@@ -629,12 +741,12 @@ mod tests {
     }
 
     #[test]
-    fn materialized_live_fs_preserves_overlay_source_for_borrowed_children() {
+    fn pinned_local_materialization_remains_pinned_for_borrowed_children() {
         let dir = tempfile::tempdir().unwrap();
         let effective_path = dir.path().to_path_buf();
         let lifeline = Arc::new(TempDirGuard::new(effective_path.clone()));
         let original_path = PathBuf::from("/home/operator/project");
-        let parent = ExecutionProvenance::root_materialized_live_fs(
+        let parent = ExecutionProvenance::root_pushed_head(
             effective_path.clone(),
             original_path.clone(),
             engine(),
@@ -644,13 +756,13 @@ mod tests {
 
         assert_eq!(parent.effective_path(), effective_path);
         assert_eq!(parent.original_project_path(), original_path);
-        assert_eq!(parent.project_source(), ProjectSourceKind::LiveFs);
+        assert_eq!(parent.project_source(), ProjectSourceKind::PushedHead);
         assert!(!parent.is_borrowed_child());
 
         let child = parent.clone_for_borrowed_child();
         assert!(matches!(
             child,
-            ExecutionProvenance::BorrowedChildLiveFs { .. }
+            ExecutionProvenance::BorrowedChildPushedHead { .. }
         ));
         assert_eq!(child.effective_path(), effective_path);
         assert_eq!(child.original_project_path(), original_path);

@@ -36,12 +36,12 @@ pub(crate) struct LaunchRequest {
     pub(crate) project_path: String,
     #[serde(default)]
     pub(crate) parameters: Value,
-    /// Launch mode. Defaults to "inline".
-    #[serde(default = "default_launch_mode")]
+    pub(crate) execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
+    #[serde(skip)]
     pub(crate) launch_mode: String,
     /// Target site id for remote execution forwarding.
     /// Non-local target_site_id returns a stream_error.
-    #[serde(default)]
+    #[serde(skip)]
     pub(crate) target_site_id: Option<String>,
     /// Whether to validate descriptor composition only, without execution.
     #[serde(default)]
@@ -52,10 +52,6 @@ pub(crate) struct LaunchRequest {
     pub(crate) call: Option<ryeos_engine::method_call::MethodCall>,
     #[serde(default)]
     pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
-}
-
-fn default_launch_mode() -> String {
-    "inline".to_string()
 }
 
 fn pre_spawn_stream_error(
@@ -134,8 +130,27 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         }
 
         // Parse launch request from input (mode prepares it from body).
-        let req: LaunchRequest = serde_json::from_value(ctx.input.clone())
+        let mut req: LaunchRequest = serde_json::from_value(ctx.input.clone())
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
+        req.execution_policy
+            .validate()
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        req.launch_mode = match req.execution_policy.response {
+            ryeos_app::execution_policy::ExecutionResponse::Wait => "inline".to_string(),
+            ryeos_app::execution_policy::ExecutionResponse::Accepted => "accepted".to_string(),
+        };
+        req.target_site_id = match &req.execution_policy.target {
+            ryeos_app::execution_policy::ExecutionTarget::Here => None,
+            ryeos_app::execution_policy::ExecutionTarget::Site { site_id } => Some(site_id.clone()),
+        };
+        if !matches!(
+            req.execution_policy.project,
+            ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }
+        ) {
+            return Err(RouteDispatchError::BadRequest(
+                "/execute/stream requires explicit live_direct project policy".to_string(),
+            ));
+        }
         if let Err(error) =
             ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
         {
@@ -358,22 +373,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
-        let launch_provenance =
-            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
-                project_ctx.effective_path.clone(),
-                project_ctx.original_path.clone(),
-                project_ctx.request_engine.clone(),
-                project_ctx.temp_dir.clone().ok_or_else(|| {
-                    RouteDispatchError::Internal(
-                        "captured stream project has no workspace guard".to_string(),
-                    )
-                })?,
-                project_ctx.snapshot_hash.clone().ok_or_else(|| {
-                    RouteDispatchError::Internal(
-                        "captured stream project has no snapshot".to_string(),
-                    )
-                })?,
-            );
+        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_ctx.effective_path.clone(),
+            project_ctx.request_engine.clone(),
+        );
         let (mut launch_handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,

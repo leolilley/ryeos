@@ -54,6 +54,7 @@ fn create_running_directive(state: &AppState, thread_id: &str, requested_by: &st
         upstream_thread_id: None,
         requested_by: Some(requested_by.to_string()),
         project_root: None,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
         base_project_snapshot_hash: None,
         usage_subject: None,
         usage_subject_asserted_by: None,

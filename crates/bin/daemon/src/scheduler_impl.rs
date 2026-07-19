@@ -113,25 +113,15 @@ impl SchedulerContext for AppSchedulerContext {
             &spec.requester_fingerprint,
             &format!("schedule-{thread_id}"),
         )
-        .map_err(|error| anyhow::anyhow!("capture scheduled project generation: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("resolve scheduled live project authority: {error}"))?;
         let original_root_kind = CanonicalRef::parse(&spec.item_ref)
             .with_context(|| format!("invalid scheduled item ref `{}`", spec.item_ref))?
             .kind;
 
-        let provenance =
-            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
-                project_ctx.effective_path.clone(),
-                project_ctx.original_path.clone(),
-                project_ctx.request_engine.clone(),
-                project_ctx
-                    .temp_dir
-                    .clone()
-                    .context("scheduled project has no workspace guard")?,
-                project_ctx
-                    .snapshot_hash
-                    .clone()
-                    .context("scheduled project has no captured snapshot")?,
-            );
+        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_ctx.effective_path.clone(),
+            project_ctx.request_engine.clone(),
+        );
 
         let site_id = self.0.threads.site_id().to_string();
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
@@ -187,6 +177,8 @@ impl SchedulerContext for AppSchedulerContext {
             acting_principal: &spec.requester_fingerprint,
             project_path: std::path::Path::new(project_path),
             provenance,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             original_root_kind: &original_root_kind,
             pre_minted_thread_id: Some(thread_id.to_string()),
             usage_subject: None,

@@ -498,6 +498,17 @@ async fn handle_execute(
     // to its origin below.
     let diag_source = child_provenance.project_source();
     let diag_effective_path = child_provenance.effective_path().to_path_buf();
+    let lifecycle_authority = state
+        .state_store
+        .get_launch_metadata(&cap.thread_id)?
+        .and_then(|metadata| metadata.resume_context)
+        .map(|resume| resume.lifecycle_authority)
+        .ok_or_else(|| {
+            hook_integrity(format!(
+                "parent {} has no sealed lifecycle authority",
+                cap.thread_id
+            ))
+        })?;
     let dispatch_req = crate::dispatch::DispatchRequest {
         launch_mode: params.action.thread.as_str(),
         target_site_id: None,
@@ -507,6 +518,7 @@ async fn handle_execute(
         acting_principal: caller_principal_id.as_str(),
         project_path: project_path.as_path(),
         provenance: child_provenance,
+        lifecycle_authority,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
         usage_subject: None,

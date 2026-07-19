@@ -235,18 +235,10 @@ async fn execute_prepared_item_ref(
     let root_canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
 
-    let provenance =
-        ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
-            prepared.project.effective_path.clone(),
-            prepared.project.original_path.clone(),
-            prepared.exec_ctx.engine.clone(),
-            prepared.project.temp_dir.clone().ok_or_else(|| {
-                HandlerError::Internal("captured UI project has no workspace guard".into())
-            })?,
-            prepared.project.snapshot_hash.clone().ok_or_else(|| {
-                HandlerError::Internal("captured UI project has no snapshot identity".into())
-            })?,
-        );
+    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+        prepared.project.effective_path.clone(),
+        prepared.exec_ctx.engine.clone(),
+    );
 
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
         launch_mode: "inline",
@@ -257,6 +249,7 @@ async fn execute_prepared_item_ref(
         acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
         project_path: &prepared.project.effective_path,
         provenance,
+        lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
         usage_subject: None,

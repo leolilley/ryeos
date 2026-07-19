@@ -28,6 +28,10 @@ use crate::route_error::{RouteConfigError, RouteDispatchError};
 use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
+use ryeos_app::execution_policy::{
+    ExecutionEnvironmentPolicy, ExecutionPolicy, ExecutionResponse, ExecutionTarget,
+    PinnedRealization, PinnedSource, ProjectExecutionPolicy, TerminalPublication,
+};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
 use ryeos_executor::execution::project_source::{self, ProjectSource, NO_PROJECT_SENTINEL};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
@@ -46,13 +50,14 @@ pub struct ExecuteRequest {
     pub project_path: Option<String>,
     #[serde(default)]
     pub parameters: Value,
-    #[serde(default = "default_launch_mode")]
+    pub execution_policy: ExecutionPolicy,
+    #[serde(skip)]
     pub launch_mode: String,
-    #[serde(default)]
+    #[serde(skip)]
     pub target_site_id: Option<String>,
     #[serde(default)]
     pub validate_only: bool,
-    #[serde(default)]
+    #[serde(skip)]
     pub project_source: Option<ProjectSource>,
     /// Method call: `{ method, args }`. The method selector is control
     /// plane — it chooses daemon-owned projection/validation/trust before
@@ -95,10 +100,6 @@ impl ExecuteRequest {
     }
 }
 
-fn default_launch_mode() -> String {
-    "inline".to_string()
-}
-
 fn execution_project_context(
     no_project_requested: bool,
     effective_path: &Path,
@@ -110,6 +111,184 @@ fn execution_project_context(
             path: effective_path.to_path_buf(),
         }
     }
+}
+
+fn resolve_project_authority(
+    policy: &ExecutionPolicy,
+    project_path: Option<&Path>,
+    snapshot_hash: Option<&str>,
+) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
+    use ryeos_state::objects::{
+        ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        LiveProjectAccess, PinnedChildProjectRealization, PinnedProjectRealization,
+        PinnedTerminalPublication,
+    };
+
+    let environment = match &policy.environment {
+        ExecutionEnvironmentPolicy::None => EnvironmentAuthority::None,
+        ExecutionEnvironmentPolicy::ProjectOverlay {
+            include_operator_vault,
+            allowed_names,
+        } => {
+            let root = project_path.ok_or_else(|| {
+                anyhow::anyhow!("project overlay requires a resolved project root")
+            })?;
+            EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: lillux::sha256_hex(
+                    format!("live-project\0{}", root.display()).as_bytes(),
+                ),
+                source_identity: format!("dotenv:{}", root.join(".env").display()),
+                include_operator_vault: *include_operator_vault,
+                allowed_names: allowed_names.clone(),
+            }
+        }
+        ExecutionEnvironmentPolicy::Vault {
+            namespace,
+            allowed_names,
+        } => EnvironmentAuthority::Vault {
+            namespace: namespace.clone(),
+            allowed_names: allowed_names.clone(),
+        },
+        ExecutionEnvironmentPolicy::Delegated {
+            provider,
+            grant_id,
+            allowed_names,
+        } => EnvironmentAuthority::Delegated {
+            provider: provider.clone(),
+            grant_id: grant_id.clone(),
+            allowed_names: allowed_names.clone(),
+        },
+    };
+
+    let child_policy = match &policy.project {
+        ProjectExecutionPolicy::Projectless => ChildProjectAuthorityPolicy::Inherit,
+        ProjectExecutionPolicy::LiveDirect { child_policy, .. }
+        | ProjectExecutionPolicy::Pinned { child_policy, .. } => match child_policy {
+            ryeos_app::execution_policy::ChildProjectPolicy::Inherit => {
+                ChildProjectAuthorityPolicy::Inherit
+            }
+            ryeos_app::execution_policy::ChildProjectPolicy::PinAtSpawn { realization } => {
+                ChildProjectAuthorityPolicy::PinAtSpawn {
+                    realization: match realization {
+                        ryeos_app::execution_policy::PinnedChildRealization::ReadOnly => {
+                            PinnedChildProjectRealization::ReadOnly
+                        }
+                        ryeos_app::execution_policy::PinnedChildRealization::CowDiscard => {
+                            PinnedChildProjectRealization::CowDiscard
+                        }
+                    },
+                }
+            }
+        },
+    };
+
+    let authority = match &policy.project {
+        ProjectExecutionPolicy::Projectless => Ok(ExecutionProjectAuthority::Projectless),
+        ProjectExecutionPolicy::LiveDirect { access, .. } => {
+            let root = project_path
+                .ok_or_else(|| anyhow::anyhow!("live project policy requires project root"))?
+                .to_path_buf();
+            ExecutionProjectAuthority::live(
+                root.clone(),
+                format!("local:{}", root.display()),
+                match access {
+                    ryeos_app::execution_policy::LiveAccess::ReadOnly => {
+                        LiveProjectAccess::ReadOnly
+                    }
+                    ryeos_app::execution_policy::LiveAccess::ReadWrite => {
+                        LiveProjectAccess::ReadWrite
+                    }
+                },
+                environment,
+                Vec::new(),
+            )
+        }
+        ProjectExecutionPolicy::Pinned { realization, .. } => {
+            let root = project_path.map(Path::to_path_buf);
+            let snapshot_hash = snapshot_hash.ok_or_else(|| {
+                anyhow::anyhow!("pinned project policy did not resolve an immutable snapshot")
+            })?;
+            let realization = match realization {
+                PinnedRealization::ReadOnly => PinnedProjectRealization::ReadOnly,
+                PinnedRealization::Cow {
+                    terminal_publication,
+                } => PinnedProjectRealization::Cow {
+                    terminal_publication: match terminal_publication {
+                        TerminalPublication::Discard => PinnedTerminalPublication::Discard,
+                        TerminalPublication::RetainResult => {
+                            PinnedTerminalPublication::RetainResult
+                        }
+                        TerminalPublication::AdvanceHead {
+                            head_ref,
+                            expected_hash,
+                            publication_grant,
+                        } => PinnedTerminalPublication::AdvanceHead {
+                            head_ref: head_ref.clone(),
+                            expected_hash: expected_hash.clone(),
+                            publication_grant: publication_grant.clone(),
+                        },
+                    },
+                },
+            };
+            ExecutionProjectAuthority::pinned(
+                root.as_ref()
+                    .map(|path| format!("local:{}", path.display()))
+                    .unwrap_or_else(|| format!("snapshot:{snapshot_hash}")),
+                root,
+                snapshot_hash.to_string(),
+                realization,
+                environment,
+                Vec::new(),
+            )
+        }
+    }?;
+    authority.with_child_policy(child_policy)
+}
+
+fn authorize_terminal_publication(
+    policy: &ExecutionPolicy,
+    original_project_path: &Path,
+    acting_principal: &str,
+    caller_scopes: &[String],
+    authorizer: &ryeos_runtime::authorizer::Authorizer,
+) -> anyhow::Result<()> {
+    let ProjectExecutionPolicy::Pinned {
+        realization:
+            PinnedRealization::Cow {
+                terminal_publication:
+                    TerminalPublication::AdvanceHead {
+                        head_ref,
+                        publication_grant,
+                        ..
+                    },
+            },
+        ..
+    } = &policy.project
+    else {
+        return Ok(());
+    };
+
+    let project_path = original_project_path.to_str().ok_or_else(|| {
+        anyhow::anyhow!("project path is not valid UTF-8 and cannot identify a project HEAD")
+    })?;
+    let canonical_project = project_source::canonical_project_ref(project_path)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let project_hash = lillux::sha256_hex(canonical_project.as_bytes());
+    let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)?;
+    let admitted_head_ref = format!("projects/{principal_key}/{project_hash}/head");
+    if head_ref != &admitted_head_ref {
+        anyhow::bail!(
+            "advance-head ref does not identify the acting principal's admitted project HEAD: expected {admitted_head_ref:?}, got {head_ref:?}"
+        );
+    }
+    authorizer
+        .authorize(
+            caller_scopes,
+            &AuthorizationPolicy::require(publication_grant),
+        )
+        .map_err(|_| {
+            anyhow::anyhow!("advance-head publication grant is not authorized: {publication_grant}")
+        })
 }
 
 // ── Mode ──────────────────────────────────────────────────────────────────
@@ -211,8 +390,41 @@ impl CompiledResponseMode for CompiledExecuteMode {
         let mut request: ExecuteRequest =
             ryeos_handler_protocol::from_json_slice_strict(&ctx.body_raw)
                 .map_err(|e| RouteDispatchError::BadRequest(format!("invalid JSON body: {e}")))?;
-        if ctx.request_parts.uri.path() == "/execute/launch" && request.launch_mode == "inline" {
-            request.launch_mode = "accepted".to_string();
+        request
+            .execution_policy
+            .validate()
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        request.launch_mode = match request.execution_policy.response {
+            ExecutionResponse::Wait => "inline".to_string(),
+            ExecutionResponse::Accepted => "accepted".to_string(),
+        };
+        request.target_site_id = match &request.execution_policy.target {
+            ExecutionTarget::Here => None,
+            ExecutionTarget::Site { site_id } => Some(site_id.clone()),
+        };
+        request.project_source = Some(match &request.execution_policy.project {
+            ProjectExecutionPolicy::Projectless | ProjectExecutionPolicy::LiveDirect { .. } => {
+                ProjectSource::LiveFs
+            }
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CurrentHead,
+                ..
+            } => ProjectSource::PushedHead,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::Snapshot { hash },
+                ..
+            } => ProjectSource::Snapshot { hash: hash.clone() },
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CaptureLive { .. },
+                ..
+            } => ProjectSource::CaptureLiveFullProject,
+        });
+        if ctx.request_parts.uri.path() == "/execute/launch"
+            && request.execution_policy.response != ExecutionResponse::Accepted
+        {
+            return Err(RouteDispatchError::BadRequest(
+                "/execute/launch requires execution_policy.response=accepted".to_string(),
+            ));
         }
 
         let item_ref = &request.item_ref;
@@ -221,7 +433,20 @@ impl CompiledResponseMode for CompiledExecuteMode {
         ) {
             return Ok(dispatch_error_response(error));
         }
-        let no_project_requested = request.project_path.is_none();
+        let no_project_requested = matches!(
+            request.execution_policy.project,
+            ProjectExecutionPolicy::Projectless
+        );
+        if no_project_requested != request.project_path.is_none() {
+            return Err(RouteDispatchError::BadRequest(
+                if no_project_requested {
+                    "projectless execution policy must not carry project_path"
+                } else {
+                    "project-backed execution policy requires project_path"
+                }
+                .to_string(),
+            ));
+        }
 
         // Capability check: derive the required cap from the item_ref
         // (e.g. "directive:apps/tv-tracker/ai_chat" →
@@ -324,7 +549,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         )
                             .into_response());
                     }
-                    if matches!(project_source, ProjectSource::LiveFs) {
+                    if matches!(
+                        project_source,
+                        ProjectSource::LiveFs | ProjectSource::CaptureLiveFullProject
+                    ) {
                         match std::fs::canonicalize(&path) {
                             Ok(path) => path,
                             Err(error) => {
@@ -332,7 +560,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                                     StatusCode::BAD_REQUEST,
                                     axum::Json(json!({
                                         "error": format!(
-                                            "live project_path '{}' cannot be resolved: {error}",
+                                            "live project_path '{}' cannot be resolved for the selected execution policy: {error}",
                                             path.display()
                                         )
                                     })),
@@ -346,7 +574,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 }
             }
             None => {
-                if matches!(project_source, ProjectSource::PushedHead) {
+                if !matches!(project_source, ProjectSource::LiveFs) {
                     return Ok((
                         StatusCode::BAD_REQUEST,
                         axum::Json(json!({ "error": "project_path is required when project_source is pushed_head" })),
@@ -406,7 +634,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
         };
 
         if request.project_path.is_some()
-            && matches!(project_source, ProjectSource::LiveFs)
+            && matches!(
+                project_source,
+                ProjectSource::LiveFs | ProjectSource::CaptureLiveFullProject
+            )
             && !project_path.join(ryeos_engine::AI_DIR).is_dir()
         {
             return Ok((
@@ -419,7 +650,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
         }
 
         // Reject validate_only + pushed_head.
-        if request.validate_only && matches!(project_source, ProjectSource::PushedHead) {
+        if request.validate_only && !matches!(project_source, ProjectSource::LiveFs) {
             return Ok((
                 StatusCode::BAD_REQUEST,
                 axum::Json(json!({ "error": "validate_only is not supported with pushed_head project_source" })),
@@ -447,12 +678,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     return Ok((
                         StatusCode::BAD_REQUEST,
                         axum::Json(json!({ "error": "state_root requires an explicit project_path (the source root it redirects state away from)" })),
-                    ).into_response());
-                }
-                if request.launch_mode == "accepted" {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(json!({ "error": "state_root is not supported with launch_mode='accepted'" })),
                     ).into_response());
                 }
                 if !path.is_absolute() {
@@ -554,6 +779,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
         };
         // The no-project scratch root remains live through capture. Execution
         // itself uses the immutable captured checkout and its own guard.
+        let no_project_lifeline = no_project_guard.clone();
         let _no_project_source_guard = no_project_guard;
 
         // Build plan context.
@@ -611,7 +837,21 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         };
 
-        let provenance = match project_source {
+        let project_authority = resolve_project_authority(
+            &request.execution_policy,
+            (!no_project_requested).then_some(project_ctx.original_path.as_path()),
+            project_ctx.snapshot_hash.as_deref(),
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        authorize_terminal_publication(
+            &request.execution_policy,
+            &project_ctx.original_path,
+            &caller_principal_id,
+            &caller_scopes,
+            &state.authorizer,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        let provenance = (match project_source {
             ProjectSource::LiveFs => {
                 if let Some(sr) = &state_root {
                     tracing::info!(
@@ -621,17 +861,15 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         "execute with runtime state-root override"
                     );
                 }
-                ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
                     project_ctx.effective_path.clone(),
-                    project_ctx.original_path.clone(),
                     project_ctx.request_engine.clone(),
-                    project_ctx.temp_dir.clone().expect(
-                        "durable live-fs resolution must own its immutable execution checkout",
-                    ),
+                )
+                .with_workspace_lifeline(
                     project_ctx
-                        .snapshot_hash
+                        .temp_dir
                         .clone()
-                        .expect("durable live-fs resolution must carry its captured snapshot"),
+                        .or_else(|| no_project_lifeline.clone()),
                 )
                 .with_state_root(state_root.clone())
             }
@@ -650,7 +888,31 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         .expect("ResolvedProjectContext PushedHead must carry a snapshot_hash"),
                 )
             }
-        };
+            ProjectSource::Snapshot { .. } | ProjectSource::CaptureLiveFullProject => {
+                // A pinned source is an owned immutable generation, regardless
+                // of whether it came from an existing hash or a just-captured
+                // live tree. Keep it on the generation-aware runner path so
+                // read-only/COW/publication semantics are driven exclusively
+                // by the sealed project authority. The materialized-live
+                // boundary is reserved for direct live-tree execution and
+                // must not make a pinned execution look mutable.
+                ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
+                    project_ctx.effective_path.clone(),
+                    project_ctx.original_path.clone(),
+                    project_ctx.request_engine.clone(),
+                    project_ctx
+                        .temp_dir
+                        .clone()
+                        .expect("pinned project context must carry a materialization lifeline"),
+                    project_ctx
+                        .snapshot_hash
+                        .clone()
+                        .expect("pinned project context must carry an immutable snapshot hash"),
+                )
+            }
+        })
+        .with_project_authority(project_authority)
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
 
         // ── Phase 0: preflight composition validation ───────────────
         // Run the full resolution pipeline (including composition and
@@ -750,14 +1012,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 )
                     .into_response());
             }
-            if !matches!(project_source, ProjectSource::LiveFs) {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(json!({ "error": "launch_mode='accepted' supports live filesystem projects only" })),
-                )
-                    .into_response());
-            }
-
             let parsed_item_ref = crate::routes::parsed_ref::ParsedItemRef::parse(item_ref)
                 .map_err(|e| {
                     RouteDispatchError::BadRequest(format!(
@@ -840,9 +1094,13 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         .into_response());
                 }
             }
-            let dotenv_dirs =
-                ryeos_app::vault::dotenv_search_dirs(Some(provenance.original_project_path()));
-            if let Err(err) = ryeos_app::vault::read_required_secrets(
+            let environment_authority = provenance.environment_authority();
+            let overlay_root = matches!(
+                environment_authority,
+                ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
+            )
+            .then(|| provenance.original_project_path());
+            if let Err(err) = ryeos_app::vault::read_required_secrets_with_authority(
                 state.vault.as_ref(),
                 &caller_principal_id,
                 &accepted_preflight
@@ -850,7 +1108,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     .resolved
                     .metadata
                     .required_secrets,
-                &dotenv_dirs,
+                environment_authority,
+                overlay_root,
             ) {
                 return Ok((
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -878,6 +1137,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             launch_options.usage_subject = usage_subject.clone();
             launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
             launch_options.call = request.call().cloned();
+            launch_options.lifecycle_authority = request.execution_policy.lifecycle_authority();
             launch_options =
                 launch_options.retain_captured_generation(project_ctx.take_captured_generation());
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
@@ -960,7 +1220,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
         let request_can_need_remote_config = request.launch_mode == "inline"
             && !request.validate_only
-            && matches!(project_source, ProjectSource::LiveFs)
             && request.method().is_none()
             && request.args().is_none();
         let remotes = if remote_target_requested && request_can_need_remote_config {
@@ -1012,13 +1271,27 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     RouteDispatchError::Internal(format!("remote ignore config: {e:#}"))
                 })?;
                 let state_arc = Arc::new(state.clone());
+                let mut destination_policy = request.execution_policy.clone();
+                destination_policy.target = ExecutionTarget::Here;
+                if let ProjectExecutionPolicy::Pinned { source, .. } =
+                    &mut destination_policy.project
+                {
+                    *source = PinnedSource::CurrentHead;
+                }
+                destination_policy.validate().map_err(|error| {
+                    RouteDispatchError::BadRequest(format!(
+                        "invalid destination execution policy: {error}"
+                    ))
+                })?;
                 let forward_req = crate::remote::forward::RemoteForwardRequest {
                     remote: &plan.remote,
                     item_ref,
                     ref_bindings: &request.ref_bindings,
                     local_project_path: plan.local_project_path.as_deref(),
+                    source_snapshot_hash: project_ctx.snapshot_hash.as_deref(),
                     remote_project_path: &plan.remote_project_path,
                     parameters: request.parameters.clone(),
+                    execution_policy: &destination_policy,
                     acting_principal: &caller_principal_id,
                     remote_ignore: &remote_ignore,
                     call: None,
@@ -1047,7 +1320,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // A pushed-head request is the remote destination boundary: complete a
         // threadless admission pass against the request-scoped overlay engine
         // before local authoritative dispatch can create a row or spawn.
-        if matches!(project_source, ProjectSource::PushedHead) {
+        if !matches!(project_source, ProjectSource::LiveFs) {
             let primary = match exec_ctx.engine.resolve(&exec_ctx.plan_ctx, &root_canonical) {
                 Ok(resolved) => match exec_ctx.engine.verify(&exec_ctx.plan_ctx, resolved) {
                     Ok(verified) => verified.resolved,
@@ -1091,6 +1364,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
         // No target_site_id, or target_site_id == current_site_id
         // (normalized to None above). Build dispatch request and call
         // local executor.
+        let lifecycle_authority = request.execution_policy.lifecycle_authority();
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: request.launch_mode.as_str(),
             target_site_id: dispatch_target_site_id,
@@ -1100,6 +1374,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             acting_principal: caller_principal_id.as_str(),
             project_path: &project_ctx.effective_path,
             provenance,
+            lifecycle_authority,
             original_root_kind: root_canonical.kind.as_str(),
             pre_minted_thread_id: None,
             usage_subject,
@@ -1109,7 +1384,26 @@ impl CompiledResponseMode for CompiledExecuteMode {
             parent_execution_context: None,
         };
 
-        match ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await {
+        let dispatch_result = if lifecycle_authority.ownership
+            == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+        {
+            ryeos_executor::dispatch::dispatch_daemon_owned(
+                item_ref,
+                &dispatch_req,
+                &exec_ctx,
+                &state,
+            )
+            .await
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "daemon-owned execution task ended without a dispatch result: {error}"
+                ))
+            })?
+        } else {
+            ryeos_executor::dispatch::dispatch(item_ref, &dispatch_req, &exec_ctx, &state).await
+        };
+
+        match dispatch_result {
             Ok(mut value) => {
                 // Execution diagnostics: with a state-root override in play,
                 // both selected roots ride on the response so the caller can
@@ -1204,7 +1498,7 @@ struct TargetSiteForwardPlan {
 
 fn plan_target_site_forward(
     request: &ExecuteRequest,
-    project_source: &ProjectSource,
+    _project_source: &ProjectSource,
     no_project_requested: bool,
     current_site_id: &str,
     effective_project_path: &Path,
@@ -1236,13 +1530,6 @@ fn plan_target_site_forward(
         return Err(target_site_unsupported(
             target_site_id,
             "validate_only with remote target_site_id is not supported; validation already ran locally",
-        ));
-    }
-
-    if !matches!(project_source, ProjectSource::LiveFs) {
-        return Err(target_site_unsupported(
-            target_site_id,
-            "project_source pushed_head is not supported for target-site forwarding",
         ));
     }
 
@@ -1516,6 +1803,14 @@ mod tests {
             ref_bindings: std::collections::BTreeMap::new(),
             project_path: Some("/tmp/project".into()),
             parameters: serde_json::Value::Null,
+            execution_policy: ExecutionPolicy {
+                target: target_site_id.map_or(ExecutionTarget::Here, |site_id| {
+                    ExecutionTarget::Site {
+                        site_id: site_id.to_string(),
+                    }
+                }),
+                ..ExecutionPolicy::local_live(ExecutionResponse::Wait)
+            },
             launch_mode: "inline".into(),
             target_site_id: target_site_id.map(String::from),
             validate_only: false,

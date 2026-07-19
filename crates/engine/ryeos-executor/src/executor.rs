@@ -297,20 +297,9 @@ pub async fn execute_service_verified(
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: Some(ctx.principal_fingerprint.clone()),
-            project_root: match &ctx.plan_ctx.project_context {
-                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
-                    Some(path.canonicalize().with_context(|| {
-                        format!("canonicalize recorded service project {}", path.display())
-                    })?)
-                }
-                _ => None,
-            },
-            base_project_snapshot_hash: match &ctx.plan_ctx.project_context {
-                ryeos_engine::contracts::ProjectContext::SnapshotHash { hash } => {
-                    Some(hash.clone())
-                }
-                _ => None,
-            },
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,

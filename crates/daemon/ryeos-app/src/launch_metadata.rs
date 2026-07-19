@@ -39,7 +39,7 @@ where
 /// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 4;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 5;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -239,6 +239,9 @@ impl OriginalPushedHeadRef {
     /// roots would turn on pin/foldback/HEAD-advance their parent owns),
     /// and live-fs spawns have no snapshot to pin.
     pub fn from_provenance(provenance: &ExecutionProvenance) -> Option<Self> {
+        if !provenance.advances_project_head() {
+            return None;
+        }
         match provenance {
             ExecutionProvenance::RootPushedHead {
                 original_project_path,
@@ -281,6 +284,13 @@ pub struct ResumeContext {
     /// Carries enough information for the engine resolver to identify
     /// the project (LocalPath / SnapshotHash / ProjectRef).
     pub project_context: ProjectContext,
+    /// Canonical typed execution authority. Paths and optional snapshot fields
+    /// below are retained only as launch/reconstruction details and must agree
+    /// with this value.
+    pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    /// Owner and restart contract sealed at admission. Response timing is not
+    /// persisted because returning early never changes daemon ownership.
+    pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     /// Stable logical identity. It survives materialization and resume and is
     /// never treated as an effective filesystem path.
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -378,91 +388,43 @@ impl ResumeContext {
     pub(crate) fn authoritative_project_identity(
         &self,
     ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
-        match &self.project_context {
-            ProjectContext::None => {
-                if self.durable_project_snapshot_hash().is_some()
-                    || self.stable_project_identity.is_some()
-                    || self.local_overlay_root.is_some()
-                {
-                    anyhow::bail!("project_context none contradicts durable project identity");
+        self.project_authority.validate()?;
+        self.lifecycle_authority.validate()?;
+        match (&self.project_authority, &self.project_context) {
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+                ProjectContext::None,
+            ) => Ok((None, None)),
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                    canonical_root, ..
+                },
+                ProjectContext::LocalPath { .. },
+            ) => {
+                if self.durable_project_snapshot_hash().is_some() {
+                    anyhow::bail!("live project authority contradicts immutable snapshot pin");
                 }
-                Ok((None, None))
+                Ok((Some(canonical_root.clone()), None))
             }
-            ProjectContext::LocalPath { path } => {
-                let stable = self.stable_project_identity.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("local-path resume context is missing stable project identity")
-                })?;
-                stable.validate()?;
-                if let Some(overlay) = &self.local_overlay_root {
-                    if !overlay.is_absolute() {
-                        anyhow::bail!("local overlay root must be absolute");
-                    }
+            (
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    display_path,
+                    snapshot_hash,
+                    ..
+                },
+                ProjectContext::LocalPath { .. }
+                | ProjectContext::SnapshotHash { .. }
+                | ProjectContext::ProjectRef { .. },
+            ) => {
+                if self.durable_project_snapshot_hash() != Some(snapshot_hash.as_str()) {
+                    anyhow::bail!("pinned project authority contradicts durable launch snapshot");
                 }
-                let snapshot = self
-                    .durable_project_snapshot_hash()
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "durable local-path resume context is missing its immutable project snapshot"
-                        )
-                    })?;
-                let _ = path;
-                Ok((Some(stable.display_path.clone()), Some(snapshot)))
+                Ok((display_path.clone(), Some(snapshot_hash.clone())))
             }
-            ProjectContext::SnapshotHash { hash } => {
-                for pinned in [
-                    self.original_snapshot_hash.as_deref(),
-                    self.original_pushed_head_ref
-                        .as_ref()
-                        .map(|pushed| pushed.snapshot_hash.as_str()),
-                ]
-                .into_iter()
-                .flatten()
-                {
-                    if pinned != hash.as_str() {
-                        anyhow::bail!(
-                            "snapshot project context {hash} contradicts durable launch pin {pinned}"
-                        );
-                    }
-                }
-                if let Some(stable) = &self.stable_project_identity {
-                    stable.validate()?;
-                }
-                Ok((
-                    self.stable_project_identity
-                        .as_ref()
-                        .map(|identity| identity.display_path.clone()),
-                    Some(hash.clone()),
-                ))
-            }
-            ProjectContext::ProjectRef { .. } => {
-                let original = self.original_snapshot_hash.as_deref();
-                let pushed = self
-                    .original_pushed_head_ref
-                    .as_ref()
-                    .map(|pushed| pushed.snapshot_hash.as_str());
-                if let (Some(original), Some(pushed)) = (original, pushed) {
-                    if original != pushed {
-                        anyhow::bail!(
-                            "project-ref continuation has contradictory immutable snapshot pins"
-                        );
-                    }
-                }
-                let pinned = original.or(pushed).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "project-ref continuation has no immutable resolved snapshot pin"
-                    )
-                })?;
-                if let Some(stable) = &self.stable_project_identity {
-                    stable.validate()?;
-                }
-                Ok((
-                    self.stable_project_identity
-                        .as_ref()
-                        .map(|identity| identity.display_path.clone()),
-                    Some(pinned.to_owned()),
-                ))
-            }
+            _ => anyhow::bail!(
+                "project_context {:?} contradicts typed execution project authority",
+                self.project_context
+            ),
         }
     }
 }
@@ -638,6 +600,35 @@ mod tests {
             }
             _ => None,
         };
+        let project_authority = match &project_context {
+            ProjectContext::None | ProjectContext::ProjectRef { .. } => {
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless
+            }
+            ProjectContext::LocalPath { path } => {
+                ryeos_state::objects::ExecutionProjectAuthority::live(
+                    path.clone(),
+                    format!("local:{}", path.display()),
+                    ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                    Vec::new(),
+                )
+                .unwrap()
+            }
+            ProjectContext::SnapshotHash { hash } => {
+                ryeos_state::objects::ExecutionProjectAuthority::pinned(
+                    format!("snapshot:{hash}"),
+                    None,
+                    hash.clone(),
+                    ryeos_state::objects::PinnedProjectRealization::Cow {
+                        terminal_publication:
+                            ryeos_state::objects::PinnedTerminalPublication::Discard,
+                    },
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                    Vec::new(),
+                )
+                .unwrap()
+            }
+        };
         ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "tool:test/run".to_string(),
@@ -645,6 +636,9 @@ mod tests {
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({}),
             project_context,
+            project_authority,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             stable_project_identity,
             local_overlay_root: None,
             original_snapshot_hash: None,
@@ -855,6 +849,19 @@ mod tests {
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                stable_project_identity: "site:a:/tmp/proj".to_string(),
+                display_path: Some(PathBuf::from("/tmp/proj")),
+                snapshot_hash: "abc123".to_string(),
+                realization: ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+                },
+                environment: ryeos_state::objects::EnvironmentAuthority::None,
+                capability_ceiling: vec!["ryeos.execute.tool.test".to_string()],
+                child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+            },
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             stable_project_identity: Some(
                 StableProjectIdentity::from_path(std::path::Path::new("/tmp/proj"), "site:a")
                     .unwrap(),

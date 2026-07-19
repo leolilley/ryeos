@@ -24,7 +24,7 @@ use serde_json::Value;
 use crate::remote::client::RemoteClient;
 use crate::remote::config::ResolvedRemote;
 use crate::remote::pull::{extract_snapshot_hash, pull_results, PullResultsError};
-use crate::remote::push::{push_project, PushResult};
+use crate::remote::push::{push_project, push_snapshot_generation, PushResult};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
 use ryeos_state::{
@@ -47,10 +47,16 @@ pub struct RemoteForwardRequest<'a> {
     pub ref_bindings: &'a BTreeMap<String, String>,
     /// Local project root path. `None` for --no-project mode.
     pub local_project_path: Option<&'a Path>,
+    /// Exact already-admitted local generation to upload. When absent, the
+    /// explicit remote-execute workflow captures `local_project_path` now.
+    pub source_snapshot_hash: Option<&'a str>,
     /// Remote project path used in push-head ref and /execute body.
     pub remote_project_path: &'a str,
     /// Parameters for the item.
     pub parameters: Value,
+    /// Exact execution contract to present to the destination node. Routing
+    /// fields have already been projected into destination-local terms.
+    pub execution_policy: &'a ryeos_app::execution_policy::ExecutionPolicy,
     /// Acting principal (caller identity).
     pub acting_principal: &'a str,
     /// Ignore rules for project ingest.
@@ -192,8 +198,37 @@ pub async fn execute_unary_forward(
     )?;
 
     // 1. Push project (or no-project user-space-only push).
-    let push_result = match req.local_project_path {
-        Some(proj_path) => push_project(
+    let push_result = match (req.source_snapshot_hash, req.local_project_path) {
+        (Some(snapshot_hash), _) => {
+            push_snapshot_generation(client, &authority, snapshot_hash, req.remote_project_path)
+                .await
+                .map_err(|e| {
+                    let message = format!("{e:#}");
+                    let _ = finish_sync_job_attempt_and_update_job(
+                        state,
+                        &attempt_id,
+                        FinishSyncJobAttempt {
+                            state: SyncJobAttemptState::Failed,
+                            phase: "push_failed".to_string(),
+                            error: Some(message.clone()),
+                            result: None,
+                        },
+                        &job_id,
+                        SyncJobUpdate {
+                            state: SyncJobState::Failed,
+                            phase: "push_failed".to_string(),
+                            roots: None,
+                            heads: None,
+                            uploaded_hashes: Vec::new(),
+                            fetched_hashes: Vec::new(),
+                            last_error: Some(message.clone()),
+                            result: None,
+                        },
+                    );
+                    RemoteForwardError::PushFailed(message)
+                })?
+        }
+        (None, Some(proj_path)) => push_project(
             client,
             state,
             &authority,
@@ -227,7 +262,7 @@ pub async fn execute_unary_forward(
             );
             RemoteForwardError::PushFailed(message)
         })?,
-        None => {
+        (None, None) => {
             // --no-project mode: push user space only.
             match push_no_project(&authority, client, req.remote_project_path).await {
                 Ok(value) => value,
@@ -279,10 +314,14 @@ pub async fn execute_unary_forward(
         .execute_with_options(
             req.item_ref,
             req.ref_bindings,
-            req.remote_project_path,
+            (!matches!(
+                req.execution_policy.project,
+                ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
+            ))
+            .then_some(req.remote_project_path),
             &req.parameters,
-            "pushed_head",
             req.call,
+            req.execution_policy,
         )
         .await
     {

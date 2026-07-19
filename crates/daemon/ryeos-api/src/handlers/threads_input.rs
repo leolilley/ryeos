@@ -455,20 +455,9 @@ pub async fn handle(
             )?
             .retain_captured_generation(project_ctx.take_captured_generation());
             let launch_provenance =
-                ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
                     project_ctx.effective_path.clone(),
-                    project_ctx.original_path.clone(),
                     project_ctx.request_engine.clone(),
-                    project_ctx.temp_dir.clone().ok_or_else(|| {
-                        HandlerError::Internal(
-                            "captured fresh thread project has no workspace guard".to_string(),
-                        )
-                    })?,
-                    project_ctx.snapshot_hash.clone().ok_or_else(|| {
-                        HandlerError::Internal(
-                            "captured fresh thread project has no snapshot".to_string(),
-                        )
-                    })?,
                 );
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
@@ -718,8 +707,10 @@ pub async fn handle(
         requested_by: Some(ctx.fingerprint.clone()),
         project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
         base_project_snapshot_hash: resume_context
-            .durable_project_snapshot_hash()
+            .project_authority
+            .base_snapshot_projection()
             .map(str::to_owned),
+        project_authority: resume_context.project_authority.clone(),
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,

@@ -1270,8 +1270,6 @@ async fn prepare_managed_launch_authority(
         },
     )
     .map_err(BuildAndLaunchError::from)?;
-    let dotenv_dirs =
-        ryeos_app::vault::dotenv_search_dirs(Some(params.provenance.original_project_path()));
     let mut secret_requirements = build_secret_requirements(params.metadata_required_secrets);
     merge_prepared_secret_requirements(
         &mut secret_requirements,
@@ -1281,11 +1279,13 @@ async fn prepare_managed_launch_authority(
         .iter()
         .map(|requirement| requirement.name.clone())
         .collect();
-    let effective_vault = ryeos_app::vault::read_required_secrets(
+    let environment_authority = params.provenance.environment_authority();
+    let effective_vault = ryeos_app::vault::read_required_secrets_with_authority(
         params.state.vault.as_ref(),
         params.acting_principal,
         &secret_names,
-        &dotenv_dirs,
+        &environment_authority,
+        Some(params.provenance.original_project_path()),
     )
     .map_err(|error| match error {
         VaultReadError::MissingSecrets { names, .. } => BuildAndLaunchError::MissingSecrets {
@@ -1384,44 +1384,10 @@ async fn prepare_managed_launch_authority(
         .is_some();
     let should_capture_resume_context =
         supports_continuation || native_resume.is_some() || force_resume_context;
-    let mut pending_project_snapshot = None;
+    let pending_project_snapshot: Option<super::CapturedProjectGeneration> = None;
     let launch_metadata = if should_capture_resume_context {
         let original_pushed_head_ref =
             ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(params.provenance);
-        let has_local_project_context = matches!(
-            &params.resolved.plan_context.project_context,
-            ryeos_engine::contracts::ProjectContext::LocalPath { .. }
-        );
-        let must_pin_local_snapshot = original_pushed_head_ref.is_none()
-            && has_local_project_context
-            && params.provenance.captured_snapshot_hash().is_none()
-            && (native_resume.is_some() || params.provenance.workspace_lifeline().is_some())
-            && capture_project_snapshot;
-        if must_pin_local_snapshot {
-            pending_project_snapshot = Some(
-                super::capture_live_project_snapshot(
-                    params.state,
-                    params.project_path,
-                    &params.resolved.origin_site_id,
-                    "managed_runtime_resume_pin",
-                )
-                .map_err(|error| {
-                    BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "failed to pin project snapshot for durable runtime `{}`: {error:#}",
-                        params.resolved.item_ref
-                    ))
-                })?,
-            );
-            let generation = pending_project_snapshot
-                .as_ref()
-                .expect("captured generation was assigned above");
-            tracing::debug!(
-                snapshot_hash = %generation.snapshot_hash,
-                tree_hash = %generation.tree_hash,
-                policy_hash = %generation.policy_hash,
-                "captured exact managed-launch project generation"
-            );
-        }
         let mut metadata = metadata_template.cloned().unwrap_or_default();
         let inherited_stable_project_identity = pending_project_snapshot
             .as_ref()
@@ -1448,22 +1414,22 @@ async fn prepare_managed_launch_authority(
                 .map_err(BuildAndLaunchError::Internal)?,
             ),
         };
-        let local_overlay_root = pending_project_snapshot
-            .as_ref()
-            .and_then(|generation| generation.local_overlay_root.clone())
-            .or_else(|| {
-                metadata_template
-                    .and_then(|template| template.resume_context.as_ref())
-                    .and_then(|resume| resume.local_overlay_root.clone())
-            })
-            .or_else(|| {
-                matches!(
-                    &params.provenance,
-                    ryeos_app::execution_provenance::ExecutionProvenance::RootLiveFs { .. }
-                        | ryeos_app::execution_provenance::ExecutionProvenance::BorrowedChildLiveFs { .. }
-                )
-                .then(|| params.provenance.original_project_path().to_path_buf())
-            });
+        let project_authority = if matches!(
+            &params.resolved.plan_context.project_context,
+            ryeos_engine::contracts::ProjectContext::None
+        ) {
+            ryeos_state::objects::ExecutionProjectAuthority::Projectless
+        } else {
+            params
+                .provenance
+                .execution_project_authority(&effective_caps)
+                .map_err(BuildAndLaunchError::Internal)?
+        };
+        let local_overlay_root = matches!(
+            project_authority.environment(),
+            ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
+        )
+        .then(|| params.provenance.original_project_path().to_path_buf());
         metadata = metadata.with_resume_context(ryeos_app::launch_metadata::ResumeContext {
             kind: params.resolved.kind.clone(),
             item_ref: params.resolved.item_ref.clone(),
@@ -1471,17 +1437,14 @@ async fn prepare_managed_launch_authority(
             launch_mode: params.resolved.launch_mode.clone(),
             parameters: params.parameters.clone(),
             project_context: params.resolved.plan_context.project_context.clone(),
+            project_authority,
+            lifecycle_authority: params.lifecycle_authority,
             stable_project_identity,
             local_overlay_root,
             original_snapshot_hash: pending_project_snapshot
                 .as_ref()
                 .map(|publication| publication.snapshot_hash.clone())
-                .or_else(|| {
-                    params
-                        .provenance
-                        .captured_snapshot_hash()
-                        .map(str::to_owned)
-                })
+                .or_else(|| params.provenance.pinned_snapshot_hash().map(str::to_owned))
                 .or_else(|| {
                     metadata_template
                         .and_then(|template| template.resume_context.as_ref())
@@ -1636,6 +1599,16 @@ pub async fn build_and_launch(
             .create_root_thread_with_events_and_launch_metadata(
                 &thread_id,
                 params.resolved,
+                authority
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.resume_context.as_ref())
+                    .map(|resume| resume.project_authority.clone())
+                    .ok_or_else(|| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "managed root launch has no sealed project authority"
+                        ))
+                    })?,
                 initial_events,
                 authority.launch_metadata.as_ref(),
             )?,
@@ -2745,7 +2718,11 @@ async fn prepare_follow_child_launch_inner(
         .sealed_root_request
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("follow-child launch metadata has no sealed root request"))?
-        .restore(engine)
+        .restore(
+            engine,
+            &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id)
+                .join("launch-capsule"),
+        )
         .context("restore follow-child sealed root request")?;
     if admitted_request.kind != resume.kind
         || admitted_request.item_ref != resume.item_ref
@@ -2862,6 +2839,7 @@ async fn prepare_follow_child_launch_inner(
         pre_minted_thread_id: None,
         effective_caps: resume.effective_caps.clone(),
         provenance,
+        lifecycle_authority: resume.lifecycle_authority,
         runtime_ref: resume.runtime_ref.clone(),
         parent_thread_id: None,
     };
@@ -3836,6 +3814,7 @@ async fn launch_claimed_follow_child(
             // borrowed workspace provenance.
             let params = crate::execution::runner::execution_params_from_sealed_root_request(
                 state,
+                thread_id,
                 &identity,
                 &sealed_root_request,
                 provenance_override,

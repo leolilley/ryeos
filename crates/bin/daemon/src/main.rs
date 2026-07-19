@@ -1279,8 +1279,18 @@ async fn dispatch_resume_intents(
                     )
                 }
                 reconcile::ResumeKind::NativeResume => unreachable!("handled above"),
-            }
-            .with_context(|| format!("durably enqueue successor recovery {thread_id}"))?;
+            };
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::error!(
+                        thread_id,
+                        error = %error,
+                        "successor recovery could not be enqueued; leaving it nonterminal for the bounded recovery sweep"
+                    );
+                    continue;
+                }
+            };
             tracing::info!(thread_id, ?outcome, "successor recovery classified");
             continue;
         }
@@ -1289,11 +1299,20 @@ async fn dispatch_resume_intents(
         // tool-subprocess resumes use the runner path; it transfers the same
         // durable launch claim to its detached background task.
         if intent.resume_context.runtime_ref.is_some() {
-            let outcome = ryeos_executor::execution::launch::prepare_and_spawn_existing_native_resume_recovery(
+            let outcome = match ryeos_executor::execution::launch::prepare_and_spawn_existing_native_resume_recovery(
                 state.clone(),
                 &thread_id,
-            )
-            .with_context(|| format!("durably enqueue managed native resume {thread_id}"))?;
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::error!(
+                        thread_id,
+                        error = %error,
+                        "managed native resume could not be enqueued; leaving it nonterminal for the bounded recovery sweep"
+                    );
+                    continue;
+                }
+            };
             tracing::info!(thread_id, ?outcome, "managed native resume classified");
             continue;
         }
@@ -1349,11 +1368,12 @@ async fn dispatch_resume_intents(
                     })
                     .is_some_and(|status| status.is_terminal());
                 if !terminal {
-                    return Err(anyhow::anyhow!(error)).with_context(|| {
-                        format!(
-                            "tool native resume {thread_id} failed before durable classification"
-                        )
-                    });
+                    tracing::error!(
+                        thread_id,
+                        error = %error,
+                        "tool native resume failed before classification; leaving it nonterminal for the bounded recovery sweep"
+                    );
+                    continue;
                 }
                 tracing::warn!(
                     thread_id,

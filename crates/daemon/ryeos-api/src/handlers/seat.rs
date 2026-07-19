@@ -113,9 +113,8 @@ pub async fn handle_open(
             origin_site_id: site_id,
             upstream_thread_id: None,
             requested_by: Some(caller.clone()),
-            project_root: root_admission
-                .project_root()
-                .map(std::path::Path::to_path_buf),
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,

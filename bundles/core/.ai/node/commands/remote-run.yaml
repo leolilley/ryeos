@@ -16,6 +16,22 @@ project:
   bind_parameter: project
 defaults:
   ref_bindings: {}
+  execution_policy:
+    schema_version: 1
+    ownership: daemon_owned
+    recovery: restart_recoverable
+    response: wait
+    target:
+      kind: here
+    environment:
+      kind: project_overlay
+      include_operator_vault: true
+      allowed_names: []
+    project:
+      kind: live_direct
+      access: read_write
+      child_policy:
+        kind: inherit
 dispatch:
   kind: execute_ref
   execute: service:remote/run

@@ -1625,6 +1625,19 @@ mod tests {
             "system/test",
             "directive-runtime",
         )
+        .project_authority(
+            crate::objects::ExecutionProjectAuthority::pinned(
+                "local:/work/project".to_string(),
+                Some(std::path::PathBuf::from("/work/project")),
+                "a".repeat(64),
+                crate::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: crate::objects::PinnedTerminalPublication::RetainResult,
+                },
+                crate::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
+        )
         .project_root(Some(std::path::PathBuf::from("/work/project")))
         .base_project_snapshot_hash("a".repeat(64))
         .result_project_snapshot_hash("b".repeat(64))

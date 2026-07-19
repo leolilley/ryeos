@@ -208,7 +208,15 @@ pub async fn run(
         .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     state
         .threads
-        .create_root_thread_with_id(&child_thread_id, &admitted_request)
+        .create_root_thread_with_id(
+            &child_thread_id,
+            &admitted_request,
+            provenance
+                .project_authority()
+                .clone()
+                .for_child()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
+        )
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &child_thread_id);

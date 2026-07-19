@@ -638,6 +638,12 @@ async fn dispatch_streaming_subprocess(
                     parent.parent_thread_id
                 ))
             })?;
+        let project_authority = request
+            .provenance
+            .project_authority()
+            .clone()
+            .for_child()
+            .map_err(DispatchError::Internal)?;
         state
             .threads
             .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
@@ -651,12 +657,13 @@ async fn dispatch_streaming_subprocess(
                 origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
                 upstream_thread_id: Some(durable_parent.thread_id.clone()),
                 requested_by: Some(request.acting_principal.to_string()),
-                project_root: Some(project_path.clone()),
-                base_project_snapshot_hash: state
-                    .state_store
-                    .authoritative_project_generation(&durable_parent.thread_id)
-                    .map_err(DispatchError::Internal)?
-                    .and_then(|(base, result)| result.or(base)),
+                project_root: project_authority
+                    .project_root_projection()
+                    .map(std::path::Path::to_path_buf),
+                base_project_snapshot_hash: project_authority
+                    .base_snapshot_projection()
+                    .map(str::to_owned),
+                project_authority,
                 usage_subject: request.usage_subject.clone(),
                 usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
                 captured_history_policy: None,
@@ -702,9 +709,11 @@ async fn dispatch_streaming_subprocess(
                 Vec::new(),
             )
         } else {
-            state
-                .threads
-                .create_root_thread_with_id(&thread_id, &resolved_stream)
+            state.threads.create_root_thread_with_id(
+                &thread_id,
+                &resolved_stream,
+                request.provenance.project_authority().clone(),
+            )
         }
     };
     created.map_err(|error| {
@@ -1118,6 +1127,7 @@ async fn dispatch_tool_subprocess(
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
         provenance: request.provenance.clone(),
+        lifecycle_authority: request.lifecycle_authority,
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
         runtime_ref: None,

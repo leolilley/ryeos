@@ -174,22 +174,10 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             requested_call: None,
         };
 
-        let provenance =
-            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
-                project_ctx.effective_path.clone(),
-                project_ctx.original_path.clone(),
-                project_ctx.request_engine.clone(),
-                project_ctx.temp_dir.clone().ok_or_else(|| {
-                    RouteDispatchError::Internal(
-                        "captured dispatch project has no workspace guard".to_string(),
-                    )
-                })?,
-                project_ctx.snapshot_hash.clone().ok_or_else(|| {
-                    RouteDispatchError::Internal(
-                        "captured dispatch project has no snapshot".to_string(),
-                    )
-                })?,
-            );
+        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_ctx.effective_path.clone(),
+            project_ctx.request_engine.clone(),
+        );
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: "inline",
@@ -200,6 +188,8 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             acting_principal: principal_id.as_str(),
             project_path: &project_ctx.effective_path,
             provenance,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: None,
             usage_subject: None,

@@ -789,6 +789,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": {
                 "retention": { "mode": "durable" },
                 "canonical_item_ref": "directive:test/item",
@@ -1027,6 +1028,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": {
                 "retention": { "mode": "durable" },
                 "canonical_item_ref": "directive:test/item",
@@ -1134,6 +1136,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": {
                 "retention": { "mode": "durable" },
                 "canonical_item_ref": "directive:test/imported",

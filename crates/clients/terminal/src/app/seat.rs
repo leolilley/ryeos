@@ -47,6 +47,7 @@ pub async fn open_seat_thread(
     let body = serde_json::json!({
         "item_ref": "service:seat/open",
         "ref_bindings": {},
+        "execution_policy": seat_execution_policy(),
         "parameters": {
             "surface_ref": surface_ref,
             "client_ref": "client:ryeos/tui",
@@ -73,6 +74,7 @@ async fn reattach_seat_thread(
     let body = serde_json::json!({
         "item_ref": "service:seat/list",
         "ref_bindings": {},
+        "execution_policy": seat_execution_policy(),
         "parameters": { "surface_ref": surface_ref, "project_path": project_path },
     });
     let envelope = client.signed_post("/execute", &body).await.ok()?;
@@ -109,6 +111,7 @@ async fn replay_seat_thread(client: &DaemonClient, thread_id: &str) -> Vec<SeatE
     let body = serde_json::json!({
         "item_ref": "service:events/chain_replay",
         "ref_bindings": {},
+        "execution_policy": seat_execution_policy(),
         "parameters": { "chain_root_id": thread_id },
     });
     let Ok(envelope) = client.signed_post("/execute", &body).await else {
@@ -174,6 +177,7 @@ pub async fn append_braid(
     let body = serde_json::json!({
         "item_ref": "service:seat/append",
         "ref_bindings": {},
+        "execution_policy": seat_execution_policy(),
         "parameters": { "thread_id": thread_id, "events": events },
     });
     client.signed_post("/execute", &body).await.is_ok()
@@ -187,6 +191,7 @@ pub async fn close_seat_thread(client: &DaemonClient, thread_id: &str) {
             &serde_json::json!({
                 "item_ref": "service:seat/close",
                 "ref_bindings": {},
+                "execution_policy": seat_execution_policy(),
                 "parameters": { "thread_id": thread_id },
             }),
         )
@@ -202,11 +207,32 @@ pub async fn touch_seat_thread(client: &DaemonClient, thread_id: &str) -> bool {
             &serde_json::json!({
                 "item_ref": "service:seat/touch",
                 "ref_bindings": {},
+                "execution_policy": seat_execution_policy(),
                 "parameters": { "thread_id": thread_id },
             }),
         )
         .await
         .is_ok()
+}
+
+fn seat_execution_policy() -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "ownership": "daemon_owned",
+        "recovery": "restart_recoverable",
+        "response": "wait",
+        "target": { "kind": "here" },
+        "environment": {
+            "kind": "project_overlay",
+            "include_operator_vault": true,
+            "allowed_names": [],
+        },
+        "project": {
+            "kind": "live_direct",
+            "access": "read_write",
+            "child_policy": { "kind": "inherit" },
+        },
+    })
 }
 
 #[cfg(test)]

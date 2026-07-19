@@ -16,6 +16,7 @@
 pub mod attestation;
 pub mod bundle_event;
 pub mod chain_state;
+pub mod execution_project_authority;
 pub mod item_source;
 pub mod live_input;
 pub mod project_file;
@@ -33,6 +34,12 @@ pub use bundle_event::{
     MAX_BUNDLE_EVENT_ATTACHMENT_BYTES, MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
+pub use execution_project_authority::{
+    ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionLifecycleAuthority,
+    ExecutionOwnershipAuthority, ExecutionProjectAuthority, ExecutionRecoveryAuthority,
+    LiveProjectAccess, PinnedChildProjectRealization, PinnedProjectRealization,
+    PinnedTerminalPublication,
+};
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use project_file::ProjectFile;

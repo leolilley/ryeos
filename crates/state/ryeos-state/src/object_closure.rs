@@ -1449,7 +1449,7 @@ mod tests {
         for value in [
             json!({"kind": "attestation", "schema": 0}),
             json!({"kind": "chain_state", "schema": 1}),
-            json!({"kind": "thread_snapshot", "schema": 2}),
+            json!({"kind": "thread_snapshot", "schema": 3}),
             json!({"kind": "thread_event", "schema": 1}),
             json!({"kind": "bundle_event", "schema": 1}),
             json!({

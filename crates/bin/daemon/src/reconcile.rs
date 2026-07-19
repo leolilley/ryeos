@@ -18,6 +18,48 @@ use ryeos_state::objects::ThreadStatus;
 /// and settle. A second live sweep after this boundary may revoke a provably
 /// dead exact owner; an in-memory task registration alone is not a heartbeat.
 const ACTIVE_OWNER_DEAD_SETTLEMENT_GRACE_MS: i64 = 5_000;
+const PROJECT_AUTHORITY_WAIT_MS: i64 = 15 * 60 * 1_000;
+
+fn live_project_authority_available(resume: &ResumeContext) -> Result<(), String> {
+    let ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+        canonical_root,
+        authored_project_identity,
+        ..
+    } = &resume.project_authority
+    else {
+        return Ok(());
+    };
+    let root = lillux::PinnedDirectory::open(canonical_root)
+        .map_err(|error| format!("open authorized live project root: {error:#}"))?
+        .ok_or_else(|| {
+            format!(
+                "authorized live project root is unavailable: {}",
+                canonical_root.display()
+            )
+        })?;
+    if !root
+        .entry_names()
+        .map_err(|error| format!("inspect authorized live project root: {error:#}"))?
+        .iter()
+        .any(|name| name.as_os_str() == std::ffi::OsStr::new(ryeos_engine::AI_DIR))
+    {
+        return Err(format!(
+            "authorized live project root no longer contains {}: {}",
+            ryeos_engine::AI_DIR,
+            canonical_root.display()
+        ));
+    }
+    let expected = format!("local:{}", canonical_root.display());
+    if authored_project_identity != &expected {
+        return Err("authorized live project identity no longer matches its canonical root".into());
+    }
+    Ok(())
+}
+
+fn bounded_recovery_detail(detail: &str) -> String {
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(2048).collect()
+}
 
 /// The structural shape of a continuation successor stranded `created`: never
 /// launched, links upstream, and carries a captured `ResumeContext`. Lineage wins
@@ -710,6 +752,77 @@ async fn reconcile_active_threads_inner(
         }
 
         let interrupted_spawn = pgid.is_none();
+
+        if let Some(resume) = thread
+            .runtime
+            .launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.resume_context.as_ref())
+        {
+            if resume.lifecycle_authority.recovery
+                == ryeos_state::objects::ExecutionRecoveryAuthority::None
+            {
+                state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                finalize_dead(
+                    state,
+                    &thread.thread_id,
+                    pgid,
+                    &thread.status,
+                    Some((
+                        "execution_not_restart_recoverable",
+                        json!({
+                            "reason": "the admitted execution lifecycle authority forbids restart recovery"
+                        }),
+                    )),
+                    &mut reconciled,
+                )?;
+                continue;
+            }
+            match live_project_authority_available(resume) {
+                Ok(()) => {
+                    if thread.runtime.recovery_wait.is_some() {
+                        state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                    }
+                }
+                Err(detail) => {
+                    let now_ms = lillux::time::timestamp_millis();
+                    let wait = state.state_store.wait_for_project_authority(
+                        &thread.thread_id,
+                        "waiting_for_project_authority",
+                        &bounded_recovery_detail(&detail),
+                        now_ms,
+                        now_ms.saturating_add(PROJECT_AUTHORITY_WAIT_MS),
+                    )?;
+                    if now_ms >= wait.deadline_at_ms {
+                        finalize_dead(
+                            state,
+                            &thread.thread_id,
+                            pgid,
+                            &thread.status,
+                            Some((
+                                "project_authority_unavailable",
+                                json!({
+                                    "reason": wait.reason,
+                                    "detail": wait.detail,
+                                    "started_at_ms": wait.started_at_ms,
+                                    "deadline_at_ms": wait.deadline_at_ms,
+                                }),
+                            )),
+                            &mut reconciled,
+                        )?;
+                        state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                    } else {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            deadline_at_ms = wait.deadline_at_ms,
+                            detail = %wait.detail,
+                            "thread is waiting for its admitted live project authority"
+                        );
+                    }
+                    continue;
+                }
+            }
+        }
 
         // Continuation successor safety net: a `created` thread that links upstream
         // and carries a captured `ResumeContext`. A crash between create and the
@@ -1706,23 +1819,43 @@ mod tests {
     }
 
     fn ctx() -> ResumeContext {
+        let project_context = ProjectContext::LocalPath {
+            path: PathBuf::from("/tmp/p"),
+        };
+        let stable_project_identity = Some(
+            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                std::path::Path::new("/tmp/p"),
+                "site:a",
+            )
+            .unwrap(),
+        );
+        let local_overlay_root = Some(PathBuf::from("/tmp/p"));
+        let project_root = PathBuf::from("/tmp/p");
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
+            project_root.clone(),
+            format!("local:{}", project_root.display()),
+            ryeos_state::objects::LiveProjectAccess::ReadWrite,
+            ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: lillux::sha256_hex(b"live-project\0/tmp/p"),
+                source_identity: "dotenv:/tmp/p/.env".to_string(),
+                include_operator_vault: true,
+                allowed_names: Vec::new(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
         ResumeContext {
             kind: "tool_run".into(),
             item_ref: "ns/foo".into(),
             ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "detached".into(),
             parameters: serde_json::json!({}),
-            project_context: ProjectContext::LocalPath {
-                path: PathBuf::from("/tmp/p"),
-            },
-            stable_project_identity: Some(
-                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                    std::path::Path::new("/tmp/p"),
-                    "site:a",
-                )
-                .unwrap(),
-            ),
-            local_overlay_root: Some(PathBuf::from("/tmp/p")),
+            project_context,
+            project_authority,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity,
+            local_overlay_root,
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -2040,6 +2173,7 @@ mod tests {
             frontier_id: None,
             fanout: false,
             expected_children: 1,
+            child_project_authority: None,
             children: Vec::new(),
             phase: ryeos_app::runtime_db::follow_phase::WAITING.into(),
             created_at_ms: 0,

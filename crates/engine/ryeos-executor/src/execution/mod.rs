@@ -158,6 +158,57 @@ pub(crate) fn capture_live_project_snapshot(
     )
 }
 
+pub(crate) fn derive_pinned_child_authority(
+    parent: &ryeos_state::objects::ExecutionProjectAuthority,
+    snapshot_hash: String,
+    realization: ryeos_state::objects::PinnedChildProjectRealization,
+    capability_ceiling: &[String],
+) -> Result<ryeos_state::objects::ExecutionProjectAuthority> {
+    let (stable_identity, display_path, environment) = match parent {
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+            authored_project_identity,
+            canonical_root,
+            environment,
+            ..
+        } => (
+            authored_project_identity.clone(),
+            Some(canonical_root.clone()),
+            environment.clone(),
+        ),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity,
+            display_path,
+            environment,
+            ..
+        } => (
+            stable_project_identity.clone(),
+            display_path.clone(),
+            environment.clone(),
+        ),
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless => {
+            anyhow::bail!("pin-at-spawn requires project-backed parent authority")
+        }
+    };
+    ryeos_state::objects::ExecutionProjectAuthority::pinned(
+        stable_identity,
+        display_path,
+        snapshot_hash,
+        match realization {
+            ryeos_state::objects::PinnedChildProjectRealization::ReadOnly => {
+                ryeos_state::objects::PinnedProjectRealization::ReadOnly
+            }
+            ryeos_state::objects::PinnedChildProjectRealization::CowDiscard => {
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+                }
+            }
+        },
+        environment,
+        capability_ceiling.to_vec(),
+    )?
+    .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
+}
+
 /// Capture a live project tree under a durable recovery root. The
 /// shared guard is acquired from the same descriptor-pinned authority before
 /// the first blob write and remains held until the staged root is durable.

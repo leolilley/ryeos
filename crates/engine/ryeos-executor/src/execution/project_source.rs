@@ -63,6 +63,11 @@ pub enum ProjectSource {
     /// Resolve the acting principal's HEAD ref for the project
     /// and checkout from CAS.
     PushedHead,
+    /// Execute from one explicitly selected immutable project snapshot.
+    Snapshot { hash: String },
+    /// Explicitly capture the complete live project at admission, then execute
+    /// from that pinned generation. This is never selected implicitly.
+    CaptureLiveFullProject,
 }
 
 /// Request-scoped project execution context.
@@ -162,27 +167,21 @@ pub fn resolve_project_context(
 
     let ctx = match source {
         ProjectSource::LiveFs => {
-            let captured = super::capture_live_project_snapshot(
-                state,
-                &original_path,
-                state.threads.site_id(),
-                "live_execution_admission",
-            )
-            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-            let snapshot_hash = captured.snapshot_hash.clone();
-            let authority = crate::execution::pinned_state_authority(state)?;
-            let cas_mutation_guard = authority.acquire_shared_guard()?;
-            authority.ensure_guard(&cas_mutation_guard)?;
-            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
-                state,
-                authority: &authority,
-                cas_mutation_guard: &cas_mutation_guard,
-                snapshot_hash: &snapshot_hash,
+            if !original_path.is_dir() {
+                return Err(ProjectSourceError::Other(format!(
+                    "live project root is not an accessible directory: {}",
+                    original_path.display()
+                )));
+            }
+            ResolvedProjectContext {
+                effective_path: original_path.clone(),
                 original_path,
-                checkout_id,
                 source: ProjectSource::LiveFs,
-                captured_generation: Some(captured),
-            })?
+                snapshot_hash: None,
+                temp_dir: None,
+                request_engine: Arc::clone(&state.engine),
+                captured_generation: None,
+            }
         }
         ProjectSource::PushedHead => {
             let authority = crate::execution::pinned_state_authority(state)?;
@@ -219,6 +218,41 @@ pub fn resolve_project_context(
                 checkout_id,
                 source: ProjectSource::PushedHead,
                 captured_generation: None,
+            })?
+        }
+        ProjectSource::Snapshot { hash } => {
+            let authority = crate::execution::pinned_state_authority(state)?;
+            let cas_mutation_guard = authority.acquire_shared_guard()?;
+            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
+                state,
+                authority: &authority,
+                cas_mutation_guard: &cas_mutation_guard,
+                snapshot_hash: hash,
+                original_path,
+                checkout_id,
+                source: source.clone(),
+                captured_generation: None,
+            })?
+        }
+        ProjectSource::CaptureLiveFullProject => {
+            let captured = crate::execution::capture_live_project_snapshot(
+                state,
+                &original_path,
+                state.threads.site_id(),
+                "explicit-execution-policy-capture",
+            )?;
+            let snapshot_hash = captured.snapshot_hash().to_string();
+            let authority = crate::execution::pinned_state_authority(state)?;
+            let cas_mutation_guard = authority.acquire_shared_guard()?;
+            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
+                state,
+                authority: &authority,
+                cas_mutation_guard: &cas_mutation_guard,
+                snapshot_hash: &snapshot_hash,
+                original_path,
+                checkout_id,
+                source: source.clone(),
+                captured_generation: Some(captured),
             })?
         }
     };

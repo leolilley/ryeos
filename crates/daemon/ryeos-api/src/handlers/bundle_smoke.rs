@@ -255,6 +255,7 @@ async fn run_entry(
         acting_principal: ctx.fingerprint.as_str(),
         project_path: source,
         provenance,
+        lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
         original_root_kind: kind,
         pre_minted_thread_id: None,
         usage_subject: None,

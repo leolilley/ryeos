@@ -123,6 +123,7 @@ pub struct NewThreadRecord {
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub project_root: Option<PathBuf>,
+    pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     /// Immutable project generation that authorizes this thread from birth.
     pub base_project_snapshot_hash: Option<String>,
     pub usage_subject: Option<UsageSubject>,
@@ -388,6 +389,9 @@ fn validated_follow_candidate_cost(candidate: &Value) -> Result<Option<Value>> {
 }
 
 fn validate_follow_reservation_shape(seed: &runtime_db::NewFollowWaiter) -> Result<()> {
+    if let Some(authority) = &seed.child_project_authority {
+        authority.validate()?;
+    }
     let expected = usize::try_from(seed.expected_children)
         .context("follow expected_children does not fit usize")?;
     if expected == 0 {
@@ -622,6 +626,10 @@ pub struct ThreadListItem {
     pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub project_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -847,6 +855,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         upstream_thread_id: thread.upstream_thread_id.clone(),
         requested_by: thread.requested_by.clone(),
         project_root: thread.project_root.clone(),
+        project_authority: thread.project_authority.clone(),
         base_project_snapshot_hash: thread.base_project_snapshot_hash.clone(),
         result_project_snapshot_hash: None,
         created_at: now.clone(),
@@ -887,9 +896,13 @@ fn build_continuation_snapshot(
             base_project_snapshot_hash
         );
     }
+    if thread.project_authority != resume.project_authority {
+        bail!("continuation successor project authority contradicts captured launch authority");
+    }
     let mut snapshot = build_snapshot(thread);
     snapshot.project_root = project_root;
     snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
+    snapshot.project_authority = resume.project_authority.clone();
     Ok(snapshot)
 }
 
@@ -2426,26 +2439,26 @@ impl StateStore {
                 &thread_row.chain_root_id,
                 &thread_row.thread_id,
             )?;
-            if let (Some(authoritative), Some(requested)) = (
-                updated_snapshot.base_project_snapshot_hash.as_deref(),
-                base_project_snapshot_hash,
-            ) {
-                if authoritative != requested {
+            let authoritative_base = updated_snapshot
+                .project_authority
+                .base_snapshot_projection()
+                .map(str::to_owned);
+            if let Some(requested_base) = base_project_snapshot_hash {
+                if Some(requested_base) != authoritative_base.as_deref() {
                     bail!(
-                        "mark_running project snapshot mismatch for {thread_id}: authoritative {authoritative}, requested {requested}"
+                        "mark_running project snapshot mismatch for {thread_id}: authoritative {:?}, requested {:?}",
+                        authoritative_base,
+                        requested_base,
                     );
                 }
             }
-            let base_project_snapshot_hash = base_project_snapshot_hash
-                .map(ToOwned::to_owned)
-                .or_else(|| updated_snapshot.base_project_snapshot_hash.clone());
 
             let now = lillux::time::iso8601_now();
             updated_snapshot.status = ThreadStatus::Running;
             updated_snapshot.updated_at.clone_from(&now);
             updated_snapshot.started_at = Some(now);
             updated_snapshot.finished_at = None;
-            updated_snapshot.base_project_snapshot_hash = base_project_snapshot_hash;
+            updated_snapshot.base_project_snapshot_hash = authoritative_base;
 
             initial_events.push(NewEventRecord {
                 event_type: "thread_started".to_string(),
@@ -3743,6 +3756,15 @@ impl StateStore {
             .runtime_db
             .get_runtime_info(thread_id)?
             .unwrap_or_default();
+        let lifecycle_authority = runtime
+            .launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.resume_context.as_ref())
+            .map(|resume| resume.lifecycle_authority);
+        let project_authority = g
+            .state_db
+            .read_authoritative_thread_snapshot(&thread_row.chain_root_id, thread_id)?
+            .map(|snapshot| snapshot.project_authority);
 
         let successor_thread_id = if is_terminal_status(&thread_row.status) {
             queries::continuation_successor(g.state_db.projection(), thread_id)?
@@ -3764,6 +3786,8 @@ impl StateStore {
             successor_thread_id,
             requested_by: thread_row.requested_by,
             project_root: thread_row.project_root,
+            project_authority,
+            lifecycle_authority,
             created_at: thread_row.created_at,
             updated_at: thread_row.updated_at,
             started_at: thread_row.started_at,
@@ -3814,6 +3838,11 @@ impl StateStore {
         let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
             anyhow!("continuation successor {thread_id} is missing runtime state")
         })?;
+        let lifecycle_authority = runtime
+            .launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.resume_context.as_ref())
+            .map(|resume| resume.lifecycle_authority);
         Ok(Some(ThreadDetail {
             thread_id: snapshot.thread_id,
             chain_root_id: snapshot.chain_root_id,
@@ -3830,6 +3859,8 @@ impl StateStore {
             project_root: snapshot
                 .project_root
                 .map(|path| path.to_string_lossy().into_owned()),
+            project_authority: Some(snapshot.project_authority),
+            lifecycle_authority,
             created_at: snapshot.created_at,
             updated_at: snapshot.updated_at,
             started_at: snapshot.started_at,
@@ -4664,6 +4695,12 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
+                project_authority: None,
+                lifecycle_authority: runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.resume_context.as_ref())
+                    .map(|resume| resume.lifecycle_authority),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             });
@@ -4850,6 +4887,12 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
+                project_authority: None,
+                lifecycle_authority: runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.resume_context.as_ref())
+                    .map(|resume| resume.lifecycle_authority),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -4889,6 +4932,12 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
+                project_authority: None,
+                lifecycle_authority: runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.resume_context.as_ref())
+                    .map(|resume| resume.lifecycle_authority),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -4962,6 +5011,29 @@ impl StateStore {
         queries::active_thread_count(g.state_db.projection())
     }
 
+    pub fn wait_for_project_authority(
+        &self,
+        thread_id: &str,
+        reason: &str,
+        detail: &str,
+        now_ms: i64,
+        deadline_at_ms: i64,
+    ) -> Result<runtime_db::RecoveryWaitDisposition> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.wait_for_project_authority(
+            thread_id,
+            reason,
+            detail,
+            now_ms,
+            deadline_at_ms,
+        )
+    }
+
+    pub fn clear_recovery_wait(&self, thread_id: &str) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?.runtime_db.clear_recovery_wait(thread_id)
+    }
+
     pub fn authoritative_result_project_snapshot(&self, thread_id: &str) -> Result<Option<String>> {
         let g = self.lock()?;
         Ok(g.state_db
@@ -5012,6 +5084,7 @@ impl StateStore {
                 roots.insert(frozen);
             }
         }
+        roots.extend(g.runtime_db.handoff_project_snapshot_roots()?);
         Ok(roots.into_iter().collect())
     }
 
@@ -5720,6 +5793,7 @@ impl StateStore {
         parent_thread_id: &str,
         request_hash: &str,
         proposed_child_thread_id: &str,
+        child_project_authority: Option<&ryeos_state::objects::ExecutionProjectAuthority>,
     ) -> Result<String> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
@@ -5733,11 +5807,32 @@ impl StateStore {
             parent_thread_id,
             request_hash,
             proposed_child_thread_id,
+            child_project_authority,
         )
     }
 
     pub fn detached_spawn_intents(&self) -> Result<Vec<runtime_db::DetachedSpawnIntent>> {
         self.lock()?.runtime_db.detached_spawn_intents()
+    }
+
+    pub fn get_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<runtime_db::DetachedSpawnIntent>> {
+        self.lock()?
+            .runtime_db
+            .get_detached_spawn_intent(operation_id)
+    }
+
+    pub fn bind_detached_spawn_project_authority(
+        &self,
+        operation_id: &str,
+        child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_detached_spawn_project_authority(operation_id, child_project_authority)
     }
 
     // ── Follow waiters ───────────────────────────────────────────────────
@@ -6850,6 +6945,7 @@ mod tests {
             frontier_id: None,
             fanout: true,
             expected_children: 2,
+            child_project_authority: None,
             children: vec![runtime_db::FollowWaiterChild {
                 item_index: 0,
                 item_ref: "tool:test/one".to_string(),
@@ -6922,6 +7018,7 @@ mod tests {
             frontier_id: None,
             fanout: true,
             expected_children: u32::MAX,
+            child_project_authority: None,
         };
 
         let error = validate_follow_reservation_shape(&seed).unwrap_err();
@@ -6956,6 +7053,7 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("fp:test".to_string()),
             project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
@@ -7186,6 +7284,25 @@ mod tests {
             ),
             _ => None,
         };
+        let local_overlay_root = Some(PathBuf::from("/work/project"));
+        let original_snapshot_hash = Some("a".repeat(64));
+        let project_root = PathBuf::from("/work/project");
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            format!("local:{}", project_root.display()),
+            Some(project_root),
+            original_snapshot_hash.clone().unwrap(),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: lillux::sha256_hex(b"live-project\0/work/project"),
+                source_identity: "dotenv:/work/project/.env".to_string(),
+                include_operator_vault: true,
+                allowed_names: Vec::new(),
+            },
+            Vec::new(),
+        )
+        .unwrap();
         crate::launch_metadata::ResumeContext {
             kind: "directive".to_string(),
             item_ref: "directive:test".to_string(),
@@ -7193,9 +7310,12 @@ mod tests {
             launch_mode: "inline".to_string(),
             parameters: json!({}),
             project_context,
+            project_authority,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             stable_project_identity,
-            local_overlay_root: Some(PathBuf::from("/work/project")),
-            original_snapshot_hash: Some("a".repeat(64)),
+            local_overlay_root,
+            original_snapshot_hash,
             original_pushed_head_ref: None,
             state_root: None,
             current_site_id: "site:test".to_string(),
@@ -7220,6 +7340,7 @@ mod tests {
         let resume = continuation_resume_context(ProjectContext::LocalPath {
             path: PathBuf::from("/work/project"),
         });
+        record.project_authority = resume.project_authority.clone();
         record.project_root = Some(PathBuf::from("/wrong/caller/path"));
         assert!(build_continuation_snapshot(&record, &resume).is_err());
         record.project_root = Some(PathBuf::from("/work/project"));
@@ -7241,6 +7362,7 @@ mod tests {
         let resume = continuation_resume_context(ProjectContext::LocalPath {
             path: PathBuf::from("/work/project"),
         });
+        successor.project_authority = resume.project_authority.clone();
         let outcome = store
             .create_or_get_continuation_for_test(
                 &successor,

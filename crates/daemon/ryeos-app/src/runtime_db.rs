@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
@@ -80,6 +80,7 @@ pub struct RuntimeInfo {
     /// another service response. Internal owners use `get_launch_metadata`.
     #[serde(skip_serializing)]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
+    pub recovery_wait: Option<RecoveryWaitDisposition>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -88,6 +89,7 @@ pub struct RuntimeThreadHistoryDiscardReport {
     pub thread_commands: usize,
     pub hook_dispatch_ledger: usize,
     pub detached_spawn_intents: usize,
+    pub recovery_waits: usize,
     pub thread_launch_claims: usize,
     pub thread_launch_epochs: usize,
     pub execution_workspaces: usize,
@@ -104,6 +106,7 @@ impl RuntimeThreadHistoryDiscardReport {
             + self.thread_commands
             + self.hook_dispatch_ledger
             + self.detached_spawn_intents
+            + self.recovery_waits
             + self.thread_launch_claims
             + self.thread_launch_epochs
             + self.execution_workspaces
@@ -297,6 +300,58 @@ pub struct DetachedSpawnIntent {
     pub parent_thread_id: String,
     pub request_hash: String,
     pub child_thread_id: String,
+    pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveryWaitDisposition {
+    pub thread_id: String,
+    pub reason: String,
+    pub detail: String,
+    pub started_at_ms: i64,
+    pub deadline_at_ms: i64,
+}
+
+fn decode_detached_spawn_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<DetachedSpawnIntent> {
+    Ok(DetachedSpawnIntent {
+        operation_id: row.get(0)?,
+        parent_thread_id: row.get(1)?,
+        request_hash: row.get(2)?,
+        child_thread_id: row.get(3)?,
+        child_project_authority: row
+            .get::<_, Option<String>>(4)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+    })
+}
+
+fn validate_runtime_thread_id(thread_id: &str) -> Result<()> {
+    if thread_id.is_empty()
+        || thread_id.trim() != thread_id
+        || thread_id.len() > 256
+        || thread_id.chars().any(char::is_control)
+    {
+        bail!("runtime thread id is not canonical");
+    }
+    Ok(())
+}
+
+fn validate_bounded_runtime_text(label: &str, value: &str, max_bytes: usize) -> Result<()> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > max_bytes
+        || value.chars().any(char::is_control)
+    {
+        bail!("{label} is not canonical or exceeds {max_bytes} bytes");
+    }
+    Ok(())
 }
 
 /// Validate the closed command vocabulary at the durable database boundary.
@@ -516,6 +571,7 @@ pub struct NewFollowWaiter {
     pub frontier_id: Option<String>,
     pub fanout: bool,
     pub expected_children: u32,
+    pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
 }
 
 #[derive(Debug, Clone)]
@@ -570,6 +626,7 @@ pub struct FollowWaiter {
     pub frontier_id: Option<String>,
     pub fanout: bool,
     pub expected_children: u32,
+    pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
     pub children: Vec<FollowWaiterChild>,
     pub phase: String,
     pub created_at_ms: i64,
@@ -667,7 +724,17 @@ CREATE TABLE IF NOT EXISTS detached_spawn_intent (
     parent_thread_id TEXT NOT NULL,
     request_hash TEXT NOT NULL,
     child_thread_id TEXT NOT NULL UNIQUE,
+    child_project_authority TEXT,
     created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS thread_recovery_wait (
+    thread_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    started_at_ms INTEGER NOT NULL,
+    deadline_at_ms INTEGER NOT NULL,
+    CHECK (deadline_at_ms > started_at_ms)
 );
 
 CREATE TABLE IF NOT EXISTS thread_launch_claim (
@@ -716,7 +783,8 @@ CREATE TABLE IF NOT EXISTS follow_waiter (
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     fanout INTEGER NOT NULL DEFAULT 0,
-    expected_children INTEGER NOT NULL DEFAULT 1
+    expected_children INTEGER NOT NULL DEFAULT 1,
+    child_project_authority TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_successor
@@ -1023,7 +1091,48 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "child_project_authority",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_recovery_wait",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reason",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "detail",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "started_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "deadline_at_ms",
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
@@ -1251,6 +1360,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_project_authority",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },
@@ -1932,6 +2047,7 @@ impl RuntimeDb {
                 thread_commands: count(&self.conn, "thread_commands")?,
                 hook_dispatch_ledger: count(&self.conn, "hook_dispatch_ledger")?,
                 detached_spawn_intents: count(&self.conn, "detached_spawn_intent")?,
+                recovery_waits: count(&self.conn, "thread_recovery_wait")?,
                 thread_launch_claims: count(&self.conn, "thread_launch_claim")?,
                 thread_launch_epochs: count(&self.conn, "thread_launch_epoch")?,
                 execution_workspaces: count(&self.conn, "execution_workspace")?,
@@ -1956,6 +2072,7 @@ impl RuntimeDb {
             seat_leases: conn.execute("DELETE FROM seat_lease", [])?,
             hook_dispatch_ledger: conn.execute("DELETE FROM hook_dispatch_ledger", [])?,
             detached_spawn_intents: conn.execute("DELETE FROM detached_spawn_intent", [])?,
+            recovery_waits: conn.execute("DELETE FROM thread_recovery_wait", [])?,
             thread_runtime: conn.execute("DELETE FROM thread_runtime", [])?,
         };
         conn.execute(
@@ -2044,6 +2161,7 @@ impl RuntimeDb {
         parent_thread_id: &str,
         request_hash: &str,
         proposed_child_thread_id: &str,
+        child_project_authority: Option<&ryeos_state::objects::ExecutionProjectAuthority>,
     ) -> Result<String> {
         validate_detached_spawn_intent(
             operation_id,
@@ -2054,47 +2172,129 @@ impl RuntimeDb {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO detached_spawn_intent(
-                operation_id, parent_thread_id, request_hash, child_thread_id, created_at_ms
-             ) VALUES(?1, ?2, ?3, ?4, ?5)
+                operation_id, parent_thread_id, request_hash, child_thread_id,
+                child_project_authority, created_at_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(operation_id) DO NOTHING",
             params![
                 operation_id,
                 parent_thread_id,
                 request_hash,
                 proposed_child_thread_id,
+                child_project_authority
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 lillux::time::timestamp_millis(),
             ],
         )?;
-        let (stored_parent, stored_request, child_thread_id): (String, String, String) = tx
-            .query_row(
-                "SELECT parent_thread_id, request_hash, child_thread_id
+        let (stored_parent, stored_request, child_thread_id, stored_authority): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT parent_thread_id, request_hash, child_thread_id, child_project_authority
                    FROM detached_spawn_intent WHERE operation_id=?1",
-                params![operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
+            params![operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
         if stored_parent != parent_thread_id || stored_request != request_hash {
             bail!(
                 "detached operation `{operation_id}` was reused with different parent or request authority"
+            );
+        }
+        let stored_authority = stored_authority
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        if child_project_authority.is_some() && stored_authority.as_ref() != child_project_authority
+        {
+            bail!(
+                "detached operation `{operation_id}` was reused with different project authority"
             );
         }
         tx.commit()?;
         Ok(child_thread_id)
     }
 
+    /// Bind the project authority selected for a previously-reserved detached
+    /// operation. Reservation and authority selection are deliberately two
+    /// phases: the stable child identity is durable before an explicit project
+    /// capture starts, while the capture itself is not authoritative until its
+    /// exact snapshot authority is sealed here. Concurrent retries may bind the
+    /// same value; a different value is an authority conflict.
+    pub fn bind_detached_spawn_project_authority(
+        &self,
+        operation_id: &str,
+        child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<()> {
+        child_project_authority.validate()?;
+        let encoded = serde_json::to_string(child_project_authority)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE detached_spawn_intent
+                SET child_project_authority=?2
+              WHERE operation_id=?1 AND child_project_authority IS NULL",
+            params![operation_id, encoded],
+        )?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT child_project_authority FROM detached_spawn_intent WHERE operation_id=?1",
+                params![operation_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
+        let stored = stored
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .ok_or_else(|| {
+                anyhow!("detached operation `{operation_id}` project authority was not bound")
+            })?;
+        if stored != *child_project_authority {
+            bail!("detached operation `{operation_id}` was bound to different project authority");
+        }
+        debug_assert!(changed <= 1);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<DetachedSpawnIntent>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                        child_project_authority
+                   FROM detached_spawn_intent WHERE operation_id=?1",
+                params![operation_id],
+                decode_detached_spawn_intent,
+            )
+            .optional()?;
+        if let Some(intent) = &row {
+            validate_detached_spawn_intent(
+                &intent.operation_id,
+                &intent.parent_thread_id,
+                &intent.request_hash,
+                &intent.child_thread_id,
+            )?;
+            if let Some(authority) = &intent.child_project_authority {
+                authority.validate()?;
+            }
+        }
+        Ok(row)
+    }
+
     pub fn detached_spawn_intents(&self) -> Result<Vec<DetachedSpawnIntent>> {
         let mut statement = self.conn.prepare(
-            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id
+            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id, child_project_authority
                FROM detached_spawn_intent ORDER BY created_at_ms, operation_id",
         )?;
         let intents = statement
-            .query_map([], |row| {
-                Ok(DetachedSpawnIntent {
-                    operation_id: row.get(0)?,
-                    parent_thread_id: row.get(1)?,
-                    request_hash: row.get(2)?,
-                    child_thread_id: row.get(3)?,
-                })
-            })?
+            .query_map([], decode_detached_spawn_intent)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(anyhow::Error::from)?;
         for intent in &intents {
@@ -2106,6 +2306,88 @@ impl RuntimeDb {
             )?;
         }
         Ok(intents)
+    }
+
+    /// Snapshot objects referenced by durable handoff intents before their
+    /// child rows become authoritative chain roots. GC must retain these roots
+    /// for the entire intent lifetime, including crash recovery between
+    /// authority sealing and child birth.
+    pub fn handoff_project_snapshot_roots(&self) -> Result<Vec<String>> {
+        let mut roots = BTreeSet::new();
+        for intent in self.detached_spawn_intents()? {
+            if let Some(hash) = intent
+                .child_project_authority
+                .as_ref()
+                .and_then(|authority| authority.base_snapshot_projection())
+            {
+                roots.insert(hash.to_string());
+            }
+        }
+        for waiter in self.list_follow_waiters()? {
+            if let Some(hash) = waiter
+                .child_project_authority
+                .as_ref()
+                .and_then(|authority| authority.base_snapshot_projection())
+            {
+                roots.insert(hash.to_string());
+            }
+        }
+        Ok(roots.into_iter().collect())
+    }
+
+    pub fn wait_for_project_authority(
+        &self,
+        thread_id: &str,
+        reason: &str,
+        detail: &str,
+        now_ms: i64,
+        deadline_at_ms: i64,
+    ) -> Result<RecoveryWaitDisposition> {
+        validate_runtime_thread_id(thread_id)?;
+        validate_bounded_runtime_text("recovery wait reason", reason, 128)?;
+        validate_bounded_runtime_text("recovery wait detail", detail, 4096)?;
+        if deadline_at_ms <= now_ms {
+            bail!("recovery wait deadline must be later than its start");
+        }
+        self.conn.execute(
+            "INSERT INTO thread_recovery_wait(
+                thread_id, reason, detail, started_at_ms, deadline_at_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(thread_id) DO UPDATE SET
+                reason=excluded.reason,
+                detail=excluded.detail",
+            params![thread_id, reason, detail, now_ms, deadline_at_ms],
+        )?;
+        self.recovery_wait(thread_id)?
+            .ok_or_else(|| anyhow!("recovery wait disappeared for thread {thread_id}"))
+    }
+
+    pub fn recovery_wait(&self, thread_id: &str) -> Result<Option<RecoveryWaitDisposition>> {
+        self.conn
+            .query_row(
+                "SELECT thread_id, reason, detail, started_at_ms, deadline_at_ms
+                   FROM thread_recovery_wait WHERE thread_id=?1",
+                params![thread_id],
+                |row| {
+                    Ok(RecoveryWaitDisposition {
+                        thread_id: row.get(0)?,
+                        reason: row.get(1)?,
+                        detail: row.get(2)?,
+                        started_at_ms: row.get(3)?,
+                        deadline_at_ms: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(anyhow::Error::from)
+    }
+
+    pub fn clear_recovery_wait(&self, thread_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM thread_recovery_wait WHERE thread_id=?1",
+            params![thread_id],
+        )?;
+        Ok(())
     }
 
     /// Seal the exact callback response for a previously reserved dispatch.
@@ -2929,6 +3211,10 @@ impl RuntimeDb {
                     params![&thread_id],
                 )?;
                 deleted += self.conn.execute(
+                    "DELETE FROM thread_recovery_wait WHERE thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
                     "DELETE FROM thread_commands WHERE thread_id=?1",
                     params![&thread_id],
                 )?;
@@ -3313,6 +3599,7 @@ impl RuntimeDb {
                 "incomplete durable stop tombstone for thread {thread_id}: timestamp and intent must be present together"
             );
         }
+        let recovery_wait = self.recovery_wait(thread_id)?;
         Ok(Some(RuntimeInfo {
             pid,
             pgid,
@@ -3321,6 +3608,7 @@ impl RuntimeDb {
             stop_requested_at_ms,
             stop_intent,
             launch_metadata,
+            recovery_wait,
         }))
     }
 
@@ -4444,8 +4732,9 @@ impl RuntimeDb {
             "INSERT INTO follow_waiter (
                  follow_key, parent_thread_id, parent_chain_root_id,
                  follow_node, graph_run_id, step_count, frontier_id,
-                 fanout, expected_children, phase, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'reserved', ?10, ?10)
+                 fanout, expected_children, child_project_authority,
+                 phase, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'reserved', ?11, ?11)
              ON CONFLICT(follow_key) DO NOTHING",
             params![
                 seed.follow_key,
@@ -4457,6 +4746,10 @@ impl RuntimeDb {
                 seed.frontier_id,
                 seed.fanout,
                 seed.expected_children,
+                seed.child_project_authority
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 now,
             ],
         )?;
@@ -4469,6 +4762,7 @@ impl RuntimeDb {
             || existing.frontier_id != seed.frontier_id
             || existing.fanout != seed.fanout
             || existing.expected_children != seed.expected_children
+            || existing.child_project_authority != seed.child_project_authority
         {
             bail!(
                 "follow reservation conflict for follow_key {}: seed does not match the persisted row",
@@ -5292,7 +5586,7 @@ impl RuntimeDb {
 
 const FOLLOW_WAITER_COLUMNS: &str = "follow_key, parent_thread_id, parent_chain_root_id, \
      parent_successor_thread_id, follow_node, graph_run_id, step_count, frontier_id, \
-     fanout, expected_children, phase, created_at_ms, updated_at_ms";
+     fanout, expected_children, child_project_authority, phase, created_at_ms, updated_at_ms";
 
 const FOLLOW_WAITER_SUMMARY_QUERY_BATCH: usize = 500;
 const FOLLOW_WAITER_SUMMARY_COLUMNS: &str = "fw.follow_key, fw.parent_thread_id, \
@@ -5310,6 +5604,17 @@ const FOLLOW_WAITER_SUMMARY_COLUMNS: &str = "fw.follow_key, fw.parent_thread_id,
      fw.created_at_ms";
 
 fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWaiter> {
+    let child_project_authority = row
+        .get::<_, Option<String>>(10)?
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
     Ok(FollowWaiter {
         follow_key: row.get(0)?,
         parent_thread_id: row.get(1)?,
@@ -5321,10 +5626,11 @@ fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWai
         frontier_id: row.get(7)?,
         fanout: row.get(8)?,
         expected_children: row.get(9)?,
+        child_project_authority,
         children: Vec::new(),
-        phase: row.get(10)?,
-        created_at_ms: row.get(11)?,
-        updated_at_ms: row.get(12)?,
+        phase: row.get(11)?,
+        created_at_ms: row.get(12)?,
+        updated_at_ms: row.get(13)?,
     })
 }
 
@@ -5714,6 +6020,7 @@ mod tests {
                 "T-parent",
                 &request_hash,
                 "T-child-first",
+                None,
             )
             .unwrap(),
             "T-child-first"
@@ -5724,6 +6031,7 @@ mod tests {
                 "T-parent",
                 &request_hash,
                 "T-child-retry",
+                None,
             )
             .unwrap(),
             "T-child-first"
@@ -5734,6 +6042,7 @@ mod tests {
                 "T-parent",
                 &"f".repeat(64),
                 "T-child-retry",
+                None,
             )
             .is_err());
     }
@@ -7130,6 +7439,7 @@ mod tests {
             frontier_id: None,
             fanout: false,
             expected_children: 1,
+            child_project_authority: None,
         }
     }
 

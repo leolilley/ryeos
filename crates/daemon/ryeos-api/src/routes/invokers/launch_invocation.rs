@@ -155,22 +155,10 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             item_ref_kind = item_ref.kind(),
         );
 
-        let launch_provenance =
-            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
-                project_ctx.effective_path.clone(),
-                project_ctx.original_path.clone(),
-                project_ctx.request_engine.clone(),
-                project_ctx.temp_dir.clone().ok_or_else(|| {
-                    RouteDispatchError::Internal(
-                        "captured route project has no workspace guard".to_string(),
-                    )
-                })?,
-                project_ctx.snapshot_hash.clone().ok_or_else(|| {
-                    RouteDispatchError::Internal(
-                        "captured route project has no snapshot".to_string(),
-                    )
-                })?,
-            );
+        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_ctx.effective_path.clone(),
+            project_ctx.request_engine.clone(),
+        );
         let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,

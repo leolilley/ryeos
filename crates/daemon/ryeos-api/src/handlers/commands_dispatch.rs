@@ -116,20 +116,10 @@ pub async fn handle(
         plan_ctx,
         requested_call: None,
     };
-    let provenance =
-        ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
-            project_ctx.effective_path.clone(),
-            project_ctx.original_path.clone(),
-            project_ctx.request_engine.clone(),
-            project_ctx.temp_dir.clone().ok_or_else(|| {
-                HandlerError::Internal(
-                    "captured command project has no workspace guard".to_string(),
-                )
-            })?,
-            project_ctx.snapshot_hash.clone().ok_or_else(|| {
-                HandlerError::Internal("captured command project has no snapshot".to_string())
-            })?,
-        );
+    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+        project_ctx.effective_path.clone(),
+        project_ctx.request_engine.clone(),
+    );
     let kind = item_ref.split(':').next().unwrap_or("");
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
         launch_mode: "inline",
@@ -140,6 +130,7 @@ pub async fn handle(
         acting_principal: ctx.fingerprint.as_str(),
         project_path: &project_ctx.effective_path,
         provenance,
+        lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
         original_root_kind: kind,
         pre_minted_thread_id: None,
         usage_subject: None,

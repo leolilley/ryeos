@@ -17,6 +17,28 @@ project:
   no_project_flag: true
 defaults:
   ref_bindings: {}
+  execution_policy:
+    schema_version: 1
+    ownership: daemon_owned
+    recovery: restart_recoverable
+    response: wait
+    target:
+      kind: here
+    environment:
+      kind: project_overlay
+      include_operator_vault: true
+      allowed_names: []
+    project:
+      kind: pinned
+      source:
+        kind: capture_live
+        scope: full_project
+      realization:
+        kind: cow
+        terminal_publication:
+          kind: retain_result
+      child_policy:
+        kind: inherit
 dispatch:
   kind: execute_ref
   execute: service:remote/execute

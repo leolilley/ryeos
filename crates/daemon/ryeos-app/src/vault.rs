@@ -336,6 +336,94 @@ pub fn read_required_secrets(
     Ok(out)
 }
 
+pub fn read_required_secrets_with_authority(
+    vault: &dyn NodeVault,
+    principal: &str,
+    required_secrets: &[String],
+    authority: &ryeos_state::objects::EnvironmentAuthority,
+    project_root: Option<&std::path::Path>,
+) -> std::result::Result<HashMap<String, String>, VaultReadError> {
+    if required_secrets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    for key in required_secrets {
+        validate_operator_secret_name(key)?;
+        crate::process::validate_spawn_secret_name(key)
+            .map_err(|error| anyhow!("vault: invalid declared secret `{key}`: {error:#}"))?;
+    }
+    let allowed_names = match authority {
+        ryeos_state::objects::EnvironmentAuthority::None => &[][..],
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { allowed_names, .. }
+        | ryeos_state::objects::EnvironmentAuthority::Vault { allowed_names, .. }
+        | ryeos_state::objects::EnvironmentAuthority::Delegated { allowed_names, .. } => {
+            allowed_names.as_slice()
+        }
+    };
+    let requested: Vec<String> = required_secrets
+        .iter()
+        .filter(|name| allowed_names.is_empty() || allowed_names.binary_search(name).is_ok())
+        .cloned()
+        .collect();
+    let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
+    let mut resolved = match authority {
+        ryeos_state::objects::EnvironmentAuthority::None => HashMap::new(),
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+            include_operator_vault,
+            ..
+        } => {
+            let root = project_root.ok_or_else(|| {
+                VaultReadError::Internal(anyhow!(
+                    "project environment authority has no authorized project root"
+                ))
+            })?;
+            let mut upstream = if *include_operator_vault {
+                vault.read_all(principal)?
+            } else {
+                HashMap::new()
+            };
+            let wanted: HashSet<String> = requested
+                .iter()
+                .filter(|name| !upstream.contains_key(name.as_str()))
+                .cloned()
+                .collect();
+            let overlay = ryeos_vault::dotenv::read_dotenv_overlay(&[root.to_path_buf()], &wanted)
+                .map_err(|error| VaultReadError::Internal(anyhow!("dotenv overlay: {error:#}")))?;
+            for (name, value) in overlay {
+                upstream.entry(name).or_insert(value);
+            }
+            upstream
+        }
+        ryeos_state::objects::EnvironmentAuthority::Vault { namespace, .. } => {
+            if namespace != "operator" {
+                return Err(VaultReadError::Internal(anyhow!(
+                    "unsupported vault namespace {namespace:?}; this node exposes only the explicit operator namespace"
+                )));
+            }
+            vault.read_all(principal)?
+        }
+        ryeos_state::objects::EnvironmentAuthority::Delegated {
+            provider, grant_id, ..
+        } => {
+            return Err(VaultReadError::Internal(anyhow!(
+                "delegated environment provider {provider:?} grant {grant_id:?} is not installed"
+            )));
+        }
+    };
+    resolved.retain(|name, _| requested_set.contains(name.as_str()));
+    let missing: Vec<String> = required_secrets
+        .iter()
+        .filter(|name| !resolved.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return Err(VaultReadError::MissingSecrets {
+            principal: principal.to_string(),
+            names: missing,
+        });
+    }
+    Ok(resolved)
+}
+
 fn read_declared_host_env(required_secrets: &[String]) -> Result<HashMap<String, String>> {
     let mut out = HashMap::new();
     for key in required_secrets {

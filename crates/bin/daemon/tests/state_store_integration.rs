@@ -84,6 +84,7 @@ mod integration_tests {
             upstream_thread_id: upstream.map(|s| s.to_string()),
             requested_by: Some("user:test".to_string()),
             project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
@@ -100,7 +101,16 @@ mod integration_tests {
         upstream: Option<&str>,
     ) -> NewThreadRecord {
         let mut thread = make_thread(thread_id, chain_root_id, kind, item_ref, upstream);
-        thread.project_root = Some(std::path::PathBuf::from("/tmp/p"));
+        let project_root = std::path::PathBuf::from("/tmp/p");
+        thread.project_root = Some(project_root.clone());
+        thread.project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
+            project_root,
+            "local:/tmp/p".to_string(),
+            ryeos_state::objects::LiveProjectAccess::ReadWrite,
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
         thread
     }
 
@@ -121,6 +131,7 @@ mod integration_tests {
             frontier_id: None,
             fanout: false,
             expected_children: 1,
+            child_project_authority: None,
         }
     }
 
@@ -289,6 +300,16 @@ mod integration_tests {
                         project_context: ProjectContext::LocalPath {
                             path: std::path::PathBuf::from("/tmp/p"),
                         },
+                        project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
+                            std::path::PathBuf::from("/tmp/p"),
+                            "local:/tmp/p".to_string(),
+                            ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                            ryeos_state::objects::EnvironmentAuthority::None,
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                        lifecycle_authority:
+                            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
                         stable_project_identity: Some(
                             ryeos_app::launch_metadata::StableProjectIdentity::from_path(
                                 std::path::Path::new("/tmp/p"),
@@ -1393,6 +1414,16 @@ mod integration_tests {
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
+                std::path::PathBuf::from("/tmp/p"),
+                "local:/tmp/p".to_string(),
+                ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             stable_project_identity: Some(
                 ryeos_app::launch_metadata::StableProjectIdentity::from_path(
                     std::path::Path::new("/tmp/p"),
@@ -1521,6 +1552,16 @@ mod integration_tests {
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
+                std::path::PathBuf::from("/tmp/p"),
+                "local:/tmp/p".to_string(),
+                ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             stable_project_identity: Some(
                 ryeos_app::launch_metadata::StableProjectIdentity::from_path(
                     std::path::Path::new("/tmp/p"),

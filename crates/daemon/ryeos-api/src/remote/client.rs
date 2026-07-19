@@ -883,16 +883,16 @@ impl RemoteClient {
         &self,
         item_ref: &str,
         ref_bindings: &BTreeMap<String, String>,
-        project_path: &str,
+        project_path: Option<&str>,
         parameters: &Value,
-        project_source: &str,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
     ) -> Result<Value> {
         let body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
-            "project_source": { "kind": project_source },
+            "execution_policy": execution_policy,
         });
         self.signed_post("/execute", &body).await
     }
@@ -911,17 +911,17 @@ impl RemoteClient {
         &self,
         item_ref: &str,
         ref_bindings: &BTreeMap<String, String>,
-        project_path: &str,
+        project_path: Option<&str>,
         parameters: &Value,
-        project_source: &str,
         call: Option<&ryeos_engine::method_call::MethodCall>,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
     ) -> Result<Value> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
-            "project_source": { "kind": project_source },
+            "execution_policy": execution_policy,
         });
         // Forward the `call` block only when it carries intent.
         if let Some(call) = call.filter(|c| !c.is_empty()) {

@@ -15,7 +15,7 @@ use super::validate_object_kind;
 /// root to carry a concrete captured history policy. Schema identifiers are
 /// immutable CAS wire identities, so the deployed schema-1 shape must never be
 /// reused for different bytes; there is deliberately no schema-1 reader.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -564,7 +564,7 @@ impl std::fmt::Display for ThreadStatus {
 /// Matches the JSON schema from ARCHITECTURE.md §3:
 /// ```json
 /// {
-///   "schema": 2,
+///   "schema": 3,
 ///   "kind": "thread_snapshot",
 ///   "thread_id": "T-root",
 ///   "chain_root_id": "T-root",
@@ -631,6 +631,10 @@ pub struct ThreadSnapshot {
     /// snapshot-backed project contexts intentionally remain unattributed.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub project_root: Option<PathBuf>,
+    /// Canonical tagged project authority. `project_root` and snapshot-hash
+    /// fields below are query/projection columns and must agree with this value;
+    /// they are never used to infer execution semantics.
+    pub project_authority: super::ExecutionProjectAuthority,
     /// History policy captured from verified, typed execution resolution. Only
     /// roots may carry it; every root must carry it in the current format.
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -751,6 +755,15 @@ impl ThreadSnapshot {
                 );
             }
         }
+        self.project_authority.validate()?;
+        if self.project_root.as_deref() != self.project_authority.project_root_projection() {
+            anyhow::bail!("project_root projection contradicts project_authority");
+        }
+        if self.base_project_snapshot_hash.as_deref()
+            != self.project_authority.base_snapshot_projection()
+        {
+            anyhow::bail!("base_project_snapshot_hash projection contradicts project_authority");
+        }
         let created_at = parse_canonical_timestamp(&self.created_at)
             .map_err(|error| anyhow::anyhow!("invalid created_at: {error}"))?;
         let updated_at = parse_canonical_timestamp(&self.updated_at)
@@ -847,6 +860,7 @@ pub struct ThreadSnapshotBuilder {
     upstream_thread_id: Option<String>,
     requested_by: Option<String>,
     project_root: Option<PathBuf>,
+    project_authority: super::ExecutionProjectAuthority,
     captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     base_project_snapshot_hash: Option<String>,
     result_project_snapshot_hash: Option<String>,
@@ -867,6 +881,9 @@ pub struct ThreadSnapshotBuilder {
 
 impl ThreadSnapshotBuilder {
     /// Start building a new thread snapshot with required fields.
+    /// Start a projectless snapshot. Project-backed callers must replace the
+    /// authority explicitly with [`Self::project_authority`]; the builder never
+    /// reconstructs authority from projection fields.
     pub fn new(
         thread_id: impl Into<String>,
         chain_root_id: impl Into<String>,
@@ -888,6 +905,7 @@ impl ThreadSnapshotBuilder {
             upstream_thread_id: None,
             requested_by: None,
             project_root: None,
+            project_authority: super::ExecutionProjectAuthority::Projectless,
             captured_history_policy: None,
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
@@ -939,6 +957,11 @@ impl ThreadSnapshotBuilder {
 
     pub fn project_root(mut self, root: Option<PathBuf>) -> Self {
         self.project_root = root;
+        self
+    }
+
+    pub fn project_authority(mut self, authority: super::ExecutionProjectAuthority) -> Self {
+        self.project_authority = authority;
         self
     }
 
@@ -1039,6 +1062,7 @@ impl ThreadSnapshotBuilder {
             upstream_thread_id: self.upstream_thread_id,
             requested_by: self.requested_by,
             project_root: self.project_root,
+            project_authority: self.project_authority,
             captured_history_policy: self.captured_history_policy,
             base_project_snapshot_hash: self.base_project_snapshot_hash,
             result_project_snapshot_hash: self.result_project_snapshot_hash,
@@ -1314,11 +1338,12 @@ mod tests {
     }
 
     #[test]
-    fn schema_2_requires_current_nullable_wire_fields() {
+    fn schema_3_requires_current_wire_fields() {
         for field in [
             "upstream_thread_id",
             "requested_by",
             "project_root",
+            "project_authority",
             "captured_history_policy",
             "base_project_snapshot_hash",
             "result_project_snapshot_hash",

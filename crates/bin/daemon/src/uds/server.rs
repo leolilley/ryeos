@@ -1703,6 +1703,7 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("user:test".to_string()),
             project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
@@ -1729,6 +1730,7 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("session:test".to_string()),
             project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
@@ -2252,6 +2254,17 @@ mod tests {
             upstream_thread_id: upstream.map(Into::into),
             requested_by: Some("user:test".to_string()),
             project_root: Some(std::path::PathBuf::from("/tmp/p")),
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::pinned(
+                "local:/tmp/p".to_string(),
+                Some(std::path::PathBuf::from("/tmp/p")),
+                "a".repeat(64),
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+                },
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
             base_project_snapshot_hash: Some("a".repeat(64)),
             usage_subject: None,
             usage_subject_asserted_by: None,
@@ -2270,6 +2283,17 @@ mod tests {
         let mut parent = make_create_params("P", "P");
         parent.project_root = Some(std::path::PathBuf::from("/tmp/p"));
         parent.base_project_snapshot_hash = Some("a".repeat(64));
+        parent.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "local:/tmp/p".to_string(),
+            Some(std::path::PathBuf::from("/tmp/p")),
+            "a".repeat(64),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
         state.threads.create_thread_for_test(&parent).unwrap();
         state.threads.mark_running("P").unwrap();
         state
@@ -2287,6 +2311,20 @@ mod tests {
                         project_context: ProjectContext::LocalPath {
                             path: std::path::PathBuf::from("/tmp/p"),
                         },
+                        project_authority: ryeos_state::objects::ExecutionProjectAuthority::pinned(
+                            "local:/tmp/p".to_string(),
+                            Some(std::path::PathBuf::from("/tmp/p")),
+                            "a".repeat(64),
+                            ryeos_state::objects::PinnedProjectRealization::Cow {
+                                terminal_publication:
+                                    ryeos_state::objects::PinnedTerminalPublication::Discard,
+                            },
+                            ryeos_state::objects::EnvironmentAuthority::None,
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                        lifecycle_authority:
+                            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
                         stable_project_identity: Some(
                             ryeos_app::launch_metadata::StableProjectIdentity::from_path(
                                 std::path::Path::new("/tmp/p"),
@@ -2343,6 +2381,7 @@ mod tests {
                 frontier_id: None,
                 fanout: false,
                 expected_children: 1,
+                child_project_authority: None,
             })
             .unwrap();
         set_test_follow_child(state, wk, child);
@@ -2390,6 +2429,9 @@ mod tests {
                 launch_mode: "detached".to_string(),
                 parameters: json!({}),
                 project_context: ProjectContext::None,
+                project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+                lifecycle_authority:
+                    ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
                 stable_project_identity: None,
                 local_overlay_root: None,
                 original_snapshot_hash: None,
@@ -2908,6 +2950,7 @@ mod tests {
                 frontier_id: None,
                 fanout: false,
                 expected_children: 1,
+                child_project_authority: None,
             })
             .unwrap();
         set_test_follow_child(&state, "wk-res", "Cres");
@@ -2965,6 +3008,7 @@ mod tests {
                 frontier_id: None,
                 fanout: false,
                 expected_children: 1,
+                child_project_authority: None,
             })
             .unwrap();
         set_test_follow_child(&state, "wk-res2", "Cnc");
@@ -3098,6 +3142,7 @@ mod tests {
                 upstream_thread_id: params.upstream_thread_id,
                 requested_by: params.requested_by,
                 project_root: params.project_root,
+                project_authority: params.project_authority,
                 base_project_snapshot_hash: params.base_project_snapshot_hash,
                 usage_subject: params.usage_subject,
                 usage_subject_asserted_by: params.usage_subject_asserted_by,
@@ -4889,6 +4934,7 @@ mod tests {
                     upstream_thread_id: Some("T-pred".to_string()),
                     requested_by: Some("user:test".to_string()),
                     project_root: None,
+                    project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
                     base_project_snapshot_hash: None,
                     usage_subject: None,
                     usage_subject_asserted_by: None,

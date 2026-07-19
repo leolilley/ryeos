@@ -381,6 +381,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);
@@ -563,6 +564,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);
@@ -809,6 +811,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
 
@@ -842,6 +845,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap1 = write_object(&cas_root, &snap_v1);
@@ -935,6 +939,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);

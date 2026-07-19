@@ -2021,6 +2021,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": null,
         });
         if thread_id == chain_root_id {

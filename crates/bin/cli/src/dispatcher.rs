@@ -191,10 +191,11 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
         "parameters": resolved.parameters,
+        "execution_policy": execution_policy_value(
+            resolved.project_path.is_some(),
+            resolved.async_launch,
+        ),
     });
-    if resolved.async_launch {
-        body["launch_mode"] = Value::String("accepted".to_string());
-    }
     if let Some(project_path) = &resolved.project_path {
         body["project_path"] = Value::String(
             project_path
@@ -292,6 +293,35 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
 
     print_result(result, &mut presenter, &cli.rest, rendered_lines)?;
     Ok(())
+}
+
+fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
+    let project = if project_backed {
+        serde_json::json!({
+            "kind": "live_direct",
+            "access": "read_write",
+            "child_policy": { "kind": "inherit" },
+        })
+    } else {
+        serde_json::json!({ "kind": "projectless" })
+    };
+    serde_json::json!({
+        "schema_version": 1,
+        "ownership": "daemon_owned",
+        "recovery": "restart_recoverable",
+        "response": if accepted { "accepted" } else { "wait" },
+        "target": { "kind": "here" },
+        "environment": if project_backed {
+            serde_json::json!({
+                "kind": "project_overlay",
+                "include_operator_vault": true,
+                "allowed_names": [],
+            })
+        } else {
+            serde_json::json!({ "kind": "none" })
+        },
+        "project": project,
+    })
 }
 
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {

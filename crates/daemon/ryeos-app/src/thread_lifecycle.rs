@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
+use base64::Engine as _;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -107,6 +108,7 @@ pub struct ThreadCreateParams {
     pub requested_by: Option<String>,
     #[serde(default)]
     pub project_root: Option<PathBuf>,
+    pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     #[serde(default)]
     pub base_project_snapshot_hash: Option<String>,
     #[serde(default)]
@@ -867,7 +869,7 @@ where
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 1;
+const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -915,6 +917,7 @@ struct SealedResolvedItem {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     materialized_project_root: Option<PathBuf>,
     raw_content_digest: String,
+    source_content_b64: String,
     content_hash: String,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     signature_header: Option<SignatureHeader>,
@@ -922,9 +925,25 @@ struct SealedResolvedItem {
     metadata: SealedItemMetadata,
 }
 
-impl From<&ResolvedItem> for SealedResolvedItem {
-    fn from(resolved: &ResolvedItem) -> Self {
-        Self {
+impl SealedResolvedItem {
+    fn capture(resolved: &ResolvedItem) -> Result<Self> {
+        let source_bytes = std::fs::read(&resolved.source_path).with_context(|| {
+            format!(
+                "read admitted item source for launch capsule: {}",
+                resolved.source_path.display()
+            )
+        })?;
+        let source_digest = lillux::sha256_hex(&source_bytes);
+        if source_digest != resolved.content_hash {
+            bail!(
+                "admitted item source changed before launch capsule capture: {} (resolved source {}, observed source {}; resolved runtime body {})",
+                resolved.source_path.display(),
+                resolved.content_hash,
+                source_digest,
+                resolved.raw_content_digest
+            );
+        }
+        Ok(Self {
             canonical_ref: resolved.canonical_ref.to_string(),
             kind: resolved.kind.clone(),
             source_path: resolved.source_path.clone(),
@@ -941,6 +960,7 @@ impl From<&ResolvedItem> for SealedResolvedItem {
                 .collect(),
             materialized_project_root: resolved.materialized_project_root.clone(),
             raw_content_digest: resolved.raw_content_digest.clone(),
+            source_content_b64: base64::engine::general_purpose::STANDARD.encode(source_bytes),
             content_hash: resolved.content_hash.clone(),
             signature_header: resolved.signature_header.clone(),
             source_format: SealedSourceFormat {
@@ -958,12 +978,10 @@ impl From<&ResolvedItem> for SealedResolvedItem {
                 required_secrets: resolved.metadata.required_secrets.clone(),
                 extra: resolved.metadata.extra.clone(),
             },
-        }
+        })
     }
-}
 
-impl SealedResolvedItem {
-    fn restore(&self) -> Result<ResolvedItem> {
+    fn restore(&self, capsule_root: &Path) -> Result<ResolvedItem> {
         let canonical_ref = CanonicalRef::parse(&self.canonical_ref)
             .map_err(|error| anyhow!("invalid sealed canonical ref: {error}"))?;
         if canonical_ref.kind != self.kind {
@@ -973,10 +991,50 @@ impl SealedResolvedItem {
                 canonical_ref.kind
             );
         }
+        let source_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&self.source_content_b64)
+            .context("decode admitted launch capsule source bytes")?;
+        let source_digest = lillux::sha256_hex(&source_bytes);
+        if source_digest != self.content_hash {
+            bail!(
+                "admitted launch capsule source digest mismatch: sealed source {}, observed source {}; sealed runtime body {}",
+                self.content_hash,
+                source_digest,
+                self.raw_content_digest
+            );
+        }
+        std::fs::create_dir_all(capsule_root).with_context(|| {
+            format!(
+                "create admitted launch capsule root {}",
+                capsule_root.display()
+            )
+        })?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(capsule_root, std::fs::Permissions::from_mode(0o700))?;
+        }
+        let materialized_source = capsule_root.join("subject.source");
+        if materialized_source.exists() {
+            let existing = std::fs::read(&materialized_source)?;
+            if lillux::sha256_hex(&existing) != self.content_hash {
+                bail!(
+                    "admitted launch capsule materialization has conflicting content: {}",
+                    materialized_source.display()
+                );
+            }
+        } else {
+            lillux::atomic_write(&materialized_source, &source_bytes).with_context(|| {
+                format!(
+                    "materialize admitted launch capsule source {}",
+                    materialized_source.display()
+                )
+            })?;
+        }
         Ok(ResolvedItem {
             canonical_ref,
             kind: self.kind.clone(),
-            source_path: self.source_path.clone(),
+            source_path: materialized_source,
             source_space: self.source_space,
             resolved_from: self.resolved_from.clone(),
             shadowed: self
@@ -988,7 +1046,7 @@ impl SealedResolvedItem {
                     path: candidate.path.clone(),
                 })
                 .collect(),
-            materialized_project_root: self.materialized_project_root.clone(),
+            materialized_project_root: Some(capsule_root.to_path_buf()),
             raw_content_digest: self.raw_content_digest.clone(),
             content_hash: self.content_hash.clone(),
             signature_header: self.signature_header.clone(),
@@ -1179,7 +1237,7 @@ impl SealedRootExecutionRequest {
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.parameters.clone(),
             ref_bindings: request.ref_bindings.clone(),
-            verified_subject: SealedResolvedItem::from(&verified.resolved),
+            verified_subject: SealedResolvedItem::capture(&verified.resolved)?,
             verified_signer_fingerprint: verified.signer.as_ref().map(|value| value.0.clone()),
             verified_trust_class: verified.trust_class,
             verified_pinned_version: verified.pinned_version.clone(),
@@ -1268,6 +1326,7 @@ impl SealedRootExecutionRequest {
                 shadowed: Vec::new(),
                 materialized_project_root: None,
                 raw_content_digest: content_hash.clone(),
+                source_content_b64: base64::engine::general_purpose::STANDARD.encode(b"{}"),
                 content_hash: content_hash.clone(),
                 signature_header: None,
                 source_format: SealedSourceFormat {
@@ -1321,7 +1380,11 @@ impl SealedRootExecutionRequest {
         }
     }
 
-    pub fn restore(&self, engine: &Engine) -> Result<ResolvedExecutionRequest> {
+    pub fn restore(
+        &self,
+        engine: &Engine,
+        capsule_root: &Path,
+    ) -> Result<ResolvedExecutionRequest> {
         if self.schema_version != SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION {
             bail!(
                 "sealed root execution request schema mismatch: persisted={}, expected={}",
@@ -1339,7 +1402,7 @@ impl SealedRootExecutionRequest {
         CanonicalRef::parse(&self.runtime_ref).map_err(|error| {
             anyhow!("invalid sealed runtime ref `{}`: {error}", self.runtime_ref)
         })?;
-        let resolved_item = self.verified_subject.restore()?;
+        let resolved_item = self.verified_subject.restore(capsule_root)?;
         let verified_subject = VerifiedItem {
             resolved: resolved_item.clone(),
             signer: self
@@ -2123,16 +2186,13 @@ impl ThreadLifecycleService {
             item_ref = %request.item_ref,
         )
     )]
-    pub fn create_root_thread(&self, request: &ResolvedExecutionRequest) -> Result<ThreadDetail> {
-        self.create_root_thread_with_id(&new_thread_id(), request)
-    }
-
     pub fn create_root_thread_with_id(
         &self,
         thread_id: &str,
         request: &ResolvedExecutionRequest,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<ThreadDetail> {
-        self.create_root_thread_with_captured_generation(thread_id, request, None)
+        self.create_root_thread_with_captured_generation(thread_id, request, project_authority)
     }
 
     /// Publish an admitted root against the exact immutable project generation
@@ -2142,7 +2202,7 @@ impl ThreadLifecycleService {
         &self,
         thread_id: &str,
         request: &ResolvedExecutionRequest,
-        captured_snapshot_hash: Option<&str>,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
         validate_thread_id_format(thread_id)?;
@@ -2165,12 +2225,10 @@ impl ThreadLifecycleService {
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
             project_root: local_project_root(&request.plan_context),
-            base_project_snapshot_hash: captured_snapshot_hash.map(str::to_owned).or_else(|| {
-                match &request.plan_context.project_context {
-                    ProjectContext::SnapshotHash { hash } => Some(hash.clone()),
-                    _ => None,
-                }
-            }),
+            base_project_snapshot_hash: project_authority
+                .base_snapshot_projection()
+                .map(str::to_owned),
+            project_authority,
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
@@ -2191,11 +2249,13 @@ impl ThreadLifecycleService {
         &self,
         thread_id: &str,
         request: &ResolvedExecutionRequest,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         initial_events: Vec<NewEventRecord>,
     ) -> Result<ThreadDetail> {
         self.create_root_thread_with_events_and_launch_metadata(
             thread_id,
             request,
+            project_authority,
             initial_events,
             None,
         )
@@ -2207,6 +2267,7 @@ impl ThreadLifecycleService {
         &self,
         thread_id: &str,
         request: &ResolvedExecutionRequest,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
         initial_events: Vec<NewEventRecord>,
         launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
     ) -> Result<ThreadDetail> {
@@ -2229,14 +2290,10 @@ impl ThreadLifecycleService {
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
             project_root: local_project_root(&request.plan_context),
-            base_project_snapshot_hash: launch_metadata
-                .and_then(|metadata| metadata.resume_context.as_ref())
-                .and_then(|resume| resume.durable_project_snapshot_hash())
-                .map(str::to_owned)
-                .or_else(|| match &request.plan_context.project_context {
-                    ProjectContext::SnapshotHash { hash } => Some(hash.clone()),
-                    _ => None,
-                }),
+            base_project_snapshot_hash: project_authority
+                .base_snapshot_projection()
+                .map(str::to_owned),
+            project_authority,
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
@@ -2311,6 +2368,16 @@ impl ThreadLifecycleService {
         if !profile.is_some_and(|p| p.supports_continuation) {
             bail!("continuation is not supported for kind '{}'", source.kind);
         }
+        let project_authority = launch_metadata
+            .and_then(|metadata| metadata.resume_context.as_ref())
+            .map(|resume| resume.project_authority.clone())
+            .or_else(|| source.project_authority.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "continuation source {} has no sealed project authority",
+                    source.thread_id
+                )
+            })?;
 
         let successor_record = NewThreadRecord {
             thread_id: successor_thread_id.to_string(),
@@ -2324,10 +2391,10 @@ impl ThreadLifecycleService {
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: request.requested_by.clone(),
             project_root: local_project_root(&request.plan_context),
-            base_project_snapshot_hash: launch_metadata
-                .and_then(|metadata| metadata.resume_context.as_ref())
-                .and_then(|resume| resume.durable_project_snapshot_hash())
+            base_project_snapshot_hash: project_authority
+                .base_snapshot_projection()
                 .map(str::to_owned),
+            project_authority,
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: None,
@@ -2482,6 +2549,7 @@ impl ThreadLifecycleService {
             upstream_thread_id: params.upstream_thread_id.clone(),
             requested_by: params.requested_by.clone(),
             project_root: params.project_root.clone(),
+            project_authority: params.project_authority.clone(),
             base_project_snapshot_hash: params.base_project_snapshot_hash.clone(),
             usage_subject: params.usage_subject.clone(),
             usage_subject_asserted_by: params.usage_subject_asserted_by.clone(),
@@ -3799,8 +3867,10 @@ impl ThreadLifecycleService {
             requested_by: source.requested_by.clone(),
             project_root: source.project_root.as_ref().map(PathBuf::from),
             base_project_snapshot_hash: expected_resume_context
-                .durable_project_snapshot_hash()
+                .project_authority
+                .base_snapshot_projection()
                 .map(str::to_owned),
+            project_authority: expected_resume_context.project_authority.clone(),
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,
@@ -4797,6 +4867,11 @@ pub struct SpawnItemParams<'a> {
     pub original_snapshot_hash: Option<&'a str>,
     pub stable_project_identity: Option<&'a crate::launch_metadata::StableProjectIdentity>,
     pub local_overlay_root: Option<&'a std::path::Path>,
+    /// Exact admitted project/environment/publication authority. This is the
+    /// source of truth for native-resume metadata; paths and snapshot hashes
+    /// above are derived launch mechanics and must never reconstruct policy.
+    pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     /// Pushed-head identity of the spawn's root provenance (see
     /// `launch_metadata::OriginalPushedHeadRef::from_provenance`).
     /// `None` for live-fs spawns and borrowed children.
@@ -4836,6 +4911,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         original_snapshot_hash,
         stable_project_identity,
         local_overlay_root,
+        project_authority,
+        lifecycle_authority,
         original_pushed_head_ref,
         state_root,
     } = params;
@@ -5042,6 +5119,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     // exact project version captured at spawn time, not the current
     // working-dir head. See `docs/future/native-resume-snapshot-pinning.md`.
     if launch_metadata.native_resume.is_some() {
+        project_authority.validate()?;
         launch_metadata =
             launch_metadata.with_resume_context(crate::launch_metadata::ResumeContext {
                 kind: resolved.kind.clone(),
@@ -5050,6 +5128,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 launch_mode: resolved.launch_mode.clone(),
                 parameters: resolved.parameters.clone(),
                 project_context: resolved.plan_context.project_context.clone(),
+                project_authority,
+                lifecycle_authority,
                 stable_project_identity: stable_project_identity.cloned(),
                 local_overlay_root: local_overlay_root.map(std::path::Path::to_path_buf),
                 original_snapshot_hash: original_snapshot_hash.map(str::to_string),
@@ -5316,6 +5396,7 @@ mod tests {
             frontier_id: None,
             fanout: false,
             expected_children: 1,
+            child_project_authority: None,
             children: vec![crate::runtime_db::FollowWaiterChild {
                 item_index: 0,
                 item_ref: "directive:example/child".to_string(),
