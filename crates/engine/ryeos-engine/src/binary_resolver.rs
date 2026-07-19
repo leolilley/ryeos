@@ -71,13 +71,13 @@ struct VerifiedBundleExecutorSet {
 /// Resolve, verify, open without following symlinks, and re-hash an installed
 /// bundle executable. The verified bytes are copied into a sealed anonymous
 /// file so later mutation of the installed path cannot change what executes.
-pub fn capture_bundle_executable(
-    executable_name: &str,
+pub fn capture_bundle_binary_ref(
+    binary_ref: &str,
     bundle_root: &Path,
     node_trust_store: &TrustStore,
 ) -> Result<CapturedExecutable, EngineError> {
     let identity = resolve_bundle_binary_ref(
-        &format!("bin:{executable_name}"),
+        binary_ref,
         bundle_root,
         |fingerprint| {
             node_trust_store
@@ -116,7 +116,7 @@ pub fn capture_bundle_executable(
     let observed = lillux::sha256_hex(&bytes);
     if observed != identity.content_hash {
         return Err(EngineError::BinHashMismatch {
-            bin: executable_name.to_string(),
+            bin: binary_ref.to_string(),
             declared: identity.content_hash,
             computed: observed,
         });
@@ -1695,7 +1695,7 @@ mod tests {
         let bundle = tmp.path().join("bundle");
         let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
         let captured =
-            capture_bundle_executable("demo", &bundle, &trust_store_for(&fingerprint, &key))
+            capture_bundle_binary_ref("bin:demo", &bundle, &trust_store_for(&fingerprint, &key))
                 .expect("signed executable should be captured");
 
         std::fs::write(&captured.identity.absolute_path, b"mutated-after-capture\n").unwrap();

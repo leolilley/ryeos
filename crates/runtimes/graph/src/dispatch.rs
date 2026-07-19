@@ -184,6 +184,10 @@ pub async fn dispatch_action(
         thread_id: thread_id.to_string(),
         project_path: project_path.to_string(),
         action: ryeos_runtime::callback::ActionPayload {
+            operation_id: action
+                .get("operation_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
             item_id: item_id.to_string(),
             ref_bindings,
             params,

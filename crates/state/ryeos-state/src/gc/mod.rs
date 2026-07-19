@@ -746,7 +746,10 @@ fn remove_rebuildable_cache_directory(
     result: &mut GcResult,
 ) -> Result<()> {
     for name in cache_directory.entry_names()? {
-        if matches!(name.to_str(), Some("executions" | "verified-code")) {
+        if matches!(
+            name.to_str(),
+            Some("executions" | "verified-code" | "snapshots")
+        ) {
             continue;
         }
         match cache_directory.open_entry(&name, false)? {
@@ -871,12 +874,24 @@ mod tests {
         }
 
         // Write a chain: snap5 -> snap4 -> snap3 -> snap2 -> snap1 (all auto)
-        let manifest_hash = write_object(
+        let tree_hash = write_object(
             &cas_root,
             &serde_json::json!({
-                "kind": "source_manifest",
-                "item_source_hashes": {},
+                "kind": "project_tree",
+                "schema": crate::objects::ProjectTree::SCHEMA,
+                "files": {},
             }),
+        );
+        let policy_hash = write_object(
+            &cas_root,
+            &crate::objects::ProjectSnapshotPolicy::new(
+                crate::project_sync::ProjectSyncScope::FullProject,
+                Vec::new(),
+                Vec::new(),
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap()
+            .to_value(),
         );
         let mut hashes = Vec::new();
         for i in 0..5 {
@@ -886,10 +901,9 @@ mod tests {
                 &serde_json::json!({
                     "kind": "project_snapshot",
                     "schema": crate::objects::ProjectSnapshot::SCHEMA,
-                    "project_manifest_hash": manifest_hash,
-                    "user_manifest_hash": null,
+                    "project_tree_hash": tree_hash,
+                    "effective_policy_hash": policy_hash,
                     "message": null,
-                    "project_sync_scope": "full_project",
                     "parent_hashes": parents,
                     "created_at": format!("2026-04-23T00:00:0{i}Z"),
                     "source": "fold_back",

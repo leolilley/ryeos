@@ -75,7 +75,7 @@ pub struct RemoteForwardResult {
 /// Push-phase summary for the response envelope.
 pub struct PushSummary {
     pub pushed_snapshot_hash: String,
-    pub manifest_entries: usize,
+    pub tree_entries: usize,
     pub blobs_uploaded: usize,
     pub blobs_skipped: usize,
 }
@@ -86,8 +86,6 @@ pub struct PullSummary {
     pub cas_objects_fetched: usize,
     pub files_updated: usize,
     pub files_deleted: usize,
-    pub user_files_updated: usize,
-    pub user_files_deleted: usize,
 }
 
 /// Errors from the unary forward pipeline.
@@ -363,8 +361,7 @@ pub async fn execute_unary_forward(
         &push_result.snapshot_hash,
         &result_snapshot_hash,
         req.local_project_path,
-        &push_result.manifest,
-        push_result.user_manifest.as_ref(),
+        &push_result.tree,
     )
     .await
     .map_err(|e| {
@@ -376,6 +373,10 @@ pub async fn execute_unary_forward(
             }
             PullResultsError::UnrelatedSnapshot { pushed, result } => {
                 RemoteForwardError::PullUnrelatedSnapshot { pushed, result }
+            }
+            PullResultsError::RecoveryRequired(message)
+            | PullResultsError::RollbackIncomplete(message) => {
+                RemoteForwardError::PullFailed(message)
             }
             PullResultsError::Other(e) => RemoteForwardError::PullFailed(format!("{e:#}")),
         };
@@ -408,8 +409,6 @@ pub async fn execute_unary_forward(
         "cas_objects_fetched": pull_result.cas_objects_fetched,
         "files_updated": pull_result.files_updated,
         "files_deleted": pull_result.files_deleted,
-        "user_files_updated": pull_result.user_files_updated,
-        "user_files_deleted": pull_result.user_files_deleted,
     });
     finish_sync_job_attempt_and_update_job(
         state,
@@ -437,7 +436,7 @@ pub async fn execute_unary_forward(
         remote_result,
         push_summary: PushSummary {
             pushed_snapshot_hash: push_result.snapshot_hash,
-            manifest_entries: push_result.manifest_entries,
+            tree_entries: push_result.tree_entries,
             blobs_uploaded: push_result.blobs_uploaded,
             blobs_skipped: push_result.blobs_skipped,
         },
@@ -447,8 +446,6 @@ pub async fn execute_unary_forward(
             cas_objects_fetched: pull_result.cas_objects_fetched,
             files_updated: pull_result.files_updated,
             files_deleted: pull_result.files_deleted,
-            user_files_updated: pull_result.user_files_updated,
-            user_files_deleted: pull_result.user_files_deleted,
         },
     })
 }
@@ -504,13 +501,15 @@ fn update_sync_job(
 /// --no-project mode: push user space only (no project ingest).
 ///
 /// This is extracted from the inline push logic in `remote_execute.rs`.
-/// It creates an empty manifest, ingests user space, and uploads.
+/// It creates an empty project tree and uploads it.
 async fn push_no_project(
     authority: &PinnedStateAuthority,
     client: &RemoteClient,
     remote_project_path: &str,
 ) -> Result<PushResult, RemoteForwardError> {
-    use crate::remote::push::{collect_snapshot_hashes, finish_staged_roots, upload_missing};
+    use crate::remote::push::{
+        collect_snapshot_upload_hashes, finish_staged_roots, upload_missing,
+    };
 
     let local_cas = authority
         .cas_store()
@@ -528,12 +527,12 @@ async fn push_no_project(
     };
 
     let operation: anyhow::Result<PushResult> = async {
-        let empty_manifest = ryeos_state::objects::SourceManifest {
-            item_source_hashes: std::collections::HashMap::new(),
+        let empty_tree = ryeos_state::objects::ProjectTree {
+            files: std::collections::BTreeMap::new(),
         };
-        let manifest_hash = {
+        let tree_hash = {
             let guard = authority.acquire_shared_guard()?;
-            staged_roots.store_object_admitted(&guard, &local_cas, &empty_manifest.to_value())?
+            staged_roots.store_object_admitted(&guard, &local_cas, &empty_tree.to_value())?
         };
 
         let upload_session = client
@@ -541,10 +540,21 @@ async fn push_no_project(
             .await?;
 
         let snapshot = ryeos_state::objects::ProjectSnapshot {
-            project_manifest_hash: manifest_hash.clone(),
-            user_manifest_hash: None,
+            project_tree_hash: tree_hash.clone(),
+            effective_policy_hash: {
+                let matcher = ryeos_state::ignore::IgnoreMatcher::from_config(
+                    &ryeos_state::ignore::IgnoreConfig {
+                        patterns: Vec::new(),
+                    },
+                )?;
+                let policy = ryeos_state::objects::ProjectSnapshotPolicy::from_matcher(
+                    ryeos_state::project_sync::ProjectSyncScope::FullProject,
+                    &matcher,
+                )?;
+                let guard = authority.acquire_shared_guard()?;
+                staged_roots.store_object_admitted(&guard, &local_cas, &policy.to_value())?
+            },
             message: None,
-            project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
             parent_hashes: upload_session
                 .expected_previous_hash
                 .iter()
@@ -557,13 +567,10 @@ async fn push_no_project(
             let guard = authority.acquire_shared_guard()?;
             let snapshot_hash =
                 staged_roots.store_object_admitted(&guard, &local_cas, &snapshot.to_value())?;
-            let upload_closure = collect_snapshot_hashes(
+            let upload_closure = collect_snapshot_upload_hashes(
                 &local_cas,
-                &empty_manifest,
-                None,
-                None,
-                &manifest_hash,
                 &snapshot_hash,
+                upload_session.expected_previous_hash.as_deref(),
             )?;
             staged_roots.protect_cas_closure_admitted(
                 &guard,
@@ -593,13 +600,11 @@ async fn push_no_project(
 
         Ok(PushResult {
             snapshot_hash,
-            manifest_hash,
-            manifest: empty_manifest,
-            manifest_entries: 0,
+            tree_hash,
+            tree: empty_tree,
+            tree_entries: 0,
             blobs_uploaded: upload.uploaded,
             blobs_skipped: upload.skipped,
-            user_manifest_hash: None,
-            user_manifest: None,
         })
     }
     .await;
@@ -676,12 +681,12 @@ mod tests {
     fn push_summary_fields() {
         let s = PushSummary {
             pushed_snapshot_hash: "snap".into(),
-            manifest_entries: 3,
+            tree_entries: 3,
             blobs_uploaded: 2,
             blobs_skipped: 1,
         };
         assert_eq!(s.pushed_snapshot_hash, "snap");
-        assert_eq!(s.manifest_entries, 3);
+        assert_eq!(s.tree_entries, 3);
         assert_eq!(s.blobs_uploaded, 2);
         assert_eq!(s.blobs_skipped, 1);
     }
@@ -693,14 +698,10 @@ mod tests {
             cas_objects_fetched: 5,
             files_updated: 3,
             files_deleted: 1,
-            user_files_updated: 2,
-            user_files_deleted: 0,
         };
         assert_eq!(s.snapshot_hash, "snap");
         assert_eq!(s.cas_objects_fetched, 5);
         assert_eq!(s.files_updated, 3);
         assert_eq!(s.files_deleted, 1);
-        assert_eq!(s.user_files_updated, 2);
-        assert_eq!(s.user_files_deleted, 0);
     }
 }

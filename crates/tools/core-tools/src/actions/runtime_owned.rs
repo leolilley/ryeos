@@ -1,14 +1,13 @@
 //! Runtime-owned path policy for the signing surfaces.
 //!
-//! Bundle publishing and operator signing both walk `.ai/` trees. Some `.ai/`
-//! subtrees are node runtime state or signing secrets, not authoring source:
-//! a node writes them while it runs, and they must never be signed as items.
-//! Signing them turns daemon state (schedules, routes, thread output, keys)
-//! into a bulk of failed items and false namespace warnings.
+//! Bundle publishing and operator signing both walk `.ai/` trees, but they have
+//! different ownership boundaries. In a project tree, node runtime state and
+//! signing secrets are not authoring source. In a bundle tree, declarative
+//! node configuration is authoring source and must be signed by the bundle
+//! publisher, while secret keys remain categorically excluded.
 //!
-//! This is the single sync-policy floor (`ryeos_state::project_sync`) reused
-//! for the signing surfaces. No path list is duplicated here — the policy
-//! lives in exactly one place.
+//! Both boundaries reuse the sync-policy classifier in
+//! `ryeos_state::project_sync`; no path list is duplicated here.
 
 use std::path::Path;
 
@@ -36,6 +35,20 @@ pub fn is_runtime_owned_ai_path(ai_rel_path: &str) -> bool {
     )
 }
 
+/// True when a `.ai/`-relative path is secret key material that must never be
+/// signed or published as an item.
+///
+/// Bundle-owned declarative node configuration under `.ai/node/` is authoring
+/// source and must be re-signed by the bundle publisher. This narrower policy
+/// is therefore used by bundle publication, while project/operator signing
+/// continues to use [`is_runtime_owned_ai_path`] to exclude node-owned state.
+pub fn is_never_signable_secret_ai_path(ai_rel_path: &str) -> bool {
+    matches!(
+        classify_project_ai_path(ai_rel_path, None),
+        ProjectAiPathClass::NeverDeploySecret { .. }
+    )
+}
+
 /// As [`is_runtime_owned_ai_path`], but taking an absolute file path plus the
 /// `.ai/` root it lives under. Reconstructs the `.ai/<...>` relative form the
 /// floor classifier expects. Returns `false` when `file_path` is not under
@@ -46,6 +59,15 @@ pub fn is_runtime_owned_file(file_path: &Path, ai_root: &Path) -> bool {
     };
     let rel_str = rel.to_string_lossy().replace('\\', "/");
     is_runtime_owned_ai_path(&format!("{AI_DIR}/{rel_str}"))
+}
+
+/// Absolute-path form of [`is_never_signable_secret_ai_path`].
+pub fn is_never_signable_secret_file(file_path: &Path, ai_root: &Path) -> bool {
+    let Ok(rel) = file_path.strip_prefix(ai_root) else {
+        return false;
+    };
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    is_never_signable_secret_ai_path(&format!("{AI_DIR}/{rel_str}"))
 }
 
 #[cfg(test)]
@@ -75,6 +97,29 @@ mod tests {
             ".ai/config/keys/trusted/publisher.pem",
         ] {
             assert!(!is_runtime_owned_ai_path(p), "expected signable: {p}");
+        }
+    }
+
+    #[test]
+    fn bundle_node_config_is_authoring_source_but_secrets_never_are() {
+        for path in [
+            ".ai/node/routes/execute.yaml",
+            ".ai/node/schedules/nightly.yaml",
+        ] {
+            assert!(is_runtime_owned_ai_path(path));
+            assert!(!is_never_signable_secret_ai_path(path));
+        }
+        assert!(!is_never_signable_secret_ai_path(
+            ".ai/node/commands/start.yaml"
+        ));
+
+        for path in [
+            ".ai/config/keys/signing/private_key.pem",
+            ".ai/node/identity/private_key.pem",
+            ".ai/node/auth/private_key.pem",
+            ".ai/node/vault/private_key.pem",
+        ] {
+            assert!(is_never_signable_secret_ai_path(path));
         }
     }
 

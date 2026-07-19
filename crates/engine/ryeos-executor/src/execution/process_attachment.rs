@@ -91,6 +91,7 @@ impl Drop for LifecycleOwnerGuard {
 struct AttachedProcessGuard<'a> {
     state: &'a AppState,
     thread_id: &'a str,
+    launch_owner: &'a str,
     identity: ryeos_app::process::ExecutionProcessIdentity,
 }
 
@@ -99,8 +100,11 @@ impl Drop for AttachedProcessGuard<'_> {
         match self
             .state
             .state_store
-            .clear_thread_process_if_matches(self.thread_id, &self.identity)
-        {
+            .clear_thread_process_if_matches_owned(
+                self.thread_id,
+                &self.identity,
+                self.launch_owner,
+            ) {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
                 thread_id = self.thread_id,
@@ -202,6 +206,7 @@ pub(crate) fn capture_or_adopt_owned_identity(
 pub(crate) fn run_lillux_attached(
     state: &AppState,
     thread_id: &str,
+    launch_owner: &str,
     request: lillux::SubprocessRequest,
     workspace_lifeline: Option<Arc<TempDirGuard>>,
 ) -> Result<lillux::SubprocessResult> {
@@ -224,16 +229,20 @@ pub(crate) fn run_lillux_attached(
     let _attachment = AttachedProcessGuard {
         state,
         thread_id,
+        launch_owner,
         identity: identity.clone(),
     };
-    if let Err(error) = state.threads.attach_process(&ThreadAttachProcessParams {
-        thread_id: thread_id.to_string(),
-        pid: spawned.pid as i64,
-        pgid: spawned.pgid,
-        process_identity: Some(identity.clone()),
-        metadata: None,
-        launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
-    }) {
+    if let Err(error) = state.threads.attach_process_owned(
+        &ThreadAttachProcessParams {
+            thread_id: thread_id.to_string(),
+            pid: spawned.pid as i64,
+            pgid: spawned.pgid,
+            process_identity: Some(identity.clone()),
+            metadata: None,
+            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+        },
+        launch_owner,
+    ) {
         spawned.abort();
         if finalize_requested_stop_if_present(state, thread_id)? {
             anyhow::bail!("callback subprocess attachment refused after durable stop request");

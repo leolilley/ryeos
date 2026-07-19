@@ -284,12 +284,24 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             .map(|p| p.scopes.clone())
             .unwrap_or_default();
 
+        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        let mut project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
+            &ctx.state,
+            &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
+            project_path.as_path(),
+            &principal_id,
+            &format!("stream-{thread_id}"),
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("capture stream project: {error}"))
+        })?;
+
         // Resolve the actual persisted root (including wrapper targets), verify
         // it, and capture its policy before exposing an id to the stream.
         let preflight = crate::routes::launch::preflight_dispatch_launch(
             &ctx.state,
             &item_ref,
-            &project_path,
+            &project_ctx,
             &req.parameters,
             &req.ref_bindings,
             &principal_id,
@@ -316,7 +328,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         })?;
         let mut options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
-            project_path.as_path(),
+            &project_ctx.effective_path,
             req.ref_bindings,
         )
         .map_err(|error| {
@@ -330,8 +342,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         options.usage_subject = usage_subject;
         options.usage_subject_asserted_by = usage_subject_asserted_by;
         options.call = req.call;
-
-        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        options = options.retain_captured_generation(project_ctx.take_captured_generation());
 
         let route_id: String = ctx.route_id.to_string();
 
@@ -347,10 +358,22 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
-        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            options.project_path().to_path_buf(),
-            ctx.state.engine.clone(),
-        );
+        let launch_provenance =
+            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+                project_ctx.effective_path.clone(),
+                project_ctx.original_path.clone(),
+                project_ctx.request_engine.clone(),
+                project_ctx.temp_dir.clone().ok_or_else(|| {
+                    RouteDispatchError::Internal(
+                        "captured stream project has no workspace guard".to_string(),
+                    )
+                })?,
+                project_ctx.snapshot_hash.clone().ok_or_else(|| {
+                    RouteDispatchError::Internal(
+                        "captured stream project has no snapshot".to_string(),
+                    )
+                })?,
+            );
         let (mut launch_handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,

@@ -80,6 +80,10 @@ pub(crate) struct DispatchLaunchOptions {
     /// Canonical project authority copied from the sealed admission. Background
     /// launch never reuses the caller's pre-canonical path spelling.
     project_path: std::path::PathBuf,
+    /// Move-only live-capture lease retained by the background task. It is
+    /// released only after dispatch has either committed the captured snapshot
+    /// into authoritative history or failed without exposing a root.
+    captured_generation: Option<ryeos_executor::execution::CapturedProjectGeneration>,
 }
 
 impl DispatchLaunchOptions {
@@ -119,7 +123,16 @@ impl DispatchLaunchOptions {
             previous_thread_id: None,
             root_admission,
             project_path,
+            captured_generation: None,
         })
+    }
+
+    pub(crate) fn retain_captured_generation(
+        mut self,
+        captured: Option<ryeos_executor::execution::CapturedProjectGeneration>,
+    ) -> Self {
+        self.captured_generation = captured;
+        self
     }
 
     pub(crate) fn project_path(&self) -> &std::path::Path {
@@ -135,7 +148,7 @@ impl DispatchLaunchOptions {
 pub(crate) fn preflight_dispatch_launch(
     state: &AppState,
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
-    project_path: &crate::routes::abs_path::AbsolutePathBuf,
+    project: &ryeos_executor::execution::project_source::ResolvedProjectContext,
     parameters: &Value,
     ref_bindings: &BTreeMap<String, String>,
     principal_id: &str,
@@ -153,10 +166,10 @@ pub(crate) fn preflight_dispatch_launch(
             other: launch_mode.to_string(),
         });
     }
-    let project_path = project_path.as_path().canonicalize().map_err(|error| {
+    let project_path = project.effective_path.canonicalize().map_err(|error| {
         DispatchError::ProjectSource(format!(
             "canonicalize launch project {}: {error}",
-            project_path.as_path().display()
+            project.effective_path.display()
         ))
     })?;
     let plan_ctx = PlanContext {
@@ -173,7 +186,7 @@ pub(crate) fn preflight_dispatch_launch(
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
         principal_fingerprint: principal_id.to_string(),
         caller_scopes: principal_scopes.to_vec(),
-        engine: state.engine.clone(),
+        engine: project.request_engine.clone(),
         plan_ctx,
         requested_call: call,
     };
@@ -272,8 +285,13 @@ fn spawn_dispatch_launch_inner(
     let previous_thread_id = options.previous_thread_id;
     let root_admission = options.root_admission;
     let ref_bindings = options.ref_bindings;
+    let captured_generation = options.captured_generation;
 
     tokio::spawn(async move {
+        // Keep the live capture's durable recovery roots pinned across request
+        // cancellation and the complete background dispatch. The authoritative
+        // birth/result rows become the long-lived roots before this drops.
+        let _captured_generation = captured_generation;
         let site_id = current_site_id;
         let current_site_id_for_failure_row = site_id.clone();
         let origin_site_id_for_failure_row = site_id.clone();

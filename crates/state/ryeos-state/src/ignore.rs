@@ -36,6 +36,7 @@ pub struct IgnoreMatcher {
     file_patterns: Vec<glob::Pattern>,
     /// Normalized anchored prefixes (no leading/trailing `/`).
     anchored_patterns: Vec<String>,
+    canonical_patterns: Vec<String>,
 }
 
 /// Decide which pattern form an entry is.
@@ -91,11 +92,14 @@ impl IgnoreMatcher {
         let mut dir_patterns = Vec::new();
         let mut file_patterns = Vec::new();
         let mut anchored_patterns = Vec::new();
+        let mut canonical_patterns = Vec::new();
 
         for pattern in &config.patterns {
             if is_anchored_pattern(pattern) {
                 // Anchored path prefix (e.g. `/.ai/config/remotes/`).
-                anchored_patterns.push(normalize_anchored(pattern)?);
+                let normalized = normalize_anchored(pattern)?;
+                canonical_patterns.push(format!("/{normalized}/"));
+                anchored_patterns.push(normalized);
             } else if pattern.ends_with('/') {
                 // Directory pattern: match against any path component.
                 let dir_name = &pattern[..pattern.len() - 1];
@@ -104,19 +108,34 @@ impl IgnoreMatcher {
                     "empty directory pattern in ignore config"
                 );
                 dir_patterns.push(dir_name.to_string());
+                canonical_patterns.push(format!("{dir_name}/"));
             } else {
                 // File/glob pattern: match against filename component.
                 let compiled = glob::Pattern::new(pattern)
                     .with_context(|| format!("invalid glob pattern: {}", pattern))?;
                 file_patterns.push(compiled);
+                canonical_patterns.push(pattern.clone());
             }
         }
+
+        dir_patterns.sort();
+        dir_patterns.dedup();
+        anchored_patterns.sort();
+        anchored_patterns.dedup();
+        canonical_patterns.sort();
+        canonical_patterns.dedup();
 
         Ok(Self {
             dir_patterns,
             file_patterns,
             anchored_patterns,
+            canonical_patterns,
         })
+    }
+
+    /// Canonical, sorted set form suitable for immutable policy identity.
+    pub fn canonical_patterns(&self) -> &[String] {
+        &self.canonical_patterns
     }
 
     /// Returns true if the relative path should be ignored.

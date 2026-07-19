@@ -75,13 +75,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     if params.children.is_empty() {
         bail!("follow: children must be nonempty");
     }
-    let fanout = params.children.len() > 1;
+    let fanout = params.children.len() > 1 || params.launch_window_width.is_some();
     let children = params.children;
     if params.launch_window_width == Some(0) {
         bail!("follow: launch_window_width must be greater than zero");
-    }
-    if !fanout && params.launch_window_width.is_some() {
-        bail!("follow: launch_window_width is only valid for a cohort");
     }
 
     let parent_thread_id = params.thread_id.clone();
@@ -95,6 +92,13 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         state
             .callback_tokens
             .validate(&params.callback_token, &parent_thread_id, &project_path)?;
+    let launch_owner = cap
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("execution callback capability has no launch owner"))?;
+    state
+        .state_store
+        .assert_launch_owner(&parent_thread_id, launch_owner)?;
 
     // Per-request identity proof → the server-side acting principal. The request
     // body carries no principal field (`deny_unknown_fields`) so it cannot spoof
@@ -130,7 +134,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
              runtime.spawn_follow_child requires a checkpoint-resumable parent"
         );
     }
-    let inherited_snapshot_hash = if cap.provenance.workspace_lifeline().is_some() {
+    let launch_snapshot_hash = if cap.provenance.captured_snapshot_hash().is_some() {
         Some(
             parent_launch_metadata
                 .as_ref()
@@ -146,7 +150,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     } else {
         None
     };
-
     let follow_key = format!(
         "{parent_thread_id}/{}/{}/{}",
         params.graph_run_id, params.follow_node, params.step_count
@@ -378,6 +381,27 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         reserved_child_ids.insert(item_index, child_thread_id);
     }
 
+    // Persist the complete cohort intent and every sealed child request before
+    // quiescing the runtime. A daemon crash can therefore re-drive an admitted
+    // intent; it never discovers an unexplained stopped predecessor. No child
+    // or successor row is visible yet.
+    let inherited_generation = launch_snapshot_hash
+        .as_deref()
+        .map(|base| {
+            let frozen = crate::execution::seal_callback_workspace_generation(
+                state,
+                &parent_thread_id,
+                cap.provenance.effective_path(),
+                base,
+            )?;
+            crate::execution::ensure_control_tree_unchanged(state, base, frozen.snapshot_hash())?;
+            Ok::<_, anyhow::Error>(frozen)
+        })
+        .transpose()?;
+    let inherited_snapshot_hash = inherited_generation
+        .as_ref()
+        .map(|generation| generation.snapshot_hash().to_string());
+
     let expected_parent_context = PersistedParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
@@ -468,7 +492,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         scopes: cap.effective_caps.clone(),
     });
     let persisted_parent_context = expected_parent_context.clone();
-    let launch_provenance = cap.provenance.clone_for_borrowed_child();
     let launch_parent_context = crate::dispatch::ParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
@@ -481,7 +504,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             continue;
         }
         let existing_row = existing_created_indices.contains(&item_index);
-        let meta = if existing_row {
+        let mut meta = if existing_row {
             persisted_launch_metadata
                 .get(&item_index)
                 .cloned()
@@ -505,6 +528,15 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     project_context: ProjectContext::LocalPath {
                         path: cap.provenance.effective_path().to_path_buf(),
                     },
+                    stable_project_identity: Some(
+                        ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                            cap.provenance.original_project_path(),
+                            &parent.origin_site_id,
+                        )?,
+                    ),
+                    local_overlay_root: (cap.provenance.project_source()
+                        == ryeos_app::execution_provenance::ProjectSourceKind::LiveFs)
+                        .then(|| cap.provenance.original_project_path().to_path_buf()),
                     original_snapshot_hash: inherited_snapshot_hash.clone(),
                     original_pushed_head_ref: None,
                     state_root: cap
@@ -527,12 +559,33 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         let child_thread_id = reserved_child_ids.get(&item_index).ok_or_else(|| {
             anyhow::anyhow!("follow: missing reserved child ID at index {item_index}")
         })?;
+        let launch_provenance = if let Some(snapshot_hash) = inherited_snapshot_hash.as_deref() {
+            let child_context = crate::execution::project_source::resolve_pinned_snapshot_context(
+                state,
+                snapshot_hash,
+                cap.provenance.original_project_path().to_path_buf(),
+                child_thread_id,
+            )?;
+            cap.provenance.clone_for_borrowed_child_workspace(
+                child_context.effective_path,
+                child_context.temp_dir.ok_or_else(|| {
+                    anyhow::anyhow!("follow: child workspace has no lifecycle guard")
+                })?,
+            )
+        } else {
+            cap.provenance.clone_for_borrowed_child()
+        };
+        if let Some(resume) = meta.resume_context.as_mut() {
+            resume.project_context = ProjectContext::LocalPath {
+                path: launch_provenance.effective_path().to_path_buf(),
+            };
+        }
         let prepared = if existing_row {
             crate::execution::launch::prepare_existing_follow_child_launch(
                 state,
                 child_thread_id,
                 &meta,
-                launch_provenance.clone(),
+                launch_provenance,
                 launch_parent_context.clone(),
             )
             .await?
@@ -541,7 +594,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 state,
                 child_thread_id,
                 &meta,
-                launch_provenance.clone(),
+                launch_provenance,
                 launch_parent_context.clone(),
             )
             .await?
@@ -796,7 +849,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     existing
                 } else {
                     let successor_id = new_thread_id();
-                    let successor_launch_metadata = parent_launch_metadata
+                    let mut successor_launch_metadata = parent_launch_metadata
                         .as_ref()
                         .ok_or_else(|| {
                             anyhow::anyhow!(
@@ -810,6 +863,16 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                                 &successor_id,
                             ),
                         );
+                    if let Some(frozen) = inherited_snapshot_hash.as_deref() {
+                        let resume = successor_launch_metadata
+                            .resume_context
+                            .as_mut()
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("follow: successor lost its durable ResumeContext")
+                            })?;
+                        resume.original_snapshot_hash = Some(frozen.to_string());
+                        resume.original_pushed_head_ref = None;
+                    }
                     // Via the lifecycle service so the parent-`continued` + successor-
                     // `created` events reach live subscribers, not just the event store.
                     state.threads.create_follow_resume_successor(
@@ -828,6 +891,11 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                                 .project_root
                                 .as_ref()
                                 .map(std::path::PathBuf::from),
+                            base_project_snapshot_hash: successor_launch_metadata
+                                .resume_context
+                                .as_ref()
+                                .and_then(|resume| resume.durable_project_snapshot_hash())
+                                .map(str::to_owned),
                             usage_subject: None,
                             usage_subject_asserted_by: None,
                             captured_history_policy: None,
@@ -836,6 +904,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         &parent.chain_root_id,
                         &params.completion,
                         &successor_launch_metadata,
+                        inherited_snapshot_hash.as_deref(),
                     )?;
                     if let Err(error) = state
                         .state_store
@@ -968,6 +1037,18 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                  (expected {expected_child_id})"
             );
         }
+    }
+
+    // The follow callback is the cooperative RuntimeQuiesced boundary for the
+    // current launch owner. The graph runtime is blocked throughout sealing
+    // and handoff; once the successor and cohort are durable, revoke both
+    // runtime capabilities before replying. Any attempted post-follow event,
+    // artifact, cost, child intent, or second handoff from the predecessor is
+    // therefore fenced even if a faulty runtime continues after the response.
+    state.callback_tokens.invalidate(&cap.token);
+    state.thread_auth.invalidate(&thread_auth.token);
+    if let Some(generation) = inherited_generation {
+        generation.publish()?;
     }
 
     let child_thread_id = child_thread_ids[0].clone();

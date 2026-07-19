@@ -108,6 +108,8 @@ pub struct ThreadCreateParams {
     #[serde(default)]
     pub project_root: Option<PathBuf>,
     #[serde(default)]
+    pub base_project_snapshot_hash: Option<String>,
+    #[serde(default)]
     pub usage_subject: Option<UsageSubject>,
     #[serde(default)]
     pub usage_subject_asserted_by: Option<String>,
@@ -2130,6 +2132,18 @@ impl ThreadLifecycleService {
         thread_id: &str,
         request: &ResolvedExecutionRequest,
     ) -> Result<ThreadDetail> {
+        self.create_root_thread_with_captured_generation(thread_id, request, None)
+    }
+
+    /// Publish an admitted root against the exact immutable project generation
+    /// captured before birth. The request retains its stable logical project
+    /// context; the snapshot hash is separate execution/recovery authority.
+    pub fn create_root_thread_with_captured_generation(
+        &self,
+        thread_id: &str,
+        request: &ResolvedExecutionRequest,
+        captured_snapshot_hash: Option<&str>,
+    ) -> Result<ThreadDetail> {
         validate_kind(&request.kind, self.kind_profiles())?;
         validate_thread_id_format(thread_id)?;
         let admission = request.root_admission.as_ref().ok_or_else(|| {
@@ -2151,6 +2165,12 @@ impl ThreadLifecycleService {
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
             project_root: local_project_root(&request.plan_context),
+            base_project_snapshot_hash: captured_snapshot_hash.map(str::to_owned).or_else(|| {
+                match &request.plan_context.project_context {
+                    ProjectContext::SnapshotHash { hash } => Some(hash.clone()),
+                    _ => None,
+                }
+            }),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
@@ -2209,6 +2229,14 @@ impl ThreadLifecycleService {
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
             project_root: local_project_root(&request.plan_context),
+            base_project_snapshot_hash: launch_metadata
+                .and_then(|metadata| metadata.resume_context.as_ref())
+                .and_then(|resume| resume.durable_project_snapshot_hash())
+                .map(str::to_owned)
+                .or_else(|| match &request.plan_context.project_context {
+                    ProjectContext::SnapshotHash { hash } => Some(hash.clone()),
+                    _ => None,
+                }),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
@@ -2296,6 +2324,10 @@ impl ThreadLifecycleService {
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: request.requested_by.clone(),
             project_root: local_project_root(&request.plan_context),
+            base_project_snapshot_hash: launch_metadata
+                .and_then(|metadata| metadata.resume_context.as_ref())
+                .and_then(|resume| resume.durable_project_snapshot_hash())
+                .map(str::to_owned),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: None,
@@ -2450,6 +2482,7 @@ impl ThreadLifecycleService {
             upstream_thread_id: params.upstream_thread_id.clone(),
             requested_by: params.requested_by.clone(),
             project_root: params.project_root.clone(),
+            base_project_snapshot_hash: params.base_project_snapshot_hash.clone(),
             usage_subject: params.usage_subject.clone(),
             usage_subject_asserted_by: params.usage_subject_asserted_by.clone(),
             captured_history_policy: if params.thread_id == params.chain_root_id {
@@ -2643,6 +2676,22 @@ impl ThreadLifecycleService {
         )
     )]
     pub fn attach_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
+        self.attach_process_with_owner(params, None)
+    }
+
+    pub fn attach_process_owned(
+        &self,
+        params: &ThreadAttachProcessParams,
+        launch_owner: &str,
+    ) -> Result<ThreadDetail> {
+        self.attach_process_with_owner(params, Some(launch_owner))
+    }
+
+    fn attach_process_with_owner(
+        &self,
+        params: &ThreadAttachProcessParams,
+        launch_owner: Option<&str>,
+    ) -> Result<ThreadDetail> {
         let process_identity = params.process_identity.as_ref().ok_or_else(|| {
             anyhow!(
                 "refusing to attach process {}/{} without a durable process identity",
@@ -2656,6 +2705,7 @@ impl ThreadLifecycleService {
             params.pgid,
             process_identity,
             &params.launch_metadata,
+            launch_owner,
         )?;
         self.get_thread(&params.thread_id)?.ok_or_else(|| {
             anyhow!(
@@ -2677,7 +2727,48 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
-        self.finalize_from_completion_inner(thread_id, completion, managed_envelope, false)
+        self.finalize_from_completion_inner(
+            thread_id,
+            completion,
+            managed_envelope,
+            None,
+            false,
+            None,
+        )
+    }
+
+    pub fn finalize_from_completion_with_project_snapshot(
+        &self,
+        thread_id: &str,
+        completion: &ExecutionCompletion,
+        managed_envelope: Option<Value>,
+        result_project_snapshot_hash: &str,
+    ) -> Result<ThreadDetail> {
+        self.finalize_from_completion_inner(
+            thread_id,
+            completion,
+            managed_envelope,
+            Some(result_project_snapshot_hash),
+            false,
+            None,
+        )
+    }
+
+    pub fn finalize_from_completion_owned(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        completion: &ExecutionCompletion,
+        result_project_snapshot_hash: Option<&str>,
+    ) -> Result<ThreadDetail> {
+        self.finalize_from_completion_inner(
+            thread_id,
+            completion,
+            None,
+            result_project_snapshot_hash,
+            false,
+            Some(launch_owner),
+        )
     }
 
     /// Finalization reported by the runtime callback boundary. The StateStore
@@ -2689,7 +2780,34 @@ impl ThreadLifecycleService {
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
     ) -> Result<ThreadDetail> {
-        self.finalize_from_completion_inner(thread_id, completion, managed_envelope, true)
+        self.finalize_from_completion_inner(
+            thread_id,
+            completion,
+            managed_envelope,
+            None,
+            true,
+            None,
+        )
+    }
+
+    /// Runtime-reported completion fenced by the exact launch owner carried on
+    /// its callback capability. The owner comparison is performed under the
+    /// same StateStore lock as terminal persistence.
+    pub fn finalize_from_runtime_completion_owned(
+        &self,
+        thread_id: &str,
+        launch_owner: &str,
+        completion: &ExecutionCompletion,
+        managed_envelope: Option<Value>,
+    ) -> Result<ThreadDetail> {
+        self.finalize_from_completion_inner(
+            thread_id,
+            completion,
+            managed_envelope,
+            None,
+            false,
+            Some(launch_owner),
+        )
     }
 
     fn finalize_from_completion_inner(
@@ -2697,7 +2815,9 @@ impl ThreadLifecycleService {
         thread_id: &str,
         completion: &ExecutionCompletion,
         managed_envelope: Option<Value>,
+        result_project_snapshot_hash: Option<&str>,
         runtime_callback: bool,
+        launch_owner: Option<&str>,
     ) -> Result<ThreadDetail> {
         let reported_status = completion.status.as_str();
         let reported_outcome_code = completion.outcome_code.clone().or_else(|| {
@@ -2719,10 +2839,14 @@ impl ThreadLifecycleService {
                 .collect(),
             final_cost: completion.final_cost.clone(),
             managed_envelope: managed_envelope.clone(),
+            result_project_snapshot_hash: result_project_snapshot_hash.map(ToOwned::to_owned),
         };
         let (persisted, effective) = if runtime_callback {
             self.state_store
                 .finalize_thread_from_runtime(thread_id, &requested)?
+        } else if let Some(launch_owner) = launch_owner {
+            self.state_store
+                .finalize_thread_effective_owned(thread_id, launch_owner, &requested)?
         } else {
             self.state_store
                 .finalize_thread_effective(thread_id, &requested)?
@@ -2831,7 +2955,15 @@ impl ThreadLifecycleService {
         // failure). A follow child that finalizes here degrades to a visible
         // failure envelope; the normal follow terminal carries its envelope via
         // the callback or `finalize_thread_with_managed_envelope`.
-        self.finalize_thread_inner(params, None, false)
+        self.finalize_thread_inner(params, None, false, None)
+    }
+
+    pub fn finalize_thread_owned(
+        &self,
+        params: &ThreadFinalizeParams,
+        launch_owner: &str,
+    ) -> Result<ThreadDetail> {
+        self.finalize_thread_inner(params, None, false, Some(launch_owner))
     }
 
     /// Like [`finalize_thread`], but carries the runtime's canonical managed
@@ -2843,7 +2975,7 @@ impl ThreadLifecycleService {
         params: &ThreadFinalizeParams,
         managed_envelope: Value,
     ) -> Result<ThreadDetail> {
-        self.finalize_thread_inner(params, Some(managed_envelope), false)
+        self.finalize_thread_inner(params, Some(managed_envelope), false, None)
     }
 
     /// Settle a link-failure row only if it is atomically proven to remain a
@@ -2863,6 +2995,7 @@ impl ThreadLifecycleService {
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
             managed_envelope: None,
+            result_project_snapshot_hash: None,
         };
         match self
             .state_store
@@ -2921,6 +3054,7 @@ impl ThreadLifecycleService {
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
             managed_envelope: None,
+            result_project_snapshot_hash: None,
         };
         match self
             .state_store
@@ -2941,11 +3075,48 @@ impl ThreadLifecycleService {
         }
     }
 
+    pub fn finalize_if_nonterminal_owned(
+        &self,
+        params: &ThreadFinalizeParams,
+        launch_owner: &str,
+    ) -> Result<FinalizeIfNonterminalOutcome> {
+        let reported_status = normalize_terminal_status(&params.status)?;
+        let requested = FinalizeThreadRecord {
+            status: reported_status.to_string(),
+            outcome_code: params.outcome_code.clone(),
+            result_json: params.result.clone(),
+            error_json: params.error.clone(),
+            artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
+            final_cost: params.final_cost.clone(),
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+        };
+        match self.state_store.finalize_if_nonterminal_owned(
+            &params.thread_id,
+            launch_owner,
+            &requested,
+        )? {
+            StoreFinalizeIfNonterminalOutcome::Finalized {
+                persisted,
+                effective,
+            } => self
+                .finish_generic_finalization(params, reported_status, persisted, *effective)
+                .map(|thread| FinalizeIfNonterminalOutcome::Finalized(Box::new(thread))),
+            StoreFinalizeIfNonterminalOutcome::AlreadyTerminal { status } => {
+                Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal { status })
+            }
+            StoreFinalizeIfNonterminalOutcome::PreservedForShutdown => {
+                Ok(FinalizeIfNonterminalOutcome::PreservedForShutdown)
+            }
+        }
+    }
+
     fn finalize_thread_inner(
         &self,
         params: &ThreadFinalizeParams,
         managed_envelope: Option<Value>,
         execution_result: bool,
+        launch_owner: Option<&str>,
     ) -> Result<ThreadDetail> {
         let reported_status = normalize_terminal_status(&params.status)?;
         let requested = FinalizeThreadRecord {
@@ -2956,8 +3127,15 @@ impl ThreadLifecycleService {
             artifacts: params.artifacts.iter().map(artifact_to_record).collect(),
             final_cost: params.final_cost.clone(),
             managed_envelope: managed_envelope.clone(),
+            result_project_snapshot_hash: None,
         };
-        let (persisted, effective) = if execution_result {
+        let (persisted, effective) = if let Some(launch_owner) = launch_owner {
+            self.state_store.finalize_thread_effective_owned(
+                &params.thread_id,
+                launch_owner,
+                &requested,
+            )?
+        } else if execution_result {
             self.state_store
                 .finalize_thread_from_runtime(&params.thread_id, &requested)?
         } else {
@@ -3620,6 +3798,9 @@ impl ThreadLifecycleService {
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: source.requested_by.clone(),
             project_root: source.project_root.as_ref().map(PathBuf::from),
+            base_project_snapshot_hash: expected_resume_context
+                .durable_project_snapshot_hash()
+                .map(str::to_owned),
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,
@@ -3669,6 +3850,7 @@ impl ThreadLifecycleService {
         chain_root_id: &str,
         completion: &ryeos_runtime::TerminalCompletion,
         successor_launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        result_project_snapshot_hash: Option<&str>,
     ) -> Result<()> {
         validate_continued_completion(completion)?;
         let persisted = self
@@ -3678,6 +3860,7 @@ impl ThreadLifecycleService {
                 source_thread_id,
                 chain_root_id,
                 successor_launch_metadata,
+                result_project_snapshot_hash,
             )?;
         self.publish_records(&persisted);
         Ok(())
@@ -4612,6 +4795,8 @@ pub struct SpawnItemParams<'a> {
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
+    pub stable_project_identity: Option<&'a crate::launch_metadata::StableProjectIdentity>,
+    pub local_overlay_root: Option<&'a std::path::Path>,
     /// Pushed-head identity of the spawn's root provenance (see
     /// `launch_metadata::OriginalPushedHeadRef::from_provenance`).
     /// `None` for live-fs spawns and borrowed children.
@@ -4649,6 +4834,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         thread_state_dir,
         is_resume,
         original_snapshot_hash,
+        stable_project_identity,
+        local_overlay_root,
         original_pushed_head_ref,
         state_root,
     } = params;
@@ -4863,6 +5050,8 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
                 launch_mode: resolved.launch_mode.clone(),
                 parameters: resolved.parameters.clone(),
                 project_context: resolved.plan_context.project_context.clone(),
+                stable_project_identity: stable_project_identity.cloned(),
+                local_overlay_root: local_overlay_root.map(std::path::Path::to_path_buf),
                 original_snapshot_hash: original_snapshot_hash.map(str::to_string),
                 original_pushed_head_ref: original_pushed_head_ref.cloned(),
                 state_root: state_root.map(std::path::Path::to_path_buf),

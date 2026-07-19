@@ -34,6 +34,7 @@ use ryeos_app::callback_token::launch_token_ttl;
 use ryeos_app::env_contract::{EnvBinding, EnvSourceDetail};
 use ryeos_app::execution_provenance::ExecutionProvenance;
 use ryeos_app::launch_metadata::ResumeContext;
+use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{
     is_terminal_status, StopIfAdmissionOpenOutcome, StopIntent, ThreadDetail,
@@ -113,6 +114,7 @@ struct ExecutionGuard {
     thread_finalized: bool,
     callback_token: Option<String>,
     thread_auth_token: Option<String>,
+    launch_owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,12 +177,17 @@ impl ExecutionGuard {
             thread_finalized: false,
             callback_token: None,
             thread_auth_token: None,
+            launch_owner: None,
         }
     }
 
     /// Mark thread as tracked by this guard.
     fn track_thread(&mut self, thread_id: &str) {
         self.thread_id = Some(thread_id.to_string());
+    }
+
+    fn track_launch_owner(&mut self, launch_owner: String) {
+        self.launch_owner = Some(launch_owner);
     }
 
     /// Mark temp dir for cleanup. The Arc is cloned; the dir is removed
@@ -252,7 +259,7 @@ impl ExecutionGuard {
                 self.thread_finalized = true;
                 return ExecutionCleanupOutcome::PreservedForShutdown;
             }
-            let finalize = self.state.threads.finalize_thread(&ThreadFinalizeParams {
+            let params = ThreadFinalizeParams {
                 thread_id: tid.clone(),
                 status: "failed".to_string(),
                 outcome_code: Some(outcome_code.to_string()),
@@ -262,7 +269,11 @@ impl ExecutionGuard {
                 artifacts: Vec::new(),
                 final_cost: None,
                 summary_json: None,
-            });
+            };
+            let finalize = match self.launch_owner.as_deref() {
+                Some(owner) => self.state.threads.finalize_thread_owned(&params, owner),
+                None => self.state.threads.finalize_thread(&params),
+            };
             match finalize {
                 Ok(_) => {
                     self.thread_finalized = true;
@@ -298,15 +309,24 @@ impl ExecutionGuard {
     fn finalize_child_link_failure_if_current(
         &mut self,
         error: serde_json::Value,
-    ) -> anyhow::Result<ryeos_app::thread_lifecycle::FinalizeCreatedUnattachedOutcome> {
+    ) -> anyhow::Result<crate::dispatch::MethodFinalizeOutcome> {
         self.revoke_callback_token();
         self.revoke_thread_auth_token();
         let thread_id = self
             .thread_id
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("child-link cleanup has no tracked thread"))?;
-        let outcome =
-            crate::dispatch::finalize_child_link_failure_if_current(&self.state, thread_id, error)?;
+        let launch_owner = self
+            .launch_owner
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("child-link cleanup has no launch owner"))?;
+        let outcome = crate::dispatch::finalize_method_thread_if_needed(
+            &self.state,
+            thread_id,
+            launch_owner,
+            "failed",
+            Some(error),
+        )?;
         if outcome.is_settled() {
             self.thread_finalized = true;
         }
@@ -575,13 +595,14 @@ struct ExecutionGuardParts {
 
 /// Prepared CAS execution context from canonical provenance.
 ///
-/// A live-tree source manifest is not reachable from a durable CAS root until
+/// A staged project tree is not reachable from a durable CAS root until
 /// it is promoted to a project snapshot and published in launch metadata.
 /// Keep its original write permit alongside the hash until that publication or
 /// the execution's final release, so online GC cannot run in the window.
 struct PreparedCasContext {
     effective_path: PathBuf,
-    pre_manifest_hash: Option<String>,
+    pre_tree_hash: Option<String>,
+    pre_policy_hash: Option<String>,
     /// Snapshot authority captured into launch metadata for native resume.
     /// A live-fs execution may acquire this only after spawn, when its source
     /// manifest is promoted to a durable resume pin.
@@ -590,20 +611,23 @@ struct PreparedCasContext {
     /// Only `RootPushedHead` owns this authority; a resume-only pin must never
     /// be reused as the expected HEAD for foldback publication.
     head_base_snapshot_hash: Option<String>,
-    manifest_publication: Option<super::PendingCasPublication>,
+    tree_publication: Option<super::PendingCasPublication>,
 }
 
 /// Prepare CAS execution context from canonical provenance.
 fn prepare_cas_context(
     state: &AppState,
     provenance: &ExecutionProvenance,
+    origin_site: &str,
     thread_id: &str,
+    launch_owner: &ryeos_app::runtime_db::LaunchOwner,
     guard: &mut ExecutionGuard,
 ) -> Result<PreparedCasContext> {
-    match provenance {
+    let prepared = match provenance {
         ExecutionProvenance::BorrowedChildLiveFs {
             project_path,
             workspace_lifeline,
+            captured_snapshot_hash,
             ..
         } => {
             if let Some(lifeline) = workspace_lifeline {
@@ -620,17 +644,32 @@ fn prepare_cas_context(
                 effective_path = %project_path.display(),
                 "borrowed CAS context prepared"
             );
+            let (pre_tree_hash, pre_policy_hash, resume_snapshot_hash) =
+                match captured_snapshot_hash {
+                    Some(snapshot_hash) => {
+                        let (tree_hash, policy_hash) =
+                            read_pre_tree_for_snapshot(state, snapshot_hash)?;
+                        (
+                            Some(tree_hash),
+                            Some(policy_hash),
+                            Some(snapshot_hash.clone()),
+                        )
+                    }
+                    None => (None, None, None),
+                };
             Ok(PreparedCasContext {
                 effective_path: project_path.clone(),
-                pre_manifest_hash: None,
-                resume_snapshot_hash: None,
+                pre_tree_hash,
+                pre_policy_hash,
+                resume_snapshot_hash,
                 head_base_snapshot_hash: None,
-                manifest_publication: None,
+                tree_publication: None,
             })
         }
         ExecutionProvenance::BorrowedChildPushedHead {
             effective_path,
             workspace_lifeline,
+            base_snapshot_hash,
             ..
         } => {
             guard.track_temp_dir(workspace_lifeline.clone());
@@ -645,28 +684,46 @@ fn prepare_cas_context(
                 effective_path = %effective_path.display(),
                 "borrowed CAS context prepared"
             );
+            let (tree_hash, policy_hash) = read_pre_tree_for_snapshot(state, base_snapshot_hash)?;
             Ok(PreparedCasContext {
                 effective_path: effective_path.clone(),
-                pre_manifest_hash: None,
-                resume_snapshot_hash: None,
+                pre_tree_hash: Some(tree_hash),
+                pre_policy_hash: Some(policy_hash),
+                resume_snapshot_hash: Some(base_snapshot_hash.clone()),
                 head_base_snapshot_hash: None,
-                manifest_publication: None,
+                tree_publication: None,
             })
         }
         ExecutionProvenance::RootLiveFs {
             project_path,
             workspace_lifeline,
+            captured_snapshot_hash,
             ..
         } => {
             if let Some(lifeline) = workspace_lifeline {
                 guard.track_temp_dir(lifeline.clone());
             }
-            let pending = super::capture_live_project_manifest(
-                state,
-                project_path,
-                "live_execution_manifest",
-            )?;
-            let manifest_hash = pending.hash;
+            let (snapshot_hash, tree_hash, policy_hash, publication) = if let Some(snapshot_hash) =
+                captured_snapshot_hash
+            {
+                let (tree_hash, policy_hash) = read_pre_tree_for_snapshot(state, snapshot_hash)?;
+                (snapshot_hash.clone(), tree_hash, policy_hash, None)
+            } else {
+                let captured = super::capture_live_project_snapshot(
+                    state,
+                    project_path,
+                    origin_site,
+                    "live_execution_generation",
+                )?;
+                let super::CapturedProjectGeneration {
+                    snapshot_hash,
+                    tree_hash,
+                    policy_hash,
+                    publication,
+                    ..
+                } = captured;
+                (snapshot_hash, tree_hash, policy_hash, Some(publication))
+            };
             tracing::trace!(
                 thread_id = %thread_id,
                 effective_path = %project_path.display(),
@@ -675,10 +732,11 @@ fn prepare_cas_context(
 
             Ok(PreparedCasContext {
                 effective_path: project_path.clone(),
-                pre_manifest_hash: Some(manifest_hash),
-                resume_snapshot_hash: None,
+                pre_tree_hash: Some(tree_hash),
+                pre_policy_hash: Some(policy_hash),
+                resume_snapshot_hash: Some(snapshot_hash),
                 head_base_snapshot_hash: None,
-                manifest_publication: Some(pending.publication),
+                tree_publication: publication,
             })
         }
         ExecutionProvenance::RootPushedHead {
@@ -688,7 +746,7 @@ fn prepare_cas_context(
             ..
         } => {
             guard.track_temp_dir(workspace_lifeline.clone());
-            let manifest_hash = read_pre_manifest_for_snapshot(state, snapshot_hash)?;
+            let (tree_hash, policy_hash) = read_pre_tree_for_snapshot(state, snapshot_hash)?;
             tracing::trace!(
                 thread_id = %thread_id,
                 effective_path = %effective_path.display(),
@@ -697,16 +755,209 @@ fn prepare_cas_context(
             );
             Ok(PreparedCasContext {
                 effective_path: effective_path.clone(),
-                pre_manifest_hash: Some(manifest_hash),
+                pre_tree_hash: Some(tree_hash),
+                pre_policy_hash: Some(policy_hash),
                 resume_snapshot_hash: Some(snapshot_hash.clone()),
                 head_base_snapshot_hash: Some(snapshot_hash.clone()),
-                manifest_publication: None,
+                tree_publication: None,
             })
         }
-    }
+    }?;
+    bind_workspace_if_unbound(state, provenance, thread_id, launch_owner)?;
+    Ok(prepared)
 }
 
-fn read_pre_manifest_for_snapshot(state: &AppState, snap_hash: &str) -> Result<String> {
+fn bind_workspace_if_unbound(
+    state: &AppState,
+    provenance: &ExecutionProvenance,
+    thread_id: &str,
+    launch_owner: &ryeos_app::runtime_db::LaunchOwner,
+) -> Result<()> {
+    let Some(lifeline) = provenance.workspace_lifeline() else {
+        return Ok(());
+    };
+    let Some(root) = lifeline.path() else {
+        anyhow::bail!("execution workspace was released before launch birth");
+    };
+    let workspace_id = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("execution workspace id is not valid UTF-8"))?;
+    let Some(record) = state.state_store.execution_workspace(workspace_id)? else {
+        anyhow::bail!("execution workspace journal row is missing: {workspace_id}");
+    };
+    let launch_owner_json = lillux::canonical_json(&serde_json::to_value(launch_owner)?)?;
+    if record.state == WorkspaceState::Constructing
+        && (record.thread_id.is_none()
+            || (record.thread_id.as_deref() == Some(thread_id)
+                && record.launch_owner.as_deref() == Some(launch_owner_json.as_str())))
+    {
+        let layout = super::workspace::WorkspaceLayout::from_root(root.clone());
+        state.state_store.claim_execution_workspace_construction(
+            workspace_id,
+            thread_id,
+            &launch_owner_json,
+        )?;
+        let (backend_id, backend_version) = state
+            .isolation
+            .workspace_backend_identity()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        state.state_store.prepare_execution_workspace_backend(
+            workspace_id,
+            thread_id,
+            &launch_owner_json,
+            backend_id,
+            backend_version,
+        )?;
+        let created = state
+            .isolation
+            .workspace_lifecycle(
+                ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+                workspace_id,
+                &launch_owner_json,
+                &record.lower_snapshot,
+                &layout.lower,
+                &layout.upper,
+                &layout.work,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let pinned_root_identities =
+            lillux::canonical_json(&serde_json::to_value(&created.pinned_root_identities)?)?;
+        state.state_store.bind_execution_workspace(
+            workspace_id,
+            thread_id,
+            Some(&launch_owner_json),
+            Some(&created.backend_id),
+            Some(&created.backend_version),
+            Some(&pinned_root_identities),
+            Some(&created.mount_identity),
+        )?;
+    } else if record.state != WorkspaceState::Ready
+        || record.thread_id.as_deref() != Some(thread_id)
+        || record.launch_owner.as_deref() != Some(launch_owner_json.as_str())
+    {
+        anyhow::bail!(
+            "execution workspace {workspace_id} cannot be adopted from state {}",
+            record.state
+        );
+    }
+    Ok(())
+}
+
+fn transition_owned_workspace(
+    state: &AppState,
+    lifeline: Option<&Arc<TempDirGuard>>,
+    thread_id: &str,
+    expected: &[WorkspaceState],
+    next: WorkspaceState,
+    process_identity: Option<&ryeos_app::process::ExecutionProcessIdentity>,
+) -> Result<()> {
+    let Some(root) = lifeline.and_then(|guard| guard.path()) else {
+        return Ok(());
+    };
+    let workspace_id = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("execution workspace id is not valid UTF-8"))?;
+    let Some(record) = state.state_store.execution_workspace(workspace_id)? else {
+        anyhow::bail!("execution workspace journal row is missing: {workspace_id}");
+    };
+    if record.thread_id.as_deref() != Some(thread_id) {
+        anyhow::bail!("execution workspace {workspace_id} is owned by another thread");
+    }
+    let launch_owner = record
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("execution workspace has no launch owner"))?;
+    let identity = process_identity
+        .map(serde_json::to_string)
+        .transpose()
+        .context("serialize workspace process identity")?;
+    state.state_store.transition_execution_workspace_owned(
+        workspace_id,
+        thread_id,
+        launch_owner,
+        expected,
+        next,
+        identity.as_deref(),
+    )
+}
+
+fn close_owned_workspace(
+    state: &AppState,
+    lifeline: Option<&Arc<TempDirGuard>>,
+    thread_id: &str,
+) -> Result<()> {
+    let Some(guard) = lifeline else {
+        return Ok(());
+    };
+    let Some(root) = guard.path() else {
+        return Ok(());
+    };
+    let layout = super::workspace::WorkspaceLayout::from_root(root.clone());
+    let workspace_id = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("execution workspace id is not valid UTF-8"))?;
+    let record = state
+        .state_store
+        .execution_workspace(workspace_id)?
+        .ok_or_else(|| anyhow::anyhow!("execution workspace journal row is missing"))?;
+    if record.thread_id.as_deref() != Some(thread_id) {
+        anyhow::bail!("execution workspace is owned by another thread");
+    }
+    let launch_owner = record
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("execution workspace has no launch owner"))?;
+    transition_owned_workspace(
+        state,
+        Some(guard),
+        thread_id,
+        &[WorkspaceState::Freezing],
+        WorkspaceState::Destroying,
+        None,
+    )?;
+    let destroyed = state
+        .isolation
+        .workspace_lifecycle(
+            ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
+            workspace_id,
+            launch_owner,
+            &record.lower_snapshot,
+            &layout.lower,
+            &layout.upper,
+            &layout.work,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let pinned = lillux::canonical_json(&serde_json::to_value(&destroyed.pinned_root_identities)?)?;
+    if record.backend_id.as_deref() != Some(destroyed.backend_id.as_str())
+        || record.backend_version.as_deref() != Some(destroyed.backend_version.as_str())
+        || record.pinned_root_identities.as_deref() != Some(pinned.as_str())
+        || record.mount_identity.as_deref() != Some(destroyed.mount_identity.as_str())
+    {
+        anyhow::bail!("workspace destroy evidence does not match the durable journal");
+    }
+    transition_owned_workspace(
+        state,
+        Some(guard),
+        thread_id,
+        &[WorkspaceState::Destroying],
+        WorkspaceState::Closing,
+        None,
+    )?;
+    guard.remove_now()?;
+    state.state_store.transition_execution_workspace_owned(
+        workspace_id,
+        thread_id,
+        launch_owner,
+        &[WorkspaceState::Closing],
+        WorkspaceState::Closed,
+        None,
+    )
+}
+
+fn read_pre_tree_for_snapshot(state: &AppState, snap_hash: &str) -> Result<(String, String)> {
     let authority = super::pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
@@ -715,123 +966,144 @@ fn read_pre_manifest_for_snapshot(state: &AppState, snap_hash: &str) -> Result<S
         .get_object(snap_hash)?
         .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
     let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
-    Ok(snapshot.project_manifest_hash)
+    Ok((snapshot.project_tree_hash, snapshot.effective_policy_hash))
 }
 
 struct PostExecutionFoldbackParams<'a> {
     pub state: &'a AppState,
     pub thread_id: &'a str,
     pub acting_principal: &'a str,
-    pub pre_manifest_hash: &'a str,
-    pub head_base_snapshot_hash: &'a str,
+    pub pre_tree_hash: &'a str,
+    pub pre_policy_hash: &'a str,
+    pub base_snapshot_hash: &'a str,
+    pub advance_head: bool,
     pub project_path: &'a std::path::Path,
     pub execution_dir: Option<&'a std::path::Path>,
     pub completion: &'a ExecutionCompletion,
 }
 
-fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
+fn post_execution_foldback(
+    params: PostExecutionFoldbackParams<'_>,
+) -> Result<crate::execution::PendingProjectResult> {
     let PostExecutionFoldbackParams {
         state,
-        thread_id: _thread_id,
+        thread_id,
         acting_principal,
-        pre_manifest_hash,
-        head_base_snapshot_hash,
+        pre_tree_hash,
+        pre_policy_hash,
+        base_snapshot_hash,
+        advance_head,
         project_path,
         execution_dir,
         completion: _completion,
     } = params;
-    let authority = match super::pinned_state_authority(state) {
-        Ok(authority) => authority,
-        Err(err) => {
-            tracing::warn!(error = %err, "failed to pin state authority for fold-back");
-            return;
-        }
-    };
+    let authority = super::pinned_state_authority(state)
+        .context("pin state authority for authoritative fold-back")?;
     // Need a working dir for fold-back. If neither an exec checkout
     // nor a LocalPath project_path is available (resume of a non-
     // LocalPath thread), nothing to fold back into.
     let working_dir = execution_dir.unwrap_or(project_path);
+    let layout = super::workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
+    let workspace_id = layout
+        .root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| anyhow::anyhow!("workspace id is not valid UTF-8"))?;
+    let workspace_record = state
+        .state_store
+        .execution_workspace(workspace_id)?
+        .ok_or_else(|| anyhow::anyhow!("workspace journal row is missing: {workspace_id}"))?;
+    let launch_owner = workspace_record
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("workspace {workspace_id} has no launch owner"))?;
+    state
+        .state_store
+        .assert_launch_owner(thread_id, launch_owner)
+        .context("fence authoritative fold-back to current launch owner")?;
 
     // The shared CAS guard is the outer mutation lock. Keep it live from the
     // first fold-back object write through the signed HEAD publication so GC
     // cannot sweep an unpublished intermediate closure.
-    let cas_mutation_guard = match authority.acquire_shared_guard() {
-        Ok(guard) => guard,
-        Err(error) => {
-            tracing::warn!(%error, "cannot acquire pinned CAS mutation guard for fold-back, skipping");
-            return;
-        }
-    };
+    let cas_mutation_guard = authority
+        .acquire_shared_guard()
+        .context("acquire pinned CAS mutation guard for authoritative fold-back")?;
 
     // Acquire write barrier for CAS mutations (fold-back + head advance).
-    let _permit = match state.write_barrier.try_acquire() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot acquire CAS write permit for fold-back, skipping");
-            return;
-        }
-    };
+    let _permit = state
+        .write_barrier
+        .try_acquire()
+        .map_err(|error| anyhow::anyhow!("acquire CAS write permit for fold-back: {error}"))?;
 
     // Fold back changes
-    let output_manifest_hash = match crate::execution::fold_back_outputs(
+    let (output_tree_hash, mut publication) = crate::execution::fold_back_outputs(
         &authority,
         &cas_mutation_guard,
+        &state.isolation,
+        workspace_id,
+        launch_owner,
         working_dir,
-        pre_manifest_hash,
-        &state.ignore_matcher,
-    ) {
-        Ok(hash) => hash,
-        Err(err) => {
-            tracing::warn!(error = %err, "fold-back failed");
-            None
-        }
-    };
+        pre_tree_hash,
+        pre_policy_hash,
+        base_snapshot_hash,
+        &workspace_record,
+    )
+    .context("freeze, validate, and publish authoritative project delta")?;
 
-    // This function is callable only with RootPushedHead's authoritative
-    // lineage, so every changed manifest advances that exact LocalPath HEAD.
-    if let Some(ref new_manifest_hash) = output_manifest_hash {
-        let Some(project_str) = project_path.to_str() else {
-            tracing::warn!(
-                project_path = %project_path.display(),
-                "cannot advance fold-back HEAD for a non-UTF-8 project identity"
-            );
-            return;
-        };
-        let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
-        let principal_key = match ryeos_state::refs::principal_storage_key(acting_principal) {
-            Ok(principal_key) => principal_key,
-            Err(error) => {
-                tracing::warn!(%error, "cannot advance fold-back HEAD for invalid principal identity");
-                return;
-            }
-        };
-        let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
-        let advanced = state.state_store.with_state_db(|db| {
-            crate::execution::advance_after_foldback(
+    let snapshot_hash = if let Some(ref new_tree_hash) = output_tree_hash {
+        if !advance_head {
+            crate::execution::store_foldback_snapshot(
                 &authority,
                 &cas_mutation_guard,
-                db,
-                &signer,
-                principal_key,
-                &project_hash,
-                new_manifest_hash,
-                head_base_snapshot_hash,
-            )
-        });
-        match advanced {
-            Ok(_new_snap) => {}
-            Err(err) => {
-                tracing::warn!(error = %err, "advance_after_foldback failed");
-            }
+                new_tree_hash,
+                base_snapshot_hash,
+                &mut publication,
+            )?
+        } else {
+            let project_str = project_path.to_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot advance fold-back HEAD for non-UTF-8 project identity {}",
+                    project_path.display()
+                )
+            })?;
+            let project_hash = lillux::cas::sha256_hex(project_str.as_bytes());
+            let principal_key = ryeos_state::refs::principal_storage_key(acting_principal)
+                .context("derive fold-back principal storage identity")?;
+            let signer = ryeos_app::state_store::NodeIdentitySigner::from_identity(&state.identity);
+            state
+                .state_store
+                .with_state_db_owned(thread_id, launch_owner, |db| {
+                    crate::execution::advance_after_foldback(
+                        &authority,
+                        &cas_mutation_guard,
+                        db,
+                        &signer,
+                        principal_key,
+                        &project_hash,
+                        new_tree_hash,
+                        base_snapshot_hash,
+                        &mut publication,
+                    )
+                })?
         }
-    }
+    } else {
+        base_snapshot_hash.to_string()
+    };
+    state
+        .state_store
+        .assert_launch_owner(thread_id, launch_owner)?;
+    Ok(crate::execution::PendingProjectResult {
+        snapshot_hash,
+        publication: Some(publication),
+        quiesced: None,
+    })
 }
 
 /// Pin a LocalPath spawn's resume to a snapshot of the working dir
 /// at spawn time.
 ///
 /// **Why:** for `LocalPath` projects the runner does not pre-allocate
-/// a `ProjectSnapshot` (only a `SourceManifest` is built by
+/// a `ProjectSnapshot` (only a staged `ProjectTree` is built by
 /// `prepare_cas_context`). Without an `original_snapshot_hash` on the
 /// captured `ResumeContext`, the reconciler would re-resolve the
 /// resumed plan against the *current* working dir on restart — not
@@ -842,16 +1114,16 @@ fn post_execution_foldback(params: PostExecutionFoldbackParams<'_>) {
 ///
 /// Returns a pending snapshot publication guard on success, `None` if no
 /// pinning was needed (no `native_resume`, or already pinned via a
-/// caller-supplied snapshot). The guard owns the source manifest's original
+/// caller-supplied snapshot). The guard owns the staged tree's original
 /// write permit and must survive until launch metadata persistence succeeds.
 fn pin_localpath_snapshot_if_needed(
     state: &AppState,
     launch_metadata: &mut ryeos_app::launch_metadata::RuntimeLaunchMetadata,
-    pre_manifest_hash: &Option<String>,
-    _pre_user_manifest_hash: &Option<String>,
+    pre_tree_hash: &Option<String>,
+    pre_policy_hash: &Option<String>,
     resume_snapshot_hash: &Option<String>,
-    manifest_publication: &mut Option<super::PendingCasPublication>,
-) -> Result<Option<super::PendingProjectSnapshot>> {
+    tree_publication: &mut Option<super::PendingCasPublication>,
+) -> Result<Option<super::CapturedProjectGeneration>> {
     if launch_metadata.native_resume.is_none() {
         return Ok(None);
     }
@@ -859,17 +1131,32 @@ fn pin_localpath_snapshot_if_needed(
         return Ok(None);
     }
     if launch_metadata.resume_context.is_none() {
-        anyhow::bail!("cannot pin native-resume source manifest without durable resume metadata");
+        anyhow::bail!("cannot pin native-resume project tree without durable resume metadata");
     }
-    let manifest_hash = pre_manifest_hash.clone().ok_or_else(|| {
-        anyhow::anyhow!("cannot pin native-resume launch without a source manifest")
+    let tree_hash = pre_tree_hash
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("cannot pin native-resume launch without a project tree"))?;
+    let policy_hash = pre_policy_hash.clone().ok_or_else(|| {
+        anyhow::anyhow!("cannot pin native-resume launch without a snapshot policy")
     })?;
-    let publication = manifest_publication.take().ok_or_else(|| {
-        anyhow::anyhow!("cannot pin native-resume source manifest without its publication permit")
+    let publication = tree_publication.take().ok_or_else(|| {
+        anyhow::anyhow!("cannot pin native-resume project tree without its publication permit")
     })?;
-    let publication = super::capture_manifest_project_snapshot(
+    let publication = super::capture_tree_project_snapshot(
         state,
-        manifest_hash,
+        tree_hash,
+        policy_hash,
+        launch_metadata
+            .resume_context
+            .as_ref()
+            .and_then(|resume| resume.stable_project_identity.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("native-resume pin is missing stable project identity")
+            })?,
+        launch_metadata
+            .resume_context
+            .as_ref()
+            .and_then(|resume| resume.local_overlay_root.clone()),
         "native_resume_pin",
         publication,
     )?;
@@ -877,11 +1164,11 @@ fn pin_localpath_snapshot_if_needed(
         .resume_context
         .as_mut()
         .expect("resume context checked above")
-        .original_snapshot_hash = Some(publication.hash.clone());
+        .original_snapshot_hash = Some(publication.snapshot_hash.clone());
     Ok(Some(publication))
 }
 
-fn release_manifest_publication(
+fn release_tree_publication(
     publication: Option<super::PendingCasPublication>,
     context: &'static str,
 ) {
@@ -893,7 +1180,7 @@ fn release_manifest_publication(
 }
 
 fn release_snapshot_publication(
-    publication: Option<super::PendingProjectSnapshot>,
+    publication: Option<super::CapturedProjectGeneration>,
     context: &'static str,
 ) {
     if let Some(publication) = publication {
@@ -915,15 +1202,19 @@ fn attach_or_kill(
     process_identity: &ryeos_app::process::ExecutionProcessIdentity,
     launch_metadata: &ryeos_app::launch_metadata::RuntimeLaunchMetadata,
     failed_outcome_code: &str,
+    launch_owner: &str,
 ) -> std::result::Result<(), ExecutionCleanupFailure> {
-    if let Err(err) = state.threads.attach_process(&ThreadAttachProcessParams {
-        thread_id: thread_id.to_string(),
-        pid: spawned_pid as i64,
-        pgid: spawned_pgid,
-        process_identity: Some(process_identity.clone()),
-        metadata: None,
-        launch_metadata: launch_metadata.clone(),
-    }) {
+    if let Err(err) = state.threads.attach_process_owned(
+        &ThreadAttachProcessParams {
+            thread_id: thread_id.to_string(),
+            pid: spawned_pid as i64,
+            pgid: spawned_pgid,
+            process_identity: Some(process_identity.clone()),
+            metadata: None,
+            launch_metadata: launch_metadata.clone(),
+        },
+        launch_owner,
+    ) {
         tracing::error!(
             thread_id,
             pgid = spawned_pgid,
@@ -945,10 +1236,11 @@ fn attach_or_kill(
                 )),
             });
         }
-        if let Err(clear_error) = state
-            .state_store
-            .clear_thread_process_if_matches(thread_id, process_identity)
-        {
+        if let Err(clear_error) = state.state_store.clear_thread_process_if_matches_owned(
+            thread_id,
+            process_identity,
+            launch_owner,
+        ) {
             tracing::error!(
                 thread_id,
                 error = %clear_error,
@@ -958,7 +1250,75 @@ fn attach_or_kill(
         return Err(ExecutionCleanupFailure {
             operation: "attach process",
             operation_error: err,
-            cleanup: fail_thread_static(state, thread_id, failed_outcome_code),
+            cleanup: fail_thread_static_owned(state, thread_id, failed_outcome_code, launch_owner),
+        });
+    }
+    let workspace_activation = (|| -> Result<()> {
+        let Some(resume) = launch_metadata.resume_context.as_ref() else {
+            return Ok(());
+        };
+        let ryeos_engine::contracts::ProjectContext::LocalPath { path } = &resume.project_context
+        else {
+            return Ok(());
+        };
+        let Ok(layout) = super::workspace::WorkspaceLayout::from_lower(path) else {
+            return Ok(());
+        };
+        let workspace_id = layout
+            .root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("workspace id is not valid UTF-8"))?;
+        let identity = serde_json::to_string(process_identity)?;
+        let record = state
+            .state_store
+            .execution_workspace(workspace_id)?
+            .ok_or_else(|| anyhow::anyhow!("workspace journal row is missing"))?;
+        let launch_owner = record
+            .launch_owner
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("workspace has no launch owner"))?;
+        state.state_store.transition_execution_workspace_owned(
+            workspace_id,
+            thread_id,
+            launch_owner,
+            &[WorkspaceState::Ready],
+            WorkspaceState::Active,
+            Some(&identity),
+        )
+    })();
+    if let Err(error) = workspace_activation {
+        let kill = ryeos_app::process::kill_by_action(
+            process_identity,
+            ryeos_app::process::ShutdownAction::Hard,
+        );
+        let clear = kill.success.then(|| {
+            state.state_store.clear_thread_process_if_matches_owned(
+                thread_id,
+                process_identity,
+                launch_owner,
+            )
+        });
+        return Err(ExecutionCleanupFailure {
+            operation: "activate workspace",
+            operation_error: error,
+            cleanup: match clear {
+                Some(Ok(true)) => fail_thread_static_owned(
+                    state,
+                    thread_id,
+                    "workspace_activation_failed",
+                    launch_owner,
+                ),
+                Some(Ok(false)) => Err(anyhow::anyhow!(
+                    "workspace activation failed and exact process attachment changed"
+                )),
+                Some(Err(error)) => Err(error
+                    .context("workspace activation failed and process compare-clear also failed")),
+                None => Err(anyhow::anyhow!(
+                    "workspace activation failed and exact process kill was unconfirmed ({})",
+                    kill.method
+                )),
+            },
         });
     }
     Ok(())
@@ -968,11 +1328,13 @@ fn clear_finished_process(
     state: &AppState,
     thread_id: &str,
     process_identity: &ryeos_app::process::ExecutionProcessIdentity,
+    launch_owner: &str,
 ) {
-    match state
-        .state_store
-        .clear_thread_process_if_matches(thread_id, process_identity)
-    {
+    match state.state_store.clear_thread_process_if_matches_owned(
+        thread_id,
+        process_identity,
+        launch_owner,
+    ) {
         Ok(true) => {}
         Ok(false) => tracing::warn!(
             thread_id,
@@ -991,18 +1353,28 @@ fn finalize_completion(
     state: &AppState,
     thread_id: &str,
     completion: ExecutionCompletion,
+    result_project_snapshot_hash: Option<&str>,
+    launch_owner: &str,
 ) -> std::result::Result<ThreadDetail, ExecutionCleanupFailure> {
-    match state
-        .threads
-        .finalize_from_completion(thread_id, &completion, None)
-    {
+    let finalized = state.threads.finalize_from_completion_owned(
+        thread_id,
+        launch_owner,
+        &completion,
+        result_project_snapshot_hash,
+    );
+    match finalized {
         Ok(thread) => Ok(thread),
         Err(err) => {
             tracing::error!(error = %err, "invalid completion during finalization");
             Err(ExecutionCleanupFailure {
                 operation: "finalize completion",
                 operation_error: err,
-                cleanup: fail_thread_static(state, thread_id, "invalid_completion"),
+                cleanup: fail_thread_static_owned(
+                    state,
+                    thread_id,
+                    "invalid_completion",
+                    launch_owner,
+                ),
             })
         }
     }
@@ -1086,6 +1458,7 @@ fn build_protocol_launch_env(
     // identity the runtime-cap minter used. `item_ref` stays the requested ref
     // for provenance/display.
     effective_bundle_id: Option<String>,
+    launch_owner: &str,
 ) -> Result<ProtocolLaunchEnv> {
     let callback_socket_requested = protocol
         .descriptor
@@ -1115,23 +1488,34 @@ fn build_protocol_launch_env(
 
     // Run-scoped credentials cover the run's full duration plus finalization.
     let ttl = launch_token_ttl(duration_seconds);
-    let callback_token = callback_token_requested.then(|| {
-        state
-            .callback_tokens
-            .generate_with_context(
-                thread_id,
-                callback_project_path.to_path_buf(),
-                ttl,
-                effective_caps,
-                provenance,
-                effective_bundle_id,
-                Some(item_ref.to_string()),
-                root_content_digest,
-                serde_json::Value::Null,
-                0,
-            )
-            .token
-    });
+    let callback_token = callback_token_requested
+        .then(|| {
+            state
+                .callback_tokens
+                .generate_with_context(
+                    thread_id,
+                    callback_project_path.to_path_buf(),
+                    ttl,
+                    effective_caps,
+                    provenance,
+                    effective_bundle_id,
+                    Some(item_ref.to_string()),
+                    root_content_digest,
+                    serde_json::Value::Null,
+                    0,
+                )
+                .token
+        })
+        .map(|token| {
+            if !state
+                .callback_tokens
+                .set_launch_owner(&token, launch_owner.to_string())
+            {
+                anyhow::bail!("fresh callback capability disappeared before owner binding");
+            }
+            Ok(token)
+        })
+        .transpose()?;
     let thread_auth_token = thread_auth_requested.then(|| {
         state
             .thread_auth
@@ -1251,10 +1635,37 @@ pub async fn run_inline(
         .pre_minted_thread_id
         .clone()
         .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
-    let _launch_claim = ThreadLaunchClaim::acquire_fresh(&state, &thread_id)?;
+    let launch_claim = ThreadLaunchClaim::acquire_fresh(&state, &thread_id)?;
+    let inline_launch_owner = launch_claim.canonical_owner()?;
+    guard.track_launch_owner(inline_launch_owner.clone());
+
+    // Seal the complete project generation before the root row becomes
+    // visible. The staged closure remains recovery-pinned until launch
+    // metadata attachment publishes it.
+    let PreparedCasContext {
+        effective_path,
+        pre_tree_hash,
+        pre_policy_hash,
+        resume_snapshot_hash,
+        head_base_snapshot_hash,
+        mut tree_publication,
+    } = prepare_cas_context(
+        &state,
+        &params.provenance,
+        &params.resolved.origin_site_id,
+        &thread_id,
+        launch_claim.owner(),
+        &mut guard,
+    )?;
+    verify_fresh_root_admission(&params)
+        .context("revalidate admitted inline root against captured generation")?;
     let created = state
         .threads
-        .create_root_thread_with_id(&thread_id, &params.resolved)
+        .create_root_thread_with_captured_generation(
+            &thread_id,
+            &params.resolved,
+            resume_snapshot_hash.as_deref(),
+        )
         .map_err(|error| {
             anyhow::anyhow!("persist admitted inline root before runtime preparation: {error:#}")
         })
@@ -1314,22 +1725,6 @@ pub async fn run_inline(
         })?;
     tracing::Span::current().record("thread_id", running.thread_id.as_str());
 
-    // Prepare CAS context — if this fails, finalize thread as failed
-    let PreparedCasContext {
-        effective_path,
-        pre_manifest_hash,
-        resume_snapshot_hash,
-        head_base_snapshot_hash,
-        mut manifest_publication,
-    } = match prepare_cas_context(&state, &params.provenance, &running.thread_id, &mut guard) {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            guard.fail_thread("cas_context_failed");
-            guard.cleanup();
-            return Err(err);
-        }
-    };
-
     // A fresh root's PlanContext is sealed admission authority, not its mutable
     // execution location. CAS may materialize a different workspace (including
     // no-project scratch execution), but that path belongs to provenance only.
@@ -1343,11 +1738,6 @@ pub async fn run_inline(
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
             };
-    }
-    if let Err(error) = verify_fresh_root_admission(&params) {
-        guard.fail_thread("history_policy_changed");
-        guard.cleanup();
-        return Err(error.context("revalidate admitted inline root after CAS preparation"));
     }
 
     // Spawn — use the per-request engine (pushed_head overlay or
@@ -1405,6 +1795,7 @@ pub async fn run_inline(
         &params.resolved.item_ref,
         params.resolved.root_raw_content_digest.clone(),
         effective_bundle_id_for_request(&params.resolved),
+        &inline_launch_owner,
     )
     .inspect_err(|_| {
         guard.fail_thread("protocol_contract_failed");
@@ -1426,6 +1817,18 @@ pub async fn run_inline(
     let inline_snapshot = resume_snapshot_hash.clone();
     let inline_pushed_head_ref =
         ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(&params.provenance);
+    let inline_stable_project_identity = match &params.resolved.plan_context.project_context {
+        ProjectContext::None => None,
+        _ => Some(
+            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                params.provenance.original_project_path(),
+                &params.resolved.origin_site_id,
+            )?,
+        ),
+    };
+    let inline_local_overlay_root = (params.provenance.project_source()
+        == ryeos_app::execution_provenance::ProjectSourceKind::LiveFs)
+        .then(|| params.provenance.original_project_path().to_path_buf());
     let inline_state_root = params
         .provenance
         .state_root_override()
@@ -1455,6 +1858,8 @@ pub async fn run_inline(
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
             original_snapshot_hash: inline_snapshot.as_deref(),
+            stable_project_identity: inline_stable_project_identity.as_ref(),
+            local_overlay_root: inline_local_overlay_root.as_deref(),
             original_pushed_head_ref: inline_pushed_head_ref.as_ref(),
             state_root: inline_state_root.as_deref(),
         })
@@ -1484,23 +1889,18 @@ pub async fn run_inline(
     };
 
     // Pin LocalPath native_resume to a snapshot before attach.
-    // pre_user_manifest_hash is intentionally None here: the
-    // LocalPath flow runs against the daemon's live app root, not
-    // a captured snapshot, so there's no pre-execution user manifest
-    // to pin alongside the project manifest. The pushed_head flow is
-    // where user-manifest lineage matters and is handled separately.
     // LIFECYCLE-INVARIANT: a root live-fs native-resume launch may promote its
-    // source manifest to a resume-only snapshot pin, but only RootPushedHead
+    // staged project tree to a resume-only snapshot pin, but only RootPushedHead
     // owns authoritative HEAD lineage and may fold back. Borrowed children
     // inherit their parent's execution authority and never pin or fold back.
     let snapshot_publication = if !params.provenance.is_borrowed_child() {
         match pin_localpath_snapshot_if_needed(
             &state,
             &mut spawned.launch_metadata,
-            &pre_manifest_hash,
-            &None,
+            &pre_tree_hash,
+            &pre_policy_hash,
             &resume_snapshot_hash,
-            &mut manifest_publication,
+            &mut tree_publication,
         ) {
             Ok(Some(publication)) => Some(publication),
             Ok(None) => None,
@@ -1514,7 +1914,12 @@ pub async fn run_inline(
                 let failure = ExecutionCleanupFailure {
                     operation: "pin LocalPath native-resume snapshot",
                     operation_error: err,
-                    cleanup: fail_thread_static(&state, &running.thread_id, "snapshot_pin_failed"),
+                    cleanup: fail_thread_static_owned(
+                        &state,
+                        &running.thread_id,
+                        "snapshot_pin_failed",
+                        &inline_launch_owner,
+                    ),
                 };
                 if failure.cleanup_disarms_guard() {
                     guard.mark_finalized();
@@ -1536,6 +1941,7 @@ pub async fn run_inline(
         &spawned.process_identity,
         &spawned.launch_metadata,
         "attach_failed",
+        &inline_launch_owner,
     ) {
         if failure.cleanup_disarms_guard() {
             guard.mark_finalized();
@@ -1544,6 +1950,10 @@ pub async fn run_inline(
         return Err(anyhow::Error::new(failure));
     }
     release_snapshot_publication(snapshot_publication, "inline launch metadata attachment");
+    release_tree_publication(
+        tree_publication.take(),
+        "inline authoritative birth and launch metadata attachment",
+    );
 
     // Wait
     let wait_workspace_lifeline = guard.temp_dir.clone();
@@ -1557,11 +1967,21 @@ pub async fn run_inline(
     .await
     {
         Ok(c) => {
-            clear_finished_process(&state, &running.thread_id, &waited_identity);
+            clear_finished_process(
+                &state,
+                &running.thread_id,
+                &waited_identity,
+                &inline_launch_owner,
+            );
             c
         }
         Err(join_err) => {
-            clear_finished_process(&state, &running.thread_id, &waited_identity);
+            clear_finished_process(
+                &state,
+                &running.thread_id,
+                &waited_identity,
+                &inline_launch_owner,
+            );
             tracing::error!(error = %join_err, "task panic during inline wait");
             guard.fail_thread("task_panic");
             guard.cleanup();
@@ -1571,10 +1991,7 @@ pub async fn run_inline(
 
     if !state.state_store.process_attachment_admission_is_open() {
         let _ = state.state_store.reset_resume_attempts(&running.thread_id);
-        release_manifest_publication(
-            manifest_publication,
-            "inline shutdown without CAS publication",
-        );
+        release_tree_publication(tree_publication, "inline shutdown without CAS publication");
         guard.cleanup();
         anyhow::bail!("execution interrupted by daemon shutdown; row preserved for recovery");
     }
@@ -1587,43 +2004,104 @@ pub async fn run_inline(
         .and_then(|m| m.get("debug"))
         .cloned();
 
-    if matches!(
-        &params.provenance,
-        ExecutionProvenance::RootPushedHead { .. }
-    ) {
+    let callback_sealed_result = state
+        .state_store
+        .authoritative_result_project_snapshot(&running.thread_id)?;
+    let mut pending_project_result = None;
+    let result_project_snapshot_hash = if let Some(snapshot) = callback_sealed_result.as_ref() {
+        Some(snapshot.clone())
+    } else {
+        transition_owned_workspace(
+            &state,
+            guard.temp_dir.as_ref(),
+            &running.thread_id,
+            &[WorkspaceState::Active],
+            WorkspaceState::Freezing,
+            None,
+        )
+        .inspect_err(|_| guard.fail_thread("workspace_freeze_failed"))?;
         match (
-            pre_manifest_hash.as_deref(),
-            head_base_snapshot_hash.as_deref(),
+            pre_tree_hash.as_deref(),
+            pre_policy_hash.as_deref(),
+            resume_snapshot_hash.as_deref(),
+            guard.temp_dir.as_ref().and_then(|guard| guard.path()),
         ) {
-            (Some(pre_manifest_hash), Some(head_base_snapshot_hash)) => {
-                let guard_exec_dir = guard.temp_dir.as_ref().and_then(|g| g.path());
-                post_execution_foldback(PostExecutionFoldbackParams {
+            (
+                Some(pre_tree_hash),
+                Some(pre_policy_hash),
+                Some(base_snapshot_hash),
+                Some(workspace),
+            ) => {
+                let pending = post_execution_foldback(PostExecutionFoldbackParams {
                     state: &state,
                     thread_id: &running.thread_id,
                     acting_principal: &params.acting_principal,
-                    pre_manifest_hash,
-                    head_base_snapshot_hash,
+                    pre_tree_hash,
+                    pre_policy_hash,
+                    base_snapshot_hash,
+                    advance_head: head_base_snapshot_hash.is_some(),
                     project_path: params.provenance.original_project_path(),
-                    execution_dir: guard_exec_dir.as_deref(),
+                    execution_dir: Some(&workspace),
                     completion: &completion,
-                });
+                })
+                .inspect_err(|_| guard.fail_thread("foldback_failed"))?;
+                let snapshot_hash = pending.snapshot_hash().to_string();
+                pending_project_result = Some(pending);
+                Some(snapshot_hash)
             }
-            _ => tracing::error!(
-                thread_id = %running.thread_id,
-                "RootPushedHead execution lost its authoritative foldback lineage"
-            ),
+            (None, None, None, _) => None,
+            _ => {
+                guard.fail_thread("foldback_lineage_missing");
+                guard.cleanup();
+                anyhow::bail!(
+                    "execution {} lost its authoritative workspace generation",
+                    running.thread_id
+                );
+            }
         }
-    }
+    };
     // A non-resumable live-tree execution has no durable snapshot root. Keep
-    // its source manifest protected through execution, then release it here.
+    // its staged project tree protected through execution, then release it here.
     // Native-resume pinning transferred the same permit into
     // `snapshot_publication` and released it after launch-metadata attachment.
-    release_manifest_publication(manifest_publication, "inline execution completion");
+    release_tree_publication(tree_publication, "inline execution completion");
 
     // Finalize
-    let finalized = match finalize_completion(&state, &running.thread_id, completion) {
+    let finalize_result = if callback_sealed_result.is_some() {
+        state
+            .threads
+            .get_thread(&running.thread_id)?
+            .ok_or_else(|| anyhow::anyhow!("callback-sealed thread disappeared"))
+            .map_err(|error| ExecutionCleanupFailure {
+                operation: "read callback-sealed completion",
+                operation_error: error,
+                cleanup: Ok(ExecutionCleanupOutcome::AlreadyTerminal),
+            })
+    } else {
+        finalize_completion(
+            &state,
+            &running.thread_id,
+            completion,
+            result_project_snapshot_hash.as_deref(),
+            &inline_launch_owner,
+        )
+    };
+    let finalized = match finalize_result {
         Ok(t) => {
+            let publication = pending_project_result
+                .take()
+                .map(crate::execution::PendingProjectResult::publish)
+                .transpose();
+            let close = close_owned_workspace(&state, guard.temp_dir.as_ref(), &running.thread_id);
+            if let Err(error) = close {
+                if let Some(workspace) = guard.temp_dir.as_ref() {
+                    workspace.disarm();
+                }
+                guard.mark_finalized();
+                return Err(error.context("close execution workspace journal"));
+            }
             guard.mark_finalized();
+            publication.context("release owner-bound fold-back publication")?;
             t
         }
         Err(failure) => {
@@ -1676,9 +2154,33 @@ pub async fn run_detached(
         .clone()
         .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
     let launch_claim = ThreadLaunchClaim::acquire_fresh(&state, &thread_id)?;
+    let detached_launch_owner = launch_claim.canonical_owner()?;
+    guard.track_launch_owner(detached_launch_owner.clone());
+
+    let PreparedCasContext {
+        effective_path,
+        pre_tree_hash,
+        pre_policy_hash,
+        resume_snapshot_hash,
+        head_base_snapshot_hash,
+        tree_publication,
+    } = prepare_cas_context(
+        &state,
+        &params.provenance,
+        &params.resolved.origin_site_id,
+        &thread_id,
+        launch_claim.owner(),
+        &mut guard,
+    )?;
+    verify_fresh_root_admission(&params)
+        .context("revalidate admitted detached root against captured generation")?;
     let created = state
         .threads
-        .create_root_thread_with_id(&thread_id, &params.resolved)
+        .create_root_thread_with_captured_generation(
+            &thread_id,
+            &params.resolved,
+            resume_snapshot_hash.as_deref(),
+        )
         .map_err(|error| {
             anyhow::anyhow!("persist admitted detached root before runtime preparation: {error:#}")
         })
@@ -1738,22 +2240,6 @@ pub async fn run_detached(
         })?;
     tracing::Span::current().record("thread_id", running.thread_id.as_str());
 
-    // Prepare CAS context
-    let PreparedCasContext {
-        effective_path,
-        pre_manifest_hash,
-        resume_snapshot_hash,
-        head_base_snapshot_hash,
-        manifest_publication,
-    } = match prepare_cas_context(&state, &params.provenance, &running.thread_id, &mut guard) {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            guard.fail_thread("cas_context_failed");
-            guard.cleanup();
-            return Err(err);
-        }
-    };
-
     // Keep fresh admitted planning authority sealed; see `run_inline`.
     if params.resolved.root_admission.is_none()
         && effective_path != params.provenance.effective_path()
@@ -1762,11 +2248,6 @@ pub async fn run_detached(
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
             };
-    }
-    if let Err(error) = verify_fresh_root_admission(&params) {
-        guard.fail_thread("history_policy_changed");
-        guard.cleanup();
-        return Err(error.context("revalidate admitted detached root after CAS preparation"));
     }
 
     // Capture thread details before moving guard
@@ -1817,6 +2298,7 @@ pub async fn run_detached(
         &params.resolved.item_ref,
         params.resolved.root_raw_content_digest.clone(),
         effective_bundle_id_for_request(&params.resolved),
+        &detached_launch_owner,
     )
     .inspect_err(|_| {
         guard.fail_thread("protocol_contract_failed");
@@ -1844,10 +2326,11 @@ pub async fn run_detached(
     let bg_vault = params.vault_bindings.clone();
     let bg_protocol_env_bindings = protocol_env_bindings;
     let bg_acting_principal = params.acting_principal.clone();
-    let bg_pre_manifest_hash = pre_manifest_hash;
+    let bg_pre_tree_hash = pre_tree_hash;
+    let bg_pre_policy_hash = pre_policy_hash;
     let bg_resume_snapshot_hash = resume_snapshot_hash;
     let bg_head_base_snapshot_hash = head_base_snapshot_hash;
-    let bg_manifest_publication = manifest_publication;
+    let bg_tree_publication = tree_publication;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_resume_snapshot_pin = params.provenance.is_borrowed_child();
     let bg_owns_pushed_head_lineage = matches!(
@@ -1873,10 +2356,11 @@ pub async fn run_detached(
         bg_vault,
         bg_protocol_env_bindings,
         bg_acting_principal,
-        bg_pre_manifest_hash,
+        bg_pre_tree_hash,
+        bg_pre_policy_hash,
         bg_resume_snapshot_hash,
         bg_head_base_snapshot_hash,
-        bg_manifest_publication,
+        bg_tree_publication,
         bg_project_path,
         bg_pushed_head_ref,
         bg_state_root,
@@ -1929,8 +2413,9 @@ pub async fn run_detached(
     name = "thread:dispatch",
     skip(
         bg_state, bg_chain_root_id, bg_resolved, bg_prepared_plan, bg_engine, bg_vault,
-        bg_protocol_env_bindings, bg_acting_principal, bg_pre_manifest_hash,
-        bg_resume_snapshot_hash, bg_head_base_snapshot_hash, bg_manifest_publication,
+        bg_protocol_env_bindings, bg_acting_principal, bg_pre_tree_hash,
+        bg_pre_policy_hash,
+        bg_resume_snapshot_hash, bg_head_base_snapshot_hash, bg_tree_publication,
         bg_project_path, bg_original_pushed_head_ref, bg_state_root,
         bg_isolation_project_authority, bg_isolation_daemon_socket_path, bg_temp_dir,
         bg_skip_resume_snapshot_pin, bg_owns_pushed_head_lineage, bg_runtime_state_dir,
@@ -1954,10 +2439,11 @@ async fn dispatch_detached_bg_task(
     bg_vault: HashMap<String, String>,
     bg_protocol_env_bindings: Vec<EnvBinding>,
     bg_acting_principal: String,
-    bg_pre_manifest_hash: Option<String>,
+    bg_pre_tree_hash: Option<String>,
+    bg_pre_policy_hash: Option<String>,
     bg_resume_snapshot_hash: Option<String>,
     bg_head_base_snapshot_hash: Option<String>,
-    mut bg_manifest_publication: Option<super::PendingCasPublication>,
+    mut bg_tree_publication: Option<super::PendingCasPublication>,
     bg_project_path: Option<PathBuf>,
     bg_original_pushed_head_ref: Option<ryeos_app::launch_metadata::OriginalPushedHeadRef>,
     bg_state_root: Option<PathBuf>,
@@ -1976,7 +2462,22 @@ async fn dispatch_detached_bg_task(
     // Keep recovery's durable spawn authorization alive through spawn, attach,
     // running, wait, and failure/finalization. Every early return drops it; a
     // completed task releases it at the function boundary.
-    let _launch_claim_guard = launch_claim;
+    let launch_claim_guard = launch_claim;
+    let launch_owner = match launch_claim_guard
+        .as_ref()
+        .map(ThreadLaunchClaim::canonical_owner)
+        .transpose()
+    {
+        Ok(Some(owner)) => owner,
+        Ok(None) => {
+            tracing::error!(thread_id = %bg_thread_id, "detached launch lost its durable owner");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(thread_id = %bg_thread_id, %error, "serialize detached launch owner");
+            return;
+        }
+    };
     // Revoke every protocol-requested credential on every exit path. A
     // callback-free protocol passes `None` and installs inert guards.
     let _cb_guard = defer_cb_token_revocation(&bg_state, &bg_thread_id, &bg_cb_token);
@@ -2006,6 +2507,20 @@ async fn dispatch_detached_bg_task(
     let protocol_env_for_spawn = bg_protocol_env_bindings;
     let snap_for_spawn = bg_resume_snapshot_hash.clone();
     let pushed_head_ref_for_spawn = bg_original_pushed_head_ref;
+    let stable_project_identity_for_spawn = bg_project_path
+        .as_deref()
+        .map(|path| {
+            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                path,
+                &res_for_spawn.origin_site_id,
+            )
+        })
+        .transpose()?;
+    let local_overlay_root_for_spawn = if pushed_head_ref_for_spawn.is_none() {
+        bg_project_path.clone()
+    } else {
+        None
+    };
     let state_root_for_spawn = bg_state_root;
     let isolation_for_spawn = bg_state.isolation.clone();
     let isolation_daemon_socket_path_for_spawn = bg_isolation_daemon_socket_path;
@@ -2036,6 +2551,8 @@ async fn dispatch_detached_bg_task(
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
             original_snapshot_hash: snap_for_spawn.as_deref(),
+            stable_project_identity: stable_project_identity_for_spawn.as_ref(),
+            local_overlay_root: local_overlay_root_for_spawn.as_deref(),
             original_pushed_head_ref: pushed_head_ref_for_spawn.as_ref(),
             state_root: state_root_for_spawn.as_deref(),
         })
@@ -2050,7 +2567,8 @@ async fn dispatch_detached_bg_task(
                 error = %err,
                 "engine error during spawn"
             );
-            if let Err(cleanup_error) = fail_thread_static(&bg_state, &bg_thread_id, "engine_error")
+            if let Err(cleanup_error) =
+                fail_thread_static_owned(&bg_state, &bg_thread_id, "engine_error", &launch_owner)
             {
                 tracing::error!(
                     phase = log_phase,
@@ -2068,7 +2586,9 @@ async fn dispatch_detached_bg_task(
                 error = %join_err,
                 "task panic during spawn"
             );
-            if let Err(cleanup_error) = fail_thread_static(&bg_state, &bg_thread_id, "task_panic") {
+            if let Err(cleanup_error) =
+                fail_thread_static_owned(&bg_state, &bg_thread_id, "task_panic", &launch_owner)
+            {
                 tracing::error!(
                     phase = log_phase,
                     thread_id = %bg_thread_id,
@@ -2082,17 +2602,14 @@ async fn dispatch_detached_bg_task(
     };
 
     // Pin LocalPath native_resume to a snapshot before attach.
-    // pre_user_manifest_hash is intentionally None for the same
-    // reason as the inline-spawn path: LocalPath runs against the
-    // daemon's live app root, not a captured snapshot.
     let snapshot_publication = if !bg_skip_resume_snapshot_pin {
         match pin_localpath_snapshot_if_needed(
             &bg_state,
             &mut spawned.launch_metadata,
-            &bg_pre_manifest_hash,
-            &None,
+            &bg_pre_tree_hash,
+            &bg_pre_policy_hash,
             &bg_resume_snapshot_hash,
-            &mut bg_manifest_publication,
+            &mut bg_tree_publication,
         ) {
             Ok(Some(publication)) => Some(publication),
             Ok(None) => None,
@@ -2105,7 +2622,12 @@ async fn dispatch_detached_bg_task(
                 // Explicit drop invokes the supervised process handle's
                 // terminate-and-reap fallback before lifecycle settlement.
                 drop(spawned);
-                let cleanup = fail_thread_static(&bg_state, &bg_thread_id, "snapshot_pin_failed");
+                let cleanup = fail_thread_static_owned(
+                    &bg_state,
+                    &bg_thread_id,
+                    "snapshot_pin_failed",
+                    &launch_owner,
+                );
                 if let Err(cleanup_error) = cleanup {
                     tracing::error!(
                         phase = log_phase,
@@ -2131,6 +2653,7 @@ async fn dispatch_detached_bg_task(
         &spawned.process_identity,
         &spawned.launch_metadata,
         attach_outcome_code,
+        &launch_owner,
     ) {
         tracing::error!(
             phase = log_phase,
@@ -2143,6 +2666,10 @@ async fn dispatch_detached_bg_task(
         return;
     }
     release_snapshot_publication(snapshot_publication, "detached launch metadata attachment");
+    release_tree_publication(
+        bg_tree_publication.take(),
+        "detached authoritative birth and launch metadata attachment",
+    );
 
     // Resume of a `created` row: transition to `running` so
     // `drain_running_threads` sees it on shutdown.
@@ -2164,11 +2691,11 @@ async fn dispatch_detached_bg_task(
         spawned.wait()
     })
     .await;
-    clear_finished_process(&bg_state, &bg_thread_id, &waited_identity);
+    clear_finished_process(&bg_state, &bg_thread_id, &waited_identity, &launch_owner);
     if !bg_state.state_store.process_attachment_admission_is_open() {
         let _ = bg_state.state_store.reset_resume_attempts(&bg_thread_id);
-        release_manifest_publication(
-            bg_manifest_publication,
+        release_tree_publication(
+            bg_tree_publication,
             "detached shutdown without CAS publication",
         );
         drop(bg_temp_dir);
@@ -2183,41 +2710,165 @@ async fn dispatch_detached_bg_task(
     let bg_exec_dir_path = bg_temp_dir.as_ref().and_then(|g| g.path());
     match wait_result {
         Ok(completion) => {
-            if bg_owns_pushed_head_lineage {
-                match (
-                    bg_pre_manifest_hash.as_deref(),
-                    bg_head_base_snapshot_hash.as_deref(),
-                    bg_project_path.as_deref(),
+            let callback_sealed_result = match bg_state
+                .state_store
+                .authoritative_result_project_snapshot(&bg_thread_id)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::error!(thread_id = %bg_thread_id, %error, "read callback-sealed generation failed");
+                    return;
+                }
+            };
+            if callback_sealed_result.is_none() {
+                if let Err(error) = transition_owned_workspace(
+                    &bg_state,
+                    bg_temp_dir.as_ref(),
+                    &bg_thread_id,
+                    &[WorkspaceState::Active],
+                    WorkspaceState::Freezing,
+                    None,
                 ) {
-                    (
-                        Some(pre_manifest_hash),
-                        Some(head_base_snapshot_hash),
-                        Some(project_path),
-                    ) => {
-                        post_execution_foldback(PostExecutionFoldbackParams {
-                            state: &bg_state,
-                            thread_id: &bg_thread_id,
-                            acting_principal: &bg_acting_principal,
-                            pre_manifest_hash,
-                            head_base_snapshot_hash,
-                            project_path,
-                            execution_dir: bg_exec_dir_path.as_deref(),
-                            completion: &completion,
-                        });
-                    }
-                    _ => tracing::error!(
+                    tracing::error!(
+                        phase = log_phase,
                         thread_id = %bg_thread_id,
-                        "RootPushedHead execution lost its authoritative foldback lineage"
-                    ),
+                        error = %error,
+                        "workspace freeze transition failed"
+                    );
+                    let _ = fail_thread_static_owned(
+                        &bg_state,
+                        &bg_thread_id,
+                        "workspace_freeze_failed",
+                        &launch_owner,
+                    );
+                    return;
                 }
             }
-            if let Err(err) = finalize_completion(&bg_state, &bg_thread_id, completion) {
+            let mut pending_project_result = None;
+            let result_project_snapshot_hash = if callback_sealed_result.is_some() {
+                callback_sealed_result.clone()
+            } else {
+                match (
+                    bg_pre_tree_hash.as_deref(),
+                    bg_pre_policy_hash.as_deref(),
+                    bg_resume_snapshot_hash.as_deref(),
+                    bg_project_path.as_deref(),
+                    bg_exec_dir_path.as_deref(),
+                ) {
+                    (
+                        Some(pre_tree_hash),
+                        Some(pre_policy_hash),
+                        Some(base_snapshot_hash),
+                        Some(project_path),
+                        Some(workspace),
+                    ) => match post_execution_foldback(PostExecutionFoldbackParams {
+                        state: &bg_state,
+                        thread_id: &bg_thread_id,
+                        acting_principal: &bg_acting_principal,
+                        pre_tree_hash,
+                        pre_policy_hash,
+                        base_snapshot_hash,
+                        advance_head: bg_owns_pushed_head_lineage,
+                        project_path,
+                        execution_dir: Some(workspace),
+                        completion: &completion,
+                    }) {
+                        Ok(pending) => {
+                            let snapshot_hash = pending.snapshot_hash().to_string();
+                            pending_project_result = Some(pending);
+                            Some(snapshot_hash)
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                phase = log_phase,
+                                thread_id = %bg_thread_id,
+                                error = %error,
+                                "authoritative fold-back failed; refusing successful settlement"
+                            );
+                            if let Err(cleanup_error) = fail_thread_static_owned(
+                                &bg_state,
+                                &bg_thread_id,
+                                "foldback_failed",
+                                &launch_owner,
+                            ) {
+                                tracing::error!(
+                                    phase = log_phase,
+                                    thread_id = %bg_thread_id,
+                                    error = %cleanup_error,
+                                    "fold-back failure cleanup did not settle"
+                                );
+                            }
+                            drop(bg_temp_dir.take());
+                            return;
+                        }
+                    },
+                    (None, None, None, _, _) => None,
+                    _ => {
+                        tracing::error!(
+                            thread_id = %bg_thread_id,
+                            "execution lost its authoritative workspace generation"
+                        );
+                        let _ = fail_thread_static_owned(
+                            &bg_state,
+                            &bg_thread_id,
+                            "foldback_lineage_missing",
+                            &launch_owner,
+                        );
+                        drop(bg_temp_dir.take());
+                        return;
+                    }
+                }
+            };
+            let settlement = if callback_sealed_result.is_some() {
+                bg_state
+                    .threads
+                    .get_thread(&bg_thread_id)
+                    .and_then(|thread| {
+                        thread.ok_or_else(|| anyhow::anyhow!("callback-sealed thread disappeared"))
+                    })
+                    .map(|_| ())
+            } else {
+                finalize_completion(
+                    &bg_state,
+                    &bg_thread_id,
+                    completion,
+                    result_project_snapshot_hash.as_deref(),
+                    &launch_owner,
+                )
+                .map(|_| ())
+                .map_err(anyhow::Error::new)
+            };
+            if let Err(err) = settlement {
                 tracing::error!(
                     phase = log_phase,
                     thread_id = %bg_thread_id,
                     error = %err,
                     "completion finalization failed; terminal cleanup outcome is included"
                 );
+            } else {
+                if let Some(pending) = pending_project_result.take() {
+                    if let Err(error) = pending.publish() {
+                        tracing::error!(
+                            phase = log_phase,
+                            thread_id = %bg_thread_id,
+                            %error,
+                            "failed to release owner-bound fold-back publication"
+                        );
+                    }
+                }
+                if let Err(error) =
+                    close_owned_workspace(&bg_state, bg_temp_dir.as_ref(), &bg_thread_id)
+                {
+                    if let Some(workspace) = bg_temp_dir.as_ref() {
+                        workspace.disarm();
+                    }
+                    tracing::error!(
+                        phase = log_phase,
+                        thread_id = %bg_thread_id,
+                        error = %error,
+                        "workspace close transition failed"
+                    );
+                }
             }
         }
         Err(join_err) => {
@@ -2226,7 +2877,9 @@ async fn dispatch_detached_bg_task(
                 error = %join_err,
                 "task panic during wait"
             );
-            if let Err(cleanup_error) = fail_thread_static(&bg_state, &bg_thread_id, "task_panic") {
+            if let Err(cleanup_error) =
+                fail_thread_static_owned(&bg_state, &bg_thread_id, "task_panic", &launch_owner)
+            {
                 tracing::error!(
                     phase = log_phase,
                     thread_id = %bg_thread_id,
@@ -2236,38 +2889,33 @@ async fn dispatch_detached_bg_task(
             }
         }
     }
-    // If no resumable snapshot was published, retain the live source manifest
+    // If no resumable snapshot was published, retain the staged project tree
     // through execution and release its publication permit now.
-    release_manifest_publication(bg_manifest_publication, "detached execution completion");
+    release_tree_publication(bg_tree_publication, "detached execution completion");
 
     // Drop the Arc<TempDirGuard>. If this is the last holder, the
     // directory is removed by the TempDirGuard Drop impl.
     drop(bg_temp_dir);
 }
 
-/// Fail a thread without a guard (for use inside detached tasks).
-/// Note: callback token revocation is handled by CbTokenGuard::drop.
-fn fail_thread_static(
+fn fail_thread_static_owned(
     state: &AppState,
     thread_id: &str,
     outcome_code: &str,
+    launch_owner: &str,
 ) -> Result<ExecutionCleanupOutcome> {
     match super::process_attachment::finalize_requested_stop_if_present(state, thread_id) {
         Ok(true) => return Ok(ExecutionCleanupOutcome::DurableStopSettled),
         Ok(false) => {}
         Err(error) => {
-            return Err(error.context("settle durable stop before static failure finalization"))
+            return Err(error.context("settle durable stop before owned failure finalization"))
         }
     }
     if !state.state_store.process_attachment_admission_is_open() {
         state.state_store.reset_resume_attempts(thread_id)?;
-        tracing::info!(
-            thread_id,
-            "preserving execution row after shutdown-owned interruption"
-        );
         return Ok(ExecutionCleanupOutcome::PreservedForShutdown);
     }
-    let finalize = state.threads.finalize_thread(&ThreadFinalizeParams {
+    let params = ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: "failed".to_string(),
         outcome_code: Some(outcome_code.to_string()),
@@ -2277,10 +2925,10 @@ fn fail_thread_static(
         artifacts: Vec::new(),
         final_cost: None,
         summary_json: None,
-    });
-    match finalize {
+    };
+    match state.threads.finalize_thread_owned(&params, launch_owner) {
         Ok(_) => Ok(ExecutionCleanupOutcome::Finalized),
-        Err(finalize_error) => {
+        Err(error) => {
             let terminal = state
                 .threads
                 .get_thread(thread_id)?
@@ -2288,7 +2936,7 @@ fn fail_thread_static(
             if terminal {
                 Ok(ExecutionCleanupOutcome::AlreadyTerminal)
             } else {
-                Err(finalize_error.context("persist static terminal cleanup"))
+                Err(error.context("persist owner-fenced terminal cleanup"))
             }
         }
     }
@@ -2394,9 +3042,6 @@ enum ResumeProvenanceDecision<'a> {
         snapshot_hash: &'a str,
         original_path: &'a std::path::Path,
     },
-    /// Original spawn ran against the live tree: resume against the
-    /// live tree and the daemon's current engine.
-    LiveFs(&'a std::path::Path),
     /// The record's project_context carries no working tree and no
     /// pushed-head identity was captured: the overlay engine cannot be
     /// rebuilt. Refuse — never silently fall back to the live tree.
@@ -2416,7 +3061,9 @@ fn decide_resume_provenance(resume: &ResumeContext) -> ResumeProvenanceDecision<
                 original_path: path,
             }
         }
-        (None, None, ProjectContext::LocalPath { path }) => ResumeProvenanceDecision::LiveFs(path),
+        (None, None, ProjectContext::LocalPath { .. }) => {
+            ResumeProvenanceDecision::MissingPushedHeadRef(&resume.project_context)
+        }
         (None, _, other) => ResumeProvenanceDecision::MissingPushedHeadRef(other),
     }
 }
@@ -2498,6 +3145,7 @@ fn execution_provenance_from_resume_context(
                 original_path.to_path_buf(),
                 ctx.request_engine,
                 lifeline,
+                snapshot_hash.to_string(),
             )
             .with_state_root(resume.state_root.clone());
             tracing::info!(
@@ -2512,25 +3160,12 @@ fn execution_provenance_from_resume_context(
                 },
             ))
         }
-        // LocalPath resume: live tree + the daemon's CURRENT engine, by
-        // intent — the original spawn also resolved against the
-        // then-current live engine. Accepted residual drift: an install-
-        // generation change between spawn and resume means item/bundle
-        // resolution here can differ from what the pre-crash run saw.
-        // The persisted state-root override is re-applied so a resumed
-        // overridden run keeps its state/callback anchor (the freshly
-        // minted token must match what the runtime advertises).
-        ResumeProvenanceDecision::LiveFs(path) => Ok((
-            ExecutionProvenance::root_live_fs(path.to_path_buf(), state.engine.clone())
-                .with_state_root(resume.state_root.clone()),
-            resume.project_context.clone(),
-        )),
         ResumeProvenanceDecision::MissingPushedHeadRef(other) => {
             anyhow::bail!(
                 "resume: record for {} has project_context {other:?} but no \
-                 original_pushed_head_ref, so the snapshot-scoped overlay engine \
+                 immutable project snapshot, so the exact workspace and engine \
                  cannot be rebuilt; refusing to resume against the live tree. \
-                 Re-spawn the thread from its original pushed head instead.",
+                 Re-spawn the thread from a newly captured generation instead.",
                 resume.item_ref,
             );
         }
@@ -2781,24 +3416,38 @@ pub async fn run_existing_detached(
     // Process attach precedes the `created -> running` transition, so liveness
     // is checked for every nonterminal status. A duplicate recovery must never
     // spawn beside an already-attached tool subprocess.
-    if thread
-        .runtime
-        .pgid
-        .is_some_and(ryeos_app::process::pgid_alive)
-    {
-        return Ok(RecoveryLaunchOutcome::Skipped("live_process"));
+    if let Some(identity) = thread.runtime.process_identity.as_ref() {
+        match ryeos_app::process::execution_group_liveness(identity) {
+            ryeos_app::process::IdentityLiveness::Alive => {
+                return Ok(RecoveryLaunchOutcome::Skipped("live_process"));
+            }
+            ryeos_app::process::IdentityLiveness::Unavailable => {
+                return Ok(RecoveryLaunchOutcome::Skipped("unprovable_process_owner"));
+            }
+            ryeos_app::process::IdentityLiveness::DeadOrStale => {}
+        }
     }
     let mut guard = ExecutionGuard::new(state.clone());
     guard.track_thread(&thread_id);
+    let resume_launch_owner = resume_claim.canonical_owner()?;
+    guard.track_launch_owner(resume_launch_owner.clone());
 
     // Prepare CAS context.
     let PreparedCasContext {
         effective_path,
-        pre_manifest_hash,
+        pre_tree_hash,
+        pre_policy_hash,
         resume_snapshot_hash,
         head_base_snapshot_hash,
-        manifest_publication,
-    } = match prepare_cas_context(&state, &params.provenance, &thread_id, &mut guard) {
+        tree_publication,
+    } = match prepare_cas_context(
+        &state,
+        &params.provenance,
+        &params.resolved.origin_site_id,
+        &thread_id,
+        resume_claim.owner(),
+        &mut guard,
+    ) {
         Ok(ctx) => ctx,
         Err(err) => {
             guard.fail_thread("cas_context_failed");
@@ -2912,6 +3561,7 @@ pub async fn run_existing_detached(
         &params.resolved.item_ref,
         params.resolved.root_raw_content_digest.clone(),
         effective_bundle_id_for_request(&params.resolved),
+        &resume_launch_owner,
     )
     .inspect_err(|_| {
         guard.fail_thread("protocol_contract_failed");
@@ -2940,10 +3590,11 @@ pub async fn run_existing_detached(
     let bg_vault = params.vault_bindings.clone();
     let bg_protocol_env_bindings = protocol_env_bindings;
     let bg_acting_principal = params.acting_principal.clone();
-    let bg_pre_manifest_hash = pre_manifest_hash;
+    let bg_pre_tree_hash = pre_tree_hash;
+    let bg_pre_policy_hash = pre_policy_hash;
     let bg_resume_snapshot_hash = resume_snapshot_hash;
     let bg_head_base_snapshot_hash = head_base_snapshot_hash;
-    let bg_manifest_publication = manifest_publication;
+    let bg_tree_publication = tree_publication;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
     let bg_skip_resume_snapshot_pin = params.provenance.is_borrowed_child();
     let bg_owns_pushed_head_lineage = matches!(
@@ -2969,10 +3620,11 @@ pub async fn run_existing_detached(
         bg_vault,
         bg_protocol_env_bindings,
         bg_acting_principal,
-        bg_pre_manifest_hash,
+        bg_pre_tree_hash,
+        bg_pre_policy_hash,
         bg_resume_snapshot_hash,
         bg_head_base_snapshot_hash,
-        bg_manifest_publication,
+        bg_tree_publication,
         bg_project_path,
         bg_pushed_head_ref,
         bg_state_root,
@@ -3002,6 +3654,13 @@ mod tests {
         project_context: ProjectContext,
         pushed: Option<OriginalPushedHeadRef>,
     ) -> ResumeContext {
+        let stable_project_identity = match &project_context {
+            ProjectContext::LocalPath { path } => Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(path, "site:test")
+                    .unwrap(),
+            ),
+            _ => None,
+        };
         ResumeContext {
             kind: "graph".into(),
             item_ref: "graph:test/item".into(),
@@ -3009,6 +3668,8 @@ mod tests {
             launch_mode: "detached".into(),
             parameters: json!({}),
             project_context,
+            stable_project_identity,
+            local_overlay_root: None,
             original_snapshot_hash: None,
             original_pushed_head_ref: pushed,
             state_root: None,
@@ -3050,7 +3711,7 @@ mod tests {
     }
 
     #[test]
-    fn localpath_record_without_pushed_ref_selects_live_fs() {
+    fn localpath_record_without_snapshot_ref_is_rejected() {
         let resume = resume_record(
             ProjectContext::LocalPath {
                 path: PathBuf::from("/home/op/proj"),
@@ -3058,10 +3719,10 @@ mod tests {
             None,
         );
         match decide_resume_provenance(&resume) {
-            ResumeProvenanceDecision::LiveFs(path) => {
+            ResumeProvenanceDecision::MissingPushedHeadRef(ProjectContext::LocalPath { path }) => {
                 assert_eq!(path, std::path::Path::new("/home/op/proj"));
             }
-            other => panic!("expected LiveFs, got {other:?}"),
+            other => panic!("expected MissingPushedHeadRef, got {other:?}"),
         }
     }
 

@@ -210,6 +210,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     }
 
     let mut cache_invalidated = false;
+    let mut durability_uncertain = false;
     let activation: Result<PathBuf> = (|| {
         let registration = serde_json::json!({ "kind": "node", "path": local_target });
         transaction.begin_present(
@@ -222,14 +223,21 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
             Err(error) => {
                 if error.namespace_committed() {
                     staging_cleanup.disarm();
+                    durability_uncertain = true;
+                    tracing::warn!(
+                        bundle = %req.bundle_name,
+                        %error,
+                        "remote bundle activation is visible but its parent durability barrier failed"
+                    );
+                } else {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "activate remote bundle staging {} at {}",
+                            transaction_staging.display(),
+                            local_target.display()
+                        )
+                    });
                 }
-                return Err(error).with_context(|| {
-                    format!(
-                        "activate remote bundle staging {} at {}",
-                        transaction_staging.display(),
-                        local_target.display()
-                    )
-                });
             }
         }
 
@@ -281,6 +289,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "files_installed": files_installed,
         "total_bytes": total_bytes,
         "path": canonical_target.display().to_string(),
+        "durability_uncertain": durability_uncertain,
     }))
 }
 
@@ -606,6 +615,42 @@ async fn fetch_and_materialize_files(
     let mut total_bytes: u64 = 0;
 
     for hashes in batches {
+        if hashes.len() == 1 {
+            let hash = &hashes[0];
+            let entry_indices = uses_by_hash
+                .get(hash)
+                .with_context(|| format!("missing local export uses for blob {hash}"))?;
+            let declared_size = entries[entry_indices[0]].size;
+            if declared_size > crate::handlers::objects_get::MAX_INLINE_BLOB_BYTES {
+                let mut temporary = tempfile::NamedTempFile::new_in(local_target)?;
+                let actual_size = client
+                    .stream_blob(hash, temporary.as_file_mut())
+                    .await
+                    .with_context(|| format!("stream remote bundle blob {hash}"))?;
+                temporary.as_file().sync_all()?;
+                if actual_size != declared_size {
+                    bail!(
+                        "remote bundle blob {hash} declared size {declared_size} but streamed {actual_size} bytes"
+                    );
+                }
+                for index in entry_indices {
+                    let entry = &entries[*index];
+                    let file_path = local_target.join(&entry.path);
+                    if let Some(parent) = file_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .with_context(|| format!("create dir {}", parent.display()))?;
+                    }
+                    materialize_regular_file_from_path(&file_path, temporary.path(), entry.mode)?;
+                    total_bytes = total_bytes
+                        .checked_add(entry.size)
+                        .context("materialized bundle size overflow")?;
+                    files_installed += 1;
+                }
+                write_remote_fetch_heartbeat(local_target)
+                    .context("refresh remote bundle transfer heartbeat after streamed blob")?;
+                continue;
+            }
+        }
         let response = client
             .objects_get_bundle_batch_with_response_limit(&hashes, REMOTE_OBJECT_RESPONSE_MAX_BYTES)
             .await
@@ -922,6 +967,33 @@ fn materialize_regular_file(path: &std::path::Path, bytes: &[u8], mode: u32) -> 
         let _ = (path, bytes, mode);
         bail!("remote bundle install requires Unix file-mode support")
     }
+}
+
+fn materialize_regular_file_from_path(
+    path: &std::path::Path,
+    source: &std::path::Path,
+    mode: u32,
+) -> Result<()> {
+    validate_unix_file_mode(mode, &path.display().to_string())?;
+    std::fs::copy(source, path)
+        .with_context(|| format!("materialize streamed regular file {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| format!("restore Unix mode {mode:#o} on {}", path.display()))?;
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o7777 != mode
+        {
+            bail!(
+                "streamed bundle entry {} is not the requested regular file",
+                path.display()
+            );
+        }
+    }
+    Ok(())
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

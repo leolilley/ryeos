@@ -70,7 +70,7 @@ fn invocation_context_for_session(
 }
 
 struct PreparedInvocation {
-    effective_path: std::path::PathBuf,
+    project: ryeos_executor::execution::project_source::ResolvedProjectContext,
     exec_ctx: ryeos_executor::executor::ExecutionContext,
 }
 
@@ -219,7 +219,7 @@ fn prepare_item_ref(
     };
 
     Ok(PreparedInvocation {
-        effective_path: project_ctx.effective_path,
+        project: project_ctx,
         exec_ctx,
     })
 }
@@ -235,10 +235,18 @@ async fn execute_prepared_item_ref(
     let root_canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
 
-    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-        prepared.effective_path.clone(),
-        prepared.exec_ctx.engine.clone(),
-    );
+    let provenance =
+        ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+            prepared.project.effective_path.clone(),
+            prepared.project.original_path.clone(),
+            prepared.exec_ctx.engine.clone(),
+            prepared.project.temp_dir.clone().ok_or_else(|| {
+                HandlerError::Internal("captured UI project has no workspace guard".into())
+            })?,
+            prepared.project.snapshot_hash.clone().ok_or_else(|| {
+                HandlerError::Internal("captured UI project has no snapshot identity".into())
+            })?,
+        );
 
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
         launch_mode: "inline",
@@ -247,7 +255,7 @@ async fn execute_prepared_item_ref(
         params: req.params.clone(),
         ref_bindings: req.ref_bindings.clone(),
         acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
-        project_path: &prepared.effective_path,
+        project_path: &prepared.project.effective_path,
         provenance,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,

@@ -552,9 +552,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 return Ok(dispatch_error_response(dispatch_err));
             }
         };
-        if let Some(guard) = no_project_guard {
-            project_ctx.temp_dir = Some(guard);
-        }
+        // The no-project scratch root remains live through capture. Execution
+        // itself uses the immutable captured checkout and its own guard.
+        let _no_project_source_guard = no_project_guard;
 
         // Build plan context.
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
@@ -621,11 +621,18 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         "execute with runtime state-root override"
                     );
                 }
-                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+                ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
                     project_ctx.effective_path.clone(),
+                    project_ctx.original_path.clone(),
                     project_ctx.request_engine.clone(),
+                    project_ctx.temp_dir.clone().expect(
+                        "durable live-fs resolution must own its immutable execution checkout",
+                    ),
+                    project_ctx
+                        .snapshot_hash
+                        .clone()
+                        .expect("durable live-fs resolution must carry its captured snapshot"),
                 )
-                .with_workspace_lifeline(project_ctx.temp_dir.clone())
                 .with_state_root(state_root.clone())
             }
             ProjectSource::PushedHead => {
@@ -871,6 +878,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
             launch_options.usage_subject = usage_subject.clone();
             launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
             launch_options.call = request.call().cloned();
+            launch_options =
+                launch_options.retain_captured_generation(project_ctx.take_captured_generation());
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
             let response_thread_id = thread_id.clone();
 

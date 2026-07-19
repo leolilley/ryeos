@@ -9,7 +9,7 @@ use crate::handler_context::HandlerContext;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_state::objects::{ProjectSnapshot, SourceManifest};
+use ryeos_state::objects::{ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,15 +51,26 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         )
     })?;
     let snapshot = ProjectSnapshot::from_value(&snapshot_obj)?;
-    let manifest_obj = cas
-        .get_object(&snapshot.project_manifest_hash)?
+    let tree_obj = cas
+        .get_object(&snapshot.project_tree_hash)?
         .ok_or_else(|| {
             anyhow!(
-                "manifest {} not found in CAS",
-                snapshot.project_manifest_hash
+                "project tree {} not found in CAS",
+                snapshot.project_tree_hash
             )
         })?;
-    let manifest = SourceManifest::from_value(&manifest_obj)?;
+    let tree = ProjectTree::from_value(&tree_obj)?;
+    let policy_obj = cas
+        .get_object(&snapshot.effective_policy_hash)?
+        .ok_or_else(|| {
+            anyhow!(
+                "project snapshot policy {} not found in CAS",
+                snapshot.effective_policy_hash
+            )
+        })?;
+    let policy = ProjectSnapshotPolicy::from_value(&policy_obj)?;
+    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_captured_policy_source(cas, &tree, &policy)?;
 
     Ok(serde_json::json!({
         "project_path": canonical_project_path,
@@ -67,9 +78,10 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "deployed": true,
         "deployed_snapshot_hash": deployed.target_hash,
         "deployed_at": deployed.updated_at,
-        "project_sync_scope": snapshot.project_sync_scope,
-        "manifest_hash": snapshot.project_manifest_hash,
-        "manifest_entries": manifest.item_source_hashes.len(),
+        "project_sync_scope": policy.sync_scope,
+        "project_tree_hash": snapshot.project_tree_hash,
+        "effective_policy_hash": snapshot.effective_policy_hash,
+        "tree_entries": tree.files.len(),
         "snapshot_created_at": snapshot.created_at,
         "snapshot_source": snapshot.source,
     }))

@@ -8,10 +8,16 @@ use ryeos_app::process::{
     execution_group_liveness, execution_identity_is_current_boot, execution_liveness,
     kill_by_action, resolve_shutdown_action, IdentityLiveness,
 };
+use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::ThreadDetail;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_state::objects::ThreadStatus;
+
+/// A runtime owner gets a short, durable post-exit window to freeze/fold back
+/// and settle. A second live sweep after this boundary may revoke a provably
+/// dead exact owner; an in-memory task registration alone is not a heartbeat.
+const ACTIVE_OWNER_DEAD_SETTLEMENT_GRACE_MS: i64 = 5_000;
 
 /// The structural shape of a continuation successor stranded `created`: never
 /// launched, links upstream, and carries a captured `ResumeContext`. Lineage wins
@@ -312,10 +318,16 @@ fn dead_identity_safe_to_clear(
 ) -> bool {
     match execution_identity_is_current_boot(identity) {
         Ok(false) => true,
+        Ok(true)
+            if ryeos_app::process::process_group_presence(identity.pgid)
+                == IdentityLiveness::DeadOrStale =>
+        {
+            true
+        }
         Ok(true) => {
             tracing::warn!(
                 thread_id,
-                "dead same-boot group leader cannot prove descendant group emptiness; quarantining until reboot or outer-worker cleanup"
+                "dead same-boot group leader still has a present or unprovable process group; quarantining"
             );
             false
         }
@@ -357,6 +369,8 @@ async fn reconcile_active_threads_inner(
     state: &AppState,
     mode: ActiveReconcileMode,
 ) -> Result<ActiveThreadReconcileReport> {
+    repair_detached_spawn_links(state)?;
+    let blocked_freezes = reconcile_execution_workspaces(state, mode)?;
     // Orphan thread cleanup.
     let mut running_threads = state
         .state_store
@@ -398,6 +412,13 @@ async fn reconcile_active_threads_inner(
     let mut intents: Vec<ResumeIntent> = Vec::new();
 
     for thread in &running_threads {
+        if blocked_freezes.contains(&thread.thread_id) {
+            tracing::error!(
+                thread_id = %thread.thread_id,
+                "thread remains quarantined until its journaled workspace freeze can be recovered"
+            );
+            continue;
+        }
         let kind_profile = state.threads.kind_profiles().get(&thread.kind);
         if is_daemon_owned_non_execution_thread(thread, kind_profile) {
             tracing::debug!(
@@ -417,17 +438,70 @@ async fn reconcile_active_threads_inner(
         let group_liveness = identity
             .map(execution_group_liveness)
             .unwrap_or(IdentityLiveness::DeadOrStale);
+        let launch_claim = state.state_store.get_launch_claim(&thread.thread_id)?;
 
-        // A live-mode launch claim is durable ownership of the attach window.
-        // Do not mistake a current daemon's claimed `created` row for a crashed
-        // spawn merely because it has not attached a pgid yet.
-        if mode == ActiveReconcileMode::Live
-            && state
-                .state_store
-                .get_launch_claim(&thread.thread_id)?
-                .is_some()
-        {
-            continue;
+        if mode == ActiveReconcileMode::Live && thread.runtime.stop_requested_at_ms.is_none() {
+            if let Some(claim) = launch_claim
+                .as_ref()
+                .filter(|claim| state.state_store.is_launch_owner_active(&claim.claimed_by))
+            {
+                let Some(identity) = identity else {
+                    // Resolution and materialization before attach are
+                    // deliberately unbounded; absence of a process is not a
+                    // timeout authority.
+                    continue;
+                };
+                if target_liveness == IdentityLiveness::Alive
+                    || target_liveness == IdentityLiveness::Unavailable
+                    || group_liveness == IdentityLiveness::Unavailable
+                {
+                    continue;
+                }
+                let now_ms = lillux::time::timestamp_millis();
+                let Some(observed_at_ms) = state.state_store.observe_active_owner_dead_process(
+                    &thread.thread_id,
+                    &claim.claim_id,
+                    &claim.claimed_by,
+                    identity,
+                    now_ms,
+                )?
+                else {
+                    continue;
+                };
+                if now_ms.saturating_sub(observed_at_ms) < ACTIVE_OWNER_DEAD_SETTLEMENT_GRACE_MS {
+                    continue;
+                }
+                if group_liveness == IdentityLiveness::Alive {
+                    let killed = ryeos_app::process::kill_by_action(
+                        identity,
+                        ryeos_app::process::ShutdownAction::Hard,
+                    );
+                    if !killed.success
+                        || execution_group_liveness(identity) != IdentityLiveness::DeadOrStale
+                    {
+                        tracing::error!(
+                            thread_id = %thread.thread_id,
+                            launch_owner = %claim.claimed_by,
+                            method = killed.method,
+                            "dead runtime target retained a live execution group that could not be terminated; preserving ownership"
+                        );
+                        continue;
+                    }
+                }
+                if !state.state_store.release_active_thread_launch_claim(
+                    &thread.thread_id,
+                    &claim.claim_id,
+                    &claim.claimed_by,
+                )? {
+                    continue;
+                }
+                tracing::warn!(
+                    thread_id = %thread.thread_id,
+                    launch_owner = %claim.claimed_by,
+                    observed_at_ms,
+                    "revoked a current-daemon owner whose exact runtime remained dead past the settlement grace"
+                );
+            }
         }
 
         // Explicit cancellation/kill intent survives a daemon crash. Recover it
@@ -496,6 +570,11 @@ async fn reconcile_active_threads_inner(
                     }
                 }
             }
+            if let Some(claim) = launch_claim.as_ref() {
+                state
+                    .state_store
+                    .release_thread_launch_claim(&thread.thread_id, &claim.claim_id)?;
+            }
             if !ryeos_app::state_store::is_terminal_status(&thread.status) {
                 finalize_recovered_stop(
                     state,
@@ -542,6 +621,11 @@ async fn reconcile_active_threads_inner(
                         "terminal identity changed before reconcile compare-and-clear"
                     );
                 }
+            }
+            if let Some(claim) = launch_claim.as_ref() {
+                state
+                    .state_store
+                    .release_thread_launch_claim(&thread.thread_id, &claim.claim_id)?;
             }
             continue;
         }
@@ -605,6 +689,23 @@ async fn reconcile_active_threads_inner(
                     );
                     continue;
                 }
+            }
+        }
+
+        // Reaching this boundary proves there is no live attached owner. A
+        // surviving exact claim is an abandoned pre-attach/attach owner from a
+        // cancelled task or prior daemon generation. Revoke only that claim;
+        // never delete another epoch wholesale.
+        if let Some(claim) = launch_claim.as_ref() {
+            if state
+                .state_store
+                .release_thread_launch_claim(&thread.thread_id, &claim.claim_id)?
+            {
+                tracing::info!(
+                    thread_id = %thread.thread_id,
+                    claim_id = %claim.claim_id,
+                    "revoked abandoned exact launch claim during reconciliation"
+                );
             }
         }
 
@@ -879,6 +980,415 @@ async fn reconcile_active_threads_inner(
         active_thread_ids,
         resume_intents: intents,
     })
+}
+
+fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
+    for intent in state.state_store.detached_spawn_intents()? {
+        let Some(child) = state.state_store.get_thread(&intent.child_thread_id)? else {
+            // The durable reservation intentionally precedes child birth.
+            continue;
+        };
+        let _inherited_stop = state.state_store.record_child_link(
+            &intent.parent_thread_id,
+            &intent.child_thread_id,
+            "dispatch",
+        )?;
+        if child.status == ryeos_state::objects::ThreadStatus::Created.as_str()
+            && child.runtime.process_identity.is_none()
+            && state
+                .state_store
+                .get_launch_claim(&intent.child_thread_id)?
+                .is_none()
+            && !state
+                .state_store
+                .launch_window_is_cancelled(&intent.child_thread_id)?
+        {
+            let window = state
+                .state_store
+                .get_launch_metadata(&intent.child_thread_id)?
+                .and_then(|metadata| metadata.follow_launch_window);
+            if let Some(window) = window {
+                state.state_store.launch_window_insert_only(
+                    &intent.child_thread_id,
+                    &window.key,
+                    window.width,
+                    lillux::time::timestamp_millis(),
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_execution_workspaces(
+    state: &AppState,
+    mode: ActiveReconcileMode,
+) -> Result<BTreeSet<String>> {
+    let mut blocked_freezes = BTreeSet::new();
+    for workspace in state.state_store.open_execution_workspaces()? {
+        let recorded_identity = workspace
+            .process_identity
+            .as_deref()
+            .map(serde_json::from_str::<ryeos_app::process::ExecutionProcessIdentity>)
+            .transpose()?;
+        let workspace_claim = workspace
+            .thread_id
+            .as_deref()
+            .map(|thread_id| state.state_store.get_launch_claim(thread_id))
+            .transpose()?
+            .flatten();
+        let current_owner_active = workspace_claim.as_ref().is_some_and(|claim| {
+            workspace.launch_owner.as_deref() == Some(claim.claimed_by.as_str())
+                && state.state_store.is_launch_owner_active(&claim.claimed_by)
+        });
+        let owner_was_replaced = workspace_claim.as_ref().is_some_and(|claim| {
+            workspace.launch_owner.as_deref() != Some(claim.claimed_by.as_str())
+        });
+        if mode == ActiveReconcileMode::Live && current_owner_active {
+            // The live owner may be between journaling `freezing`, stopping its
+            // process group, publishing the frozen generation, and resuming.
+            // A periodic sweep must never steal that in-process saga.
+            continue;
+        }
+        if workspace.state == WorkspaceState::Closing {
+            if let Err(error) = cleanup_dead_execution_workspace(state, &workspace) {
+                tracing::warn!(
+                    workspace_id = %workspace.workspace_id,
+                    %error,
+                    "verified workspace destroy could not finish idempotent root/row cleanup"
+                );
+            }
+            continue;
+        }
+        let runtime_identity = if workspace_claim.as_ref().is_some_and(|claim| {
+            workspace.launch_owner.as_deref() == Some(claim.claimed_by.as_str())
+        }) {
+            workspace
+                .thread_id
+                .as_deref()
+                .map(|thread_id| state.state_store.get_thread(thread_id))
+                .transpose()?
+                .flatten()
+                .and_then(|thread| thread.runtime.process_identity)
+        } else {
+            None
+        };
+        let liveness = runtime_identity
+            .as_ref()
+            .or(recorded_identity.as_ref())
+            .map(execution_group_liveness)
+            .unwrap_or(IdentityLiveness::DeadOrStale);
+        if workspace.state == WorkspaceState::Freezing {
+            let nonterminal_owner = workspace
+                .thread_id
+                .as_deref()
+                .map(|thread_id| state.state_store.get_thread(thread_id))
+                .transpose()?
+                .flatten()
+                .is_some_and(|thread| matches!(thread.status.as_str(), "created" | "running"));
+            if nonterminal_owner && !owner_was_replaced {
+                let identity = runtime_identity.as_ref().or(recorded_identity.as_ref());
+                let mut quiesced_members = Vec::new();
+                if liveness == IdentityLiveness::Alive {
+                    let identity = identity.expect("alive liveness implies process identity");
+                    let stopped = if ryeos_app::process::signal_exact_group(identity, libc::SIGSTOP)
+                        == ryeos_app::process::SignalResult::Delivered
+                    {
+                        ryeos_app::process::wait_for_exact_group_quiesced(
+                            identity,
+                            std::time::Duration::from_secs(2),
+                        )
+                    } else {
+                        Err(anyhow::anyhow!(
+                            "exact process-group stop was not delivered"
+                        ))
+                    };
+                    let Ok(members) = stopped else {
+                        if let Some(thread_id) = workspace.thread_id.as_ref() {
+                            blocked_freezes.insert(thread_id.clone());
+                        }
+                        tracing::error!(
+                            workspace_id = %workspace.workspace_id,
+                            "interrupted callback freeze owner could not be quiesced; preserving upper layer"
+                        );
+                        continue;
+                    };
+                    quiesced_members = members;
+                } else if liveness == IdentityLiveness::Unavailable {
+                    if let Some(thread_id) = workspace.thread_id.as_ref() {
+                        blocked_freezes.insert(thread_id.clone());
+                    }
+                    tracing::error!(
+                        workspace_id = %workspace.workspace_id,
+                        "interrupted callback freeze liveness is unavailable; preserving upper layer"
+                    );
+                    continue;
+                }
+                match ryeos_executor::execution::recover_interrupted_workspace_freeze(
+                    state, &workspace,
+                ) {
+                    Ok(snapshot_hash) => {
+                        if !quiesced_members.is_empty() {
+                            ryeos_app::process::terminate_exact_processes(
+                                &quiesced_members,
+                                std::time::Duration::from_secs(2),
+                            )?;
+                        }
+                        tracing::warn!(
+                            workspace_id = %workspace.workspace_id,
+                            %snapshot_hash,
+                            "recovered interrupted callback freeze and terminated its exact orphan process set"
+                        );
+                    }
+                    Err(error) => {
+                        if let Some(thread_id) = workspace.thread_id.as_ref() {
+                            blocked_freezes.insert(thread_id.clone());
+                        }
+                        tracing::error!(
+                            workspace_id = %workspace.workspace_id,
+                            %error,
+                            "interrupted callback freeze could not be recovered; preserving upper layer"
+                        );
+                    }
+                }
+                continue;
+            }
+        }
+        if liveness == IdentityLiveness::Alive {
+            continue;
+        }
+        if liveness == IdentityLiveness::Unavailable {
+            tracing::warn!(
+                workspace_id = %workspace.workspace_id,
+                "workspace process-group liveness is unavailable; leaving it quarantined in place"
+            );
+            continue;
+        }
+        if mode == ActiveReconcileMode::Live
+            && workspace.thread_id.is_none()
+            && workspace.launch_owner.is_none()
+        {
+            // Materialization is deliberately unbounded. An unbound reservation
+            // may still be owned by the request that is constructing its lower,
+            // and elapsed wall time is never sufficient proof of abandonment.
+            // Startup runs only after the previous daemon generation is gone and
+            // may safely reconcile these pre-bind rows.
+            continue;
+        }
+        if workspace.state != WorkspaceState::Orphaned {
+            if let (Some(thread_id), Some(launch_owner)) = (
+                workspace.thread_id.as_deref(),
+                workspace.launch_owner.as_deref(),
+            ) {
+                state
+                    .state_store
+                    .transition_abandoned_execution_workspace_owned(
+                        &workspace.workspace_id,
+                        thread_id,
+                        launch_owner,
+                        &[workspace.state],
+                        WorkspaceState::Orphaned,
+                    )?;
+            } else {
+                state.state_store.transition_execution_workspace(
+                    &workspace.workspace_id,
+                    &[workspace.state],
+                    WorkspaceState::Orphaned,
+                    None,
+                )?;
+            }
+            tracing::warn!(
+                workspace_id = %workspace.workspace_id,
+                thread_id = workspace.thread_id.as_deref().unwrap_or(""),
+                root_path = %workspace.root_path,
+                "execution workspace owner is dead; quarantined for verified cleanup"
+            );
+        }
+        if let Err(error) = cleanup_dead_execution_workspace(state, &workspace) {
+            tracing::warn!(
+                workspace_id = %workspace.workspace_id,
+                %error,
+                "dead execution workspace could not be owner-verified and removed; retaining quarantine"
+            );
+        }
+    }
+    Ok(blocked_freezes)
+}
+
+fn cleanup_dead_execution_workspace(
+    state: &AppState,
+    workspace: &ryeos_app::runtime_db::WorkspaceRecord,
+) -> Result<()> {
+    if workspace.state == WorkspaceState::Closing {
+        remove_exact_workspace_root_if_present(std::path::Path::new(&workspace.root_path))?;
+        if let (Some(thread_id), Some(launch_owner)) = (
+            workspace.thread_id.as_deref(),
+            workspace.launch_owner.as_deref(),
+        ) {
+            state
+                .state_store
+                .transition_abandoned_execution_workspace_owned(
+                    &workspace.workspace_id,
+                    thread_id,
+                    launch_owner,
+                    &[WorkspaceState::Closing],
+                    WorkspaceState::Closed,
+                )?;
+        } else {
+            state.state_store.transition_execution_workspace(
+                &workspace.workspace_id,
+                &[WorkspaceState::Closing],
+                WorkspaceState::Closed,
+                None,
+            )?;
+        }
+        return Ok(());
+    }
+    if workspace.thread_id.is_none() && workspace.launch_owner.is_none() {
+        state.state_store.transition_execution_workspace(
+            &workspace.workspace_id,
+            &[WorkspaceState::Orphaned],
+            WorkspaceState::Closing,
+            None,
+        )?;
+        remove_exact_workspace_root_if_present(std::path::Path::new(&workspace.root_path))?;
+        state.state_store.transition_execution_workspace(
+            &workspace.workspace_id,
+            &[WorkspaceState::Closing],
+            WorkspaceState::Closed,
+            None,
+        )?;
+        return Ok(());
+    }
+    let thread_id = workspace
+        .thread_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("workspace has no bound thread owner"))?;
+    let launch_owner = workspace
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("workspace has no launch owner"))?;
+    if let Some(claim) = state.state_store.get_launch_claim(thread_id)? {
+        if claim.claimed_by == launch_owner
+            && state.state_store.is_launch_owner_active(&claim.claimed_by)
+        {
+            anyhow::bail!("workspace launch owner is still active in this daemon");
+        }
+    }
+    let root = std::path::PathBuf::from(&workspace.root_path);
+    let layout = ryeos_executor::execution::workspace::WorkspaceLayout::from_root(root.clone());
+    let (captured_backend_id, captured_backend_version) = state
+        .isolation
+        .workspace_backend_identity()
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if workspace.backend_id.as_deref() != Some(captured_backend_id)
+        || workspace.backend_version.as_deref() != Some(captured_backend_version)
+    {
+        anyhow::bail!(
+            "workspace selected backend differs from the daemon's exact captured adapter build"
+        );
+    }
+    // A daemon can die after the backend selection is durable but before the
+    // Create response is journaled. Create is deliberately idempotent for an
+    // exact owner and pinned roots, so recovery re-drives it to recover the
+    // identities required to prove a safe Destroy. No abandoned upper is ever
+    // folded back.
+    let recovered_create =
+        if workspace.pinned_root_identities.is_none() || workspace.mount_identity.is_none() {
+            if workspace.state != WorkspaceState::Constructing {
+                anyhow::bail!("bound workspace is missing durable backend creation evidence");
+            }
+            Some(
+                state
+                    .isolation
+                    .workspace_lifecycle(
+                        ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+                        &workspace.workspace_id,
+                        launch_owner,
+                        &workspace.lower_snapshot,
+                        &layout.lower,
+                        &layout.upper,
+                        &layout.work,
+                    )
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+            )
+        } else {
+            None
+        };
+    let response = state
+        .isolation
+        .workspace_lifecycle(
+            ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
+            &workspace.workspace_id,
+            launch_owner,
+            &workspace.lower_snapshot,
+            &layout.lower,
+            &layout.upper,
+            &layout.work,
+        )
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let pinned = lillux::canonical_json(&serde_json::to_value(&response.pinned_root_identities)?)?;
+    let expected_pinned = match recovered_create.as_ref() {
+        Some(created) => {
+            lillux::canonical_json(&serde_json::to_value(&created.pinned_root_identities)?)?
+        }
+        None => workspace
+            .pinned_root_identities
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("workspace has no pinned root identities"))?,
+    };
+    let expected_mount = recovered_create
+        .as_ref()
+        .map(|created| created.mount_identity.as_str())
+        .or(workspace.mount_identity.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("workspace has no backend mount identity"))?;
+    if workspace.backend_id.as_deref() != Some(response.backend_id.as_str())
+        || workspace.backend_version.as_deref() != Some(response.backend_version.as_str())
+        || expected_pinned != pinned
+        || expected_mount != response.mount_identity
+    {
+        anyhow::bail!("workspace destroy evidence differs from its durable journal");
+    }
+    state
+        .state_store
+        .transition_abandoned_execution_workspace_owned(
+            &workspace.workspace_id,
+            thread_id,
+            launch_owner,
+            &[WorkspaceState::Orphaned],
+            WorkspaceState::Closing,
+        )?;
+    remove_exact_workspace_root_if_present(&root)?;
+    state
+        .state_store
+        .transition_abandoned_execution_workspace_owned(
+            &workspace.workspace_id,
+            thread_id,
+            launch_owner,
+            &[WorkspaceState::Closing],
+            WorkspaceState::Closed,
+        )?;
+    Ok(())
+}
+
+fn remove_exact_workspace_root_if_present(root_path: &std::path::Path) -> Result<()> {
+    let name = root_path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("workspace root has no final component"))?;
+    let parent_path = root_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("workspace root has no parent"))?;
+    let Some(parent) = lillux::PinnedDirectory::open(parent_path)? else {
+        return Ok(());
+    };
+    let Some(root) = parent.open_child_directory(name)? else {
+        return Ok(());
+    };
+    root.remove_contents_recursive()?;
+    if !parent.remove_empty_child_if_same(name, &root)? {
+        anyhow::bail!("workspace root remained non-empty");
+    }
+    Ok(())
 }
 
 /// Process reconciliation owns executable threads and any row that carries
@@ -1205,6 +1715,14 @@ mod tests {
             project_context: ProjectContext::LocalPath {
                 path: PathBuf::from("/tmp/p"),
             },
+            stable_project_identity: Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    std::path::Path::new("/tmp/p"),
+                    "site:a",
+                )
+                .unwrap(),
+            ),
+            local_overlay_root: Some(PathBuf::from("/tmp/p")),
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -1247,6 +1765,7 @@ mod tests {
                 pid: None,
                 pgid: None,
                 process_identity: None,
+                process_dead_observed_at_ms: None,
                 stop_requested_at_ms: None,
                 stop_intent: None,
                 launch_metadata: lm,

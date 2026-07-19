@@ -2298,6 +2298,7 @@ typo_field: oops
             "name: needy\nversion: '1.0'\nrequires_kinds:\n  - nonexistent-kind\n",
         )
         .unwrap();
+        materialize_test_manifest(&needy, "needy");
 
         let opts = InitOptions {
             app_root: state.clone(),

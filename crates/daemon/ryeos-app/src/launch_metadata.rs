@@ -39,7 +39,7 @@ where
 /// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 3;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 4;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -189,6 +189,49 @@ pub struct OriginalPushedHeadRef {
     pub original_project_path: PathBuf,
 }
 
+/// Stable attribution and authorization identity for a project. This is never
+/// an execution cwd and never grants permission to open a path on this node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StableProjectIdentity {
+    pub normalized_logical_key: String,
+    pub origin_site: String,
+    pub display_path: PathBuf,
+}
+
+impl StableProjectIdentity {
+    pub fn from_path(path: &std::path::Path, origin_site: &str) -> anyhow::Result<Self> {
+        if !path.is_absolute() {
+            anyhow::bail!(
+                "stable project identity path must be absolute: {}",
+                path.display()
+            );
+        }
+        let display = path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("stable project identity path is not UTF-8"))?;
+        if display.bytes().any(|byte| byte.is_ascii_control())
+            || origin_site.is_empty()
+            || origin_site.bytes().any(|byte| byte.is_ascii_control())
+        {
+            anyhow::bail!("stable project identity contains invalid control characters");
+        }
+        Ok(Self {
+            normalized_logical_key: format!("{origin_site}:{display}"),
+            origin_site: origin_site.to_string(),
+            display_path: path.to_path_buf(),
+        })
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let canonical = Self::from_path(&self.display_path, &self.origin_site)?;
+        if canonical.normalized_logical_key != self.normalized_logical_key {
+            anyhow::bail!("stable project identity logical key is not canonical");
+        }
+        Ok(())
+    }
+}
+
 impl OriginalPushedHeadRef {
     /// Derive the persistable pushed-head identity from a launch's
     /// provenance. `Some` only for a root pushed-head spawn: borrowed
@@ -238,6 +281,14 @@ pub struct ResumeContext {
     /// Carries enough information for the engine resolver to identify
     /// the project (LocalPath / SnapshotHash / ProjectRef).
     pub project_context: ProjectContext,
+    /// Stable logical identity. It survives materialization and resume and is
+    /// never treated as an effective filesystem path.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub stable_project_identity: Option<StableProjectIdentity>,
+    /// Admission-validated node-local root used only for local overlays such as
+    /// `.env`. Remote attribution paths never populate this field.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub local_overlay_root: Option<PathBuf>,
     /// Snapshot hash captured by the runner at original spawn time
     /// (`prepare_cas_context`'s `base_snapshot_hash`). When set, the
     /// reconciler prefers a `ProjectContext::SnapshotHash` form over
@@ -329,18 +380,34 @@ impl ResumeContext {
     ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
         match &self.project_context {
             ProjectContext::None => {
-                if self.durable_project_snapshot_hash().is_some() {
-                    anyhow::bail!("project_context none contradicts a durable project snapshot");
+                if self.durable_project_snapshot_hash().is_some()
+                    || self.stable_project_identity.is_some()
+                    || self.local_overlay_root.is_some()
+                {
+                    anyhow::bail!("project_context none contradicts durable project identity");
                 }
                 Ok((None, None))
             }
             ProjectContext::LocalPath { path } => {
-                if self.original_pushed_head_ref.is_some() {
-                    anyhow::bail!(
-                        "local-path project context contradicts pushed-head project identity"
-                    );
+                let stable = self.stable_project_identity.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("local-path resume context is missing stable project identity")
+                })?;
+                stable.validate()?;
+                if let Some(overlay) = &self.local_overlay_root {
+                    if !overlay.is_absolute() {
+                        anyhow::bail!("local overlay root must be absolute");
+                    }
                 }
-                Ok((Some(path.clone()), self.original_snapshot_hash.clone()))
+                let snapshot = self
+                    .durable_project_snapshot_hash()
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "durable local-path resume context is missing its immutable project snapshot"
+                        )
+                    })?;
+                let _ = path;
+                Ok((Some(stable.display_path.clone()), Some(snapshot)))
             }
             ProjectContext::SnapshotHash { hash } => {
                 for pinned in [
@@ -358,7 +425,15 @@ impl ResumeContext {
                         );
                     }
                 }
-                Ok((None, Some(hash.clone())))
+                if let Some(stable) = &self.stable_project_identity {
+                    stable.validate()?;
+                }
+                Ok((
+                    self.stable_project_identity
+                        .as_ref()
+                        .map(|identity| identity.display_path.clone()),
+                    Some(hash.clone()),
+                ))
             }
             ProjectContext::ProjectRef { .. } => {
                 let original = self.original_snapshot_hash.as_deref();
@@ -378,7 +453,15 @@ impl ResumeContext {
                         "project-ref continuation has no immutable resolved snapshot pin"
                     )
                 })?;
-                Ok((None, Some(pinned.to_owned())))
+                if let Some(stable) = &self.stable_project_identity {
+                    stable.validate()?;
+                }
+                Ok((
+                    self.stable_project_identity
+                        .as_ref()
+                        .map(|identity| identity.display_path.clone()),
+                    Some(pinned.to_owned()),
+                ))
             }
         }
     }
@@ -549,6 +632,12 @@ mod tests {
     }
 
     fn resume_context(project_context: ProjectContext) -> ResumeContext {
+        let stable_project_identity = match &project_context {
+            ProjectContext::LocalPath { path } => {
+                Some(StableProjectIdentity::from_path(path, "site:test").unwrap())
+            }
+            _ => None,
+        };
         ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "tool:test/run".to_string(),
@@ -556,6 +645,8 @@ mod tests {
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({}),
             project_context,
+            stable_project_identity,
+            local_overlay_root: None,
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -764,6 +855,11 @@ mod tests {
             launch_mode: "detached".to_string(),
             parameters: serde_json::json!({"x": 1}),
             project_context: local_path_ctx(),
+            stable_project_identity: Some(
+                StableProjectIdentity::from_path(std::path::Path::new("/tmp/proj"), "site:a")
+                    .unwrap(),
+            ),
+            local_overlay_root: Some(PathBuf::from("/tmp/proj")),
             original_snapshot_hash: Some("abc123".to_string()),
             original_pushed_head_ref: Some(OriginalPushedHeadRef {
                 snapshot_hash: "snap-ph".to_string(),

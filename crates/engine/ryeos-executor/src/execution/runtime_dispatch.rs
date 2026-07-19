@@ -35,6 +35,13 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         state
             .callback_tokens
             .validate(&params.callback_token, &params.thread_id, &project_path)?;
+    let launch_owner = cap
+        .launch_owner
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("execution callback capability has no launch owner"))?;
+    state
+        .state_store
+        .assert_launch_owner(&params.thread_id, launch_owner)?;
     crate::execution::launch_preparation::validate_ref_bindings(&params.action.ref_bindings)?;
 
     // V5.5 P2 — daemon-enforced callback caps. The token carries the
@@ -360,6 +367,11 @@ async fn handle_execute(
             &params.action.params,
             params.action.facets.as_ref(),
             params.action.launch_window.as_ref(),
+            params
+                .action
+                .operation_id
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("detached callback action has no operation_id"))?,
         )
         .await;
     }
@@ -656,6 +668,7 @@ mod tests {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-parent".to_string(),
+            launch_owner: None,
             chain_root_id: "T-parent".to_string(),
             project_path: PathBuf::from("/project"),
             expires_at: Instant::now() + Duration::from_secs(300),
@@ -686,6 +699,7 @@ mod tests {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-parent".to_string(),
+            launch_owner: None,
             chain_root_id: "T-parent".to_string(),
             project_path: PathBuf::from("/project"),
             expires_at: Instant::now() + Duration::from_secs(300),
@@ -722,6 +736,7 @@ mod tests {
             context_hash: "c".repeat(64),
         };
         let action = ryeos_runtime::callback::ActionPayload {
+            operation_id: None,
             item_id: "tool:test/audit".to_string(),
             ref_bindings: std::collections::BTreeMap::new(),
             params: serde_json::json!({"value": 1}),
@@ -791,6 +806,7 @@ mod tests {
             context_hash: "b".repeat(64),
         };
         let action = ryeos_runtime::callback::ActionPayload {
+            operation_id: None,
             item_id: "tool:test/audit".to_string(),
             ref_bindings: std::collections::BTreeMap::new(),
             params: serde_json::json!({}),

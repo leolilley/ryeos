@@ -18,19 +18,32 @@ pub enum AtomicMutationError {
     /// barrier failed. The new namespace is observable but crash durability is
     /// uncertain.
     DurabilityUncertain(anyhow::Error),
+    /// A conditional mutation refused to publish the requested value, but a
+    /// racing namespace prevented restoration of the quarantined prior entry.
+    /// The unexpected and prior entries remain preserved for explicit
+    /// recovery; the requested mutation itself did not commit.
+    NamespaceChanged(anyhow::Error),
 }
 
 impl AtomicMutationError {
-    fn before(error: impl Into<anyhow::Error>) -> Self {
+    pub(crate) fn before(error: impl Into<anyhow::Error>) -> Self {
         Self::BeforeCommit(error.into())
     }
 
-    fn durability(error: impl Into<anyhow::Error>) -> Self {
+    pub(crate) fn durability(error: impl Into<anyhow::Error>) -> Self {
         Self::DurabilityUncertain(error.into())
+    }
+
+    pub(crate) fn namespace_changed(error: impl Into<anyhow::Error>) -> Self {
+        Self::NamespaceChanged(error.into())
     }
 
     pub fn namespace_committed(&self) -> bool {
         matches!(self, Self::DurabilityUncertain(_))
+    }
+
+    pub fn namespace_requires_recovery(&self) -> bool {
+        matches!(self, Self::NamespaceChanged(_))
     }
 }
 
@@ -44,6 +57,10 @@ impl std::fmt::Display for AtomicMutationError {
                 formatter,
                 "atomic mutation committed but durability is uncertain: {error:#}"
             ),
+            Self::NamespaceChanged(error) => write!(
+                formatter,
+                "atomic mutation did not publish the requested value but namespace recovery is required: {error:#}"
+            ),
         }
     }
 }
@@ -51,9 +68,9 @@ impl std::fmt::Display for AtomicMutationError {
 impl std::error::Error for AtomicMutationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::BeforeCommit(error) | Self::DurabilityUncertain(error) => {
-                Some(error.root_cause())
-            }
+            Self::BeforeCommit(error)
+            | Self::DurabilityUncertain(error)
+            | Self::NamespaceChanged(error) => Some(error.root_cause()),
         }
     }
 }
@@ -283,6 +300,49 @@ pub fn rename_path_durable(source: &Path, target: &Path) -> AtomicMutationResult
     {
         let _ = (source, target);
         unsupported_mutation("durable rename")
+    }
+}
+
+/// Publish a staged sibling without replacing any existing destination, then
+/// durably flush the shared parent directory.
+pub fn rename_path_noreplace_durable(source: &Path, target: &Path) -> AtomicMutationResult<()> {
+    if source.parent() != target.parent() {
+        return Err(AtomicMutationError::before(anyhow::anyhow!(
+            "durable no-replace rename paths must share a parent directory"
+        )));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CString;
+        use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::OsStrExt;
+
+        let (parent, source_name) = open_parent_and_name(source)?;
+        let target_name = target.file_name().ok_or_else(|| {
+            AtomicMutationError::before(anyhow::anyhow!("rename target has no file name"))
+        })?;
+        let target_name =
+            CString::new(target_name.as_bytes()).map_err(AtomicMutationError::before)?;
+        let renamed = unsafe {
+            libc::renameat2(
+                parent.as_raw_fd(),
+                source_name.as_ptr(),
+                parent.as_raw_fd(),
+                target_name.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if renamed != 0 {
+            return Err(AtomicMutationError::before(std::io::Error::last_os_error()));
+        }
+        return sync_open_parent(&parent).map_err(AtomicMutationError::durability);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (source, target);
+        Err(AtomicMutationError::before(anyhow::anyhow!(
+            "durable no-replace rename is unavailable on this platform"
+        )))
     }
 }
 

@@ -294,7 +294,7 @@ async fn await_operator_handoff(
 fn admit_fresh_launch(
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
     ref_bindings: &BTreeMap<String, String>,
-    project_path: &crate::routes::abs_path::AbsolutePathBuf,
+    project: &ryeos_executor::execution::project_source::ResolvedProjectContext,
     parameters: &Value,
     ctx: &HandlerContext,
     state: &AppState,
@@ -302,7 +302,7 @@ fn admit_fresh_launch(
     let preflight = crate::routes::launch::preflight_dispatch_launch(
         state,
         item_ref,
-        project_path,
+        project,
         parameters,
         ref_bindings,
         &ctx.fingerprint,
@@ -324,7 +324,7 @@ fn admit_fresh_launch(
     })?;
     crate::routes::launch::DispatchLaunchOptions::admitted(
         root_admission,
-        project_path.as_path(),
+        &project.effective_path,
         ref_bindings.clone(),
     )
     .map_err(|error| {
@@ -433,19 +433,42 @@ pub async fn handle(
             let parameters = json!({ "input": input });
             let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&item_ref)
                 .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
+            let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            let mut project_ctx =
+                ryeos_executor::execution::project_source::resolve_project_context(
+                    &state,
+                    &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
+                    project_path.as_path(),
+                    &ctx.fingerprint,
+                    &format!("thread-input-{thread_id}"),
+                )
+                .map_err(|error| {
+                    HandlerError::BadRequest(format!("capture fresh thread project: {error}"))
+                })?;
             let launch_options = admit_fresh_launch(
                 &parsed_ref,
                 &ref_bindings,
-                &project_path,
+                &project_ctx,
                 &parameters,
                 &ctx,
                 &state,
-            )?;
-            let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            )?
+            .retain_captured_generation(project_ctx.take_captured_generation());
             let launch_provenance =
-                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                    launch_options.project_path().to_path_buf(),
-                    state.engine.clone(),
+                ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+                    project_ctx.effective_path.clone(),
+                    project_ctx.original_path.clone(),
+                    project_ctx.request_engine.clone(),
+                    project_ctx.temp_dir.clone().ok_or_else(|| {
+                        HandlerError::Internal(
+                            "captured fresh thread project has no workspace guard".to_string(),
+                        )
+                    })?,
+                    project_ctx.snapshot_hash.clone().ok_or_else(|| {
+                        HandlerError::Internal(
+                            "captured fresh thread project has no snapshot".to_string(),
+                        )
+                    })?,
                 );
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
@@ -694,6 +717,9 @@ pub async fn handle(
         upstream_thread_id: Some(previous.thread_id.clone()),
         requested_by: Some(ctx.fingerprint.clone()),
         project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
+        base_project_snapshot_hash: resume_context
+            .durable_project_snapshot_hash()
+            .map(str::to_owned),
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,

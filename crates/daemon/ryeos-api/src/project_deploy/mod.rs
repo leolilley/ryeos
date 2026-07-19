@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use ryeos_app::state::AppState;
-use ryeos_state::objects::SourceManifest;
+use ryeos_state::objects::ProjectTree;
 
 use crate::handler_context::HandlerContext;
 
@@ -11,7 +11,7 @@ pub mod schedules;
 pub struct ProjectDeployContext<'a> {
     pub project_path: &'a Path,
     pub staging_root: &'a Path,
-    pub manifest: &'a SourceManifest,
+    pub tree: &'a ProjectTree,
     pub snapshot_hash: &'a str,
     pub project_key: &'a str,
     pub caller: &'a HandlerContext,
@@ -29,7 +29,7 @@ pub struct ProjectDeployReport {
 }
 
 pub fn plan(ctx: &ProjectDeployContext<'_>) -> Result<ProjectDeployPlan> {
-    let _ = ctx.manifest;
+    let _ = ctx.tree;
     Ok(ProjectDeployPlan {
         schedules: schedules::plan(ctx)?,
     })

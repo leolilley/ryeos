@@ -167,7 +167,7 @@ pub async fn try_dispatch(
 #[command(
     name = "ryeos node gc",
     about = "Run bootstrap-safe offline node garbage collection",
-    long_about = "Run bootstrap-safe offline node garbage collection. The thread-history mode retires every authoritative thread-chain head, clears execution recovery rows/files and scheduler fire history, and publishes an empty current thread projection. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, project heads, operational sync/admission state, and independently retained logs/caches are preserved.",
+    long_about = "Run bootstrap-safe offline node garbage collection. The thread-history mode retires every authoritative thread-chain head, clears execution recovery rows/files and scheduler fire history, and publishes an empty current thread projection. Principal and deployed project HEADs are preserved unless the explicit schema-cutover flags are also supplied. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved.",
     no_binary_name = true
 )]
 struct NodeGcArgs {
@@ -182,6 +182,14 @@ struct NodeGcArgs {
     /// Required acknowledgement for destructive thread-history retirement.
     #[arg(long)]
     confirm_discard_thread_history: bool,
+
+    /// Also retire every principal and deployed project HEAD for an immutable object-schema cutover.
+    #[arg(long)]
+    discard_project_heads: bool,
+
+    /// Required acknowledgement for destructive project-HEAD retirement.
+    #[arg(long)]
+    confirm_discard_project_heads: bool,
 
     /// Inspect and report without mutating any store.
     #[arg(long)]
@@ -209,6 +217,14 @@ impl NodeGcArgs {
                 "discarding all thread history requires --confirm-discard-thread-history"
             );
         }
+        if self.discard_project_heads && !self.discard_thread_history {
+            anyhow::bail!("--discard-project-heads requires --discard-thread-history");
+        }
+        if self.discard_project_heads && !self.dry_run && !self.confirm_discard_project_heads {
+            anyhow::bail!(
+                "discarding all principal and deployed project HEADs requires --confirm-discard-project-heads"
+            );
+        }
         if self.dry_run && self.sweep_cas {
             anyhow::bail!(
                 "--sweep-cas cannot be combined with --dry-run; inspect history first, then sweep only with the confirmed discard"
@@ -228,6 +244,7 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
         app_root: args.app_root,
         dry_run: args.dry_run,
         sweep_cas: args.sweep_cas,
+        discard_project_heads: args.discard_project_heads,
     };
     let mut progress = crate::tty::OfflineGcProgress::new(!args.json, console.capabilities());
     let report = match progress.as_mut() {
@@ -262,6 +279,7 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
     status.detail = Some(report.app_root.display().to_string());
     status.rows = vec![
         crate::tty::Row::key_value("chain heads", report.chain_heads.to_string()),
+        crate::tty::Row::key_value("project heads", report.project_heads.to_string()),
         crate::tty::Row::key_value(
             "chain/recovery artifacts",
             (report.chain_ref_artifacts + report.pending_transitions).to_string(),
@@ -1498,6 +1516,8 @@ mod tests {
             app_root: None,
             discard_thread_history: true,
             confirm_discard_thread_history: confirm,
+            discard_project_heads: false,
+            confirm_discard_project_heads: false,
             dry_run,
             sweep_cas,
             json: false,
@@ -1514,6 +1534,23 @@ mod tests {
         assert!(node_gc_args(false, false, false).validate().is_err());
         assert!(node_gc_args(false, true, false).validate().is_ok());
         assert!(node_gc_args(true, false, true).validate().is_err());
+    }
+
+    #[test]
+    fn project_head_cutover_requires_the_combined_explicit_confirmation() {
+        let mut args = node_gc_args(false, true, false);
+        args.discard_project_heads = true;
+        assert!(args.validate().is_err());
+
+        args.confirm_discard_project_heads = true;
+        assert!(args.validate().is_ok());
+
+        args.discard_thread_history = false;
+        assert!(args.validate().is_err());
+
+        let mut preview = node_gc_args(true, false, false);
+        preview.discard_project_heads = true;
+        assert!(preview.validate().is_ok());
     }
 
     fn isolation_policy(mode: &str, open_files: Option<u64>) -> String {

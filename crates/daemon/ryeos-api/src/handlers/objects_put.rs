@@ -27,6 +27,16 @@ pub struct BlobEntry {
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct BlobChunkEntry {
+    pub hash: String,
+    pub total_size: u64,
+    pub offset: u64,
+    /// Base64-encoded bytes for one bounded sequential chunk.
+    pub data: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjectEntry {
     /// JSON value to store as a CAS object.
     pub value: Value,
@@ -44,6 +54,8 @@ pub struct Request {
     #[serde(default)]
     pub blobs: Vec<BlobEntry>,
     #[serde(default)]
+    pub blob_chunks: Vec<BlobChunkEntry>,
+    #[serde(default)]
     pub objects: Vec<ObjectEntry>,
 }
 
@@ -51,7 +63,9 @@ pub struct Request {
 /// as a whole; this additionally keeps an `objects/put` grant from
 /// pushing a single oversized blob through any route configured with a
 /// generous body cap.
-pub const MAX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_BLOB_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const MAX_BLOB_CHUNK_BYTES: usize = 512 * 1024;
+pub const MAX_INLINE_BLOB_BYTES: usize = 16 * 1024 * 1024;
 
 pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
     ctx.require_verified()
@@ -104,14 +118,41 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let mut blob_hashes = Vec::with_capacity(req.blobs.len());
     for blob in &req.blobs {
         // Cheap base64-length bound before decoding allocates anything.
-        if blob.data.len() / 4 * 3 > MAX_BLOB_BYTES {
-            anyhow::bail!("blob exceeds the {} byte per-blob limit", MAX_BLOB_BYTES);
+        let max_encoded = MAX_INLINE_BLOB_BYTES.saturating_add(2) / 3 * 4;
+        if blob.data.len() > max_encoded {
+            anyhow::bail!(
+                "inline blob exceeds {MAX_INLINE_BLOB_BYTES} bytes; use bounded blob_chunks"
+            );
         }
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(&blob.data)
             .map_err(|e| anyhow::anyhow!("invalid base64 in blob data: {e}"))?;
         let hash = stage.store_blob(&cas_guard, &cas, &bytes)?;
         blob_hashes.push(hash);
+    }
+    for chunk in &req.blob_chunks {
+        if chunk.total_size > MAX_BLOB_BYTES {
+            anyhow::bail!("blob exceeds the {} byte per-blob limit", MAX_BLOB_BYTES);
+        }
+        if chunk.data.len() > MAX_BLOB_CHUNK_BYTES.saturating_mul(2) {
+            anyhow::bail!("encoded blob chunk exceeds the route-safe bound");
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(&chunk.data)
+            .map_err(|e| anyhow::anyhow!("invalid base64 in blob chunk: {e}"))?;
+        if bytes.len() > MAX_BLOB_CHUNK_BYTES {
+            anyhow::bail!("blob chunk exceeds {MAX_BLOB_CHUNK_BYTES} bytes");
+        }
+        if stage.store_blob_chunk(
+            &cas_guard,
+            &cas,
+            &chunk.hash,
+            chunk.total_size,
+            chunk.offset,
+            &bytes,
+        )? {
+            blob_hashes.push(chunk.hash.clone());
+        }
     }
 
     let mut object_hashes = Vec::with_capacity(req.objects.len());

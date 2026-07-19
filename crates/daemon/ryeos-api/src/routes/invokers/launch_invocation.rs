@@ -90,10 +90,26 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         let project_path = crate::routes::abs_path::AbsolutePathBuf::try_from_str(project_path_str)
             .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
+        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        let mut project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
+            &ctx.state,
+            &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
+            project_path.as_path(),
+            &principal_id,
+            &format!("route-{thread_id}"),
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(format!("capture project: {error}")))?;
+        let effective_project = crate::routes::abs_path::AbsolutePathBuf::try_from_str(
+            project_ctx.effective_path.to_str().ok_or_else(|| {
+                RouteDispatchError::Internal("captured project path is not UTF-8".to_string())
+            })?,
+        )
+        .map_err(|error| RouteDispatchError::Internal(format!("captured project path: {error}")))?;
+
         let preflight = crate::routes::launch::preflight_dispatch_launch(
             &ctx.state,
             &item_ref,
-            &project_path,
+            &project_ctx,
             &parameters,
             &ref_bindings,
             &principal_id,
@@ -120,16 +136,15 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         })?;
         let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
-            project_path.as_path(),
+            effective_project.as_path(),
             ref_bindings,
         )
         .map_err(|error| {
             RouteDispatchError::Internal(format!(
                 "validated launch contract rejected at dispatch boundary: {error:#}"
             ))
-        })?;
-
-        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        })?
+        .retain_captured_generation(project_ctx.take_captured_generation());
 
         let route_id: String = ctx.route_id.to_string();
 
@@ -140,10 +155,22 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             item_ref_kind = item_ref.kind(),
         );
 
-        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            launch_options.project_path().to_path_buf(),
-            ctx.state.engine.clone(),
-        );
+        let launch_provenance =
+            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+                project_ctx.effective_path.clone(),
+                project_ctx.original_path.clone(),
+                project_ctx.request_engine.clone(),
+                project_ctx.temp_dir.clone().ok_or_else(|| {
+                    RouteDispatchError::Internal(
+                        "captured route project has no workspace guard".to_string(),
+                    )
+                })?,
+                project_ctx.snapshot_hash.clone().ok_or_else(|| {
+                    RouteDispatchError::Internal(
+                        "captured route project has no snapshot".to_string(),
+                    )
+                })?,
+            );
         let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,

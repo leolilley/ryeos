@@ -2,17 +2,20 @@
 //!
 //! After `remote execute`, the remote node may have advanced its HEAD ref
 //! (fold-back writes new files into CAS). This module fetches the resulting
-//! snapshot, diffs against the pre-push manifest, and applies changes to
+//! snapshot, diffs against the exact tree that was pushed, and applies changes to
 //! the local workspace with a clean-base conflict policy.
 
-use std::collections::HashMap;
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use hmac::{Hmac, Mac as _};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::Sha256;
 
 use lillux::cas::CasStore;
-use ryeos_state::objects::{ItemSource, SourceManifest};
+use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::{PinnedStateAuthority, StagedCasRootLease};
 
 use crate::remote::client::RemoteClient;
@@ -24,11 +27,6 @@ pub struct PullResult {
     pub cas_objects_fetched: usize,
     pub files_updated: usize,
     pub files_deleted: usize,
-    /// User-space files updated by the symmetric user pull-back.
-    /// Always 0 when the pushed snapshot had no user manifest.
-    pub user_files_updated: usize,
-    /// User-space files deleted by the symmetric user pull-back.
-    pub user_files_deleted: usize,
 }
 
 /// Typed errors for the pull/apply pipeline.
@@ -40,6 +38,10 @@ pub enum PullResultsError {
     LocalConflict(String),
     #[error("invalid remote snapshot: {0}")]
     InvalidRemoteSnapshot(String),
+    #[error("remote result apply requires recovery: {0}")]
+    RecoveryRequired(String),
+    #[error("remote result rollback was incomplete: {0}")]
+    RollbackIncomplete(String),
     /// Result snapshot returned by the remote does not descend from the
     /// snapshot we pushed. Defends against a misconfigured or
     /// hostile remote handing us an unrelated snapshot to apply.
@@ -59,21 +61,17 @@ pub enum PullResultsError {
 ///   result snapshot must equal this OR list it in `parent_hashes` (direct
 ///   parent only, per resolved design decision).
 /// * `remote_snapshot_hash` — The snapshot hash from the remote execution result
-/// * `local_project_root` — The local project directory to apply changes
-///   to. `None` for `--no-project` mode: the project diff/apply is
-///   skipped entirely (no local workspace exists), but lineage check
-///   skipped entirely (no local workspace exists).
-/// * `base_manifest` — The exact manifest that was pushed (from PushResult.manifest)
-/// * `_base_user_manifest` — retained in the wire contract, ignored by the
-///   single-app-root implementation.
+/// * `local_project_root` — The local project directory to apply changes to.
+///   `None` for `--no-project` mode skips diff/apply because no workspace
+///   exists; snapshot lineage is still verified.
+/// * `base_tree` — The exact tree that was pushed (from PushResult.tree)
 pub async fn pull_results(
     client: &RemoteClient,
     authority: &PinnedStateAuthority,
     pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
     local_project_root: Option<&Path>,
-    base_manifest: &SourceManifest,
-    _base_user_manifest: Option<&SourceManifest>,
+    base_tree: &ProjectTree,
 ) -> Result<PullResult, PullResultsError> {
     let local_cas = authority.cas_store().map_err(PullResultsError::Other)?;
     let recovery = authority
@@ -96,7 +94,7 @@ pub async fn pull_results(
         pushed_snapshot_hash,
         remote_snapshot_hash,
         local_project_root,
-        base_manifest,
+        base_tree,
     )
     .await;
 
@@ -114,11 +112,11 @@ async fn pull_results_staged(
     pushed_snapshot_hash: &str,
     remote_snapshot_hash: &str,
     local_project_root: Option<&Path>,
-    base_manifest: &SourceManifest,
+    base_tree: &ProjectTree,
 ) -> Result<PullResult, PullResultsError> {
     // 1. Fetch remote snapshot object
     let snapshot_objs = client
-        .objects_get(&[remote_snapshot_hash.to_string()])
+        .objects_get(&[remote_snapshot_hash.to_string()], &[])
         .await
         .map_err(PullResultsError::Other)?;
 
@@ -144,127 +142,139 @@ async fn pull_results_staged(
     //     diff against.
     verify_snapshot_lineage(&snapshot_val, pushed_snapshot_hash, remote_snapshot_hash)?;
 
-    // 2 – 5: project-side diff + apply. Skipped entirely in
-    // --no-project mode (no local workspace to write into). The
-    // user-space pull-back below still runs.
+    // Fetch and validate the complete result-generation closure before any
+    // local mutation. This includes unchanged ProjectFile objects and the
+    // exact stored policy; a destination cannot reinterpret the tree using
+    // its current ignore configuration.
     let mut fetched_count = 1usize;
-    let (files_updated, files_deleted) = if let Some(local_project_root) = local_project_root {
-        let manifest_hash = snapshot_val
-            .get("project_manifest_hash")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                PullResultsError::InvalidRemoteSnapshot(
-                    "missing project_manifest_hash in snapshot".into(),
-                )
-            })?
-            .to_string();
-
-        // 2. Fetch remote manifest
-        let manifest_objs = client
-            .objects_get(std::slice::from_ref(&manifest_hash))
-            .await
-            .map_err(PullResultsError::Other)?;
-
-        let manifest_val = manifest_objs.find_object(&manifest_hash).ok_or_else(|| {
+    let snapshot = ProjectSnapshot::from_value(&snapshot_val)
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+    let pushed_snapshot_value = local_cas.get_object(pushed_snapshot_hash)?.ok_or_else(|| {
+        PullResultsError::InvalidRemoteSnapshot(format!(
+            "locally pushed snapshot {pushed_snapshot_hash} is absent"
+        ))
+    })?;
+    let pushed_snapshot = ProjectSnapshot::from_value(&pushed_snapshot_value)
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+    if snapshot.effective_policy_hash != pushed_snapshot.effective_policy_hash {
+        return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+            "result snapshot changed project policy from {} to {} without an authorized policy transition",
+            pushed_snapshot.effective_policy_hash, snapshot.effective_policy_hash
+        )));
+    }
+    let roots = [
+        snapshot.project_tree_hash.clone(),
+        snapshot.effective_policy_hash.clone(),
+    ];
+    let roots_response = client
+        .objects_get(&roots, &[])
+        .await
+        .map_err(PullResultsError::Other)?;
+    let tree_val = roots_response
+        .find_object(&snapshot.project_tree_hash)
+        .ok_or_else(|| {
             PullResultsError::InvalidRemoteSnapshot(format!(
-                "manifest {} not found in objects_get response",
-                manifest_hash
+                "project tree {} is absent",
+                snapshot.project_tree_hash
             ))
         })?;
-        store_remote_object(
-            authority,
-            staged_roots,
-            local_cas,
-            &manifest_hash,
-            &manifest_val,
-        )?;
+    let policy_val = roots_response
+        .find_object(&snapshot.effective_policy_hash)
+        .ok_or_else(|| {
+            PullResultsError::InvalidRemoteSnapshot(format!(
+                "project policy {} is absent",
+                snapshot.effective_policy_hash
+            ))
+        })?;
+    store_remote_object(
+        authority,
+        staged_roots,
+        local_cas,
+        &snapshot.project_tree_hash,
+        &tree_val,
+    )?;
+    store_remote_object(
+        authority,
+        staged_roots,
+        local_cas,
+        &snapshot.effective_policy_hash,
+        &policy_val,
+    )?;
+    fetched_count += 2;
+    let remote_tree = ProjectTree::from_value(&tree_val)
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+    let policy = ProjectSnapshotPolicy::from_value(&policy_val)
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+    ryeos_state::project_sync::validate_project_tree_paths(&remote_tree, &policy)
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+    ryeos_state::project_sync::validate_captured_policy_source(local_cas, &remote_tree, &policy)
+        .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
+    let mut project_files = Vec::with_capacity(remote_tree.files.len());
+    for object_hash in remote_tree.files.values() {
+        let value = match local_cas.get_object(object_hash)? {
+            Some(value) => value,
+            None => {
+                let response = client
+                    .objects_get(std::slice::from_ref(object_hash), &[])
+                    .await
+                    .map_err(PullResultsError::Other)?;
+                let value = response.find_object(object_hash).ok_or_else(|| {
+                    PullResultsError::InvalidRemoteSnapshot(format!(
+                        "project file object {object_hash} is absent"
+                    ))
+                })?;
+                store_remote_object(authority, staged_roots, local_cas, object_hash, &value)?;
+                fetched_count += 1;
+                value
+            }
+        };
+        let file = ProjectFile::from_value(&value)
+            .map_err(|error| PullResultsError::InvalidRemoteSnapshot(error.to_string()))?;
+        project_files.push(file);
+    }
+    for file in &project_files {
+        if local_cas.has_blob(&file.blob_hash)? {
+            continue;
+        }
+        fetch_remote_blob_streaming(client, authority, staged_roots, local_cas, file).await?;
         fetched_count += 1;
+    }
+    let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
+        local_cas,
+        [remote_snapshot_hash.to_string()],
+        limits,
+    )?;
+    if !closure.is_complete() {
+        return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+            "result generation closure is incomplete: {closure:?}"
+        )));
+    }
+    {
+        let guard = authority.acquire_shared_guard()?;
+        staged_roots.protect_cas_closure_admitted(
+            &guard,
+            closure.object_hashes.iter().map(String::as_str),
+            closure.blob_hashes.iter().map(String::as_str),
+        )?;
+    }
 
-        let remote_manifest: SourceManifest = parse_manifest(&manifest_val)?;
-
-        // 3. Diff manifests — find new/changed item source hashes + their blob hashes
-        let mut needed_hashes: Vec<String> = Vec::new();
-        let mut changed_paths: HashMap<String, String> = HashMap::new();
-
-        for (path, hash) in &remote_manifest.item_source_hashes {
-            let base_hash = base_manifest.item_source_hashes.get(path);
-            let is_new_or_changed = match base_hash {
-                None => true,
-                Some(old) => old != hash,
-            };
-            if is_new_or_changed {
-                needed_hashes.push(hash.clone());
-                changed_paths.insert(path.clone(), hash.clone());
-            }
+    let (files_updated, files_deleted) = match local_project_root {
+        Some(root) => {
+            let journal_auth_key = authority
+                .require_recovery()?
+                .remote_pull_journal_auth_key()?;
+            apply_tree_diff(local_cas, root, base_tree, &remote_tree, &journal_auth_key)?
         }
-
-        // 4. Fetch needed items into local CAS
-        if !needed_hashes.is_empty() {
-            let fetched = client
-                .objects_get(&needed_hashes)
-                .await
-                .map_err(PullResultsError::Other)?;
-
-            for entry in &fetched.entries {
-                if entry.kind == "object" {
-                    if let Some(ref val) = entry.value {
-                        store_remote_object(authority, staged_roots, local_cas, &entry.hash, val)?;
-                        fetched_count += 1;
-                        if let Some(blob_hash) =
-                            val.get("content_blob_hash").and_then(|v| v.as_str())
-                        {
-                            let blob_fetched = client
-                                .objects_get(&[blob_hash.to_string()])
-                                .await
-                                .map_err(PullResultsError::Other)?;
-                            if let Some(blob_data) = blob_fetched.find_blob(blob_hash) {
-                                store_remote_blob(
-                                    authority,
-                                    staged_roots,
-                                    local_cas,
-                                    blob_hash,
-                                    &blob_data,
-                                )?;
-                                fetched_count += 1;
-                            }
-                        }
-                    }
-                } else if entry.kind == "blob" {
-                    if let Some(ref blob_data) = entry.data {
-                        use base64::Engine;
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(blob_data)
-                            .map_err(|e| {
-                                PullResultsError::Other(anyhow::anyhow!("invalid base64: {e}"))
-                            })?;
-                        store_remote_blob(authority, staged_roots, local_cas, &entry.hash, &bytes)?;
-                        fetched_count += 1;
-                    }
-                }
-            }
-        }
-
-        // 5. Apply project changes with clean-base policy.
-        apply_manifest_diff(
-            local_cas,
-            local_project_root,
-            base_manifest,
-            &remote_manifest,
-        )?
-    } else {
-        (0, 0)
+        None => (0, 0),
     };
 
-    // 6. No global user-space pull-back exists in the single-app-root model.
-    let user_fetched = 0usize;
-    let (user_files_updated, user_files_deleted) = (0usize, 0usize);
     Ok(PullResult {
         snapshot_hash: remote_snapshot_hash.to_string(),
-        cas_objects_fetched: fetched_count + user_fetched,
+        cas_objects_fetched: fetched_count,
         files_updated,
         files_deleted,
-        user_files_updated,
-        user_files_deleted,
     })
 }
 
@@ -289,25 +299,51 @@ fn store_remote_object(
     Ok(())
 }
 
-fn store_remote_blob(
+async fn fetch_remote_blob_streaming(
+    client: &RemoteClient,
     authority: &PinnedStateAuthority,
     staged_roots: &mut StagedCasRootLease,
     local_cas: &CasStore,
-    expected_hash: &str,
-    bytes: &[u8],
+    file: &ProjectFile,
 ) -> Result<(), PullResultsError> {
-    let guard = authority
-        .acquire_shared_guard()
-        .map_err(PullResultsError::Other)?;
-    let stored = staged_roots
-        .store_blob_admitted(&guard, local_cas, bytes)
-        .map_err(PullResultsError::Other)?;
-    if stored != expected_hash {
-        return Err(PullResultsError::InvalidRemoteSnapshot(format!(
-            "blob hash mismatch: expected {expected_hash}, got {stored}"
-        )));
+    let mut part = staged_roots.open_blob_part(&file.blob_hash)?;
+    {
+        let destination = part.file_mut();
+        let mut offset = 0_u64;
+        while offset < file.size {
+            let chunk = client
+                .objects_get_blob_chunk(
+                    &file.blob_hash,
+                    offset,
+                    crate::handlers::objects_get::MAX_BLOB_CHUNK_BYTES,
+                )
+                .await?;
+            if chunk.kind == "missing" {
+                anyhow::bail!("project blob {} is absent", file.blob_hash);
+            }
+            if chunk.total_size != Some(file.size) {
+                anyhow::bail!(
+                    "project blob {} changed its declared size during transfer",
+                    file.blob_hash
+                );
+            }
+            let bytes = chunk.decoded_data()?;
+            if bytes.is_empty() {
+                anyhow::bail!("project blob transfer made no progress");
+            }
+            destination.write_all(&bytes)?;
+            offset = offset
+                .checked_add(u64::try_from(bytes.len())?)
+                .ok_or_else(|| anyhow::anyhow!("project blob transfer size overflow"))?;
+            if chunk.eof != Some(offset == file.size) {
+                anyhow::bail!("project blob transfer returned a contradictory EOF marker");
+            }
+        }
     }
-    Ok(())
+    let guard = authority.acquire_shared_guard()?;
+    staged_roots
+        .publish_blob_part_admitted(&guard, local_cas, part, &file.blob_hash, file.size)
+        .map_err(PullResultsError::Other)
 }
 
 fn finish_pull_staged_roots<T>(
@@ -331,12 +367,83 @@ fn finish_pull_staged_roots<T>(
 /// A planned change to apply.
 enum PlannedChange {
     /// Write new content to this relative path.
-    Write { rel_path: String, content: Vec<u8> },
+    Write {
+        rel_path: String,
+        blob_hash: String,
+        normalized_mode: u32,
+        expected_live: Option<std::fs::File>,
+        expected_blob_hash: Option<String>,
+        expected_mode: Option<u32>,
+    },
     /// Delete this relative path.
-    Delete { rel_path: String },
+    Delete {
+        rel_path: String,
+        expected_live: std::fs::File,
+        expected_blob_hash: String,
+        expected_mode: u32,
+    },
 }
 
-/// Apply the diff between base and remote manifests to the local workspace.
+struct AppliedWrite {
+    rel_path: String,
+    installed: std::fs::File,
+}
+
+const PULL_RECOVERY_JOURNAL_KIND: &str = "ryeos_remote_result_apply_recovery";
+const PULL_RECOVERY_JOURNAL_SCHEMA: u32 = 2;
+// A transported ProjectTree may be 32 MiB. Recovery adds one base/result
+// identity per changed entry, so keep a separate bounded envelope large enough
+// for every accepted tree rather than making valid large diffs unrecoverable.
+const MAX_PULL_RECOVERY_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PULL_RECOVERY_CHANGES: usize = 100_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryFileIdentity {
+    blob_hash: String,
+    normalized_mode: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum PullRecoveryChange {
+    Write {
+        path: String,
+        artifact: String,
+        base: Option<RecoveryFileIdentity>,
+        result: RecoveryFileIdentity,
+    },
+    Delete {
+        path: String,
+        artifact: String,
+        base: RecoveryFileIdentity,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PullRecoveryJournal {
+    kind: String,
+    schema: u32,
+    transaction_id: String,
+    project_root: String,
+    changes: Vec<PullRecoveryChange>,
+    auth_tag: String,
+}
+
+impl PullRecoveryJournal {
+    fn authenticated_value(&self) -> Value {
+        serde_json::json!({
+            "kind": self.kind,
+            "schema": self.schema,
+            "transaction_id": self.transaction_id,
+            "project_root": self.project_root,
+            "changes": self.changes,
+        })
+    }
+}
+
+/// Apply the diff between base and remote project trees to the local workspace.
 ///
 /// Uses clean-base policy: if any tracked file has drifted since the push,
 /// the entire apply is aborted with `LocalConflict`.
@@ -349,18 +456,28 @@ enum PlannedChange {
 /// them into place (Phase C). If any swap operation fails, all previously
 /// applied changes are rolled back from the backup, restoring the workspace
 /// to its pre-apply state. The workspace is never left in a partial state.
-fn apply_manifest_diff(
+fn apply_tree_diff(
     local_cas: &CasStore,
     local_project_root: &Path,
-    base_manifest: &SourceManifest,
-    remote_manifest: &SourceManifest,
+    base_tree: &ProjectTree,
+    remote_tree: &ProjectTree,
+    journal_auth_key: &[u8; 32],
 ) -> Result<(usize, usize), PullResultsError> {
-    // Collect all paths from base + remote manifests
+    let project_root = lillux::PinnedDirectory::open(local_project_root)?
+        .ok_or_else(|| anyhow::anyhow!("local project root disappeared"))?;
+    let _pull_lock = acquire_pull_apply_lock(&project_root)?;
+    if let Some(report) =
+        recover_interrupted_pull_apply(&project_root, local_cas, journal_auth_key)?
+    {
+        return Err(PullResultsError::RecoveryRequired(report));
+    }
+    ensure_no_pull_recovery_artifacts(&project_root)?;
+    // Collect all paths from base + remote trees.
     let mut all_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for path in base_manifest.item_source_hashes.keys() {
+    for path in base_tree.files.keys() {
         all_paths.insert(path.clone());
     }
-    for path in remote_manifest.item_source_hashes.keys() {
+    for path in remote_tree.files.keys() {
         all_paths.insert(path.clone());
     }
 
@@ -369,22 +486,36 @@ fn apply_manifest_diff(
     let mut planned: Vec<PlannedChange> = Vec::new();
 
     for path in &all_paths {
-        let base_hash = base_manifest.item_source_hashes.get(path);
-        let remote_hash = remote_manifest.item_source_hashes.get(path);
-        let local_path = safe_join(local_project_root, path)?;
+        let base_hash = base_tree.files.get(path);
+        let remote_hash = remote_tree.files.get(path);
+        ryeos_state::project_sync::validate_safe_relative_path(path)
+            .map_err(PullResultsError::Other)?;
+        let local_file = open_relative_regular(&project_root, path)?;
+        let base_file = base_hash
+            .map(|hash| load_project_file(local_cas, hash))
+            .transpose()?;
 
         // If the path was in the base, verify local hasn't drifted
-        if let Some(base_h) = base_hash {
-            let local_content = read_local_file(&local_path);
-            let local_hash = local_content.as_ref().map(|c| lillux::cas::sha256_hex(c));
-            if local_hash.as_deref() != Some(base_h.as_str()) {
+        if let Some(base_file) = base_file.as_ref() {
+            let (local_hash, local_mode) = match local_file.as_ref() {
+                Some(file) => (
+                    Some(hash_open_regular(
+                        file.try_clone().map_err(anyhow::Error::from)?,
+                    )?),
+                    Some(normalized_open_mode(file)?),
+                ),
+                None => (None, None),
+            };
+            if local_hash.as_deref() != Some(base_file.blob_hash.as_str())
+                || local_mode != Some(base_file.normalized_mode)
+            {
                 return Err(PullResultsError::LocalConflict(path.clone()));
             }
         }
 
         // If the path is NEW in remote (not in base), check there's no
         // pre-existing local file — that would be a conflict too.
-        if base_hash.is_none() && remote_hash.is_some() && local_path.exists() {
+        if base_hash.is_none() && remote_hash.is_some() && local_file.is_some() {
             return Err(PullResultsError::LocalConflict(format!(
                 "{} (new remote file would overwrite local)",
                 path
@@ -397,26 +528,55 @@ fn apply_manifest_diff(
             (Some(b), Some(r)) if b == r => {}
             // File changed — resolve content from CAS (fail hard if missing)
             (Some(_), Some(r)) => {
-                let content = fetch_content_for_item_strict(local_cas, r, path)?;
+                let file = require_project_file_blob(local_cas, r, path)?;
                 planned.push(PlannedChange::Write {
                     rel_path: path.clone(),
-                    content,
+                    blob_hash: file.blob_hash,
+                    normalized_mode: file.normalized_mode,
+                    expected_live: local_file,
+                    expected_blob_hash: Some(
+                        base_file
+                            .as_ref()
+                            .expect("changed base file was loaded")
+                            .blob_hash
+                            .clone(),
+                    ),
+                    expected_mode: Some(
+                        base_file
+                            .as_ref()
+                            .expect("changed base file was loaded")
+                            .normalized_mode,
+                    ),
                 });
             }
             // File deleted on remote
             (Some(_), None) => {
-                if local_path.exists() {
+                if local_file.is_some() {
                     planned.push(PlannedChange::Delete {
                         rel_path: path.clone(),
+                        expected_live: local_file.expect("base file was verified above"),
+                        expected_blob_hash: base_file
+                            .as_ref()
+                            .expect("deleted base file was loaded")
+                            .blob_hash
+                            .clone(),
+                        expected_mode: base_file
+                            .as_ref()
+                            .expect("deleted base file was loaded")
+                            .normalized_mode,
                     });
                 }
             }
             // New file on remote — resolve content from CAS (fail hard if missing)
             (None, Some(r)) => {
-                let content = fetch_content_for_item_strict(local_cas, r, path)?;
+                let file = require_project_file_blob(local_cas, r, path)?;
                 planned.push(PlannedChange::Write {
                     rel_path: path.clone(),
-                    content,
+                    blob_hash: file.blob_hash,
+                    normalized_mode: file.normalized_mode,
+                    expected_live: None,
+                    expected_blob_hash: None,
+                    expected_mode: None,
                 });
             }
             // Both None — shouldn't happen but no-op
@@ -427,67 +587,116 @@ fn apply_manifest_diff(
     // Phase B: all content resolved successfully. Stage writes into a
     // temp directory. This is the only phase that touches the filesystem
     // before Phase C — if anything fails here the workspace is untouched.
-    let staging_dir = local_project_root.join(".ryeos-pull-staging");
-    // Clean up any leftover staging dir from a previous failed attempt
-    let _ = std::fs::remove_dir_all(&staging_dir);
+    let transaction_id = format!("{:032x}", rand::random::<u128>());
+    let mut backup = PinnedScratchDirectory::create(
+        &project_root,
+        &format!(".ryeos-pull-backup-{transaction_id}"),
+    )?;
+    write_pull_recovery_journal(
+        &project_root,
+        backup.directory(),
+        &transaction_id,
+        journal_auth_key,
+        &planned,
+    )?;
+    let mut staging = PinnedScratchDirectory::create(
+        &project_root,
+        &format!(".ryeos-pull-staging-{transaction_id}"),
+    )?;
 
     for change in &planned {
-        if let PlannedChange::Write { rel_path, content } = change {
-            let staged_path = staging_dir.join(rel_path);
-            if let Some(parent) = staged_path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create staging dir for {}", rel_path))
-                    .map_err(PullResultsError::Other)?;
-            }
-            std::fs::write(&staged_path, content)
+        if let PlannedChange::Write {
+            rel_path,
+            blob_hash,
+            normalized_mode,
+            ..
+        } = change
+        {
+            let artifact = scratch_artifact_name(rel_path);
+            let staged_path = staging.directory().descriptor_child_path(&artifact)?;
+            local_cas
+                .materialize_blob_to_new_file(blob_hash, &staged_path, *normalized_mode)
                 .with_context(|| format!("stage file {}", rel_path))
                 .map_err(PullResultsError::Other)?;
         }
     }
-
     // Phase C: atomic swap. We backup originals to `.ryeos-pull-backup/`,
     // then swap staged files into place and perform deletes. If anything
     // fails mid-swap, we roll back from the backup so the workspace is
     // never left in a partial state.
-    let backup_dir = local_project_root.join(".ryeos-pull-backup");
-    let _ = std::fs::remove_dir_all(&backup_dir);
-
     let mut files_updated = 0usize;
     let mut files_deleted = 0usize;
 
     // C.1: Backup any live files that will be overwritten or deleted.
     for change in &planned {
-        let rel_path = match change {
-            PlannedChange::Write { rel_path, .. } => rel_path,
-            PlannedChange::Delete { rel_path } => rel_path,
-        };
-        let live_path = local_project_root.join(rel_path);
-        if live_path.exists() {
-            let backup_path = backup_dir.join(rel_path);
-            if let Some(parent) = backup_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+        match change {
+            PlannedChange::Write {
+                rel_path,
+                expected_live,
+                expected_blob_hash,
+                expected_mode,
+                ..
+            } => {
+                revalidate_expected_live(
+                    &project_root,
+                    rel_path,
+                    expected_live.as_ref(),
+                    expected_blob_hash.as_deref(),
+                    *expected_mode,
+                )?;
+                if expected_live.is_some() {
+                    let artifact = scratch_artifact_name(rel_path);
+                    let backup_path = backup.directory().descriptor_child_path(&artifact)?;
+                    local_cas.materialize_blob_to_new_file(
+                        expected_blob_hash
+                            .as_deref()
+                            .expect("existing write has a base blob"),
+                        &backup_path,
+                        expected_mode.expect("existing write has a base mode"),
+                    )?;
+                }
             }
-            // Copy (not rename) so the live file stays in place until swap.
-            std::fs::copy(&live_path, &backup_path)
-                .with_context(|| format!("backup {} for rollback", rel_path))
-                .map_err(PullResultsError::Other)?;
+            PlannedChange::Delete {
+                rel_path,
+                expected_live,
+                expected_blob_hash,
+                expected_mode,
+            } => {
+                revalidate_expected_live(
+                    &project_root,
+                    rel_path,
+                    Some(expected_live),
+                    Some(expected_blob_hash),
+                    Some(*expected_mode),
+                )?;
+                let artifact = scratch_artifact_name(rel_path);
+                let backup_path = backup.directory().descriptor_child_path(&artifact)?;
+                local_cas.materialize_blob_to_new_file(
+                    expected_blob_hash,
+                    &backup_path,
+                    *expected_mode,
+                )?;
+            }
         }
     }
 
     // C.2: Apply writes and deletes. On any failure, roll back.
     let apply_result = apply_with_rollback(
         &planned,
-        &staging_dir,
-        &backup_dir,
-        local_project_root,
+        &project_root,
+        staging.directory(),
+        backup.directory(),
         &mut files_updated,
         &mut files_deleted,
     );
 
-    // C.3: Clean up staging + backup dirs regardless of outcome.
-    let _ = std::fs::remove_dir_all(&staging_dir);
-    let _ = std::fs::remove_dir_all(&backup_dir);
-
+    if matches!(
+        &apply_result,
+        Err(PullResultsError::RecoveryRequired(_) | PullResultsError::RollbackIncomplete(_))
+    ) {
+        staging.preserve();
+        backup.preserve();
+    }
     apply_result
 }
 
@@ -498,76 +707,1129 @@ fn apply_manifest_diff(
 /// original state.
 fn apply_with_rollback(
     planned: &[PlannedChange],
-    staging_dir: &Path,
-    backup_dir: &Path,
-    local_project_root: &Path,
+    project_root: &lillux::PinnedDirectory,
+    staging: &lillux::PinnedDirectory,
+    backup: &lillux::PinnedDirectory,
     files_updated: &mut usize,
     files_deleted: &mut usize,
 ) -> Result<(usize, usize), PullResultsError> {
     // Track what we've applied so far for rollback.
-    let mut applied_writes: Vec<String> = Vec::new();
+    let mut applied_writes: Vec<AppliedWrite> = Vec::new();
     let mut applied_deletes: Vec<String> = Vec::new();
+    let mut namespace_recovery_required = false;
 
     for change in planned {
-        match change {
-            PlannedChange::Write { rel_path, .. } => {
-                let staged_path = staging_dir.join(rel_path);
-                let live_path = safe_join(local_project_root, rel_path)?;
-                if let Some(parent) = live_path.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        rollback_writes_and_deletes(
-                            &applied_writes,
-                            &applied_deletes,
-                            backup_dir,
-                            local_project_root,
-                        );
-                        return Err(PullResultsError::Other(anyhow::anyhow!(
-                            "create dir for {}: {e}",
-                            rel_path
+        enum AppliedChange {
+            Write(String, std::fs::File),
+            Delete(String),
+        }
+        let applied = (|| -> Result<AppliedChange, PullResultsError> {
+            match change {
+                PlannedChange::Write {
+                    rel_path,
+                    expected_live,
+                    expected_blob_hash,
+                    expected_mode,
+                    ..
+                } => {
+                    revalidate_expected_live(
+                        project_root,
+                        rel_path,
+                        expected_live.as_ref(),
+                        expected_blob_hash.as_deref(),
+                        *expected_mode,
+                    )?;
+                    let (live_parent, live_name) =
+                        pinned_relative_parent(project_root, rel_path, true)?
+                            .ok_or_else(|| anyhow::anyhow!("live parent could not be created"))?;
+                    revalidate_expected_entry(
+                        &live_parent,
+                        &live_name,
+                        rel_path,
+                        expected_live.as_ref(),
+                        expected_blob_hash.as_deref(),
+                        *expected_mode,
+                    )?;
+                    let artifact = scratch_artifact_name(rel_path);
+                    let staged = staging
+                        .open_regular(&artifact, false)?
+                        .ok_or_else(|| anyhow::anyhow!("staged remote result disappeared"))?;
+                    if let Err(error) = live_parent.replace_regular_from_if_matches_atomic(
+                        &live_name,
+                        expected_live.as_ref(),
+                        |expected| {
+                            validate_expected_content(
+                                expected,
+                                rel_path,
+                                expected_blob_hash.as_deref(),
+                                *expected_mode,
+                            )
+                        },
+                        staging,
+                        &artifact,
+                        &staged,
+                    ) {
+                        namespace_recovery_required |= error.namespace_requires_recovery();
+                        if error.namespace_committed() {
+                            applied_writes.push(AppliedWrite {
+                                rel_path: rel_path.clone(),
+                                installed: staged,
+                            });
+                        }
+                        return Err(PullResultsError::Other(error.into()));
+                    }
+                    if let Err(error) = live_parent.ensure_path_binding() {
+                        applied_writes.push(AppliedWrite {
+                            rel_path: rel_path.clone(),
+                            installed: staged,
+                        });
+                        return Err(PullResultsError::Other(
+                            error.context("remote result write committed through a rebound parent"),
+                        ));
+                    }
+                    Ok(AppliedChange::Write(rel_path.clone(), staged))
+                }
+                PlannedChange::Delete {
+                    rel_path,
+                    expected_live,
+                    expected_blob_hash,
+                    expected_mode,
+                } => {
+                    let (live_parent, live_name) =
+                        pinned_relative_parent(project_root, rel_path, false)?
+                            .ok_or_else(|| anyhow::anyhow!("live delete parent disappeared"))?;
+                    revalidate_expected_entry(
+                        &live_parent,
+                        &live_name,
+                        rel_path,
+                        Some(expected_live),
+                        Some(expected_blob_hash),
+                        Some(*expected_mode),
+                    )?;
+                    if let Err(error) = live_parent.remove_if_same_validated_atomic(
+                        &live_name,
+                        expected_live,
+                        |expected| {
+                            validate_expected_content(
+                                expected,
+                                rel_path,
+                                Some(expected_blob_hash),
+                                Some(*expected_mode),
+                            )
+                        },
+                    ) {
+                        namespace_recovery_required |= error.namespace_requires_recovery();
+                        if error.namespace_committed() {
+                            applied_deletes.push(rel_path.clone());
+                        }
+                        return Err(PullResultsError::Other(error.into()));
+                    }
+                    if let Err(error) = live_parent.ensure_path_binding() {
+                        applied_deletes.push(rel_path.clone());
+                        return Err(PullResultsError::Other(error.context(
+                            "remote result delete committed through a rebound parent",
                         )));
                     }
+                    Ok(AppliedChange::Delete(rel_path.clone()))
                 }
-                if let Err(e) = std::fs::rename(&staged_path, &live_path) {
-                    // rename may fail cross-device; fall back to copy+delete
-                    if let Err(e2) = std::fs::copy(&staged_path, &live_path)
-                        .and_then(|_| std::fs::remove_file(&staged_path))
-                    {
-                        rollback_writes_and_deletes(
-                            &applied_writes,
-                            &applied_deletes,
-                            backup_dir,
-                            local_project_root,
-                        );
-                        return Err(PullResultsError::Other(anyhow::anyhow!(
-                            "swap staged file {}: {e}, fallback copy: {e2}",
-                            rel_path
-                        )));
-                    }
-                }
-                applied_writes.push(rel_path.clone());
+            }
+        })();
+        match applied {
+            Ok(AppliedChange::Write(path, installed)) => {
+                applied_writes.push(AppliedWrite {
+                    rel_path: path,
+                    installed,
+                });
                 *files_updated += 1;
             }
-            PlannedChange::Delete { rel_path } => {
-                let live_path = safe_join(local_project_root, rel_path)?;
-                if let Err(e) = std::fs::remove_file(&live_path) {
-                    rollback_writes_and_deletes(
-                        &applied_writes,
-                        &applied_deletes,
-                        backup_dir,
-                        local_project_root,
-                    );
-                    return Err(PullResultsError::Other(anyhow::anyhow!(
-                        "delete file {}: {e}",
-                        rel_path
-                    )));
-                }
-                applied_deletes.push(rel_path.clone());
+            Ok(AppliedChange::Delete(path)) => {
+                applied_deletes.push(path);
                 *files_deleted += 1;
+            }
+            Err(error) => {
+                rollback_pinned_changes(&applied_writes, &applied_deletes, project_root, backup)?;
+                if namespace_recovery_required {
+                    return Err(PullResultsError::RecoveryRequired(error.to_string()));
+                }
+                return Err(error);
             }
         }
     }
 
+    if let Err(error) = project_root.ensure_path_binding() {
+        rollback_pinned_changes(&applied_writes, &applied_deletes, project_root, backup)?;
+        return Err(PullResultsError::Other(error.context(
+            "local project root was rebound during remote result apply",
+        )));
+    }
+
     Ok((*files_updated, *files_deleted))
+}
+
+fn rollback_pinned_changes(
+    applied_writes: &[AppliedWrite],
+    applied_deletes: &[String],
+    project_root: &lillux::PinnedDirectory,
+    backup: &lillux::PinnedDirectory,
+) -> Result<(), PullResultsError> {
+    let mut errors = Vec::new();
+    for applied in applied_writes.iter().rev() {
+        let rel_path = &applied.rel_path;
+        let rollback = (|| -> Result<()> {
+            let (live_parent, live_name) = pinned_relative_parent(project_root, rel_path, true)?
+                .ok_or_else(|| anyhow::anyhow!("rollback parent could not be opened"))?;
+            live_parent.ensure_path_binding()?;
+            let artifact = scratch_artifact_name(rel_path);
+            if let Some(saved) = backup.open_regular(&artifact, false)? {
+                live_parent
+                    .replace_regular_from_if_matches_atomic(
+                        &live_name,
+                        Some(&applied.installed),
+                        |_| Ok(()),
+                        backup,
+                        &artifact,
+                        &saved,
+                    )
+                    .map_err(anyhow::Error::from)?;
+            } else {
+                live_parent
+                    .remove_if_same_atomic(&live_name, &applied.installed)
+                    .map_err(anyhow::Error::from)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = rollback {
+            errors.push(format!("restore write {rel_path}: {error:#}"));
+        }
+    }
+    for rel_path in applied_deletes.iter().rev() {
+        let rollback = (|| -> Result<()> {
+            let (live_parent, live_name) = pinned_relative_parent(project_root, rel_path, true)?
+                .ok_or_else(|| anyhow::anyhow!("rollback parent could not be opened"))?;
+            live_parent.ensure_path_binding()?;
+            let artifact = scratch_artifact_name(rel_path);
+            let saved = backup
+                .open_regular(&artifact, false)?
+                .ok_or_else(|| anyhow::anyhow!("rollback backup disappeared"))?;
+            live_parent
+                .replace_regular_from_if_matches_atomic(
+                    &live_name,
+                    None,
+                    |_| Ok(()),
+                    backup,
+                    &artifact,
+                    &saved,
+                )
+                .map_err(anyhow::Error::from)?;
+            Ok(())
+        })();
+        if let Err(error) = rollback {
+            errors.push(format!("restore delete {rel_path}: {error:#}"));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(PullResultsError::RollbackIncomplete(errors.join("; ")));
+    }
+    Ok(())
+}
+
+fn pinned_relative_parent(
+    root: &lillux::PinnedDirectory,
+    relative: &str,
+    create: bool,
+) -> Result<Option<(lillux::PinnedDirectory, std::ffi::OsString)>, PullResultsError> {
+    use std::path::Component;
+
+    ryeos_state::project_sync::validate_safe_relative_path(relative)
+        .map_err(PullResultsError::Other)?;
+    let mut parent = root.try_clone()?;
+    let mut components = Path::new(relative).components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            return Err(PullResultsError::Other(anyhow::anyhow!(
+                "remote project path is not normalized: {relative}"
+            )));
+        };
+        if components.peek().is_none() {
+            return Ok(Some((parent, name.to_os_string())));
+        }
+        parent = if create {
+            parent.open_or_create_child(name, 0o700)?
+        } else {
+            let Some(child) = parent.open_child_directory(name)? else {
+                return Ok(None);
+            };
+            child
+        };
+    }
+    Ok(None)
+}
+
+fn open_relative_regular(
+    root: &lillux::PinnedDirectory,
+    relative: &str,
+) -> Result<Option<std::fs::File>, PullResultsError> {
+    let Some((parent, name)) = pinned_relative_parent(root, relative, false)? else {
+        return Ok(None);
+    };
+    parent.open_regular(&name, false).map_err(Into::into)
+}
+
+fn revalidate_expected_live(
+    root: &lillux::PinnedDirectory,
+    relative: &str,
+    expected: Option<&std::fs::File>,
+    expected_blob_hash: Option<&str>,
+    expected_mode: Option<u32>,
+) -> Result<(), PullResultsError> {
+    let Some((parent, name)) = pinned_relative_parent(root, relative, false)? else {
+        return if expected.is_none() {
+            Ok(())
+        } else {
+            Err(PullResultsError::LocalConflict(relative.to_owned()))
+        };
+    };
+    revalidate_expected_entry(
+        &parent,
+        &name,
+        relative,
+        expected,
+        expected_blob_hash,
+        expected_mode,
+    )
+}
+
+fn revalidate_expected_entry(
+    parent: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    relative: &str,
+    expected: Option<&std::fs::File>,
+    expected_blob_hash: Option<&str>,
+    expected_mode: Option<u32>,
+) -> Result<(), PullResultsError> {
+    parent
+        .ensure_path_binding()
+        .map_err(|_| PullResultsError::LocalConflict(relative.to_owned()))?;
+    parent
+        .ensure_regular_entry_matches(name, expected)
+        .map_err(|_| PullResultsError::LocalConflict(relative.to_owned()))?;
+    let Some(expected) = expected else {
+        if expected_blob_hash.is_some() || expected_mode.is_some() {
+            return Err(PullResultsError::Other(anyhow::anyhow!(
+                "missing clean-base descriptor carried expected metadata"
+            )));
+        }
+        return Ok(());
+    };
+    validate_expected_content(expected, relative, expected_blob_hash, expected_mode)
+        .map_err(PullResultsError::Other)
+}
+
+fn validate_expected_content(
+    expected: &std::fs::File,
+    relative: &str,
+    expected_blob_hash: Option<&str>,
+    expected_mode: Option<u32>,
+) -> Result<()> {
+    let observed_hash = hash_open_regular(expected.try_clone().map_err(anyhow::Error::from)?)
+        .map_err(anyhow::Error::new)?;
+    let observed_mode = normalized_open_mode(expected).map_err(anyhow::Error::new)?;
+    if expected_blob_hash != Some(observed_hash.as_str()) || expected_mode != Some(observed_mode) {
+        anyhow::bail!("local workspace conflict at {relative}");
+    }
+    Ok(())
+}
+
+fn hash_open_regular(mut source: std::fs::File) -> Result<String, PullResultsError> {
+    use sha2::Digest as _;
+    source
+        .seek(std::io::SeekFrom::Start(0))
+        .map_err(anyhow::Error::from)?;
+    let before = source.metadata().map_err(anyhow::Error::from)?;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = source.read(&mut buffer).map_err(anyhow::Error::from)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let after = source.metadata().map_err(anyhow::Error::from)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.size() != after.size()
+            || before.mtime() != after.mtime()
+            || before.mtime_nsec() != after.mtime_nsec()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+        {
+            return Err(PullResultsError::LocalConflict(
+                "file changed while hashing".to_owned(),
+            ));
+        }
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+fn normalized_open_mode(file: &std::fs::File) -> Result<u32, PullResultsError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        Ok(ProjectFile::normalize_mode(
+            file.metadata()
+                .map_err(anyhow::Error::from)?
+                .permissions()
+                .mode(),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        Ok(ProjectFile::REGULAR_MODE)
+    }
+}
+
+fn scratch_artifact_name(relative: &str) -> std::ffi::OsString {
+    std::ffi::OsString::from(lillux::sha256_hex(relative.as_bytes()))
+}
+
+fn write_pull_recovery_journal(
+    project_root: &lillux::PinnedDirectory,
+    backup: &lillux::PinnedDirectory,
+    transaction_id: &str,
+    auth_key: &[u8; 32],
+    planned: &[PlannedChange],
+) -> Result<(), PullResultsError> {
+    if planned.len() > MAX_PULL_RECOVERY_CHANGES {
+        return Err(PullResultsError::Other(anyhow::anyhow!(
+            "remote result apply has {} changes, exceeding the recoverable journal limit of {MAX_PULL_RECOVERY_CHANGES}",
+            planned.len()
+        )));
+    }
+    let changes = planned
+        .iter()
+        .map(|change| match change {
+            PlannedChange::Write {
+                rel_path,
+                blob_hash,
+                normalized_mode,
+                expected_blob_hash,
+                expected_mode,
+                ..
+            } => PullRecoveryChange::Write {
+                path: rel_path.clone(),
+                artifact: scratch_artifact_name(rel_path)
+                    .to_string_lossy()
+                    .into_owned(),
+                base: expected_blob_hash.as_ref().zip(*expected_mode).map(
+                    |(blob_hash, normalized_mode)| RecoveryFileIdentity {
+                        blob_hash: blob_hash.clone(),
+                        normalized_mode,
+                    },
+                ),
+                result: RecoveryFileIdentity {
+                    blob_hash: blob_hash.clone(),
+                    normalized_mode: *normalized_mode,
+                },
+            },
+            PlannedChange::Delete {
+                rel_path,
+                expected_blob_hash,
+                expected_mode,
+                ..
+            } => PullRecoveryChange::Delete {
+                path: rel_path.clone(),
+                artifact: scratch_artifact_name(rel_path)
+                    .to_string_lossy()
+                    .into_owned(),
+                base: RecoveryFileIdentity {
+                    blob_hash: expected_blob_hash.clone(),
+                    normalized_mode: *expected_mode,
+                },
+            },
+        })
+        .collect::<Vec<_>>();
+    let project_root_path = project_root
+        .path()
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("project root path is not UTF-8"))?
+        .to_owned();
+    let mut journal = PullRecoveryJournal {
+        kind: PULL_RECOVERY_JOURNAL_KIND.to_owned(),
+        schema: PULL_RECOVERY_JOURNAL_SCHEMA,
+        transaction_id: transaction_id.to_owned(),
+        project_root: project_root_path,
+        changes,
+        auth_tag: String::new(),
+    };
+    journal.auth_tag = authenticate_pull_recovery_journal(auth_key, &journal)?;
+    let bytes = lillux::canonical_json(&serde_json::to_value(&journal)?)?.into_bytes();
+    if bytes.len() > MAX_PULL_RECOVERY_JOURNAL_BYTES {
+        return Err(PullResultsError::Other(anyhow::anyhow!(
+            "remote result recovery journal is {} bytes, exceeding the recoverable limit of {MAX_PULL_RECOVERY_JOURNAL_BYTES}",
+            bytes.len()
+        )));
+    }
+    if backup
+        .atomic_create_regular(std::ffi::OsStr::new("journal.json"), &bytes, 0o600)?
+        .is_none()
+    {
+        return Err(PullResultsError::Other(anyhow::anyhow!(
+            "pull recovery journal already exists"
+        )));
+    }
+    backup.try_clone_descriptor()?.sync_all()?;
+    Ok(())
+}
+
+fn authenticate_pull_recovery_journal(
+    auth_key: &[u8; 32],
+    journal: &PullRecoveryJournal,
+) -> Result<String, PullResultsError> {
+    let authenticated = lillux::canonical_json(&journal.authenticated_value())?;
+    let mut mac = <Hmac<Sha256>>::new_from_slice(auth_key)
+        .map_err(|_| anyhow::anyhow!("invalid remote pull journal authentication key"))?;
+    mac.update(authenticated.as_bytes());
+    Ok(mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn read_authenticated_pull_recovery_journal(
+    project_root: &lillux::PinnedDirectory,
+    backup_name: &std::ffi::OsStr,
+    backup: &lillux::PinnedDirectory,
+    auth_key: &[u8; 32],
+) -> Result<PullRecoveryJournal, PullResultsError> {
+    let journal_path = project_root.path().join(backup_name).join("journal.json");
+    let mut journal_file = backup
+        .open_regular(std::ffi::OsStr::new("journal.json"), false)?
+        .ok_or_else(|| {
+            PullResultsError::RecoveryRequired(format!(
+                "pull recovery directory {} has no authenticated journal",
+                project_root.path().join(backup_name).display()
+            ))
+        })?;
+    let mut bytes = Vec::new();
+    std::io::Read::take(
+        &mut journal_file,
+        u64::try_from(MAX_PULL_RECOVERY_JOURNAL_BYTES + 1).expect("journal bound fits in u64"),
+    )
+    .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PULL_RECOVERY_JOURNAL_BYTES {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "pull recovery journal {} exceeds {} bytes",
+            journal_path.display(),
+            MAX_PULL_RECOVERY_JOURNAL_BYTES
+        )));
+    }
+    let journal: PullRecoveryJournal = serde_json::from_slice(&bytes).map_err(|error| {
+        PullResultsError::RecoveryRequired(format!(
+            "invalid pull recovery journal {}: {error}",
+            journal_path.display()
+        ))
+    })?;
+    let canonical = lillux::canonical_json(&serde_json::to_value(&journal)?)?;
+    if canonical.as_bytes() != bytes {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "pull recovery journal {} is not canonical JSON",
+            journal_path.display()
+        )));
+    }
+    validate_pull_recovery_journal(project_root, backup_name, &journal)?;
+    let supplied_tag = decode_sha256_hex("pull recovery auth_tag", &journal.auth_tag)?;
+    let authenticated = lillux::canonical_json(&journal.authenticated_value())?;
+    let mut mac = <Hmac<Sha256>>::new_from_slice(auth_key)
+        .map_err(|_| anyhow::anyhow!("invalid remote pull journal authentication key"))?;
+    mac.update(authenticated.as_bytes());
+    mac.verify_slice(&supplied_tag).map_err(|_| {
+        PullResultsError::RecoveryRequired(format!(
+            "pull recovery journal {} is not authenticated by this node",
+            journal_path.display()
+        ))
+    })?;
+    Ok(journal)
+}
+
+fn validate_pull_recovery_journal(
+    project_root: &lillux::PinnedDirectory,
+    backup_name: &std::ffi::OsStr,
+    journal: &PullRecoveryJournal,
+) -> Result<(), PullResultsError> {
+    if journal.kind != PULL_RECOVERY_JOURNAL_KIND || journal.schema != PULL_RECOVERY_JOURNAL_SCHEMA
+    {
+        return Err(PullResultsError::RecoveryRequired(
+            "unsupported pull recovery journal kind or schema".to_owned(),
+        ));
+    }
+    if journal.transaction_id.len() != 32
+        || !journal
+            .transaction_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PullResultsError::RecoveryRequired(
+            "pull recovery journal has a non-canonical transaction id".to_owned(),
+        ));
+    }
+    let expected_backup = format!(".ryeos-pull-backup-{}", journal.transaction_id);
+    if backup_name != std::ffi::OsStr::new(&expected_backup) {
+        return Err(PullResultsError::RecoveryRequired(
+            "pull recovery journal is not bound to its backup directory".to_owned(),
+        ));
+    }
+    if project_root.path().to_str() != Some(journal.project_root.as_str()) {
+        return Err(PullResultsError::RecoveryRequired(
+            "pull recovery journal is bound to a different project root".to_owned(),
+        ));
+    }
+    if journal.changes.len() > MAX_PULL_RECOVERY_CHANGES {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "pull recovery journal exceeds {MAX_PULL_RECOVERY_CHANGES} changes"
+        )));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    let mut artifacts = std::collections::BTreeSet::new();
+    for change in &journal.changes {
+        let (path, artifact, base, result) = match change {
+            PullRecoveryChange::Write {
+                path,
+                artifact,
+                base,
+                result,
+            } => (path, artifact, base.as_ref(), Some(result)),
+            PullRecoveryChange::Delete {
+                path,
+                artifact,
+                base,
+            } => (path, artifact, Some(base), None),
+        };
+        ryeos_state::project_sync::validate_safe_relative_path(path).map_err(|error| {
+            PullResultsError::RecoveryRequired(format!(
+                "pull recovery journal path {path:?} is unsafe: {error:#}"
+            ))
+        })?;
+        if ryeos_state::project_sync::is_project_snapshot_floor_excluded(path) {
+            return Err(PullResultsError::RecoveryRequired(format!(
+                "pull recovery journal targets reserved path {path:?}"
+            )));
+        }
+        let expected_artifact = scratch_artifact_name(path).to_string_lossy().into_owned();
+        if artifact != &expected_artifact {
+            return Err(PullResultsError::RecoveryRequired(format!(
+                "pull recovery artifact does not match path {path:?}"
+            )));
+        }
+        if !paths.insert(path.as_str()) || !artifacts.insert(artifact.as_str()) {
+            return Err(PullResultsError::RecoveryRequired(
+                "pull recovery journal contains duplicate paths or artifacts".to_owned(),
+            ));
+        }
+        if let Some(base) = base {
+            validate_recovery_file_identity("base", base)?;
+        }
+        if let Some(result) = result {
+            validate_recovery_file_identity("result", result)?;
+        }
+    }
+    decode_sha256_hex("pull recovery auth_tag", &journal.auth_tag)?;
+    Ok(())
+}
+
+fn validate_recovery_file_identity(
+    label: &str,
+    identity: &RecoveryFileIdentity,
+) -> Result<(), PullResultsError> {
+    decode_sha256_hex(label, &identity.blob_hash)?;
+    if !matches!(
+        identity.normalized_mode,
+        ProjectFile::REGULAR_MODE | ProjectFile::EXECUTABLE_MODE
+    ) {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "pull recovery {label} mode is not normalized"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_sha256_hex(label: &str, value: &str) -> Result<[u8; 32], PullResultsError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "{label} is not canonical lowercase sha256"
+        )));
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = (pair[0] as char).to_digit(16).expect("validated hex") as u8;
+        let low = (pair[1] as char).to_digit(16).expect("validated hex") as u8;
+        decoded[index] = (high << 4) | low;
+    }
+    Ok(decoded)
+}
+
+fn materialize_recovered_base(
+    project_root: &lillux::PinnedDirectory,
+    cas: &CasStore,
+    transaction_id: &str,
+    rel_path: &str,
+    base: &RecoveryFileIdentity,
+) -> Result<PathBuf, PullResultsError> {
+    let (parent, _) = pinned_relative_parent(project_root, rel_path, true)?
+        .ok_or_else(|| anyhow::anyhow!("recovery parent could not be opened"))?;
+    parent.ensure_path_binding()?;
+    let recovered_name = std::ffi::OsString::from(format!(
+        ".ryeos-recovered-base-{}",
+        lillux::sha256_hex(format!("{transaction_id}\0{rel_path}").as_bytes())
+    ));
+    if let Some(existing) = parent.open_regular(&recovered_name, false)? {
+        validate_expected_content(
+            &existing,
+            rel_path,
+            Some(base.blob_hash.as_str()),
+            Some(base.normalized_mode),
+        )?;
+    } else {
+        let recovered_path = parent.descriptor_child_path(&recovered_name)?;
+        match cas.materialize_blob_to_new_file(
+            &base.blob_hash,
+            &recovered_path,
+            base.normalized_mode,
+        ) {
+            Ok(_) => {}
+            Err(error) => {
+                let existing = parent
+                    .open_regular(&recovered_name, false)?
+                    .ok_or_else(|| {
+                        PullResultsError::RecoveryRequired(format!(
+                            "could not materialize recovered base for {rel_path}: {error:#}"
+                        ))
+                    })?;
+                validate_expected_content(
+                    &existing,
+                    rel_path,
+                    Some(base.blob_hash.as_str()),
+                    Some(base.normalized_mode),
+                )?;
+            }
+        }
+    }
+    parent.ensure_path_binding()?;
+    project_root.ensure_path_binding()?;
+    Ok(parent.path().join(recovered_name))
+}
+
+struct PinnedScratchDirectory {
+    parent: lillux::PinnedDirectory,
+    name: std::ffi::OsString,
+    directory: lillux::PinnedDirectory,
+    cleanup_on_drop: bool,
+}
+
+impl PinnedScratchDirectory {
+    fn create(root: &lillux::PinnedDirectory, name: &str) -> Result<Self, PullResultsError> {
+        let name = std::ffi::OsString::from(name);
+        let directory = root.create_child(&name, 0o700)?;
+        Ok(Self {
+            parent: root.try_clone()?,
+            name,
+            directory,
+            cleanup_on_drop: true,
+        })
+    }
+
+    fn directory(&self) -> &lillux::PinnedDirectory {
+        &self.directory
+    }
+
+    fn preserve(&mut self) {
+        self.cleanup_on_drop = false;
+        tracing::error!(
+            path = %self.parent.path().join(&self.name).display(),
+            "preserving remote result recovery artifacts"
+        );
+    }
+}
+
+impl Drop for PinnedScratchDirectory {
+    fn drop(&mut self) {
+        if !self.cleanup_on_drop {
+            return;
+        }
+        if let Err(error) = self.directory.remove_contents_recursive().and_then(|()| {
+            self.parent
+                .remove_empty_child_if_same(&self.name, &self.directory)
+                .and_then(|removed| {
+                    if removed {
+                        Ok(())
+                    } else {
+                        anyhow::bail!("scratch directory remained non-empty")
+                    }
+                })
+        }) {
+            tracing::warn!(%error, "failed to clean pinned pull/apply scratch directory");
+        }
+    }
+}
+
+fn ensure_no_pull_recovery_artifacts(
+    project_root: &lillux::PinnedDirectory,
+) -> Result<(), PullResultsError> {
+    let found = std::cell::RefCell::new(None::<std::path::PathBuf>);
+    project_root.visit_regular_files(
+        |relative, _directory| {
+            if is_pull_transaction_path(relative) {
+                *found.borrow_mut() = Some(relative.to_path_buf());
+                return Ok(true);
+            }
+            Ok(false)
+        },
+        |relative, _file| {
+            if is_pull_transaction_path(relative) {
+                *found.borrow_mut() = Some(relative.to_path_buf());
+            }
+            Ok(())
+        },
+    )?;
+    if let Some(relative) = found.into_inner() {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "reserved transaction artifact {} is present; preserve it and recover the interrupted apply before retrying",
+            project_root.path().join(relative).display()
+        )));
+    }
+    Ok(())
+}
+
+fn is_pull_transaction_artifact_name(name: &str) -> bool {
+    name.starts_with(".ryeos-pull-staging-")
+        || name.starts_with(".ryeos-pull-backup-")
+        || name.starts_with(".ryeos-quarantine.")
+}
+
+fn acquire_pull_apply_lock(
+    project_root: &lillux::PinnedDirectory,
+) -> Result<lillux::ExclusiveFileLock, PullResultsError> {
+    project_root.ensure_path_binding()?;
+    let lock = lillux::ExclusiveFileLock::acquire_in_with_timeout(
+        project_root,
+        std::ffi::OsStr::new("ryeos-pull"),
+        std::time::Duration::from_secs(5),
+    )
+    .map_err(|error| {
+        PullResultsError::RecoveryRequired(format!(
+            "could not acquire the project pull/apply lock: {error:#}"
+        ))
+    })?;
+    project_root.ensure_path_binding()?;
+    Ok(lock)
+}
+
+fn recover_interrupted_pull_apply(
+    project_root: &lillux::PinnedDirectory,
+    cas: &CasStore,
+    auth_key: &[u8; 32],
+) -> Result<Option<String>, PullResultsError> {
+    project_root.ensure_path_binding()?;
+    let names = project_root.entry_names()?;
+    let mut backup_names = names
+        .iter()
+        .filter(|name| {
+            name.to_str()
+                .is_some_and(|name| name.starts_with(".ryeos-pull-backup-"))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    backup_names.sort();
+    let had_artifacts = !backup_names.is_empty()
+        || names.iter().any(|name| {
+            name.to_str()
+                .is_some_and(|name| name.starts_with(".ryeos-pull-staging-"))
+        });
+    let mut notices = Vec::new();
+    let mut recovered_transactions = std::collections::BTreeSet::new();
+    for backup_name in backup_names {
+        project_root.ensure_path_binding()?;
+        let backup = project_root
+            .open_child_directory(&backup_name)?
+            .ok_or_else(|| anyhow::anyhow!("pull recovery backup disappeared"))?;
+        if backup
+            .open_regular(std::ffi::OsStr::new("journal.json"), false)?
+            .is_none()
+        {
+            let backup_name_str = backup_name.to_str().ok_or_else(|| {
+                PullResultsError::RecoveryRequired(
+                    "pull recovery backup name is not UTF-8".to_owned(),
+                )
+            })?;
+            let transaction_id = backup_name_str
+                .strip_prefix(".ryeos-pull-backup-")
+                .filter(|value| {
+                    value.len() == 32
+                        && value
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
+                .ok_or_else(|| {
+                    PullResultsError::RecoveryRequired(format!(
+                        "unauthenticated pull recovery directory {backup_name_str:?} has a non-canonical transaction id"
+                    ))
+                })?;
+            let staging_name =
+                std::ffi::OsString::from(format!(".ryeos-pull-staging-{transaction_id}"));
+            if project_root.open_child_directory(&staging_name)?.is_some() {
+                return Err(PullResultsError::RecoveryRequired(format!(
+                    "pull transaction {transaction_id} has staging bytes but no authenticated journal; preserve it for operator inspection"
+                )));
+            }
+            project_root.ensure_path_binding()?;
+            if !project_root.remove_empty_child_if_same(&backup_name, &backup)? {
+                return Err(PullResultsError::RecoveryRequired(format!(
+                    "pre-journal pull directory {backup_name_str:?} was not empty; preserve it for operator inspection"
+                )));
+            }
+            project_root.ensure_path_binding()?;
+            notices.push(format!(
+                "retired pre-journal pull transaction {transaction_id} without changing project bytes"
+            ));
+            continue;
+        }
+        let journal = read_authenticated_pull_recovery_journal(
+            project_root,
+            &backup_name,
+            &backup,
+            auth_key,
+        )?;
+        recovered_transactions.insert(journal.transaction_id.clone());
+        for change in &journal.changes {
+            recover_journaled_change(
+                project_root,
+                &backup,
+                cas,
+                &journal.transaction_id,
+                change,
+                &mut notices,
+            )?;
+        }
+        project_root.ensure_path_binding()?;
+        cleanup_recovery_directory(project_root, &backup_name, &backup)?;
+        let staging_name =
+            std::ffi::OsString::from(format!(".ryeos-pull-staging-{}", journal.transaction_id));
+        if let Some(staging) = project_root.open_child_directory(&staging_name)? {
+            cleanup_recovery_directory(project_root, &staging_name, &staging)?;
+        }
+    }
+    for name in &names {
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(transaction_id) = name.strip_prefix(".ryeos-pull-staging-") else {
+            continue;
+        };
+        if !recovered_transactions.contains(transaction_id)
+            && project_root
+                .open_child_directory(std::ffi::OsStr::new(name))?
+                .is_some()
+        {
+            return Err(PullResultsError::RecoveryRequired(format!(
+                "unpaired pull staging directory {name:?} has no authenticated recovery journal; preserve it for operator inspection"
+            )));
+        }
+    }
+    let surfaced = surface_quarantined_files(project_root)?;
+    notices.extend(surfaced);
+    project_root.ensure_path_binding()?;
+    if had_artifacts || !notices.is_empty() {
+        let detail = if notices.is_empty() {
+            "interrupted remote result apply was retired without changing live project bytes"
+                .to_owned()
+        } else {
+            notices.join("; ")
+        };
+        return Ok(Some(format!("{detail}; retry the pull")));
+    }
+    Ok(None)
+}
+
+fn recover_journaled_change(
+    project_root: &lillux::PinnedDirectory,
+    backup: &lillux::PinnedDirectory,
+    cas: &CasStore,
+    transaction_id: &str,
+    change: &PullRecoveryChange,
+    notices: &mut Vec<String>,
+) -> Result<(), PullResultsError> {
+    let (rel_path, artifact, base, result) = match change {
+        PullRecoveryChange::Write {
+            path,
+            artifact,
+            base,
+            result,
+        } => (
+            path.as_str(),
+            artifact.as_str(),
+            base.as_ref(),
+            Some(result),
+        ),
+        PullRecoveryChange::Delete {
+            path,
+            artifact,
+            base,
+        } => (path.as_str(), artifact.as_str(), Some(base), None),
+    };
+    project_root.ensure_path_binding()?;
+    if let Some(base) = base {
+        if let Some(saved) = backup.open_regular(std::ffi::OsStr::new(artifact), false)? {
+            validate_expected_content(
+                &saved,
+                rel_path,
+                Some(base.blob_hash.as_str()),
+                Some(base.normalized_mode),
+            )?;
+        }
+    } else if backup
+        .open_regular(std::ffi::OsStr::new(artifact), false)?
+        .is_some()
+    {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "new-file recovery for {rel_path} carried a contradictory base backup"
+        )));
+    }
+    let live = open_relative_regular(project_root, rel_path)?;
+    let live_state = live
+        .as_ref()
+        .map(|file| {
+            Ok::<_, PullResultsError>((
+                hash_open_regular(file.try_clone().map_err(anyhow::Error::from)?)?,
+                normalized_open_mode(file)?,
+            ))
+        })
+        .transpose()?;
+    let already_base = match (base, live_state.as_ref()) {
+        (None, None) => true,
+        (Some(base), Some((live_hash, live_mode))) => {
+            base.blob_hash == *live_hash && base.normalized_mode == *live_mode
+        }
+        _ => false,
+    };
+    if already_base {
+        return Ok(());
+    }
+    if let Some(base) = base {
+        let recovered =
+            materialize_recovered_base(project_root, cas, transaction_id, rel_path, base)?;
+        notices.push(format!(
+            "preserved the pre-pull version of {rel_path} as {}",
+            recovered.display()
+        ));
+    }
+    let live_description = match (result, live_state.as_ref()) {
+        (Some(result), Some((hash, mode)))
+            if result.blob_hash == *hash && result.normalized_mode == *mode =>
+        {
+            "the remote result"
+        }
+        (None, None) => "an absent path",
+        _ => "concurrent local state",
+    };
+    notices.push(format!(
+        "left {live_description} untouched at {rel_path} after interrupted pull"
+    ));
+    project_root.ensure_path_binding()?;
+    Ok(())
+}
+
+fn cleanup_recovery_directory(
+    project_root: &lillux::PinnedDirectory,
+    name: &std::ffi::OsStr,
+    directory: &lillux::PinnedDirectory,
+) -> Result<(), PullResultsError> {
+    project_root.ensure_path_binding()?;
+    directory.remove_contents_recursive()?;
+    if !project_root.remove_empty_child_if_same(name, directory)? {
+        return Err(PullResultsError::RecoveryRequired(format!(
+            "recovery directory {} remained non-empty",
+            project_root.path().join(name).display()
+        )));
+    }
+    project_root.ensure_path_binding()?;
+    Ok(())
+}
+
+fn surface_quarantined_files(
+    project_root: &lillux::PinnedDirectory,
+) -> Result<Vec<String>, PullResultsError> {
+    let quarantines = std::cell::RefCell::new(Vec::<PathBuf>::new());
+    project_root.visit_regular_files(
+        |_relative, _directory| Ok(false),
+        |relative, _file| {
+            if relative.components().any(|component| {
+                matches!(component, std::path::Component::Normal(name) if name.to_str().is_some_and(|name| name.starts_with(".ryeos-quarantine.")))
+            }) {
+                quarantines.borrow_mut().push(relative.to_path_buf());
+            }
+            Ok(())
+        },
+    )?;
+    let mut notices = Vec::new();
+    for relative in quarantines.into_inner() {
+        project_root.ensure_path_binding()?;
+        let relative_str = relative
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("quarantine path is not UTF-8"))?;
+        let (parent, name) = pinned_relative_parent(project_root, relative_str, false)?
+            .ok_or_else(|| anyhow::anyhow!("quarantine parent disappeared"))?;
+        let file = parent
+            .open_regular(&name, false)?
+            .ok_or_else(|| anyhow::anyhow!("quarantine file disappeared"))?;
+        let recovered_name = std::ffi::OsString::from(format!(
+            ".ryeos-recovered-{}",
+            lillux::sha256_hex(relative_str.as_bytes())
+        ));
+        parent.ensure_path_binding()?;
+        if let Err(error) =
+            parent.rename_regular_child_noreplace_atomic(&name, &recovered_name, &file)
+        {
+            if !(error.namespace_committed()
+                && parent
+                    .ensure_regular_entry_matches(&recovered_name, Some(&file))
+                    .is_ok())
+            {
+                return Err(PullResultsError::Other(error.into()));
+            }
+            tracing::warn!(
+                path = %parent.path().join(&recovered_name).display(),
+                %error,
+                "quarantine preservation committed but directory durability was uncertain"
+            );
+        }
+        parent.ensure_path_binding()?;
+        project_root.ensure_path_binding()?;
+        notices.push(format!(
+            "preserved ambiguous local bytes as {}",
+            parent.path().join(recovered_name).display()
+        ));
+    }
+    project_root.ensure_path_binding()?;
+    Ok(notices)
+}
+
+fn is_pull_transaction_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        name.to_str().is_some_and(is_pull_transaction_artifact_name)
+    })
 }
 
 /// Roll back applied writes and deletes by restoring from backup.
@@ -575,6 +1837,7 @@ fn apply_with_rollback(
 /// For files that had a backup (existed before apply), the backup is
 /// restored over the live path. For files that had **no** backup (new
 /// files created during apply), the live path is **removed** entirely.
+#[cfg(test)]
 fn rollback_writes_and_deletes(
     applied_writes: &[String],
     applied_deletes: &[String],
@@ -606,9 +1869,58 @@ fn rollback_writes_and_deletes(
     }
 }
 
-/// Read a local file, returning None if it doesn't exist.
-fn read_local_file(path: &Path) -> Option<Vec<u8>> {
-    std::fs::read(path).ok()
+#[cfg(test)]
+fn hash_local_regular(path: &Path) -> Result<Option<String>, PullResultsError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        Ok(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PullResultsError::Other(error.into())),
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .ok_or_else(|| PullResultsError::Other(anyhow::anyhow!("local file has no name")))?;
+    let pinned = lillux::PinnedDirectory::open(parent)?
+        .ok_or_else(|| anyhow::anyhow!("local file parent disappeared"))?;
+    let mut source = match pinned.open_regular(name, false)? {
+        Some(source) => source,
+        None => return Ok(None),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let opened = source.metadata().map_err(anyhow::Error::from)?;
+        if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
+            return Err(PullResultsError::LocalConflict(path.display().to_string()));
+        }
+    }
+    use sha2::Digest as _;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = source.read(&mut buffer).map_err(anyhow::Error::from)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let after = source.metadata().map_err(anyhow::Error::from)?;
+        if after.dev() != metadata.dev()
+            || after.ino() != metadata.ino()
+            || after.size() != metadata.size()
+            || after.mtime() != metadata.mtime()
+            || after.mtime_nsec() != metadata.mtime_nsec()
+            || after.ctime() != metadata.ctime()
+            || after.ctime_nsec() != metadata.ctime_nsec()
+        {
+            return Err(PullResultsError::LocalConflict(path.display().to_string()));
+        }
+    }
+    Ok(Some(format!("{:x}", digest.finalize())))
 }
 
 /// Verify that a result snapshot is a valid descendant of the pushed
@@ -645,7 +1957,7 @@ fn verify_snapshot_lineage(
     }
 }
 
-/// Safely join a base directory with a relative path from a remote manifest.
+/// Safely join a base directory with a relative path from a remote project tree.
 ///
 /// Rejects:
 /// - Absolute paths
@@ -661,6 +1973,7 @@ fn verify_snapshot_lineage(
 /// `symlink_metadata` to catch symlink-via-workspace escapes. Does NOT
 /// call `canonicalize` (which would *follow* symlinks rather than
 /// detect them).
+#[cfg(test)]
 fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PullResultsError> {
     if rel.is_empty() {
         return Ok(base.to_path_buf());
@@ -668,14 +1981,14 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PullResultsError> {
     // Reject absolute paths
     if rel.starts_with('/') {
         return Err(PullResultsError::Other(anyhow::anyhow!(
-            "rejecting absolute path '{}' from remote manifest",
+            "rejecting absolute path '{}' from remote project tree",
             rel
         )));
     }
     // Reject NUL bytes
     if rel.contains('\0') {
         return Err(PullResultsError::Other(anyhow::anyhow!(
-            "rejecting path with NUL byte from remote manifest: '{}'",
+            "rejecting path with NUL byte from remote project tree: '{}'",
             rel.replace('\0', "\\0")
         )));
     }
@@ -688,7 +2001,7 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PullResultsError> {
                 // Walking above base — reject
                 if !normalized.pop() {
                     return Err(PullResultsError::Other(anyhow::anyhow!(
-                        "rejecting path '{}' from remote manifest: escapes base directory (.. traversal)",
+                        "rejecting path '{}' from remote project tree: escapes base directory (.. traversal)",
                         rel
                     )));
                 }
@@ -698,7 +2011,7 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PullResultsError> {
             }
             std::path::Component::RootDir | std::path::Component::Prefix(_) => {
                 return Err(PullResultsError::Other(anyhow::anyhow!(
-                    "rejecting path '{}' from remote manifest: unexpected component type",
+                    "rejecting path '{}' from remote project tree: unexpected component type",
                     rel
                 )));
             }
@@ -725,7 +2038,7 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PullResultsError> {
             match std::fs::symlink_metadata(&walker) {
                 Ok(meta) if meta.file_type().is_symlink() => {
                     return Err(PullResultsError::Other(anyhow::anyhow!(
-                        "rejecting path '{}' from remote manifest: \
+                        "rejecting path '{}' from remote project tree: \
                          intermediate component '{}' is a symlink in the \
                          local workspace; refusing to write through it",
                         rel,
@@ -742,36 +2055,57 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, PullResultsError> {
     Ok(base.join(&normalized))
 }
 
-/// Fetch file content for an item source hash from local CAS.
+/// Fetch one project file's exact content and normalized mode from local CAS.
 ///
 /// Returns an error (not `None`) if the content is missing from CAS.
 /// This prevents silent partial applies.
-fn fetch_content_for_item_strict(
+fn require_project_file_blob(
     cas: &CasStore,
-    item_hash: &str,
+    file_hash: &str,
     rel_path: &str,
-) -> Result<Vec<u8>, PullResultsError> {
-    let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
-    let obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+) -> Result<ProjectFile, PullResultsError> {
+    let file = load_project_file(cas, file_hash)?;
+    let Some((_source, actual_size)) = cas.open_blob(&file.blob_hash)? else {
+        return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+            "project file {rel_path:?} blob {} is missing",
+            file.blob_hash
+        )));
+    };
+    if actual_size != file.size {
+        return Err(PullResultsError::InvalidRemoteSnapshot(format!(
+            "project file {rel_path:?} declares {} bytes but its blob has {}",
+            file.size, actual_size
+        )));
+    }
+    Ok(file)
+}
+
+fn load_project_file(cas: &CasStore, file_hash: &str) -> Result<ProjectFile, PullResultsError> {
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
+    let object = ryeos_state::object_closure::load_exact_cas_object_with_cas(
         cas,
-        item_hash,
+        file_hash,
         limits.max_object_bytes,
     )
     .map_err(PullResultsError::Other)?;
-    let item = ItemSource::from_value(&obj).map_err(PullResultsError::Other)?;
-    if item.item_ref != rel_path {
-        return Err(PullResultsError::Other(anyhow::anyhow!(
-            "manifest path {:?} does not match embedded item_source path {:?}",
-            rel_path,
-            item.item_ref
-        )));
+    ProjectFile::from_value(&object).map_err(PullResultsError::Other)
+}
+
+#[cfg(test)]
+fn local_normalized_mode(path: &Path) -> Option<u32> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
     }
-    ryeos_state::object_closure::load_exact_cas_blob_with_cas(
-        cas,
-        &item.content_blob_hash,
-        limits.max_blob_bytes,
-    )
-    .map_err(PullResultsError::Other)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        Some(ProjectFile::normalize_mode(metadata.permissions().mode()))
+    }
+    #[cfg(not(unix))]
+    {
+        Some(ProjectFile::REGULAR_MODE)
+    }
 }
 
 /// Extract snapshot_hash from a remote execute response.
@@ -819,35 +2153,29 @@ pub fn extract_snapshot_hash(response: &Value) -> Option<String> {
         })
 }
 
-/// Parse a SourceManifest from a JSON value.
-fn parse_manifest(val: &Value) -> Result<SourceManifest, PullResultsError> {
-    SourceManifest::from_value(val).map_err(PullResultsError::Other)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use lillux::cas::CasStore;
     use std::path::PathBuf;
 
-    /// Helper: create a CAS with a single blob and its corresponding item
-    /// source object. Returns the item hash.
-    fn store_blob_and_item(cas: &CasStore, rel_path: &str, content: &[u8]) -> String {
+    /// Store one current project-file object and its content blob.
+    fn store_project_file(cas: &CasStore, content: &[u8]) -> String {
         let blob_hash = cas.store_blob(content).unwrap();
-        let item = serde_json::json!({
-            "kind": "item_source",
-            "item_ref": rel_path,
-            "content_blob_hash": blob_hash,
-            "integrity": blob_hash,
-            "signature_info": null,
-            "mode": null,
-        });
-        cas.store_object(&item).unwrap()
+        cas.store_object(
+            &ProjectFile {
+                blob_hash,
+                size: content.len() as u64,
+                normalized_mode: 0o644,
+            }
+            .to_value(),
+        )
+        .unwrap()
     }
 
-    fn make_manifest(items: &[(&str, &str)]) -> SourceManifest {
-        SourceManifest {
-            item_source_hashes: items
+    fn make_tree(items: &[(&str, &str)]) -> ProjectTree {
+        ProjectTree {
+            files: items
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
@@ -857,20 +2185,41 @@ mod tests {
     // ── R3-3a: pull/apply conflict detection ──
 
     #[test]
+    fn repeated_descriptor_hashes_restart_at_the_beginning() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("value"), b"non-empty").unwrap();
+        let root = lillux::PinnedDirectory::open(tmp.path()).unwrap().unwrap();
+        let file = root
+            .open_regular(std::ffi::OsStr::new("value"), false)
+            .unwrap()
+            .unwrap();
+        let expected = lillux::sha256_hex(b"non-empty");
+        assert_eq!(
+            hash_open_regular(file.try_clone().unwrap()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            hash_open_regular(file.try_clone().unwrap()).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
     fn apply_detects_local_conflict_on_tracked_file() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
 
-        // Write a file with hash "aaa..." but manifest says it should be "bbb..."
+        // Write a file with hash "aaa..." but its ProjectFile says it should be "bbb..."
         std::fs::write(project_root.join("file.txt"), "original content").unwrap();
-
-        let base = make_manifest(&[("file.txt", "sha256:original_hash")]);
-        let remote = make_manifest(&[("file.txt", "sha256:changed_hash")]);
 
         let cas_root = tmp.path().join("cas");
         let cas = CasStore::new(cas_root);
+        let base_file = store_project_file(&cas, b"different base content");
+        let remote_file = store_project_file(&cas, b"remote content");
+        let base = make_tree(&[("file.txt", &base_file)]);
+        let remote = make_tree(&[("file.txt", &remote_file)]);
 
-        let result = apply_manifest_diff(&cas, project_root, &base, &remote);
+        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]);
         match result {
             Err(PullResultsError::LocalConflict(path)) => {
                 assert_eq!(path, "file.txt");
@@ -893,13 +2242,13 @@ mod tests {
         // A file exists locally that the remote also wants to create
         std::fs::write(project_root.join("new.txt"), "local content").unwrap();
 
-        let base = make_manifest(&[]); // empty base — file wasn't tracked
-        let remote = make_manifest(&[("new.txt", "sha256:some_hash")]);
-
         let cas_root = tmp.path().join("cas");
         let cas = CasStore::new(cas_root);
+        let remote_file = store_project_file(&cas, b"remote");
+        let base = make_tree(&[]); // empty base — file wasn't tracked
+        let remote = make_tree(&[("new.txt", &remote_file)]);
 
-        let result = apply_manifest_diff(&cas, project_root, &base, &remote);
+        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]);
         match result {
             Err(PullResultsError::LocalConflict(msg)) => {
                 assert!(msg.contains("new.txt"), "got: {msg}");
@@ -932,15 +2281,25 @@ mod tests {
         let cas = CasStore::new(cas_root);
 
         // Store content for file A only
-        let hash_a = store_blob_and_item(&cas, "a.txt", b"new A content");
-        let hash_a_old = lillux::cas::sha256_hex(content_a.as_bytes());
-        let hash_b_old = lillux::cas::sha256_hex(content_b.as_bytes());
+        let hash_a = store_project_file(&cas, b"new A content");
+        let hash_a_old = store_project_file(&cas, content_a.as_bytes());
+        let hash_b_old = store_project_file(&cas, content_b.as_bytes());
+        let missing = cas
+            .store_object(
+                &ProjectFile {
+                    blob_hash: "ab".repeat(32),
+                    size: 8,
+                    normalized_mode: 0o644,
+                }
+                .to_value(),
+            )
+            .unwrap();
         // File B's hash doesn't exist in CAS — will trigger strict failure
 
-        let base = make_manifest(&[("a.txt", &hash_a_old), ("b.txt", &hash_b_old)]);
-        let remote = make_manifest(&[("a.txt", &hash_a), ("b.txt", "sha256:missing_hash")]);
+        let base = make_tree(&[("a.txt", &hash_a_old), ("b.txt", &hash_b_old)]);
+        let remote = make_tree(&[("a.txt", &hash_a), ("b.txt", &missing)]);
 
-        let result = apply_manifest_diff(&cas, project_root, &base, &remote);
+        let result = apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]);
         assert!(result.is_err(), "should fail on missing CAS content");
 
         // Workspace should be completely untouched — no partial apply
@@ -972,26 +2331,27 @@ mod tests {
         let cas_root = tmp.path().join("cas");
         let cas = CasStore::new(cas_root);
 
-        let hash_a_old = lillux::cas::sha256_hex(content_a.as_bytes());
-        let hash_b_old = lillux::cas::sha256_hex(content_b.as_bytes());
-        let hash_c = lillux::cas::sha256_hex(content_c.as_bytes());
+        let hash_a_old = store_project_file(&cas, content_a.as_bytes());
+        let hash_b_old = store_project_file(&cas, content_b.as_bytes());
+        let hash_c = store_project_file(&cas, content_c.as_bytes());
 
-        let hash_a_new = store_blob_and_item(&cas, "a.txt", b"new A");
-        let hash_d = store_blob_and_item(&cas, "d.txt", b"brand new D");
+        let hash_a_new = store_project_file(&cas, b"new A");
+        let hash_d = store_project_file(&cas, b"brand new D");
 
-        let base = make_manifest(&[
+        let base = make_tree(&[
             ("a.txt", &hash_a_old),
             ("b.txt", &hash_b_old),
             ("c.txt", &hash_c),
         ]);
-        let remote = make_manifest(&[
+        let remote = make_tree(&[
             ("a.txt", &hash_a_new),
             // b.txt absent → deleted
             ("c.txt", &hash_c),
             ("d.txt", &hash_d),
         ]);
 
-        let (updated, deleted) = apply_manifest_diff(&cas, project_root, &base, &remote).unwrap();
+        let (updated, deleted) =
+            apply_tree_diff(&cas, project_root, &base, &remote, &[7_u8; 32]).unwrap();
         assert_eq!(updated, 2); // a.txt + d.txt
         assert_eq!(deleted, 1); // b.txt
 
@@ -1156,7 +2516,7 @@ mod tests {
     fn lineage_accepts_identical_snapshot() {
         // No-op execution: result hash == pushed hash
         let snap = serde_json::json!({
-            "project_manifest_hash": "manifest_x",
+            "project_tree_hash": "tree_x",
             "parent_hashes": [],
         });
         verify_snapshot_lineage(&snap, "abc", "abc").expect("identical hash must accept");
@@ -1166,7 +2526,7 @@ mod tests {
     fn lineage_accepts_direct_parent() {
         // result.parent_hashes contains pushed hash
         let snap = serde_json::json!({
-            "project_manifest_hash": "manifest_y",
+            "project_tree_hash": "tree_y",
             "parent_hashes": ["pushed_xxx", "other_yyy"],
         });
         verify_snapshot_lineage(&snap, "pushed_xxx", "result_zzz")
@@ -1177,7 +2537,7 @@ mod tests {
     fn lineage_rejects_unrelated_snapshot() {
         // Different hash, pushed NOT in parents
         let snap = serde_json::json!({
-            "project_manifest_hash": "manifest_z",
+            "project_tree_hash": "tree_z",
             "parent_hashes": ["unrelated_aaa"],
         });
         let err = verify_snapshot_lineage(&snap, "pushed_xxx", "result_zzz")
@@ -1195,7 +2555,7 @@ mod tests {
     fn lineage_rejects_missing_parent_hashes() {
         // Different hash, no parent_hashes field at all
         let snap = serde_json::json!({
-            "project_manifest_hash": "manifest_z",
+            "project_tree_hash": "tree_z",
         });
         let err = verify_snapshot_lineage(&snap, "pushed_xxx", "result_zzz")
             .expect_err("missing parents on different hash must reject");
@@ -1241,7 +2601,7 @@ mod tests {
         // Direct-parent-only: even if pushed appears deeper in lineage,
         // we can't observe that without recursive fetches. Reject.
         let snap = serde_json::json!({
-            "project_manifest_hash": "manifest_z",
+            "project_tree_hash": "tree_z",
             "parent_hashes": ["intermediate_iii"],
         });
         // pushed_xxx is NOT in parent_hashes (would be parent's parent in

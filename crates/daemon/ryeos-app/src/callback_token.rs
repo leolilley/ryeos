@@ -16,6 +16,9 @@ pub struct CallbackCapability {
     pub token: String,
     pub invocation_id: String,
     pub thread_id: String,
+    /// Exact durable launch owner allowed to use this token. Production
+    /// managed launches bind it before the token is exposed to a runtime.
+    pub launch_owner: Option<String>,
     /// Chain root of the minting thread. Carried so the daemon can key
     /// cross-chain wiring from a callback without re-deriving it. It is NOT an
     /// authority source by itself — callers that act on it MUST confirm it
@@ -136,6 +139,7 @@ impl CallbackCapabilityStore {
             token: token.clone(),
             invocation_id,
             thread_id: thread_id.to_string(),
+            launch_owner: None,
             // Defaults to root (chain_root == thread_id). The managed launch
             // path overrides this via `set_chain_root` with the thread's
             // authoritative chain root from state.
@@ -163,6 +167,16 @@ impl CallbackCapabilityStore {
         match self.capabilities.lock().unwrap().get_mut(token) {
             Some(cap) => {
                 cap.chain_root_id = chain_root_id.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_launch_owner(&self, token: &str, launch_owner: String) -> bool {
+        match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.launch_owner = Some(launch_owner);
                 true
             }
             None => false,
@@ -722,6 +736,7 @@ mod tests {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test".to_string(),
+            launch_owner: None,
             chain_root_id: "T-test".to_string(),
             project_path: PathBuf::from("/project"),
             expires_at: Instant::now() + Duration::from_secs(300),

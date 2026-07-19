@@ -18,19 +18,19 @@ pub use exec::{
 
 pub use atomic_fs::{
     atomic_exchange_paths, atomic_write, atomic_write_private, atomic_write_with_mode,
-    remove_dir_all_durable, remove_file_durable, rename_path_durable, sync_tree_durable,
-    AtomicMutationError, AtomicMutationResult,
+    remove_dir_all_durable, remove_file_durable, rename_path_durable,
+    rename_path_noreplace_durable, sync_tree_durable, AtomicMutationError, AtomicMutationResult,
 };
 pub use cas::{
     atomic_write_batch, atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path,
-    valid_hash, CanonicalJsonError, CasPutOutcome, CasStore,
+    valid_hash, CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome,
 };
 pub use locks::{with_exclusive_file_lock, ExclusiveFileLock, SharedFileLock};
 pub use secure_fs::{
     collect_directory_tree_no_follow, collect_regular_files_no_follow,
     read_regular_file_bounded_no_follow, read_regular_file_no_follow,
-    read_regular_file_to_string_no_follow, NoFollowDirectoryTree, PinnedDirectory,
-    PinnedDirectoryEntry, PinnedDirectoryLock, PinnedRegularFile,
+    read_regular_file_to_string_no_follow, visit_regular_files_no_follow, NoFollowDirectoryTree,
+    PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryLock, PinnedRegularFile,
 };
 
 pub use identity::envelope::{

@@ -146,6 +146,11 @@ pub async fn handle(
         )));
     }
 
+    let parent_generation = state
+        .state_store
+        .authoritative_project_generation(&parent_thread.thread_id)
+        .map_err(|e| HandlerError::Internal(e.to_string()))?
+        .ok_or_else(|| HandlerError::Internal("parent authoritative history is missing".into()))?;
     let branch_thread = NewThreadRecord {
         thread_id: child_thread_id.clone(),
         chain_root_id: req.parent_event_ref.chain_root_id.clone(),
@@ -161,6 +166,7 @@ pub async fn handle(
             .project_root
             .as_ref()
             .map(std::path::PathBuf::from),
+        base_project_snapshot_hash: parent_generation.1.or(parent_generation.0),
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,

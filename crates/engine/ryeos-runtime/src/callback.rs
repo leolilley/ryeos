@@ -241,6 +241,10 @@ impl<'de> Deserialize<'de> for TerminalCompletion {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActionPayload {
+    /// Stable runtime-occurrence identity. Required for detached actions so a
+    /// daemon crash/retry cannot mint the same logical child twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
     pub item_id: String,
     pub ref_bindings: BTreeMap<String, String>,
     #[serde(default)]
@@ -328,6 +332,7 @@ pub fn parse_hook_action(action: Value) -> Result<ActionPayload, String> {
         return Err("invalid hook action: `thread` must be a non-empty string".to_string());
     }
     Ok(ActionPayload {
+        operation_id: None,
         item_id,
         ref_bindings,
         params,
@@ -572,6 +577,7 @@ mod tests {
     #[test]
     fn action_payload_omits_call_when_none() {
         let payload = ActionPayload {
+            operation_id: None,
             item_id: "tool:t/echo".to_string(),
             ref_bindings: BTreeMap::new(),
             params: json!({}),
@@ -677,6 +683,7 @@ mod tests {
             thread_id: "T-hook".to_string(),
             project_path: "/project".to_string(),
             action: ActionPayload {
+                operation_id: None,
                 item_id: "tool:test/hook".to_string(),
                 ref_bindings: BTreeMap::new(),
                 params: json!({"audit": true}),

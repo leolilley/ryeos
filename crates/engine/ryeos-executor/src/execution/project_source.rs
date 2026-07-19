@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_engine::engine::Engine;
@@ -86,7 +87,6 @@ pub enum ProjectSource {
 ///
 /// Ownership of `temp_dir` is transferred to `ExecutionGuard` in the
 /// runner for lifecycle management.
-#[derive(Debug)]
 pub struct ResolvedProjectContext {
     /// The path to resolve and execute against (may be a CAS checkout dir).
     pub effective_path: PathBuf,
@@ -113,6 +113,9 @@ pub struct ResolvedProjectContext {
     /// lookups MUST go through this field (or the `engine` on the
     /// `ExecutionContext` / `ExecutionParams` that it flows into).
     pub request_engine: Arc<Engine>,
+    /// Keeps the captured CAS closure rooted until the authoritative launch
+    /// birth is visible. Pushed-head contexts are already rooted by HEAD.
+    captured_generation: Option<super::CapturedProjectGeneration>,
 }
 
 impl ResolvedProjectContext {
@@ -138,7 +141,14 @@ impl ResolvedProjectContext {
             snapshot_hash: None,
             temp_dir: None,
             request_engine,
+            captured_generation: None,
         })
+    }
+
+    /// Move the staged CAS reachability lease into the launch task. Only live
+    /// captures carry one; pushed HEAD generations are already durable roots.
+    pub fn take_captured_generation(&mut self) -> Option<super::CapturedProjectGeneration> {
+        self.captured_generation.take()
     }
 }
 
@@ -165,17 +175,29 @@ pub fn resolve_project_context(
     let original_path = project_path.to_path_buf();
 
     let ctx = match source {
-        ProjectSource::LiveFs => ResolvedProjectContext {
-            effective_path: original_path.clone(),
-            original_path,
-            source: source.clone(),
-            snapshot_hash: None,
-            temp_dir: None,
-            // LiveFs uses the daemon's startup engine directly — no
-            // per-request overlay needed because the daemon's own
-            // app root is what resolves anyway.
-            request_engine: Arc::clone(&state.engine),
-        },
+        ProjectSource::LiveFs => {
+            let captured = super::capture_live_project_snapshot(
+                state,
+                &original_path,
+                state.threads.site_id(),
+                "live_execution_admission",
+            )
+            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            let snapshot_hash = captured.snapshot_hash.clone();
+            let authority = crate::execution::pinned_state_authority(state)?;
+            let cas_mutation_guard = authority.acquire_shared_guard()?;
+            authority.ensure_guard(&cas_mutation_guard)?;
+            resolve_pinned_snapshot_context_admitted(
+                state,
+                &authority,
+                &cas_mutation_guard,
+                &snapshot_hash,
+                original_path,
+                checkout_id,
+                ProjectSource::LiveFs,
+                Some(captured),
+            )?
+        }
         ProjectSource::PushedHead => {
             let authority = crate::execution::pinned_state_authority(state)?;
             let cas_mutation_guard = authority.acquire_shared_guard()?;
@@ -209,6 +231,8 @@ pub fn resolve_project_context(
                 &snap_hash,
                 original_path,
                 checkout_id,
+                ProjectSource::PushedHead,
+                None,
             )?
         }
     };
@@ -249,6 +273,8 @@ pub fn resolve_pinned_snapshot_context(
         snapshot_hash,
         original_path,
         checkout_id,
+        ProjectSource::PushedHead,
+        None,
     )
 }
 
@@ -259,6 +285,8 @@ fn resolve_pinned_snapshot_context_admitted(
     snapshot_hash: &str,
     original_path: PathBuf,
     checkout_id: &str,
+    source: ProjectSource,
+    captured_generation: Option<super::CapturedProjectGeneration>,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
@@ -274,14 +302,7 @@ fn resolve_pinned_snapshot_context_admitted(
         })?;
     let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
-    if snapshot.user_manifest_hash.is_some() {
-        return Err(ProjectSourceError::CheckoutFailed(
-            "snapshots with user_manifest_hash are not supported; re-push the project".to_string(),
-        ));
-    }
-
-    // ── 1. Always materialise the project checkout (request-owned) ──
-    let manifest_hash = &snapshot.project_manifest_hash;
+    // ── 1. Build the request-owned COW workspace lower ──────────────
     let runtime_cache = state.config.runtime_root().cache();
     let execution_root = runtime_cache.join("executions");
     std::fs::create_dir_all(&execution_root)
@@ -292,26 +313,57 @@ fn resolve_pinned_snapshot_context_admitted(
         std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
             .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
     }
-    let exec_dir = execution_root.join(checkout_id);
-    std::fs::create_dir(&exec_dir)
+    let workspace_root = execution_root.join(checkout_id);
+    state
+        .state_store
+        .reserve_execution_workspace(
+            checkout_id,
+            snapshot_hash,
+            workspace_root.to_str().ok_or_else(|| {
+                ProjectSourceError::CheckoutFailed(
+                    "execution workspace path is not valid UTF-8".to_string(),
+                )
+            })?,
+        )
         .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&exec_dir, std::fs::Permissions::from_mode(0o700))
+    let workspace =
+        crate::execution::workspace::WorkspaceLayout::create(&execution_root, checkout_id)
             .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+    let reserved = state
+        .state_store
+        .execution_workspace(checkout_id)
+        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?
+        .ok_or_else(|| {
+            ProjectSourceError::CheckoutFailed("workspace reservation disappeared".to_string())
+        })?;
+    if reserved.state == WorkspaceState::Reserved {
+        state
+            .state_store
+            .transition_execution_workspace(
+                checkout_id,
+                &[WorkspaceState::Reserved],
+                WorkspaceState::Constructing,
+                None,
+            )
+            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+    } else if reserved.state != WorkspaceState::Constructing {
+        return Err(ProjectSourceError::CheckoutFailed(format!(
+            "workspace {checkout_id} cannot be adopted from state {}",
+            reserved.state
+        )));
     }
+    let project_guard = Arc::new(TempDirGuard::new_workspace(workspace.root.clone()));
     let materialization_cache =
         crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
-    crate::execution::checkout_project(
+    let (_, generation_lease) = crate::execution::checkout_project_lower(
         authority,
         cas_mutation_guard,
-        manifest_hash,
-        &exec_dir,
-        Some(&materialization_cache),
+        snapshot_hash,
+        &workspace.lower,
+        &materialization_cache,
     )
     .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+    project_guard.retain_lease(generation_lease);
 
     // ── 2. Check cache for a previously-built engine ──
     let cache_key = ryeos_app::engine_cache::CacheKey {
@@ -319,6 +371,7 @@ fn resolve_pinned_snapshot_context_admitted(
         snapshot_hash: snapshot_hash.to_string(),
     };
 
+    let immutable_project_root = materialization_cache.cache_dir(snapshot_hash);
     let request_engine = state.engine_cache.get_or_insert_with(
         cache_key,
         || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
@@ -330,7 +383,7 @@ fn resolve_pinned_snapshot_context_admitted(
             let built = ryeos_app::engine_init::build_engine_for_roots(
                 &state.config,
                 &bundle_roots,
-                Some(exec_dir.as_path()),
+                Some(immutable_project_root.as_path()),
                 None,
                 Arc::clone(&state.isolation),
             )
@@ -343,15 +396,16 @@ fn resolve_pinned_snapshot_context_admitted(
     )?;
 
     Ok(ResolvedProjectContext {
-        effective_path: exec_dir,
+        effective_path: workspace.lower,
         original_path,
-        source: ProjectSource::PushedHead,
+        source,
         snapshot_hash: Some(snapshot_hash.to_string()),
         // Request-owned: wrapped in Arc<TempDirGuard> so the
         // runner and cache can both hold references. The project
         // checkout is cleaned up when the last Arc drops.
         temp_dir: Some(project_guard),
         request_engine,
+        captured_generation,
     })
 }
 

@@ -512,6 +512,7 @@ mod tests {
             thread_id: "T-1".to_string(),
             project_path: "/project".to_string(),
             action: ActionPayload {
+                operation_id: None,
                 item_id: "tool:test/audit".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),
@@ -538,6 +539,7 @@ mod tests {
             thread_id: "T-1".to_string(),
             project_path: "/project".to_string(),
             action: ActionPayload {
+                operation_id: None,
                 item_id: "tool:test/noop".to_string(),
                 ref_bindings: std::collections::BTreeMap::new(),
                 params: json!({}),

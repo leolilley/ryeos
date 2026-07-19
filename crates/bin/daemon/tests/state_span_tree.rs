@@ -75,6 +75,7 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         upstream_thread_id: None,
         requested_by: Some("user:test".to_string()),
         project_root: None,
+        base_project_snapshot_hash: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: (thread_id == chain_root_id).then(captured_policy),
@@ -108,6 +109,7 @@ fn state_store_write_path_emits_state_spans() {
                     group_leader_start_time_ticks: 20,
                 },
                 &RuntimeLaunchMetadata::default(),
+                None,
             )
             .expect("attach_thread_process");
         store

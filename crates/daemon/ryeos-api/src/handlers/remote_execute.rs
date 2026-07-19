@@ -203,7 +203,7 @@ pub async fn handle(
     Ok(serde_json::json!({
         "push": {
             "snapshot_hash": forward_result.push_summary.pushed_snapshot_hash,
-            "manifest_entries": forward_result.push_summary.manifest_entries,
+            "tree_entries": forward_result.push_summary.tree_entries,
             "blobs_uploaded": forward_result.push_summary.blobs_uploaded,
             "blobs_skipped": forward_result.push_summary.blobs_skipped,
         },
@@ -216,8 +216,6 @@ pub async fn handle(
             "cas_objects_fetched": forward_result.pull_summary.cas_objects_fetched,
             "files_updated": forward_result.pull_summary.files_updated,
             "files_deleted": forward_result.pull_summary.files_deleted,
-            "user_files_updated": forward_result.pull_summary.user_files_updated,
-            "user_files_deleted": forward_result.pull_summary.user_files_deleted,
         },
     }))
 }

@@ -627,9 +627,20 @@ async fn scheduler_pause_prevents_fires() {
     .await;
     assert!(status.is_success());
 
-    // Observe show_fires for 3 consecutive checks over 3s — count should
-    // stay at 1, proving no new fires appeared after pause.
-    let stable = observe_fire_count_stable(&h, "pause-no-fire", 1, 3, Duration::from_secs(3)).await;
+    // A boundary already claimed before the pause write gate linearizes may
+    // legitimately be visible now. From the successful pause response onward,
+    // however, the count must remain stable.
+    let count_after_pause = fire_count(&h, "pause-no-fire")
+        .await
+        .expect("show_fires after pause");
+    let stable = observe_fire_count_stable(
+        &h,
+        "pause-no-fire",
+        count_after_pause,
+        3,
+        Duration::from_secs(3),
+    )
+    .await;
     assert!(
         stable,
         "paused schedule should not produce additional fires"
@@ -690,13 +701,21 @@ async fn scheduler_deregister_stops_fires() {
         "deregistered schedule should not appear in list"
     );
 
-    // Observe show_fires for 3 consecutive checks over 3s — count should
-    // stay at 1, proving no new fires appeared after deregister.
-    let stable = observe_fire_count_stable(&h, "dereg-stop", 1, 3, Duration::from_secs(3)).await;
-    assert!(
-        stable,
-        "deregistered schedule should not produce additional fires"
-    );
+    // `show_fires` is owner-authorized through the live schedule spec and
+    // therefore returns not-found after deregistration. Inspect the durable
+    // fire projection instead: completion may still update an already-claimed
+    // row, but the successful response is the fence after which no new fire
+    // identity may be claimed.
+    let count_after_deregister =
+        projected_fire_count(&h, "dereg-stop").expect("read projected fires after deregister");
+    for _ in 0..3 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(
+            projected_fire_count(&h, "dereg-stop"),
+            Some(count_after_deregister),
+            "deregistered schedule should not claim additional fires"
+        );
+    }
 }
 
 // ── Schedule ID reuse blocked ──────────────────────────────────────────────
@@ -1031,6 +1050,40 @@ async fn poll_for_fires_count(
     }
 }
 
+async fn fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
+    let (status, body) = exec(
+        h,
+        "service:scheduler/show_fires",
+        json!({
+            "schedule_id": schedule_id,
+        }),
+    )
+    .await;
+    if !status.is_success() {
+        return None;
+    }
+    body.get("result")?.get("total")?.as_u64()
+}
+
+fn projected_fire_count(h: &DaemonHarness, schedule_id: &str) -> Option<u64> {
+    let path = h
+        .state_path
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("scheduler.sqlite3");
+    let connection =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM schedule_fires WHERE schedule_id = ?1",
+            [schedule_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()?;
+    u64::try_from(count).ok()
+}
+
 /// Observe `show_fires` over a time window, checking that the fire count
 /// stays stable at `expected_count` for `consecutive` consecutive checks.
 /// Spreads checks evenly across `window` duration.
@@ -1045,22 +1098,7 @@ async fn observe_fire_count_stable(
     let interval = window / consecutive as u32;
     for _ in 0..consecutive {
         tokio::time::sleep(interval).await;
-        let (status, body) = exec(
-            h,
-            "service:scheduler/show_fires",
-            json!({
-                "schedule_id": schedule_id,
-            }),
-        )
-        .await;
-        if !status.is_success() {
-            continue;
-        }
-        let total = body
-            .get("result")
-            .and_then(|r| r["total"].as_u64())
-            .unwrap_or(u64::MAX);
-        if total != expected_count {
+        if fire_count(h, schedule_id).await != Some(expected_count) {
             return false;
         }
     }

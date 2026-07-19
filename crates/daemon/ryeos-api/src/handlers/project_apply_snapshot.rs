@@ -1,12 +1,14 @@
 //! `project/apply-snapshot` — apply an AI-only snapshot to a live project.
 
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 #[cfg(unix)]
 use std::fs::File;
 #[cfg(unix)]
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -26,7 +28,7 @@ use crate::project_deploy::{self, ProjectDeployContext};
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
-use ryeos_state::objects::{ItemSource, ProjectSnapshot, SourceManifest};
+use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(serde::Deserialize)]
@@ -88,27 +90,26 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         ryeos_state::object_closure::ObjectClosureLimits::default().max_object_bytes,
     )?;
     let snapshot = ProjectSnapshot::from_value(&snapshot_obj)?;
-    if snapshot.project_sync_scope != ProjectSyncScope::AiOnly {
-        anyhow::bail!(
-            "project.apply-snapshot only accepts ai_only snapshots in v1 (got {:?})",
-            snapshot.project_sync_scope
-        );
-    }
-    if snapshot.user_manifest_hash.is_some() {
-        anyhow::bail!("project.apply-snapshot refuses snapshots with user_manifest_hash");
-    }
-
-    let manifest_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+    let policy_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
         &cas,
-        &snapshot.project_manifest_hash,
+        &snapshot.effective_policy_hash,
         ryeos_state::object_closure::ObjectClosureLimits::default().max_object_bytes,
     )?;
-    let manifest = SourceManifest::from_value(&manifest_obj)?;
-    ryeos_state::project_sync::validate_project_manifest_paths(
-        &manifest,
-        ProjectSyncScope::AiOnly,
-        Some(state.ignore_matcher.as_ref()),
+    let policy = ProjectSnapshotPolicy::from_value(&policy_obj)?;
+    if policy.sync_scope != ProjectSyncScope::AiOnly {
+        anyhow::bail!(
+            "project.apply-snapshot only accepts ai_only snapshots in v1 (got {:?})",
+            policy.sync_scope
+        );
+    }
+    let tree_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        &cas,
+        &snapshot.project_tree_hash,
+        ryeos_state::object_closure::ObjectClosureLimits::default().max_object_bytes,
     )?;
+    let tree = ProjectTree::from_value(&tree_obj)?;
+    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_captured_policy_source(&cas, &tree, &policy)?;
 
     let current_ref = state
         .state_store
@@ -145,8 +146,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
             "project_hash": project_hash,
             "snapshot_hash": req.snapshot_hash,
             "previous_deployed_hash": previous_deployed_hash,
-            "project_sync_scope": snapshot.project_sync_scope,
-            "manifest_entries": manifest.item_source_hashes.len(),
+            "project_sync_scope": policy.sync_scope,
+            "tree_entries": tree.files.len(),
             "idempotent": true,
         }));
     }
@@ -159,7 +160,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let staging = StagingDirectory::create(&project_directory)?;
     let staging_root = staging.descriptor_path()?;
 
-    if let Err(error) = materialize_manifest_to_staging(&cas, &manifest, staging.directory()) {
+    if let Err(error) = materialize_tree_to_staging(&cas, &tree, staging.directory()) {
         drop(cas_read_guard);
         let _ = staging.cleanup();
         return Err(error);
@@ -173,7 +174,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         let deploy_ctx = ProjectDeployContext {
             project_path: &project_path,
             staging_root: &staging_root,
-            manifest: &manifest,
+            tree: &tree,
             snapshot_hash: &req.snapshot_hash,
             project_key: &project_hash,
             caller: &ctx,
@@ -261,8 +262,8 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "project_hash": project_hash,
         "snapshot_hash": req.snapshot_hash,
         "previous_deployed_hash": previous_deployed_hash,
-        "project_sync_scope": snapshot.project_sync_scope,
-        "manifest_entries": manifest.item_source_hashes.len(),
+        "project_sync_scope": policy.sync_scope,
+        "tree_entries": tree.files.len(),
         "files_materialized": report.files_materialized,
         "roots_replaced": report.roots_replaced,
         "roots_deleted": report.roots_deleted,
@@ -315,7 +316,7 @@ pub(crate) fn snapshot_history_contains(cas: &CasStore, head: &str, wanted: &str
         Complete,
     }
 
-    let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
+    let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
     let mut pending = vec![(head.to_string(), false)];
     let mut states = HashMap::<String, VisitState>::new();
     let mut contains = false;
@@ -718,13 +719,13 @@ fn sweep_stale_staging_dirs(project: &PinnedDirectory) -> Result<()> {
     }
 }
 
-fn materialize_manifest_to_staging(
+fn materialize_tree_to_staging(
     cas: &CasStore,
-    manifest: &SourceManifest,
+    tree: &ProjectTree,
     staging_root: &PinnedDirectory,
 ) -> Result<usize> {
     let mut count = 0usize;
-    for (rel_path, item_hash) in &manifest.item_source_hashes {
+    for (rel_path, file_hash) in &tree.files {
         // Floors (secrets/node-owned) are enforced regardless; ignore was
         // already validated against the live matcher by the caller.
         ryeos_state::project_sync::validate_project_manifest_path(
@@ -732,30 +733,22 @@ fn materialize_manifest_to_staging(
             ProjectSyncScope::AiOnly,
             None,
         )?;
-        let limits = ryeos_state::object_closure::ObjectClosureLimits::default();
-        let item_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
+        let limits =
+            ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
+        let file_obj = ryeos_state::object_closure::load_exact_cas_object_with_cas(
             cas,
-            item_hash,
+            file_hash,
             limits.max_object_bytes,
         )?;
-        let item = ItemSource::from_value(&item_obj)?;
-        if item.item_ref != *rel_path {
-            anyhow::bail!(
-                "manifest path '{}' does not match item_source identity '{}'",
-                rel_path,
-                item.item_ref
-            );
-        }
-        let blob = ryeos_state::object_closure::load_exact_cas_blob_with_cas(
+        let file = ProjectFile::from_value(&file_obj)?;
+        write_staged_regular_file(
+            staging_root,
+            Path::new(rel_path),
             cas,
-            &item.content_blob_hash,
-            limits.max_blob_bytes,
+            &file.blob_hash,
+            file.size,
+            Some(file.normalized_mode),
         )?;
-        if lillux::cas::sha256_hex(&blob) != item.integrity {
-            anyhow::bail!("integrity mismatch for '{}'", rel_path);
-        }
-
-        write_staged_regular_file(staging_root, Path::new(rel_path), &blob, item.mode)?;
         count += 1;
     }
     Ok(count)
@@ -764,12 +757,14 @@ fn materialize_manifest_to_staging(
 fn write_staged_regular_file(
     staging_root: &PinnedDirectory,
     relative: &Path,
-    bytes: &[u8],
+    cas: &CasStore,
+    blob_hash: &str,
+    expected_size: u64,
     mode: Option<u32>,
 ) -> Result<()> {
     #[cfg(not(unix))]
     {
-        let _ = (staging_root, relative, bytes, mode);
+        let _ = (staging_root, relative, cas, blob_hash, expected_size, mode);
         anyhow::bail!("secure descriptor-relative project apply is unavailable on this platform");
     }
     #[cfg(unix)]
@@ -791,7 +786,35 @@ fn write_staged_regular_file(
         }
         let mut file = unsafe { File::from_raw_fd(descriptor) };
         let write_result = (|| -> Result<()> {
-            file.write_all(bytes)?;
+            let (mut source, size) = cas
+                .open_blob(blob_hash)?
+                .ok_or_else(|| anyhow!("project blob {blob_hash} is missing"))?;
+            if size != expected_size {
+                anyhow::bail!(
+                    "project blob {blob_hash} has {size} bytes, expected {expected_size}"
+                );
+            }
+            use sha2::Digest as _;
+            let mut digest = sha2::Sha256::new();
+            let mut copied = 0_u64;
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            loop {
+                let read = source.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+                file.write_all(&buffer[..read])?;
+                copied = copied
+                    .checked_add(u64::try_from(read)?)
+                    .ok_or_else(|| anyhow!("project blob size overflow"))?;
+            }
+            let actual_hash = format!("{:x}", digest.finalize());
+            if copied != expected_size || actual_hash != blob_hash {
+                anyhow::bail!(
+                    "project blob verification failed: expected {blob_hash}/{expected_size}, got {actual_hash}/{copied}"
+                );
+            }
             let mode = mode.unwrap_or(0o644) & 0o777;
             if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
                 return Err(std::io::Error::last_os_error()).context("set staged file mode");
@@ -1191,7 +1214,7 @@ mod tests {
     }
 
     #[test]
-    fn materialize_manifest_restores_executable_mode() {
+    fn materialize_tree_restores_executable_mode() {
         #[cfg(not(unix))]
         {
             return;
@@ -1203,24 +1226,20 @@ mod tests {
         let cas = CasStore::new(cas_dir.path().to_path_buf());
         let bytes = b"#!/bin/sh\n";
         let blob_hash = cas.store_blob(bytes).unwrap();
-        let item = ItemSource {
-            item_ref: ".ai/tools/run.sh".into(),
-            content_blob_hash: blob_hash,
-            integrity: lillux::cas::sha256_hex(bytes),
-            signature_info: None,
-            mode: Some(0o755),
+        let file = ProjectFile {
+            blob_hash,
+            size: bytes.len() as u64,
+            normalized_mode: 0o755,
         };
-        let item_hash = cas.store_object(&item.to_value()).unwrap();
-        let mut map = HashMap::new();
-        map.insert(".ai/tools/run.sh".to_string(), item_hash);
-        let manifest = SourceManifest {
-            item_source_hashes: map,
-        };
+        let file_hash = cas.store_object(&file.to_value()).unwrap();
+        let mut map = BTreeMap::new();
+        map.insert(".ai/tools/run.sh".to_string(), file_hash);
+        let tree = ProjectTree { files: map };
         let staging = TempDir::new().unwrap();
 
         let staging_root = staging.path().canonicalize().unwrap();
         let staging_directory = PinnedDirectory::open_canonical(&staging_root).unwrap();
-        materialize_manifest_to_staging(&cas, &manifest, &staging_directory).unwrap();
+        materialize_tree_to_staging(&cas, &tree, &staging_directory).unwrap();
         let mode = std::fs::metadata(staging.path().join(".ai/tools/run.sh"))
             .unwrap()
             .permissions()

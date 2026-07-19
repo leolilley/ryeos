@@ -99,7 +99,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 "scope": "ai_only",
                 "remote_project_path": project_path_for_ref,
                 "snapshot_hash": result.snapshot_hash,
-                "manifest_entries": result.manifest_entries,
+                "tree_hash": result.tree_hash,
+                "tree_entries": result.tree_entries,
                 "blobs_uploaded": result.blobs_uploaded,
                 "blobs_skipped": result.blobs_skipped,
                 // `remote push` uploads CAS objects and records the snapshot; it
@@ -147,7 +148,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
                 "scope": "full_project",
                 "remote_project_path": project_path_for_ref,
                 "snapshot_hash": result.snapshot_hash,
-                "manifest_entries": result.manifest_entries,
+                "tree_hash": result.tree_hash,
+                "tree_entries": result.tree_entries,
                 "blobs_uploaded": result.blobs_uploaded,
                 "blobs_skipped": result.blobs_skipped,
                 // See ai_only branch: push uploads only, it does not deploy.

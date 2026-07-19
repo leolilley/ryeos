@@ -531,16 +531,16 @@ fn validate_new_thread_project_snapshots(
         anyhow::bail!("new created snapshot cannot carry a result project snapshot hash");
     }
     if snapshot.base_project_snapshot_hash.is_some() {
-        let source = continuation_source.ok_or_else(|| {
-            anyhow::anyhow!(
-                "new created snapshot may carry a base project snapshot hash only for a continuation successor"
-            )
-        })?;
-        if snapshot.upstream_thread_id.as_deref() != Some(source) {
-            anyhow::bail!(
-                "continuation successor upstream {:?} does not match continuation source {source}",
-                snapshot.upstream_thread_id
-            );
+        // Project-bearing roots are born against an exact immutable generation.
+        // A continuation additionally has to prove that its upstream link is the
+        // transition source; a fresh admitted root has no continuation source.
+        if let Some(source) = continuation_source {
+            if snapshot.upstream_thread_id.as_deref() != Some(source) {
+                anyhow::bail!(
+                    "continuation successor upstream {:?} does not match continuation source {source}",
+                    snapshot.upstream_thread_id
+                );
+            }
         }
     }
     Ok(())

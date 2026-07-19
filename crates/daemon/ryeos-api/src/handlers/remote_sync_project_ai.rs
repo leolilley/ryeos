@@ -126,8 +126,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "remote_project_path": binding.remote_project_path,
         "push": {
             "snapshot_hash": push.snapshot_hash,
-            "manifest_hash": push.manifest_hash,
-            "manifest_entries": push.manifest_entries,
+            "tree_hash": push.tree_hash,
+            "tree_entries": push.tree_entries,
             "blobs_uploaded": push.blobs_uploaded,
             "blobs_skipped": push.blobs_skipped,
         },

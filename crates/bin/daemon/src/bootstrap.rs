@@ -639,7 +639,7 @@ fn load_node_config_two_phase_with_socket(
     // snapshot. Mutation paths take this same node-wide lock before planning
     // or activation, so one daemon generation cannot mix bundle generations.
     let _bundle_generation_lock =
-        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire(app_root)
+        ryeos_app::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
             .context("acquire bundle-generation lock for node bootstrap")?;
 
     // ── Phase 1: bootstrap trust store + bundle section ──

@@ -21,13 +21,32 @@ use std::sync::Mutex;
 /// recursively when the LAST `Arc<TempDirGuard>` drops.
 pub struct TempDirGuard {
     inner: Mutex<Option<PathBuf>>,
+    leases: Mutex<Vec<std::fs::File>>,
+    explicit_cleanup: bool,
 }
 
 impl TempDirGuard {
     pub fn new(path: PathBuf) -> Self {
         Self {
             inner: Mutex::new(Some(path)),
+            leases: Mutex::new(Vec::new()),
+            explicit_cleanup: false,
         }
+    }
+
+    /// A backend-owned workspace must be destroyed and descriptor-removed by
+    /// its owner-fenced lifecycle before the journal can close.
+    pub fn new_workspace(path: PathBuf) -> Self {
+        Self {
+            inner: Mutex::new(Some(path)),
+            leases: Mutex::new(Vec::new()),
+            explicit_cleanup: true,
+        }
+    }
+
+    /// Retain an exact-generation cache lease for the lifetime of this guard.
+    pub fn retain_lease(&self, lease: std::fs::File) {
+        self.leases.lock().unwrap().push(lease);
     }
 
     /// The guarded path, if not yet disarmed.
@@ -41,12 +60,46 @@ impl TempDirGuard {
     pub fn disarm(&self) -> Option<PathBuf> {
         self.inner.lock().unwrap().take()
     }
+
+    /// Remove the exact pinned directory tree now. Failure leaves the guard
+    /// armed so recovery retains both the journal evidence and the path.
+    pub fn remove_now(&self) -> anyhow::Result<()> {
+        let mut path_slot = self.inner.lock().unwrap();
+        let Some(path) = path_slot.as_ref() else {
+            return Ok(());
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("guarded directory has no final component"))?;
+        let parent_path = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("guarded directory has no parent"))?;
+        let parent = lillux::PinnedDirectory::open(parent_path)?
+            .ok_or_else(|| anyhow::anyhow!("guarded directory parent disappeared"))?;
+        let root = parent
+            .open_child_directory(name)?
+            .ok_or_else(|| anyhow::anyhow!("guarded directory disappeared"))?;
+        root.remove_contents_recursive()?;
+        if !parent.remove_empty_child_if_same(name, &root)? {
+            anyhow::bail!("guarded directory remained non-empty: {}", path.display());
+        }
+        *path_slot = None;
+        self.leases.lock().unwrap().clear();
+        Ok(())
+    }
 }
 
 impl Drop for TempDirGuard {
     fn drop(&mut self) {
         if let Some(p) = self.inner.lock().unwrap().take() {
-            let _ = std::fs::remove_dir_all(p);
+            if self.explicit_cleanup {
+                tracing::error!(
+                    path = %p.display(),
+                    "backend workspace guard dropped while still armed; preserving for journal reconciliation"
+                );
+            } else if let Err(error) = std::fs::remove_dir_all(&p) {
+                tracing::warn!(path = %p.display(), %error, "temporary directory cleanup failed");
+            }
         }
     }
 }

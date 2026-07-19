@@ -106,20 +106,38 @@ impl SchedulerContext for AppSchedulerContext {
                 .context("scheduler app root is not valid UTF-8")?,
         };
         let project_path_buf = std::path::PathBuf::from(project_path);
+        let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
+            &self.0,
+            &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
+            &project_path_buf,
+            &spec.requester_fingerprint,
+            &format!("schedule-{thread_id}"),
+        )
+        .map_err(|error| anyhow::anyhow!("capture scheduled project generation: {error}"))?;
         let original_root_kind = CanonicalRef::parse(&spec.item_ref)
             .with_context(|| format!("invalid scheduled item ref `{}`", spec.item_ref))?
             .kind;
 
-        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            project_path_buf.clone(),
-            self.0.engine.clone(),
-        );
+        let provenance =
+            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
+                project_ctx.effective_path.clone(),
+                project_ctx.original_path.clone(),
+                project_ctx.request_engine.clone(),
+                project_ctx
+                    .temp_dir
+                    .clone()
+                    .context("scheduled project has no workspace guard")?,
+                project_ctx
+                    .snapshot_hash
+                    .clone()
+                    .context("scheduled project has no captured snapshot")?,
+            );
 
         let site_id = self.0.threads.site_id().to_string();
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: spec.requester_fingerprint.clone(),
             caller_scopes: spec.capabilities.clone(),
-            engine: self.0.engine.clone(),
+            engine: project_ctx.request_engine.clone(),
             plan_ctx: ryeos_engine::contracts::PlanContext {
                 requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
                     ryeos_engine::contracts::Principal {
@@ -128,7 +146,7 @@ impl SchedulerContext for AppSchedulerContext {
                     },
                 ),
                 project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
-                    path: project_path_buf,
+                    path: project_ctx.effective_path.clone(),
                 },
                 current_site_id: site_id.clone(),
                 origin_site_id: site_id,
