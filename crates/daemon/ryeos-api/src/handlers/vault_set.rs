@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use serde_json::Value;
+use zeroize::Zeroizing;
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::{HandlerError, HandlerResult};
@@ -25,12 +26,15 @@ pub async fn handle(
     ctx: HandlerContext,
     state: Arc<AppState>,
 ) -> HandlerResult<Value> {
+    let Request { name, value } = req;
+    let value = Zeroizing::new(value);
+
     // Vault writes are scoped to the caller's fingerprint — must be verified.
     ctx.require_verified()?;
 
     state
         .vault
-        .set_secret(&ctx.fingerprint, &req.name, &req.value)
+        .set_secret(&ctx.fingerprint, &name, value.as_str())
         .map_err(|e| {
             // Vault validation errors (key name, blocked names) are user
             // errors → 400. Anything else is 500.
@@ -43,7 +47,7 @@ pub async fn handle(
         })?;
 
     let mut response = serde_json::json!({
-        "name": req.name,
+        "name": name,
     });
     if let Some(ref fp) = state.vault_fingerprint {
         response["vault_fingerprint"] = serde_json::Value::String(fp.clone());

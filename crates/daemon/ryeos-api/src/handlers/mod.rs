@@ -38,6 +38,7 @@ pub mod items_effective;
 pub mod maintenance_gc;
 pub mod node_sign;
 pub mod node_status;
+pub mod model_providers_validate;
 pub mod objects_closure_describe;
 pub mod objects_closure_get;
 pub mod objects_get;
@@ -114,6 +115,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     health_status::DESCRIPTOR,
     identity_public_key::DESCRIPTOR,
     node_status::DESCRIPTOR,
+    model_providers_validate::DESCRIPTOR,
     system_routes::DESCRIPTOR,
     ingest_ignore::DESCRIPTOR,
     objects_has::DESCRIPTOR,

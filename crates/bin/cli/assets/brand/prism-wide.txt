@@ -1,0 +1,6 @@
+             /\
+            /  \
+       ____/ ◆  \____       RYE / OS
+       \            /       portable verified execution
+        \____  ____/
+             \/

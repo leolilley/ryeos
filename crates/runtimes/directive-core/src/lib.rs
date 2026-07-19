@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use url::Url;
 
 pub const MODEL_BINDING: &str = "model";
 pub const MODEL_ROUTING_INPUT: &str = "model_routing";
@@ -269,6 +270,90 @@ pub struct ModelPricing {
     pub output_per_million: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSetupConfig {
+    pub display_name: String,
+    #[serde(default = "default_setup_priority")]
+    pub priority: i32,
+    #[serde(default)]
+    pub recommended: bool,
+    #[serde(default)]
+    pub credential: Option<ProviderSetupCredential>,
+    #[serde(default)]
+    pub help_url: Option<String>,
+    #[serde(default)]
+    pub validation: Option<ProviderSetupValidation>,
+    #[serde(default)]
+    pub models: Vec<ProviderSetupModel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSetupCredential {
+    pub label: String,
+    pub secret_name: String,
+    pub input: ProviderSetupInput,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderSetupInput {
+    Secret,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSetupValidation {
+    pub r#ref: String,
+    pub url: String,
+    #[serde(default = "default_validation_timeout_seconds")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub may_incur_cost: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderSetupModel {
+    pub name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub recommended: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderSetupProjection {
+    pub provider_id: String,
+    pub display_name: String,
+    pub priority: i32,
+    pub recommended: bool,
+    pub credential: Option<ProviderSetupCredential>,
+    pub help_url: Option<String>,
+    pub validation: Option<ProviderSetupValidation>,
+    pub models: Vec<ProviderSetupModelProjection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderSetupModelProjection {
+    pub name: String,
+    pub display_name: String,
+    pub context_window: Option<u64>,
+    pub recommended: bool,
+    pub pricing: Option<ModelPricing>,
+}
+
+fn default_setup_priority() -> i32 {
+    100
+}
+
+fn default_validation_timeout_seconds() -> u64 {
+    15
+}
+
 impl PricingConfig {
     pub fn for_model(&self, model_name: &str) -> Option<ModelPricing> {
         self.models.get(model_name).cloned().or_else(|| {
@@ -281,6 +366,168 @@ impl PricingConfig {
 }
 
 impl ProviderConfig {
+    pub fn setup_projection(&self, provider_id: &str) -> Result<ProviderSetupProjection> {
+        let setup = match self.extra.get("setup") {
+            Some(value) => serde_json::from_value::<ProviderSetupConfig>(value.clone())
+                .map_err(|error| anyhow::anyhow!("provider '{provider_id}' setup metadata is invalid: {error}"))?,
+            None => ProviderSetupConfig {
+                display_name: provider_id.to_string(),
+                priority: default_setup_priority(),
+                recommended: false,
+                credential: self.auth.env_var.as_ref().map(|secret_name| ProviderSetupCredential {
+                    label: "Credential".to_string(),
+                    secret_name: secret_name.clone(),
+                    input: ProviderSetupInput::Secret,
+                }),
+                help_url: None,
+                validation: None,
+                models: self
+                    .pricing
+                    .as_ref()
+                    .map(|pricing| {
+                        let mut names = pricing.models.keys().cloned().collect::<Vec<_>>();
+                        names.sort();
+                        names
+                            .into_iter()
+                            .map(|name| ProviderSetupModel {
+                                name,
+                                display_name: None,
+                                context_window: None,
+                                recommended: false,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            },
+        };
+        if setup.display_name.trim().is_empty()
+            || setup.display_name.len() > 160
+            || setup.display_name.chars().any(char::is_control)
+        {
+            bail!("provider '{provider_id}' setup display_name is empty, unsafe, or too long");
+        }
+        if let Some(credential) = &setup.credential {
+            if credential.label.trim().is_empty()
+                || credential.label.len() > 160
+                || credential.label.chars().any(char::is_control)
+                || credential.secret_name.is_empty()
+                || credential.secret_name.len() > 128
+                || !credential
+                    .secret_name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            {
+                bail!("provider '{provider_id}' setup credential fields are empty, unsafe, or too long");
+            }
+            if self.auth.env_var.as_deref() != Some(credential.secret_name.as_str()) {
+                bail!(
+                    "provider '{provider_id}' setup secret_name '{}' does not exactly match runtime auth.env_var",
+                    credential.secret_name
+                );
+            }
+        }
+        if setup.help_url.as_deref().is_some_and(|url| {
+            url.len() > 4096
+                || !(url.starts_with("https://") || url.starts_with("http://"))
+        }) {
+            bail!("provider '{provider_id}' setup help_url is invalid");
+        }
+        if let Some(validation) = &setup.validation {
+            if validation.r#ref.trim().is_empty()
+                || validation.r#ref.len() > 512
+                || validation.url.len() > 4096
+                || validation.timeout_seconds == 0
+                || !(validation.url.starts_with("https://")
+                    || validation.url.starts_with("http://"))
+            {
+                bail!("provider '{provider_id}' setup validation is incomplete");
+            }
+            validate_setup_endpoint(
+                provider_id,
+                &self.base_url,
+                validation,
+                setup.credential.is_some(),
+            )?;
+        }
+        let mut seen_models = std::collections::BTreeSet::new();
+        let models = setup
+            .models
+            .into_iter()
+            .map(|model| {
+                if model.name.trim().is_empty()
+                    || model.name.len() > 256
+                    || model.name.chars().any(char::is_control)
+                    || !seen_models.insert(model.name.clone())
+                {
+                    bail!("provider '{provider_id}' setup model names must be safe, bounded, and unique");
+                }
+                if model
+                    .display_name
+                    .as_deref()
+                    .is_some_and(|value| {
+                        value.trim().is_empty()
+                            || value.len() > 160
+                            || value.chars().any(char::is_control)
+                    })
+                {
+                    bail!("provider '{provider_id}' setup model '{}' has an unsafe display_name", model.name);
+                }
+                if model.context_window == Some(0) {
+                    bail!("provider '{provider_id}' setup model '{}' has zero context_window", model.name);
+                }
+                Ok(ProviderSetupModelProjection {
+                    display_name: model
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| model.name.clone()),
+                    pricing: self.pricing.as_ref().and_then(|pricing| pricing.for_model(&model.name)),
+                    name: model.name,
+                    context_window: model.context_window,
+                    recommended: model.recommended,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        for model in &models {
+            let effective = self.resolve_for_model(&model.name);
+            match &setup.credential {
+                Some(credential)
+                    if effective.auth.env_var.as_deref()
+                        != Some(credential.secret_name.as_str()) =>
+                {
+                    bail!(
+                        "provider '{provider_id}' setup credential does not match model '{}' runtime auth",
+                        model.name
+                    );
+                }
+                None if effective.auth.env_var.is_some() => {
+                    bail!(
+                        "provider '{provider_id}' model '{}' requires a credential that setup does not declare",
+                        model.name
+                    );
+                }
+                _ => {}
+            }
+            if let Some(validation) = &setup.validation {
+                validate_setup_endpoint(
+                    provider_id,
+                    &effective.base_url,
+                    validation,
+                    setup.credential.is_some(),
+                )?;
+            }
+        }
+        Ok(ProviderSetupProjection {
+            provider_id: provider_id.to_string(),
+            display_name: setup.display_name,
+            priority: setup.priority,
+            recommended: setup.recommended,
+            credential: setup.credential,
+            help_url: setup.help_url,
+            validation: setup.validation,
+            models,
+        })
+    }
+
     pub fn matched_profile(&self, model_name: &str) -> Option<&ProviderProfile> {
         self.profiles.iter().find(|profile| {
             profile
@@ -411,6 +658,46 @@ impl ProviderConfig {
         resolved.profiles.clear();
         resolved
     }
+}
+
+fn validate_setup_endpoint(
+    provider_id: &str,
+    base_url: &str,
+    validation: &ProviderSetupValidation,
+    sends_credential: bool,
+) -> Result<()> {
+    let validation_source = validation.url.replace("{model}", "setup-probe");
+    let validation_url = Url::parse(&validation_source)
+        .map_err(|error| anyhow::anyhow!("provider '{provider_id}' setup validation URL is invalid: {error}"))?;
+    let base_source = base_url.replace("{model}", "setup-probe");
+    let base = Url::parse(&base_source)
+        .map_err(|error| anyhow::anyhow!("provider '{provider_id}' base_url is invalid: {error}"))?;
+    if validation_url.username() != ""
+        || validation_url.password().is_some()
+        || base.username() != ""
+        || base.password().is_some()
+    {
+        bail!("provider '{provider_id}' setup URLs cannot contain user information");
+    }
+    let same_origin = validation_url.scheme() == base.scheme()
+        && validation_url.host_str() == base.host_str()
+        && validation_url.port_or_known_default() == base.port_or_known_default();
+    if !same_origin {
+        bail!("provider '{provider_id}' validation URL must use the provider base_url origin");
+    }
+    if sends_credential && validation_url.scheme() != "https" {
+        bail!("provider '{provider_id}' validation must use HTTPS when sending a credential");
+    }
+    if validation_url.scheme() == "http" {
+        let loopback = matches!(
+            validation_url.host_str(),
+            Some("localhost" | "127.0.0.1" | "::1")
+        );
+        if !loopback {
+            bail!("provider '{provider_id}' permits HTTP validation only for a loopback host");
+        }
+    }
+    Ok(())
 }
 
 fn deep_merge(base: &mut Value, overlay: &Value) {

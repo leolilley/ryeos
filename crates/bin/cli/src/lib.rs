@@ -15,6 +15,7 @@ pub mod node_descriptors;
 pub mod offline_dispatch;
 pub mod presenter;
 pub mod project_resolve;
+pub(crate) mod setup;
 #[cfg(test)]
 pub(crate) mod test_env;
 pub mod transport;

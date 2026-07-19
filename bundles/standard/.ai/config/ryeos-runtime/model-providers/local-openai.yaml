@@ -47,3 +47,9 @@ pricing:
   output_per_million: 0.0
 extra:
   stream_url: "/chat/completions"
+  setup:
+    display_name: Local OpenAI-compatible
+    priority: 90
+    credential: null
+    validation: {ref: "service:model-providers/validate", url: "http://127.0.0.1:8000/v1/models", timeout_seconds: 5}
+    models: []

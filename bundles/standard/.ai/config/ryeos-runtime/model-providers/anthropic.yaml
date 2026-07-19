@@ -54,3 +54,13 @@ pricing:
     claude-opus-4-1-20250805:   {input_per_million: 15.00, output_per_million: 75.00}
 extra:
   stream_url: ""
+  setup:
+    display_name: Anthropic
+    priority: 30
+    credential: {label: API key, secret_name: ANTHROPIC_API_KEY, input: secret}
+    help_url: https://console.anthropic.com/settings/keys
+    validation: {ref: "service:model-providers/validate", url: "https://api.anthropic.com/v1/models", timeout_seconds: 15}
+    models:
+      - {name: claude-haiku-4-5-20251001, display_name: Claude Haiku 4.5, context_window: 200000}
+      - {name: claude-sonnet-4-5-20250929, display_name: Claude Sonnet 4.5, context_window: 200000, recommended: true}
+      - {name: claude-opus-4-1-20250805, display_name: Claude Opus 4.1, context_window: 200000}

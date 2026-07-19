@@ -192,7 +192,7 @@ done < <(find "$stage" -print0)
 # solely under the official public key embedded in the qualified RyeOS binary.
 verify_app_root="$tmp/verify-app"
 ryeos_term_update "verifying staged source set" "production init preflight"
-"$ryeos_bin" init --app-root "$verify_app_root" --source "$stage" >/dev/null
+"$ryeos_bin" init --non-interactive --app-root "$verify_app_root" --source "$stage" >/dev/null
 
 mkdir -p "$(dirname "$output")"
 ryeos_term_update "writing deterministic archive" "$(basename "$output")"

@@ -21,6 +21,11 @@ use crate::transport::signing::Signer;
 mod capabilities;
 mod diagnostic;
 mod document;
+pub(crate) mod help_flow;
+pub(crate) mod interaction;
+pub(crate) mod onboarding_spec;
+pub(crate) mod onboarding_journal;
+pub(crate) mod onboarding_flow;
 mod progress;
 mod result;
 mod theme;
@@ -32,6 +37,13 @@ pub use progress::{
 };
 pub use result::{write_json, write_machine_diagnostics, write_raw};
 pub use theme::Tone;
+
+pub(crate) fn sanitize_terminal_inline(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| if character.is_control() { '�' } else { character })
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct Console {
@@ -450,8 +462,14 @@ pub(crate) fn clamp_visible(value: &str, max_width: usize) -> String {
     if visible_width(value) <= max_width {
         return value.to_string();
     }
-    let ellipsis = if value.is_ascii() { "..." } else { "…" };
-    let ellipsis_width = visible_width(ellipsis).min(max_width);
+    let ellipsis = if value.is_ascii() {
+        ".".repeat(max_width.min(3))
+    } else if max_width == 0 {
+        String::new()
+    } else {
+        "…".to_string()
+    };
+    let ellipsis_width = visible_width(&ellipsis);
     let target = max_width.saturating_sub(ellipsis_width);
     let mut out = String::new();
     let mut width = 0;
@@ -479,7 +497,7 @@ pub(crate) fn clamp_visible(value: &str, max_width: usize) -> String {
         width += ch_width;
         out.push(ch);
     }
-    out.push_str(ellipsis);
+    out.push_str(&ellipsis);
     if value.contains('\x1b') {
         out.push_str("\x1b[0m");
     }
@@ -1769,5 +1787,11 @@ mod tests {
         let rendered = clamp_visible("\x1b[31mabcdef\x1b[0m", 4);
         assert!(visible_width(&rendered) <= 4);
         assert!(rendered.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn visible_clamp_respects_one_and_two_column_viewports() {
+        assert_eq!(visible_width(&clamp_visible("abcdef", 1)), 1);
+        assert_eq!(visible_width(&clamp_visible("abcdef", 2)), 2);
     }
 }

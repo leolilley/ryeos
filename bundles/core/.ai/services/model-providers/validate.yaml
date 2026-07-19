@@ -1,0 +1,7 @@
+kind: service
+endpoint: model-providers.validate
+required_caps: ["ryeos.execute.service.model-providers/validate"]
+schema:
+  provider_id: string
+  model: string?
+description: "Validate a configured model provider using its verified setup metadata"

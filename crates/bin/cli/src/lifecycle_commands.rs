@@ -4,6 +4,7 @@
 //! the local node before the daemon exists or is reachable:
 //!
 //!   - `ryeos init`   — bootstrap operator keys, trust store, and bundles
+//!   - `ryeos setup`  — reopen optional provider and model setup
 //!   - `ryeos start`  — bring the local node runtime online
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
@@ -46,7 +47,12 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     },
     LocalCommandDescriptor {
         tokens: &["init"],
-        summary: "Bootstrap local node state and packaged bundles",
+        summary: "Initialize RyeOS with an interactive first-contact ceremony",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["setup"],
+        summary: "Configure a verified model provider and default model",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -112,7 +118,15 @@ pub async fn try_dispatch(
             Ok(true)
         }
         ("init", _) => {
-            run_init_command(&argv[1..], console).map_err(map_local_err)?;
+            run_init_command(&argv[1..], console)
+                .await
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("setup", _) => {
+            run_setup_command(&argv[1..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("status")) => {
@@ -381,9 +395,15 @@ struct InitArgs {
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
+
+    /// Run the typed initialization transaction without interactive prompts.
+    /// Package installers and automation should always pass this flag or
+    /// `--json` instead of relying on terminal detection.
+    #[arg(long, conflicts_with = "json")]
+    non_interactive: bool,
 }
 
-fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let Some(args) = parse_or_render_help::<InitArgs>(argv, console)? else {
         return Ok(());
     };
@@ -395,6 +415,29 @@ fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()
         trust_files: args.trust_files,
         skip_preflight: false,
     };
+
+    if !args.json
+        && !args.non_interactive
+        && console.capabilities().interactive()
+        && !crate::tty::onboarding_flow::supported_geometry()
+    {
+        anyhow::bail!(
+            "interactive onboarding requires a terminal of at least 40x12; resize it or pass --non-interactive/--json explicitly"
+        );
+    }
+
+    if !args.json
+        && !args.non_interactive
+        && console.capabilities().interactive()
+        && crate::tty::onboarding_flow::supported_geometry()
+    {
+        return crate::tty::onboarding_flow::run(
+            console,
+            crate::tty::onboarding_flow::OnboardingOptions { init: opts },
+        )
+        .await;
+    }
+
     let mut progress = if args.json {
         None
     } else {
@@ -449,6 +492,36 @@ fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()
         console.success(&status)?;
     }
     Ok(())
+}
+
+// ── ryeos setup ────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos setup",
+    about = "Configure a verified model provider and default model",
+    no_binary_name = true
+)]
+struct SetupArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+}
+
+async fn run_setup_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<SetupArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !console.capabilities().interactive() || !crate::tty::onboarding_flow::supported_geometry() {
+        anyhow::bail!(
+            "ryeos setup requires an interactive terminal of at least 40x12; use verified config and vault operations for automation"
+        );
+    }
+    crate::tty::onboarding_flow::run_setup(
+        console,
+        args.app_root.unwrap_or_else(default_app_root),
+    )
+    .await
 }
 
 // ── ryeos {node status,start,stop} ──────────────────────────────────

@@ -1265,6 +1265,42 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
+/// Open an existing regular file without following links and refuse to read
+/// more than `max_bytes`. The limit is enforced against both metadata and the
+/// bytes actually read from the pinned descriptor.
+pub fn read_regular_file_bounded_no_follow(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, max_bytes);
+        anyhow::bail!("secure bounded no-follow file reading is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let directory = open_directory_no_follow(parent)?.ok_or_else(|| {
+            anyhow::anyhow!("secure file parent does not exist: {}", parent.display())
+        })?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("secure file path has no filename"))?;
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let mut file = open_regular_at(&directory, &name, path)?
+            .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))?;
+        let metadata = file.metadata()?;
+        if metadata.len() > max_bytes {
+            anyhow::bail!("secure file exceeds {max_bytes} bytes: {}", path.display());
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        std::io::Read::by_ref(&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            anyhow::bail!("secure file exceeds {max_bytes} bytes: {}", path.display());
+        }
+        Ok(bytes)
+    }
+}
+
 /// UTF-8 variant of [`read_regular_file_no_follow`].
 pub fn read_regular_file_to_string_no_follow(path: &Path) -> Result<String> {
     String::from_utf8(read_regular_file_no_follow(path)?)

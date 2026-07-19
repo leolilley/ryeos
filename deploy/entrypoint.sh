@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Entrypoint for ryeosd-full container.
 #
-# Always runs `ryeos init` on every boot. Init is idempotent — on first boot
+# Always runs `ryeos init --non-interactive` on every boot. Init is idempotent — on first boot
 # it creates keys, trust, and lays down bundles; on subsequent boots it
 # re-verifies and re-copies to bring bundles up to date with the image.
 #
@@ -52,12 +52,13 @@ collect_baked_publisher_trust_args() {
 }
 
 main() {
-  echo "[entrypoint] running ryeos init"
+  echo "[entrypoint] running ryeos init --non-interactive"
   mkdir -p /data
 
   collect_baked_publisher_trust_args /opt/ryeos
 
   ryeos init \
+    --non-interactive \
     --app-root /data/app \
     --source /opt/ryeos \
     "${TRUST_ARGS[@]}"

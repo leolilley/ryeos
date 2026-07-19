@@ -171,9 +171,10 @@ pub fn prepare_runtime_launch(
         binding_wires.insert(name.clone(), prepared_item_wire(&resolution)?);
     }
 
+    let launch_config_roots = request.engine.launch_config_roots(request.roots);
     let config_inputs = ryeos_engine::launch_config::load_launch_config_snapshots(
         &contract.config_inputs,
-        request.roots,
+        &launch_config_roots,
         request.parsers,
         &request.engine.kinds,
         &request.engine.trust_store,

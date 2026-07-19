@@ -6,6 +6,7 @@ pub mod init_check;
 pub mod lifecycle_marker;
 pub mod lifecycle_wire;
 pub mod metadata;
+pub mod model_setup;
 pub mod start;
 pub mod status;
 pub mod stop;
@@ -18,7 +19,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub use init::{
-    run_init, run_init_with_progress, InitOptions, InitPhase, InitProgress, InitReport,
+    run_init, run_init_with_operator_ceremony, run_init_with_progress, InitOperatorCeremony,
+    verify_init_completion, InitCompletionReport, InitOperatorProfile, InitOptions, InitPhase,
+    InitProgress, InitReport,
 };
 pub use init_check::{require_initialized, InitDiagnostics, InitState};
 pub use lifecycle_wire::{
@@ -26,6 +29,7 @@ pub use lifecycle_wire::{
     LIFECYCLE_FRAME_MAX_BYTES, LIFECYCLE_PROTOCOL_VERSION,
 };
 pub use metadata::DaemonMetadata;
+pub use model_setup::{persist_default_model_route, PersistModelRouteOptions, PersistModelRouteReport};
 pub use start::{LifecycleStartLock, StartReport};
 pub use status::{is_ready, LifecycleStatus, StaleDiagnostics};
 pub use stop::{StopOptions, StopReport};
