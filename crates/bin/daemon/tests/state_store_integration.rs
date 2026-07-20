@@ -84,7 +84,7 @@ mod integration_tests {
             upstream_thread_id: upstream.map(|s| s.to_string()),
             requested_by: Some("user:test".to_string()),
             project_root: None,
-            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,

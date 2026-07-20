@@ -392,7 +392,7 @@ impl ResumeContext {
         self.lifecycle_authority.validate()?;
         match (&self.project_authority, &self.project_context) {
             (
-                ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. },
                 ProjectContext::None,
             ) => Ok((None, None)),
             (
@@ -602,7 +602,7 @@ mod tests {
         };
         let project_authority = match &project_context {
             ProjectContext::None | ProjectContext::ProjectRef { .. } => {
-                ryeos_state::objects::ExecutionProjectAuthority::Projectless
+                ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS
             }
             ProjectContext::LocalPath { path } => {
                 ryeos_state::objects::ExecutionProjectAuthority::live(

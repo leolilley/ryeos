@@ -179,7 +179,7 @@ pub async fn handle_open(
             upstream_thread_id: None,
             requested_by: Some(owner.clone()),
             project_root: None,
-            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,

@@ -185,7 +185,7 @@ pub(crate) fn derive_pinned_child_authority(
             display_path.clone(),
             environment.clone(),
         ),
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless => {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
             anyhow::bail!("pin-at-spawn requires project-backed parent authority")
         }
     };

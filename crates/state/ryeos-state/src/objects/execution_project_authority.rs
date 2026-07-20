@@ -163,7 +163,9 @@ impl EnvironmentAuthority {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionProjectAuthority {
-    Projectless,
+    Projectless {
+        environment: EnvironmentAuthority,
+    },
     LiveProject {
         authority_id: String,
         authored_project_identity: String,
@@ -186,6 +188,16 @@ pub enum ExecutionProjectAuthority {
 }
 
 impl ExecutionProjectAuthority {
+    pub const PROJECTLESS: Self = Self::Projectless {
+        environment: EnvironmentAuthority::None,
+    };
+
+    pub fn projectless(environment: EnvironmentAuthority) -> anyhow::Result<Self> {
+        let authority = Self::Projectless { environment };
+        authority.validate()?;
+        Ok(authority)
+    }
+
     pub fn with_capability_ceiling(
         mut self,
         mut capability_ceiling: Vec<String>,
@@ -193,7 +205,7 @@ impl ExecutionProjectAuthority {
         capability_ceiling.sort();
         capability_ceiling.dedup();
         match &mut self {
-            Self::Projectless => {
+            Self::Projectless { .. } => {
                 if !capability_ceiling.is_empty() {
                     anyhow::bail!(
                         "projectless authority cannot carry a project capability ceiling"
@@ -230,7 +242,7 @@ impl ExecutionProjectAuthority {
         child_policy: ChildProjectAuthorityPolicy,
     ) -> anyhow::Result<Self> {
         match &mut self {
-            Self::Projectless => {
+            Self::Projectless { .. } => {
                 if child_policy != ChildProjectAuthorityPolicy::Inherit {
                     anyhow::bail!("projectless execution cannot pin project state at child spawn");
                 }
@@ -248,7 +260,7 @@ impl ExecutionProjectAuthority {
 
     pub fn child_policy(&self) -> ChildProjectAuthorityPolicy {
         match self {
-            Self::Projectless => ChildProjectAuthorityPolicy::Inherit,
+            Self::Projectless { .. } => ChildProjectAuthorityPolicy::Inherit,
             Self::LiveProject { child_policy, .. }
             | Self::PinnedGeneration { child_policy, .. } => child_policy.clone(),
         }
@@ -305,7 +317,7 @@ impl ExecutionProjectAuthority {
 
     pub fn validate(&self) -> anyhow::Result<()> {
         match self {
-            Self::Projectless => Ok(()),
+            Self::Projectless { environment } => environment.validate(false),
             Self::LiveProject {
                 authority_id,
                 authored_project_identity,
@@ -372,7 +384,7 @@ impl ExecutionProjectAuthority {
 
     pub fn project_root_projection(&self) -> Option<&Path> {
         match self {
-            Self::Projectless => None,
+            Self::Projectless { .. } => None,
             Self::LiveProject { canonical_root, .. } => Some(canonical_root),
             Self::PinnedGeneration { display_path, .. } => display_path.as_deref(),
         }
@@ -381,13 +393,13 @@ impl ExecutionProjectAuthority {
     pub fn base_snapshot_projection(&self) -> Option<&str> {
         match self {
             Self::PinnedGeneration { snapshot_hash, .. } => Some(snapshot_hash),
-            Self::Projectless | Self::LiveProject { .. } => None,
+            Self::Projectless { .. } | Self::LiveProject { .. } => None,
         }
     }
 
     pub fn environment(&self) -> &EnvironmentAuthority {
         match self {
-            Self::Projectless => &EnvironmentAuthority::None,
+            Self::Projectless { environment } => environment,
             Self::LiveProject { environment, .. } | Self::PinnedGeneration { environment, .. } => {
                 environment
             }

@@ -298,7 +298,7 @@ pub async fn execute_service_verified(
             upstream_thread_id: None,
             requested_by: Some(ctx.principal_fingerprint.clone()),
             project_root: None,
-            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,

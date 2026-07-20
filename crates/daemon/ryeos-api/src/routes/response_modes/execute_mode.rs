@@ -183,7 +183,7 @@ fn resolve_project_authority(
     };
 
     let authority = match &policy.project {
-        ProjectExecutionPolicy::Projectless => Ok(ExecutionProjectAuthority::Projectless),
+        ProjectExecutionPolicy::Projectless => ExecutionProjectAuthority::projectless(environment),
         ProjectExecutionPolicy::LiveDirect { access, .. } => {
             let root = project_path
                 .ok_or_else(|| anyhow::anyhow!("live project policy requires project root"))?

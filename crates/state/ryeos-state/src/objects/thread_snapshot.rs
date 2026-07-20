@@ -905,7 +905,7 @@ impl ThreadSnapshotBuilder {
             upstream_thread_id: None,
             requested_by: None,
             project_root: None,
-            project_authority: super::ExecutionProjectAuthority::Projectless,
+            project_authority: super::ExecutionProjectAuthority::PROJECTLESS,
             captured_history_policy: None,
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,

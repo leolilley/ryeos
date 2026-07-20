@@ -75,7 +75,7 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         upstream_thread_id: None,
         requested_by: Some("user:test".to_string()),
         project_root: None,
-        project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
         base_project_snapshot_hash: None,
         usage_subject: None,
         usage_subject_asserted_by: None,

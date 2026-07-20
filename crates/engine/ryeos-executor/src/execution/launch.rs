@@ -1418,7 +1418,7 @@ async fn prepare_managed_launch_authority(
             &params.resolved.plan_context.project_context,
             ryeos_engine::contracts::ProjectContext::None
         ) {
-            ryeos_state::objects::ExecutionProjectAuthority::Projectless
+            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS
         } else {
             params
                 .provenance

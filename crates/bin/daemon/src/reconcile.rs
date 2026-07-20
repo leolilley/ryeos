@@ -1890,6 +1890,8 @@ mod tests {
             successor_thread_id: successor.map(Into::into),
             requested_by: None,
             project_root: None,
+            project_authority: None,
+            lifecycle_authority: None,
             created_at: "t".into(),
             updated_at: "t".into(),
             started_at: None,

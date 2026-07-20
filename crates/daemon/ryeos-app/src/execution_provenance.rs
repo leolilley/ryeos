@@ -266,7 +266,7 @@ impl ExecutionProvenance {
         if projected_root != Some(self.original_project_path())
             && !matches!(
                 &authority,
-                ryeos_state::objects::ExecutionProjectAuthority::Projectless
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
             )
         {
             anyhow::bail!(
@@ -553,7 +553,7 @@ impl ExecutionProvenance {
         &self,
     ) -> ryeos_engine::isolation::IsolationProjectAuthority {
         match self.project_authority() {
-            ryeos_state::objects::ExecutionProjectAuthority::Projectless => {
+            ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
                 ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace
             }
             ryeos_state::objects::ExecutionProjectAuthority::LiveProject {

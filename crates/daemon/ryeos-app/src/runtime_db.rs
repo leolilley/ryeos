@@ -2245,7 +2245,7 @@ impl RuntimeDb {
             )
             .optional()?
             .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
-        let stored = stored
+        let stored: ryeos_state::objects::ExecutionProjectAuthority = stored
             .as_deref()
             .map(serde_json::from_str)
             .transpose()?

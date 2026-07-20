@@ -711,6 +711,10 @@ pub struct ThreadDetail {
     pub successor_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub project_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -4696,11 +4700,11 @@ impl StateStore {
                 requested_by: row.requested_by,
                 project_root: row.project_root,
                 project_authority: None,
-                lifecycle_authority: runtime
-                    .launch_metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.resume_context.as_ref())
-                    .map(|resume| resume.lifecycle_authority),
+                // The high-frequency list projection deliberately remains
+                // bounded to projection rows and continuation payloads. Exact
+                // signed project/lifecycle authority is exposed by the detail
+                // endpoint, without adding per-row CAS/runtime reads here.
+                lifecycle_authority: None,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             });
@@ -4995,6 +4999,12 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
+                project_authority: None,
+                lifecycle_authority: runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.resume_context.as_ref())
+                    .map(|resume| resume.lifecycle_authority),
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -7053,7 +7063,7 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("fp:test".to_string()),
             project_root: None,
-            project_authority: ryeos_state::objects::ExecutionProjectAuthority::Projectless,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
             base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,

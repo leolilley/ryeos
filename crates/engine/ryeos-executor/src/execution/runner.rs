@@ -1152,7 +1152,7 @@ fn validate_resume_project_authority(
         .ok_or_else(|| anyhow::anyhow!("native-resume launch is missing durable resume metadata"))?
         .project_authority;
     match authority {
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. }
         | ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. } => {
             if resume_snapshot_hash.is_some() {
                 anyhow::bail!(
@@ -3271,7 +3271,7 @@ enum ResumeProvenanceDecision<'a> {
 
 fn decide_resume_provenance(resume: &ResumeContext) -> ResumeProvenanceDecision<'_> {
     match &resume.project_authority {
-        ryeos_state::objects::ExecutionProjectAuthority::Projectless => {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
             ResumeProvenanceDecision::Projectless
         }
         ryeos_state::objects::ExecutionProjectAuthority::LiveProject { canonical_root, .. } => {
@@ -3940,7 +3940,7 @@ mod tests {
         };
         let project_authority = match (&project_context, pushed.as_ref()) {
             (ProjectContext::None, None) => {
-                ryeos_state::objects::ExecutionProjectAuthority::Projectless
+                ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS
             }
             (ProjectContext::LocalPath { path: root }, None) => {
                 ryeos_state::objects::ExecutionProjectAuthority::live(
