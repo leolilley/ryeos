@@ -363,6 +363,13 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             // Resolve every interrupted bundle tree/registration transaction before
             // the bootstrap loader consumes installed bundle registrations.
             let identity = NodeIdentity::load(&config.node_signing_key_path)?;
+            ryeos_api::auth::validate_authorized_key_directory(
+                &config.authorized_keys_dir,
+                &identity,
+            )
+            .context(
+                "authorized-key cutover failed; stop the daemon and run `ryeos node auth-reset --confirm-discard-authorized-keys` to discard every client/remote grant and recreate only the local operator grant",
+            )?;
             let repaired_bundles =
                 ryeos_app::bundle_transaction::reconcile_all_bundle_transactions(
                     &config.app_root,
@@ -1264,7 +1271,37 @@ async fn dispatch_resume_intents(
 ) -> Result<()> {
     for intent in intents {
         let thread_id = intent.thread_id.clone();
-        if intent.kind != reconcile::ResumeKind::NativeResume {
+        if matches!(
+            intent.kind,
+            reconcile::ResumeKind::OperatorContinuation | reconcile::ResumeKind::Continuation
+        ) {
+            match intent.launch_driver {
+                ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime => {}
+                ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor => {
+                    tracing::error!(
+                        thread_id,
+                        recovery_kind = ?intent.kind,
+                        "continuation recovery requires the managed-runtime driver admitted by the continuation protocol"
+                    );
+                    state.threads.finalize_thread(
+                        &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                            thread_id,
+                            status: "failed".to_string(),
+                            outcome_code: Some("continuation_driver_invalid".to_string()),
+                            result: None,
+                            error: Some(serde_json::json!({
+                                "code": "continuation_driver_invalid",
+                                "message": "continuation recovery cannot use the direct-item launch driver",
+                            })),
+                            metadata: None,
+                            artifacts: Vec::new(),
+                            final_cost: None,
+                            summary_json: None,
+                        },
+                    )?;
+                    continue;
+                }
+            }
             let outcome = match intent.kind {
                 reconcile::ResumeKind::OperatorContinuation => {
                     ryeos_executor::execution::launch::prepare_and_spawn_operator_successor_recovery(
@@ -1278,30 +1315,81 @@ async fn dispatch_resume_intents(
                         &thread_id,
                     )
                 }
-                reconcile::ResumeKind::NativeResume => unreachable!("handled above"),
-            }
-            .with_context(|| format!("durably enqueue successor recovery {thread_id}"))?;
+                reconcile::ResumeKind::AdmittedRoot | reconcile::ResumeKind::NativeResume => {
+                    unreachable!("continuation kinds matched above")
+                }
+            };
+            let outcome = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    tracing::error!(
+                        thread_id,
+                        error = %error,
+                        "successor recovery could not be enqueued; leaving it nonterminal for the bounded recovery sweep"
+                    );
+                    continue;
+                }
+            };
             tracing::info!(thread_id, ?outcome, "successor recovery classified");
             continue;
         }
 
-        // Runtime-registry resumes require the managed envelope path. Generic
-        // tool-subprocess resumes use the runner path; it transfers the same
-        // durable launch claim to its detached background task.
-        if intent.resume_context.runtime_ref.is_some() {
-            let outcome = ryeos_executor::execution::launch::prepare_and_spawn_existing_native_resume_recovery(
-                state.clone(),
-                &thread_id,
-            )
-            .with_context(|| format!("durably enqueue managed native resume {thread_id}"))?;
-            tracing::info!(thread_id, ?outcome, "managed native resume classified");
-            continue;
+        match intent.launch_driver {
+            ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime => {
+                let outcome = match intent.kind {
+                reconcile::ResumeKind::AdmittedRoot => {
+                    ryeos_executor::execution::launch::prepare_and_spawn_admitted_root_recovery(
+                        state.clone(),
+                        &thread_id,
+                    )
+                }
+                reconcile::ResumeKind::NativeResume => {
+                    ryeos_executor::execution::launch::prepare_and_spawn_existing_native_resume_recovery(
+                        state.clone(),
+                        &thread_id,
+                    )
+                }
+                reconcile::ResumeKind::Continuation
+                | reconcile::ResumeKind::OperatorContinuation => {
+                    unreachable!("continuation kinds handled above")
+                }
+            };
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        tracing::error!(
+                            thread_id,
+                            error = %error,
+                            recovery_kind = ?intent.kind,
+                            "managed recovery could not be enqueued; leaving it nonterminal for the bounded recovery sweep"
+                        );
+                        continue;
+                    }
+                };
+                tracing::info!(thread_id, ?outcome, recovery_kind = ?intent.kind, "managed recovery classified");
+                continue;
+            }
+            ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor => {}
         }
 
-        let params = match ryeos_executor::execution::runner::execution_params_from_resume_context(
-            state,
-            &intent.resume_context,
-        ) {
+        let params = match state
+            .state_store
+            .get_launch_metadata(&thread_id)
+            .and_then(|metadata| {
+                let metadata = metadata.ok_or_else(|| {
+                    anyhow::anyhow!("resume thread {thread_id} has no launch metadata")
+                })?;
+                let sealed = metadata.sealed_root_request.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("resume thread {thread_id} has no sealed admitted request")
+                })?;
+                ryeos_executor::execution::runner::execution_params_from_sealed_root_request(
+                    state,
+                    &thread_id,
+                    &intent.resume_context,
+                    sealed,
+                    None,
+                )
+            }) {
             Ok(params) => params,
             Err(error) => {
                 tracing::error!(
@@ -1328,17 +1416,34 @@ async fn dispatch_resume_intents(
                 continue;
             }
         };
-        match ryeos_executor::execution::runner::run_existing_detached(
-            state.clone(),
-            thread_id.clone(),
-            intent.chain_root_id,
-            params,
-            intent.prior_status,
-        )
-        .await
-        {
+        let outcome = match intent.kind {
+            reconcile::ResumeKind::AdmittedRoot => {
+                ryeos_executor::execution::runner::run_existing_admitted_root(
+                    state.clone(),
+                    thread_id.clone(),
+                    intent.chain_root_id,
+                    params,
+                    intent.prior_status,
+                )
+                .await
+            }
+            reconcile::ResumeKind::NativeResume => {
+                ryeos_executor::execution::runner::run_existing_detached(
+                    state.clone(),
+                    thread_id.clone(),
+                    intent.chain_root_id,
+                    params,
+                    intent.prior_status,
+                )
+                .await
+            }
+            reconcile::ResumeKind::Continuation | reconcile::ResumeKind::OperatorContinuation => {
+                unreachable!("continuation kinds handled above")
+            }
+        };
+        match outcome {
             Ok(outcome) => {
-                tracing::info!(thread_id, ?outcome, "tool native resume classified");
+                tracing::info!(thread_id, ?outcome, recovery_kind = ?intent.kind, "direct-executor recovery classified");
             }
             Err(error) => {
                 let terminal = state
@@ -1349,16 +1454,19 @@ async fn dispatch_resume_intents(
                     })
                     .is_some_and(|status| status.is_terminal());
                 if !terminal {
-                    return Err(anyhow::anyhow!(error)).with_context(|| {
-                        format!(
-                            "tool native resume {thread_id} failed before durable classification"
-                        )
-                    });
+                    tracing::error!(
+                        thread_id,
+                        error = %error,
+                        recovery_kind = ?intent.kind,
+                        "direct-executor recovery failed before classification; leaving it nonterminal for the bounded recovery sweep"
+                    );
+                    continue;
                 }
                 tracing::warn!(
                     thread_id,
                     error = %error,
-                    "tool native resume classified as terminal failure"
+                    recovery_kind = ?intent.kind,
+                    "direct-executor recovery classified as terminal failure"
                 );
             }
         }
@@ -1445,13 +1553,14 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
         if status.is_terminal()
             || live_owned_process
             || state.state_store.get_launch_claim(thread_id)?.is_some()
+            || thread.runtime.recovery_wait.is_some()
             || durable_follow_owner
             || durable_window_owner
         {
             continue;
         }
         anyhow::bail!(
-            "recovery target {thread_id} reached readiness without terminal state, a verified live process, or durable claim/follow/window ownership"
+            "recovery target {thread_id} reached readiness without terminal state, a verified live process, or durable claim/wait/follow/window ownership"
         );
     }
     Ok(())

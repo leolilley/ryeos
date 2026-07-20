@@ -266,6 +266,10 @@ pub struct DispatchRequest<'a> {
     /// Required execution provenance. Constructed once at the entry
     /// point and never reconstructed downstream.
     pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
+    /// Sealed owner/recovery contract selected at the external boundary.
+    /// Response timing is intentionally absent: it does not alter execution
+    /// ownership after admission.
+    pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     /// **B1**: kind parsed from the user-supplied root `item_ref`.
     /// `dispatch_native_runtime` gates `runtime.execute` enforcement
     /// on this being `"runtime"` so indirect alias chains are not
@@ -1280,12 +1284,12 @@ pub(crate) async fn dispatch_method(
     //    short-circuit, so a `validate_only` request with a bad mode is
     //    rejected rather than reported valid. Method dispatch runs the
     //    runtime synchronously and returns its result, so it only supports
-    //    `inline`: `detached` is a known-but-unsupported capability, and
+    //    `wait`: `detached` is a known-but-unsupported capability, and
     //    anything else is an outright invalid mode (which must not be
     //    silently recorded on the thread or surface as an opaque internal
     //    error).
     match request.launch_mode {
-        "inline" => {}
+        "wait" => {}
         "detached" => {
             return Err(DispatchError::CapabilityRejected {
                 reason: "detached mode not yet supported for method dispatch".into(),
@@ -1420,6 +1424,12 @@ pub(crate) async fn dispatch_method(
                     parent.parent_thread_id
                 ))
             })?;
+        let project_authority = request
+            .provenance
+            .project_authority()
+            .clone()
+            .for_child()
+            .map_err(DispatchError::Internal)?;
         state
             .threads
             .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
@@ -1433,17 +1443,13 @@ pub(crate) async fn dispatch_method(
                 origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
                 upstream_thread_id: Some(durable_parent.thread_id.clone()),
                 requested_by: Some(request.acting_principal.to_string()),
-                project_root: Some(
-                    request
-                        .project_path
-                        .canonicalize()
-                        .unwrap_or_else(|_| request.project_path.to_path_buf()),
-                ),
-                base_project_snapshot_hash: state
-                    .state_store
-                    .authoritative_project_generation(&durable_parent.thread_id)
-                    .map_err(DispatchError::Internal)?
-                    .and_then(|(base, result)| result.or(base)),
+                project_root: project_authority
+                    .project_root_projection()
+                    .map(std::path::Path::to_path_buf),
+                base_project_snapshot_hash: project_authority
+                    .base_snapshot_projection()
+                    .map(str::to_owned),
+                project_authority,
                 usage_subject: request.usage_subject.clone(),
                 usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
                 captured_history_policy: None,
@@ -1467,9 +1473,11 @@ pub(crate) async fn dispatch_method(
             plan_context: ctx.plan_ctx.clone(),
             root_admission: Some(root_admission.clone()),
         };
-        state
-            .threads
-            .create_root_thread_with_id(&thread_id, &resolved_method)
+        state.threads.create_root_thread_with_id(
+            &thread_id,
+            &resolved_method,
+            request.provenance.project_authority().clone(),
+        )
     };
     created.map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
     let mut lifecycle_owner =
@@ -1806,6 +1814,10 @@ pub(crate) async fn dispatch_method(
             supervised_status: None,
         };
         let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+        let live_access = request
+            .provenance
+            .isolation_live_access_authority()
+            .map_err(DispatchError::Internal)?;
         let applied = state
             .isolation
             .apply_with_provenance(
@@ -1813,6 +1825,7 @@ pub(crate) async fn dispatch_method(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
+                    live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: callback_ipc_requested
@@ -2446,15 +2459,15 @@ async fn dispatch_via_method_executor(
     // A method-dispatch recall runs synchronously. Inline is the normal path
     // (directive tool-calls; `execute` without `--async`). Accepted (`--async`)
     // is supported too — the accepted route mints the thread and runs the
-    // background dispatch with launch_mode "inline", and `preflight_root_dispatch`
+    // background dispatch with launch_mode "wait", and `preflight_root_dispatch`
     // has already validated the target. Only detached (fire-and-forget, no
     // result capture) has no meaningful form for a recall.
     match LaunchMode::from_wire(request.launch_mode) {
-        Some(LaunchMode::Inline) => {}
+        Some(LaunchMode::Wait) => {}
         Some(LaunchMode::Detached) => {
             return Err(DispatchError::CapabilityRejected {
                 reason: format!(
-                    "tool `{wrapper_ref}` routes to a method dispatch, which is inline-only; \
+                    "tool `{wrapper_ref}` routes to a method dispatch, which is wait-only; \
                      detached launch is not supported"
                 ),
             });
@@ -2500,6 +2513,7 @@ async fn dispatch_via_method_executor(
         acting_principal: request.acting_principal,
         project_path: request.project_path,
         provenance: request.provenance.clone(),
+        lifecycle_authority: request.lifecycle_authority,
         original_root_kind: target_canonical.kind.as_str(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         usage_subject: request.usage_subject.clone(),
@@ -2958,6 +2972,17 @@ pub async fn dispatch(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
+    if request.lifecycle_authority.ownership
+        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    {
+        return dispatch_daemon_owned(item_ref, request, ctx, state)
+            .await
+            .map_err(|error| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "daemon-owned dispatch task ended before settlement: {error}"
+                ))
+            })?;
+    }
     // `dispatch_inner` owns every terminal branch and is intentionally large.
     // Keep that state machine behind one heap indirection: runtime callbacks
     // enter here from a Tokio worker with the UDS router already on its stack,
@@ -2967,6 +2992,71 @@ pub async fn dispatch(
         item_ref, None, None, request, ctx, state, None,
     ))
     .await
+}
+
+/// Transfer a unary dispatch onto a daemon-owned task before awaiting it.
+///
+/// The HTTP response policy is deliberately separate from execution
+/// ownership. A caller may choose to wait for a daemon-owned execution, but
+/// dropping that wait must only detach the response observer; it must not drop
+/// the dispatch future that owns admission, spawn, follow handoff, or terminal
+/// settlement.
+pub fn dispatch_daemon_owned(
+    item_ref: &str,
+    request: &DispatchRequest<'_>,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> tokio::task::JoinHandle<Result<Value, DispatchError>> {
+    let item_ref = item_ref.to_owned();
+    let launch_mode = request.launch_mode.to_owned();
+    let target_site_id = request.target_site_id.map(ToOwned::to_owned);
+    let validate_only = request.validate_only;
+    let params = request.params.clone();
+    let ref_bindings = request.ref_bindings.clone();
+    let acting_principal = request.acting_principal.to_owned();
+    let project_path = request.project_path.to_path_buf();
+    let provenance = request.provenance.clone();
+    let lifecycle_authority = request.lifecycle_authority;
+    let original_root_kind = request.original_root_kind.to_owned();
+    let pre_minted_thread_id = request.pre_minted_thread_id.clone();
+    let usage_subject = request.usage_subject.clone();
+    let usage_subject_asserted_by = request.usage_subject_asserted_by.clone();
+    let previous_thread_id = request.previous_thread_id.clone();
+    let root_admission = request.root_admission.clone();
+    let parent_execution_context = request.parent_execution_context.clone();
+    let ctx = ExecutionContext {
+        principal_fingerprint: ctx.principal_fingerprint.clone(),
+        caller_scopes: ctx.caller_scopes.clone(),
+        engine: ctx.engine.clone(),
+        plan_ctx: ctx.plan_ctx.clone(),
+        requested_call: ctx.requested_call.clone(),
+    };
+    let state = state.clone();
+
+    tokio::spawn(async move {
+        let request = DispatchRequest {
+            launch_mode: &launch_mode,
+            target_site_id: target_site_id.as_deref(),
+            validate_only,
+            params,
+            ref_bindings,
+            acting_principal: &acting_principal,
+            project_path: &project_path,
+            provenance,
+            lifecycle_authority,
+            original_root_kind: &original_root_kind,
+            pre_minted_thread_id,
+            usage_subject,
+            usage_subject_asserted_by,
+            previous_thread_id,
+            root_admission,
+            parent_execution_context,
+        };
+        Box::pin(dispatch_inner(
+            &item_ref, None, None, &request, &ctx, &state, None,
+        ))
+        .await
+    })
 }
 
 /// Dispatch a launch whose caller needs proof that durable execution authority
@@ -4292,7 +4382,7 @@ metadata:
             kind: "tool_run".into(),
             item_ref: item_ref.into(),
             executor_ref: "@subprocess".into(),
-            launch_mode: "inline".into(),
+            launch_mode: "wait".into(),
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             target_site_id: None,

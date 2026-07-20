@@ -11,9 +11,10 @@ pub mod vault;
 
 pub use exec::{
     configure_inherited_fds, configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
-    supervised_launcher_status_pipe, validate_subprocess_limits, OutputLimitExceeded,
-    RunningProcess, SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
-    SupervisedLauncherStatusPipe, SupervisedProcessStatus,
+    supervised_launcher_gated_status_pipe, supervised_launcher_status_pipe,
+    validate_subprocess_limits, OutputLimitExceeded, ProcessStartGate, RunningProcess, SpawnResult,
+    SubprocessLimits, SubprocessRequest, SubprocessResult, SupervisedLauncherStatusPipe,
+    SupervisedProcessStatus,
 };
 
 pub use atomic_fs::{

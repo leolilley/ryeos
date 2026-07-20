@@ -260,7 +260,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         project_context: ProjectContext::LocalPath {
             path: project_dir.clone(),
         },
-        launch_mode: LaunchMode::Inline,
+        launch_mode: LaunchMode::Wait,
     };
 
     let completion = engine

@@ -486,6 +486,20 @@ impl PinnedDirectory {
         &self.path
     }
 
+    /// Return the concrete filesystem identity pinned by this descriptor.
+    /// Callers use this to compare a durable authority fence with the object
+    /// they will actually traverse, without reopening the pathname.
+    pub fn device_inode(&self) -> Result<(u64, u64)> {
+        #[cfg(not(unix))]
+        anyhow::bail!("secure directory identity is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = self.directory.metadata()?;
+            Ok((metadata.dev(), metadata.ino()))
+        }
+    }
+
     /// Linux descriptor-rooted child pathname for APIs (notably SQLite) that
     /// cannot accept an already-open directory handle. The child remains bound
     /// to this directory inode even if its ordinary pathname is replaced.
@@ -1103,32 +1117,45 @@ impl PinnedDirectory {
         }
     }
 
-    /// Create a hard link to an already-open regular file under one validated
-    /// child name of this exact directory inode. The source descriptor and
-    /// destination directory stay pinned for the entire operation, so neither
-    /// side can be rebound by replacing an ambient pathname.
+    /// Create a hard link from one exact named regular file in a pinned source
+    /// directory under one validated child name of this exact directory inode.
+    /// Both directory descriptors and the expected source file stay pinned for
+    /// the entire operation, so neither side can be rebound by replacing an
+    /// ambient pathname.
     ///
     /// An existing destination is accepted only when it is the same regular
     /// inode as `source`.
-    pub fn link_regular_descriptor(&self, target_name: &OsStr, source: &File) -> Result<()> {
-        #[cfg(not(target_os = "linux"))]
+    pub fn link_regular_from(
+        &self,
+        target_name: &OsStr,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> Result<()> {
+        #[cfg(not(unix))]
         {
-            let _ = (target_name, source);
-            anyhow::bail!("descriptor-relative hard linking is unavailable on this platform")
+            let _ = (target_name, source_directory, source_name, expected_source);
+            anyhow::bail!("secure hard linking is unavailable on this platform")
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
             validate_child_name(target_name)?;
-            let source_path =
-                std::ffi::CString::new(format!("/proc/self/fd/{}", source.as_raw_fd()))?;
+            validate_child_name(source_name)?;
+            let source_name_c = std::ffi::CString::new(source_name.as_bytes())?;
             let target_name_c = std::ffi::CString::new(target_name.as_bytes())?;
+            ensure_entry_matches(
+                &source_directory.directory,
+                &source_name_c,
+                Some(expected_source),
+                &source_directory.path.join(source_name),
+            )?;
             if unsafe {
                 libc::linkat(
-                    libc::AT_FDCWD,
-                    source_path.as_ptr(),
+                    source_directory.directory.as_raw_fd(),
+                    source_name_c.as_ptr(),
                     self.directory.as_raw_fd(),
                     target_name_c.as_ptr(),
-                    libc::AT_SYMLINK_FOLLOW,
+                    0,
                 )
             } != 0
             {
@@ -1136,7 +1163,8 @@ impl PinnedDirectory {
                 if error.kind() != std::io::ErrorKind::AlreadyExists {
                     return Err(error).with_context(|| {
                         format!(
-                            "link regular descriptor into {}",
+                            "link secure regular file {} into {}",
+                            source_directory.path.join(source_name).display(),
                             self.path.join(target_name).display()
                         )
                     });
@@ -1148,7 +1176,7 @@ impl PinnedDirectory {
                     )
                 })?;
                 use std::os::unix::fs::MetadataExt as _;
-                let source_metadata = source.metadata()?;
+                let source_metadata = expected_source.metadata()?;
                 let existing_metadata = existing.metadata()?;
                 if !existing_metadata.file_type().is_file()
                     || source_metadata.dev() != existing_metadata.dev()
@@ -1229,7 +1257,7 @@ impl PinnedDirectory {
             } != 0
             {
                 return Err(crate::atomic_fs::AtomicMutationError::before(
-                    std::io::Error::last_os_error().context(format!(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
                         "publish pinned directory {} as {}",
                         self.path.join(source_name).display(),
                         self.path.join(target_name).display()
@@ -1290,7 +1318,7 @@ impl PinnedDirectory {
             } != 0
             {
                 return Err(crate::atomic_fs::AtomicMutationError::before(
-                    std::io::Error::last_os_error().context(format!(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
                         "preserve pinned regular file {} as {}",
                         self.path.join(source_name).display(),
                         self.path.join(target_name).display()
@@ -1374,7 +1402,7 @@ impl PinnedDirectory {
             } != 0
             {
                 return Err(crate::atomic_fs::AtomicMutationError::before(
-                    std::io::Error::last_os_error().context(format!(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
                         "move pinned regular file {} to {}",
                         source_directory.path.join(source_name).display(),
                         self.path.join(target_name).display()
@@ -1521,7 +1549,8 @@ impl PinnedDirectory {
                     &target_name_c,
                 ) {
                     Ok(()) => Err(crate::atomic_fs::AtomicMutationError::before(
-                        error.context("conditional replace target was occupied before publication"),
+                        anyhow::Error::new(error)
+                            .context("conditional replace target was occupied before publication"),
                     )),
                     Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
                         anyhow::anyhow!(
@@ -1534,7 +1563,7 @@ impl PinnedDirectory {
                 != 0
             {
                 return Err(crate::atomic_fs::AtomicMutationError::durability(
-                    std::io::Error::last_os_error().context(format!(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
                         "remove replaced target quarantine {}",
                         self.path.join(quarantine_name).display()
                     )),
@@ -1849,7 +1878,7 @@ impl PinnedDirectory {
                 != 0
             {
                 return Err(crate::atomic_fs::AtomicMutationError::durability(
-                    std::io::Error::last_os_error().context(format!(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
                         "remove secure file quarantine {}",
                         self.path.join(quarantine_name).display()
                     )),
@@ -1937,6 +1966,18 @@ impl PinnedDirectory {
     pub fn sync(&self) -> Result<()> {
         self.directory.sync_all()?;
         Ok(())
+    }
+
+    /// Durably sync every regular file and directory beneath this exact pinned
+    /// root. Traversal remains descriptor-relative throughout; symlinks,
+    /// special files, and disappearing entries fail closed.
+    pub fn sync_tree(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("descriptor-relative tree sync is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        sync_open_directory_tree(&self.path, &self.directory)
     }
 }
 
@@ -2269,6 +2310,36 @@ where
 }
 
 #[cfg(unix)]
+fn sync_open_directory_tree(path: &Path, directory: &File) -> Result<()> {
+    for name in directory_names(directory)? {
+        let child_path = path.join(&name);
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        if let Some(child_directory) = open_child_directory(directory, &name, &child_path)? {
+            sync_open_directory_tree(&child_path, &child_directory)?;
+            continue;
+        }
+        let file = open_regular_at(directory, &name, &child_path)
+            .with_context(|| {
+                format!(
+                    "secure tree sync rejected a symlink or non-regular entry: {}",
+                    child_path.display()
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "secure tree sync encountered a disappearing entry: {}",
+                    child_path.display()
+                )
+            })?;
+        file.sync_all()
+            .with_context(|| format!("sync secure regular file {}", child_path.display()))?;
+    }
+    directory
+        .sync_all()
+        .with_context(|| format!("sync secure directory {}", path.display()))
+}
+
+#[cfg(unix)]
 fn collect_from_open_directory(
     path: &Path,
     directory: &File,
@@ -2554,7 +2625,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn descriptor_link_is_create_only_and_accepts_only_the_same_inode() {
+    fn pinned_link_is_create_only_and_accepts_only_the_same_inode() {
         let source = tempfile::tempdir().unwrap();
         let destination = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("payload"), b"immutable").unwrap();
@@ -2566,14 +2637,29 @@ mod tests {
             .unwrap();
 
         destination
-            .link_regular_descriptor(OsStr::new("linked"), &payload)
+            .link_regular_from(
+                OsStr::new("linked"),
+                &source,
+                OsStr::new("payload"),
+                &payload,
+            )
             .unwrap();
         destination
-            .link_regular_descriptor(OsStr::new("linked"), &payload)
+            .link_regular_from(
+                OsStr::new("linked"),
+                &source,
+                OsStr::new("payload"),
+                &payload,
+            )
             .unwrap();
         std::fs::write(destination.path().join("conflict"), b"different").unwrap();
         assert!(destination
-            .link_regular_descriptor(OsStr::new("conflict"), &payload)
+            .link_regular_from(
+                OsStr::new("conflict"),
+                &source,
+                OsStr::new("payload"),
+                &payload,
+            )
             .is_err());
         assert_eq!(
             std::fs::read(destination.path().join("linked")).unwrap(),
@@ -2652,6 +2738,46 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("cas-entry")).unwrap(),
             b"complete bytes"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tree_sync_remains_bound_to_the_pinned_directory_after_namespace_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("generation");
+        let displaced = root.path().join("displaced");
+        std::fs::create_dir_all(original.join("nested")).unwrap();
+        std::fs::write(original.join("nested/value"), b"immutable").unwrap();
+        let pinned = PinnedDirectory::open(&original).unwrap().unwrap();
+
+        std::fs::rename(&original, &displaced).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        symlink("missing", original.join("replacement-link")).unwrap();
+
+        pinned.sync_tree().unwrap();
+        assert_eq!(
+            std::fs::read(displaced.join("nested/value")).unwrap(),
+            b"immutable"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tree_sync_rejects_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("value"), b"value").unwrap();
+        symlink("value", root.path().join("linked")).unwrap();
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+
+        let error = pinned.sync_tree().unwrap_err().to_string();
+        assert!(
+            error.contains("rejected a symlink or non-regular entry"),
+            "unexpected error: {error}"
         );
     }
 }

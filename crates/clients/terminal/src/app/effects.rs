@@ -140,6 +140,7 @@ async fn effect_data(
                 "item_ref": "service:commands/submit",
                 "ref_bindings": {},
                 "parameters": { "thread_id": thread_id, "command_type": command_type },
+                "execution_policy": execute_policy(None),
             });
             let envelope = client.signed_post("/execute", &body).await?;
             Ok(envelope.get("result").cloned().unwrap_or(envelope))
@@ -161,6 +162,7 @@ async fn effect_data(
                     "item_ref": item_ref,
                     "ref_bindings": {},
                     "parameters": params,
+                    "execution_policy": execute_policy(project_path),
                 });
                 if let Some(project) = project_path {
                     body["project_path"] = serde_json::Value::String(project.to_string());
@@ -185,6 +187,7 @@ async fn effect_data(
                     "item_ref": "service:commands/dispatch",
                     "ref_bindings": {},
                     "parameters": command,
+                    "execution_policy": execute_policy(project_path),
                 });
                 let envelope = client.signed_post("/execute", &body).await?;
                 Ok(envelope.get("result").cloned().unwrap_or(envelope))
@@ -192,6 +195,35 @@ async fn effect_data(
         },
         RyeOsEffectKind::SetLocationHash { .. } | RyeOsEffectKind::CopyToClipboard { .. } | RyeOsEffectKind::OpenUrl { .. } => Ok(serde_json::Value::Null),
     }
+}
+
+fn execute_policy(project_path: Option<&str>) -> serde_json::Value {
+    let project_backed = project_path.is_some();
+    serde_json::json!({
+        "schema_version": 2,
+        "ownership": "daemon_owned",
+        "recovery": "restart_recoverable",
+        "response": "wait",
+        "target": { "kind": "here" },
+        "environment": if project_backed {
+            serde_json::json!({
+                "kind": "project_overlay",
+                "include_operator_vault": true,
+                "name_policy": { "kind": "declared_required" },
+            })
+        } else {
+            serde_json::json!({ "kind": "none" })
+        },
+        "project": if project_backed {
+            serde_json::json!({
+                "kind": "live_direct",
+                "access": "read_write",
+                "child_policy": { "kind": "inherit" },
+            })
+        } else {
+            serde_json::json!({ "kind": "projectless" })
+        },
+    })
 }
 
 fn fill_project_path_slot(params: &mut serde_json::Value, project: &str) {

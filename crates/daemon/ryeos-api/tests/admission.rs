@@ -122,11 +122,14 @@ async fn admission_claim_writes_authorized_key_and_rejects_reuse() {
     let fingerprint = response["fingerprint"].as_str().unwrap();
     assert_eq!(response["admitted"], true);
     assert_eq!(response["label"], "dev-machine");
-    assert!(state
+    let grant_path = state
         .config
         .authorized_keys_dir
-        .join(format!("{fingerprint}.toml"))
-        .exists());
+        .join(format!("{fingerprint}.toml"));
+    let grant = std::fs::read_to_string(grant_path).unwrap();
+    assert!(grant.contains("schema_version = 2"));
+    assert!(grant.contains("principal_class = \"remote_node\""));
+    assert!(grant.contains(&format!("origin_site_id = \"{}\"", state.threads.site_id())));
 
     let reused = admission_claim::handle(
         signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine")),
@@ -180,14 +183,30 @@ async fn admission_claim_rejects_wrong_audience_signature() {
     let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
     let mut req = signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("dev-machine"));
     req.signature = sign_claim(
-        "fp:wrong-audience",
-        token,
-        &req.public_key,
-        &req.scopes.iter().map(String::as_str).collect::<Vec<_>>(),
-        req.signed_at,
-        &req.nonce,
+        ClaimToSign {
+            audience: "fp:wrong-audience",
+            token,
+            public_key: &req.public_key,
+            origin_site_id: &req.origin_site_id,
+            scopes: &req.scopes.iter().map(String::as_str).collect::<Vec<_>>(),
+            signed_at: req.signed_at,
+            nonce: &req.nonce,
+        },
         &claimant,
     );
+
+    let result = admission_claim::handle(req, Arc::new(state)).await;
+    assert!(matches!(result, Err(HandlerError::Forbidden(_))));
+}
+
+#[tokio::test]
+async fn admission_claim_rejects_origin_site_changed_after_signing() {
+    let (_tmp, state) = test_state::build_test_state();
+    let token = "tampered-origin-site-token";
+    write_admission_token_file(&state, token, PUSH_SCOPES, None, 600);
+    let claimant = lillux::crypto::SigningKey::generate(&mut rand::rngs::OsRng);
+    let mut req = signed_claim_request(&state, token, &claimant, PUSH_SCOPES, Some("node"));
+    req.origin_site_id = "site:attacker".to_string();
 
     let result = admission_claim::handle(req, Arc::new(state)).await;
     assert!(matches!(result, Err(HandlerError::Forbidden(_))));
@@ -305,18 +324,25 @@ fn signed_claim_request(
     scopes.dedup();
     let signed_at = now_unix();
     let nonce = "test-nonce".to_string();
+    let origin_site_id = state.threads.site_id().to_string();
+    let audience = state.identity.principal_id();
     let signature = sign_claim(
-        &state.identity.principal_id(),
-        token,
-        &public_key,
-        &scopes.iter().map(String::as_str).collect::<Vec<_>>(),
-        signed_at,
-        &nonce,
+        ClaimToSign {
+            audience: &audience,
+            token,
+            public_key: &public_key,
+            origin_site_id: &origin_site_id,
+            scopes: &scopes.iter().map(String::as_str).collect::<Vec<_>>(),
+            signed_at,
+            nonce: &nonce,
+        },
         claimant,
     );
     admission_claim::Request {
+        protocol_version: 2,
         token: token.to_string(),
         public_key,
+        origin_site_id,
         label: label.map(str::to_string),
         scopes,
         signed_at,
@@ -325,24 +351,27 @@ fn signed_claim_request(
     }
 }
 
-fn sign_claim(
-    audience: &str,
-    token: &str,
-    public_key: &str,
-    scopes: &[&str],
+struct ClaimToSign<'a> {
+    audience: &'a str,
+    token: &'a str,
+    public_key: &'a str,
+    origin_site_id: &'a str,
+    scopes: &'a [&'a str],
     signed_at: u64,
-    nonce: &str,
-    claimant: &lillux::crypto::SigningKey,
-) -> String {
-    let token_hash = lillux::cas::sha256_hex(token.as_bytes());
+    nonce: &'a str,
+}
+
+fn sign_claim(claim: ClaimToSign<'_>, claimant: &lillux::crypto::SigningKey) -> String {
+    let token_hash = lillux::cas::sha256_hex(claim.token.as_bytes());
     let claim = format!(
-        "ryeos-admission-claim-v1\n{}\n{}\n{}\n{}\n{}\n{}",
-        audience,
+        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        claim.audience,
         token_hash,
-        public_key,
-        scopes.join(","),
-        signed_at,
-        nonce,
+        claim.public_key,
+        claim.origin_site_id,
+        claim.scopes.join(","),
+        claim.signed_at,
+        claim.nonce,
     );
     let content_hash = lillux::cas::sha256_hex(claim.as_bytes());
     let signature = claimant.sign(content_hash.as_bytes());

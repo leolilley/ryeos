@@ -360,7 +360,7 @@ mod tests {
             "kind_name": "directive",
             "item_ref": "directive:test/item",
             "executor_ref": "test/executor",
-            "launch_mode": "inline",
+            "launch_mode": "wait",
             "current_site_id": "site:test",
             "origin_site_id": "site:test",
             "base_project_snapshot_hash": null,
@@ -381,6 +381,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);
@@ -542,7 +543,7 @@ mod tests {
             "kind_name": "directive",
             "item_ref": "directive:test/item",
             "executor_ref": "test/executor",
-            "launch_mode": "inline",
+            "launch_mode": "wait",
             "current_site_id": "site:test",
             "origin_site_id": "site:test",
             "base_project_snapshot_hash": null,
@@ -563,6 +564,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);
@@ -788,7 +790,7 @@ mod tests {
             "kind_name": "directive",
             "item_ref": "directive:test/item",
             "executor_ref": "test/executor",
-            "launch_mode": "inline",
+            "launch_mode": "wait",
             "current_site_id": "site:test",
             "origin_site_id": "site:test",
             "base_project_snapshot_hash": null,
@@ -809,6 +811,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
 
@@ -821,7 +824,7 @@ mod tests {
             "kind_name": "directive",
             "item_ref": "directive:test/item",
             "executor_ref": "test/executor",
-            "launch_mode": "inline",
+            "launch_mode": "wait",
             "current_site_id": "site:test",
             "origin_site_id": "site:test",
             "base_project_snapshot_hash": null,
@@ -842,6 +845,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap1 = write_object(&cas_root, &snap_v1);
@@ -914,7 +918,7 @@ mod tests {
             "kind_name": "directive",
             "item_ref": "directive:test/item",
             "executor_ref": "test/executor",
-            "launch_mode": "inline",
+            "launch_mode": "wait",
             "current_site_id": "site:test",
             "origin_site_id": "site:test",
             "base_project_snapshot_hash": null,
@@ -935,6 +939,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);

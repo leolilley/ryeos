@@ -3,7 +3,7 @@
 //!
 //! The smoke list is signed manifest data (`smoke:` in manifest.source.yaml,
 //! see `ryeos_bundle::manifest::SmokeDecl`). Each entry dispatches as a
-//! NORMAL inline thread — same resolution pipeline, trust verification,
+//! normal waited thread — same resolution pipeline, trust verification,
 //! capability minting, and braid visibility as any operator execution — with
 //! the project anchored at the bundle source and a `state_root` override
 //! keeping every runtime write out of the authored tree.
@@ -185,7 +185,7 @@ pub async fn handle(
     }))
 }
 
-/// Dispatch one smoke entry as a normal inline thread against the bundle
+/// Dispatch one smoke entry as a normal waited thread against the bundle
 /// source with the state-root override. Never propagates: every failure mode
 /// becomes an `EntryOutcome` so remaining entries still run.
 async fn run_entry(
@@ -220,6 +220,7 @@ async fn run_entry(
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let site_id = state.threads.site_id().to_string();
+    let origin_site_id = ctx.execution_origin(&site_id);
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
@@ -229,7 +230,7 @@ async fn run_entry(
             path: source.to_path_buf(),
         },
         current_site_id: site_id.clone(),
-        origin_site_id: site_id,
+        origin_site_id,
         execution_hints: Default::default(),
         validate_only: false,
     };
@@ -240,14 +241,37 @@ async fn run_entry(
         plan_ctx,
         requested_call: None,
     };
-    let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+    if let Err(error) =
+        ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
+    {
+        outcome.error = Some(format!("authorize smoke execution: {error:#}"));
+        return outcome;
+    }
+    let resolved_authority =
+        match ryeos_app::execution_policy::resolve_standard_local_live_authority(
+            source,
+            ctx.scopes.clone(),
+        ) {
+            Ok(authority) => authority,
+            Err(error) => {
+                outcome.error = Some(format!("resolve smoke execution authority: {error:#}"));
+                return outcome;
+            }
+        };
+    let provenance = match ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         source.to_path_buf(),
         state.engine.clone(),
-    )
-    .with_state_root(Some(state_root.to_path_buf()));
+        resolved_authority.project,
+    ) {
+        Ok(provenance) => provenance.with_state_root(Some(state_root.to_path_buf())),
+        Err(error) => {
+            outcome.error = Some(format!("construct smoke execution provenance: {error:#}"));
+            return outcome;
+        }
+    };
     let kind = decl.item_ref.split(':').next().unwrap_or("");
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
-        launch_mode: "inline",
+        launch_mode: "wait",
         target_site_id: None,
         validate_only: false,
         params,
@@ -255,6 +279,7 @@ async fn run_entry(
         acting_principal: ctx.fingerprint.as_str(),
         project_path: source,
         provenance,
+        lifecycle_authority: resolved_authority.lifecycle,
         original_root_kind: kind,
         pre_minted_thread_id: None,
         usage_subject: None,

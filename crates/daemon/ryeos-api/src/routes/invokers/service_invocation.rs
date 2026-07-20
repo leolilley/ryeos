@@ -91,7 +91,12 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
 
         // Build typed handler context from the principal.
         let hctx = match &inv_ctx.principal {
-            Some(p) => HandlerContext::new(p.id.clone(), p.scopes.clone(), p.verified),
+            Some(p) => HandlerContext::new_with_origin(
+                p.id.clone(),
+                p.scopes.clone(),
+                p.verified,
+                p.authenticated_origin_site_id.clone(),
+            ),
             None => HandlerContext::anonymous(),
         };
 

@@ -243,10 +243,11 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
         "parameters": resolved.parameters,
+        "execution_policy": execution_policy_value(
+            resolved.project_path.is_some(),
+            resolved.async_launch,
+        ),
     });
-    if resolved.async_launch {
-        body["launch_mode"] = Value::String("accepted".to_string());
-    }
     if let Some(project_path) = &resolved.project_path {
         body["project_path"] = Value::String(
             project_path
@@ -344,6 +345,35 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
 
     print_result(result, &mut presenter, &cli.rest, rendered_lines)?;
     Ok(())
+}
+
+fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
+    let project = if project_backed {
+        serde_json::json!({
+            "kind": "live_direct",
+            "access": "read_write",
+            "child_policy": { "kind": "inherit" },
+        })
+    } else {
+        serde_json::json!({ "kind": "projectless" })
+    };
+    serde_json::json!({
+        "schema_version": 2,
+        "ownership": "daemon_owned",
+        "recovery": if project_backed { "none" } else { "restart_recoverable" },
+        "response": if accepted { "accepted" } else { "wait" },
+        "target": { "kind": "here" },
+        "environment": if project_backed {
+            serde_json::json!({
+                "kind": "project_overlay",
+                "include_operator_vault": true,
+                "name_policy": { "kind": "declared_required" },
+            })
+        } else {
+            serde_json::json!({ "kind": "none" })
+        },
+        "project": project,
+    })
 }
 
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
@@ -1749,6 +1779,24 @@ mod tests {
             source_file: PathBuf::new(),
             provenance: ryeos_runtime::CommandProvenance::default(),
         }
+    }
+
+    #[test]
+    fn live_project_execute_is_daemon_owned_but_not_restart_recoverable() {
+        let policy = execution_policy_value(true, true);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "none");
+        assert_eq!(policy["response"], "accepted");
+        assert_eq!(policy["project"]["kind"], "live_direct");
+    }
+
+    #[test]
+    fn projectless_execute_can_be_restart_recoverable() {
+        let policy = execution_policy_value(false, false);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "restart_recoverable");
+        assert_eq!(policy["response"], "wait");
+        assert_eq!(policy["project"]["kind"], "projectless");
     }
 
     #[test]

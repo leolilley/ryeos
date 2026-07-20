@@ -25,14 +25,34 @@ pub mod workspace;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use ryeos_app::runtime_db::WorkspaceState;
 
 use ryeos_state::objects::{ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::signer::Signer;
 
 use self::cache::MaterializationCache;
+
+/// Project capture/materialization is both filesystem- and CAS-heavy. Keep a
+/// small daemon-wide admission window so independent async callbacks cannot
+/// amplify one large project into unbounded concurrent copies.
+const MAX_CONCURRENT_PROJECT_CAPTURE_WORK: usize = 2;
+static PROJECT_CAPTURE_PERMITS: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_PROJECT_CAPTURE_WORK));
+
+pub async fn run_bounded_project_capture<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    let permit = PROJECT_CAPTURE_PERMITS
+        .acquire()
+        .await
+        .expect("static project-capture semaphore is never closed");
+    let result = tokio::task::block_in_place(operation);
+    drop(permit);
+    result
+}
 
 /// A descriptor-pinned CAS publication whose immutable objects are protected
 /// by durable recovery roots until a daemon-authoritative consumer is visible.
@@ -114,10 +134,7 @@ pub(crate) struct StagedProjectTree {
 /// materialization, continuation and recovery.
 pub struct CapturedProjectGeneration {
     pub(crate) snapshot_hash: String,
-    pub(crate) tree_hash: String,
-    pub(crate) policy_hash: String,
     pub(crate) stable_project_identity: ryeos_app::launch_metadata::StableProjectIdentity,
-    pub(crate) local_overlay_root: Option<PathBuf>,
     publication: PendingCasPublication,
 }
 
@@ -152,10 +169,60 @@ pub(crate) fn capture_live_project_snapshot(
         pending.hash,
         pending.policy_hash,
         ryeos_app::launch_metadata::StableProjectIdentity::from_path(project_path, origin_site)?,
-        Some(project_path.to_path_buf()),
         source,
         pending.publication,
     )
+}
+
+pub(crate) fn derive_pinned_child_authority(
+    parent: &ryeos_state::objects::ExecutionProjectAuthority,
+    snapshot_hash: String,
+    realization: ryeos_state::objects::PinnedChildProjectRealization,
+    capability_ceiling: &[String],
+) -> Result<ryeos_state::objects::ExecutionProjectAuthority> {
+    let (stable_identity, display_path, environment) = match parent {
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+            authored_project_identity,
+            canonical_root,
+            environment,
+            ..
+        } => (
+            authored_project_identity.clone(),
+            Some(canonical_root.clone()),
+            environment.clone(),
+        ),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            stable_project_identity,
+            display_path,
+            environment,
+            ..
+        } => (
+            stable_project_identity.clone(),
+            display_path.clone(),
+            environment.clone(),
+        ),
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
+            anyhow::bail!("pin-at-spawn requires project-backed parent authority")
+        }
+    };
+    ryeos_state::objects::ExecutionProjectAuthority::pinned(
+        stable_identity,
+        display_path,
+        snapshot_hash,
+        match realization {
+            ryeos_state::objects::PinnedChildProjectRealization::ReadOnly => {
+                ryeos_state::objects::PinnedProjectRealization::ReadOnly
+            }
+            ryeos_state::objects::PinnedChildProjectRealization::CowDiscard => {
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+                }
+            }
+        },
+        environment,
+        capability_ceiling.to_vec(),
+    )?
+    .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
 }
 
 /// Capture a live project tree under a durable recovery root. The
@@ -224,7 +291,6 @@ pub(crate) fn capture_tree_project_snapshot(
     tree_hash: String,
     policy_hash: String,
     stable_project_identity: ryeos_app::launch_metadata::StableProjectIdentity,
-    local_overlay_root: Option<PathBuf>,
     source: &str,
     mut publication: PendingCasPublication,
 ) -> Result<CapturedProjectGeneration> {
@@ -268,10 +334,7 @@ pub(crate) fn capture_tree_project_snapshot(
     )?;
     Ok(CapturedProjectGeneration {
         snapshot_hash: hash,
-        tree_hash,
-        policy_hash,
         stable_project_identity,
-        local_overlay_root,
         publication,
     })
 }
@@ -306,7 +369,7 @@ pub fn checkout_project_lower(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     snapshot_hash: &str,
-    target_dir: &Path,
+    target_dir: Option<&Path>,
     cache: &MaterializationCache,
 ) -> Result<(PathBuf, std::fs::File)> {
     authority.ensure_guard(cas_mutation_guard)?;
@@ -384,16 +447,21 @@ pub fn checkout_project_lower(
     }
     cache.verify_complete_for_tree(&cas, &tree, snapshot_hash)?;
 
-    let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
-    for (relative, project_file) in &project_files {
-        let content = cache.ensure_content_file(&cas, project_file)?;
-        let (parent, name) = pinned_output_parent(&target_root, relative)?;
-        content.link_to(&parent, &name)?;
-    }
     let lease = cache.generation_lease(snapshot_hash)?;
+    let realized_path = if let Some(target_dir) = target_dir {
+        let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
+        for (relative, project_file) in &project_files {
+            let content = cache.ensure_content_file(&cas, project_file)?;
+            let (parent, name) = pinned_output_parent(&target_root, relative)?;
+            content.link_to(&parent, &name)?;
+        }
+        target_dir.to_path_buf()
+    } else {
+        cache.cache_dir(snapshot_hash)
+    };
     drop(_build_lock);
     cache.prune(128)?;
-    Ok((target_dir.to_path_buf(), lease))
+    Ok((realized_path, lease))
 }
 
 fn pinned_output_parent(
@@ -428,18 +496,34 @@ fn pinned_output_parent(
 
 /// Capture the authoritative post-execution tree under the exact immutable
 /// policy that produced the base generation.
-pub fn fold_back_outputs(
-    authority: &ryeos_state::PinnedStateAuthority,
-    cas_mutation_guard: &ryeos_state::CasMutationGuard,
-    isolation: &ryeos_engine::isolation::IsolationRuntime,
-    workspace_id: &str,
-    launch_owner: &str,
-    working_dir: &Path,
-    pre_tree_hash: &str,
-    policy_hash: &str,
-    base_snapshot_hash: &str,
-    workspace_record: &ryeos_app::runtime_db::WorkspaceRecord,
+pub(crate) struct FoldBackOutputsParams<'a> {
+    pub authority: &'a ryeos_state::PinnedStateAuthority,
+    pub cas_mutation_guard: &'a ryeos_state::CasMutationGuard,
+    pub isolation: &'a ryeos_engine::isolation::IsolationRuntime,
+    pub workspace_id: &'a str,
+    pub launch_owner: &'a str,
+    pub working_dir: &'a Path,
+    pub pre_tree_hash: &'a str,
+    pub policy_hash: &'a str,
+    pub base_snapshot_hash: &'a str,
+    pub workspace_record: &'a ryeos_app::runtime_db::WorkspaceRecord,
+}
+
+pub(crate) fn fold_back_outputs(
+    params: FoldBackOutputsParams<'_>,
 ) -> Result<(Option<String>, PendingCasPublication)> {
+    let FoldBackOutputsParams {
+        authority,
+        cas_mutation_guard,
+        isolation,
+        workspace_id,
+        launch_owner,
+        working_dir,
+        pre_tree_hash,
+        policy_hash,
+        base_snapshot_hash,
+        workspace_record,
+    } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
     let mut staged_roots = authority
@@ -465,15 +549,15 @@ pub fn fold_back_outputs(
         );
     }
     let lifecycle = isolation
-        .workspace_lifecycle_pinned(
-            ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
+        .workspace_lifecycle_pinned(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::FreezeAndDiff,
             workspace_id,
             launch_owner,
-            base_snapshot_hash,
-            &layout.lower,
-            &layout.upper,
-            &layout.work,
-        )
+            lower_snapshot: base_snapshot_hash,
+            lower_path: &layout.lower,
+            upper_path: &layout.upper,
+            work_path: &layout.work,
+        })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(
         &lifecycle.response.pinned_root_identities,
@@ -537,7 +621,7 @@ pub fn fold_back_outputs(
 // Pinned authority, held CAS guard, signed head identity, and both snapshot
 // hashes remain explicit at the compare-and-swap fold-back boundary.
 #[allow(clippy::too_many_arguments)]
-pub fn advance_after_foldback(
+pub(crate) fn advance_after_foldback(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     state_db: &ryeos_state::StateDb,
@@ -545,7 +629,8 @@ pub fn advance_after_foldback(
     principal_key: &str,
     project_path_hash: &str,
     new_tree_hash: &str,
-    current_snapshot_hash: &str,
+    snapshot_parent_hash: &str,
+    expected_head_hash: &str,
     publication: &mut PendingCasPublication,
 ) -> Result<String> {
     authority.ensure_guard(cas_mutation_guard)?;
@@ -556,7 +641,7 @@ pub fn advance_after_foldback(
         authority,
         cas_mutation_guard,
         new_tree_hash,
-        current_snapshot_hash,
+        snapshot_parent_hash,
         publication,
     )?;
 
@@ -564,7 +649,7 @@ pub fn advance_after_foldback(
         principal_key,
         project_path_hash,
         &new_snapshot_hash,
-        current_snapshot_hash,
+        expected_head_hash,
         signer,
         cas_mutation_guard,
     )?;
@@ -573,7 +658,7 @@ pub fn advance_after_foldback(
 }
 
 /// Publish one immutable result generation over a verified workspace delta.
-pub fn store_foldback_snapshot(
+pub(crate) fn store_foldback_snapshot(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     new_tree_hash: &str,
@@ -671,18 +756,18 @@ pub(crate) fn seal_callback_workspace_generation(
         .write_barrier
         .try_acquire()
         .map_err(|error| anyhow::anyhow!("acquire callback generation write permit: {error}"))?;
-    let (next_tree, mut publication) = fold_back_outputs(
-        &authority,
-        &guard,
-        &state.isolation,
+    let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
+        authority: &authority,
+        cas_mutation_guard: &guard,
+        isolation: &state.isolation,
         workspace_id,
         launch_owner,
-        &workspace.root,
-        &snapshot.project_tree_hash,
-        &snapshot.effective_policy_hash,
+        working_dir: &workspace.root,
+        pre_tree_hash: &snapshot.project_tree_hash,
+        policy_hash: &snapshot.effective_policy_hash,
         base_snapshot_hash,
-        &record,
-    )?;
+        workspace_record: &record,
+    })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
             &authority,
@@ -745,18 +830,18 @@ pub fn recover_interrupted_workspace_freeze(
         .write_barrier
         .try_acquire()
         .map_err(|error| anyhow::anyhow!("acquire recovery freeze write permit: {error}"))?;
-    let (next_tree, mut publication) = fold_back_outputs(
-        &authority,
-        &guard,
-        &state.isolation,
-        &record.workspace_id,
+    let (next_tree, mut publication) = fold_back_outputs(FoldBackOutputsParams {
+        authority: &authority,
+        cas_mutation_guard: &guard,
+        isolation: &state.isolation,
+        workspace_id: &record.workspace_id,
         launch_owner,
-        Path::new(&record.root_path),
-        &base.project_tree_hash,
-        &base.effective_policy_hash,
-        &record.lower_snapshot,
-        record,
-    )?;
+        working_dir: Path::new(&record.root_path),
+        pre_tree_hash: &base.project_tree_hash,
+        policy_hash: &base.effective_policy_hash,
+        base_snapshot_hash: &record.lower_snapshot,
+        workspace_record: record,
+    })?;
     let snapshot_hash = match next_tree {
         Some(tree_hash) => store_foldback_snapshot(
             &authority,

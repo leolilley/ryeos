@@ -205,6 +205,7 @@ where
 pub struct VerifiedRuntime {
     pub canonical_ref: CanonicalRef,
     pub raw_content_digest: String,
+    pub signer_fingerprint: String,
     pub yaml: RuntimeYaml,
     pub trust_class: TrustClass,
     pub bundle_root: PathBuf,
@@ -483,6 +484,7 @@ fn load_and_verify_runtime_yaml(
     Ok(VerifiedRuntime {
         canonical_ref: canonical,
         raw_content_digest: sig_header.content_hash.clone(),
+        signer_fingerprint: sig_header.signer_fingerprint.clone(),
         yaml,
         trust_class: root_trust,
         bundle_root: bundle_root.to_owned(),
@@ -1059,6 +1061,7 @@ mod tests {
         let vr = VerifiedRuntime {
             canonical_ref: canon.clone(),
             raw_content_digest: "0".repeat(64),
+            signer_fingerprint: "fp:test-runtime".to_string(),
             yaml,
             trust_class: TrustClass::TrustedBundle,
             bundle_root: test_path(),

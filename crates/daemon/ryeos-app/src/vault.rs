@@ -336,6 +336,142 @@ pub fn read_required_secrets(
     Ok(out)
 }
 
+pub fn read_required_secrets_with_authority(
+    vault: &dyn NodeVault,
+    principal: &str,
+    required_secrets: &[String],
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> std::result::Result<HashMap<String, String>, VaultReadError> {
+    if required_secrets.is_empty() {
+        return Ok(HashMap::new());
+    }
+    for key in required_secrets {
+        validate_operator_secret_name(key)?;
+        crate::process::validate_spawn_secret_name(key)
+            .map_err(|error| anyhow!("vault: invalid declared secret `{key}`: {error:#}"))?;
+    }
+    project_authority
+        .validate()
+        .map_err(VaultReadError::Internal)?;
+    let authority = project_authority.environment();
+    let name_authority = match authority {
+        ryeos_state::objects::EnvironmentAuthority::None => None,
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { name_authority, .. }
+        | ryeos_state::objects::EnvironmentAuthority::Vault { name_authority, .. }
+        | ryeos_state::objects::EnvironmentAuthority::Delegated { name_authority, .. } => {
+            Some(name_authority)
+        }
+    };
+    let unauthorized: Vec<String> = required_secrets
+        .iter()
+        .filter(|name| {
+            !name_authority.is_some_and(|authority| authority.permits_declared(name.as_str()))
+        })
+        .cloned()
+        .collect();
+    if !unauthorized.is_empty() {
+        return Err(VaultReadError::Internal(anyhow!(
+            "declared secret name(s) exceed the admitted environment authority: [{}]",
+            unauthorized.join(", ")
+        )));
+    }
+    let requested = required_secrets.to_vec();
+    let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
+    let mut resolved = match authority {
+        ryeos_state::objects::EnvironmentAuthority::None => HashMap::new(),
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+            project_authority_id,
+            source_identity,
+            include_operator_vault,
+            ..
+        } => {
+            let root = project_authority.open_environment_root()?.ok_or_else(|| {
+                VaultReadError::Internal(anyhow!(
+                    "project environment authority has no authorized project root"
+                ))
+            })?;
+            let stable_identity = match project_authority {
+                ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                    authored_project_identity,
+                    ..
+                } => authored_project_identity,
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    stable_project_identity,
+                    ..
+                } => stable_project_identity,
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
+                    return Err(VaultReadError::Internal(anyhow!(
+                        "projectless authority cannot carry a project environment overlay"
+                    )))
+                }
+            };
+            let expected_authority_id = lillux::sha256_hex(
+                format!(
+                    "live-project\0{}\0{}",
+                    stable_identity,
+                    root.path().display()
+                )
+                .as_bytes(),
+            );
+            if project_authority_id != &expected_authority_id {
+                return Err(VaultReadError::Internal(anyhow!(
+                    "project environment authority id does not match the descriptor-opened overlay root"
+                )));
+            }
+            let expected_source = format!("dotenv:{}", root.path().join(".env").display());
+            if source_identity != &expected_source {
+                return Err(VaultReadError::Internal(anyhow!(
+                    "project environment source identity mismatch: expected {expected_source:?}, got {source_identity:?}"
+                )));
+            }
+            let mut upstream = if *include_operator_vault {
+                vault.read_all(principal)?
+            } else {
+                HashMap::new()
+            };
+            let wanted: HashSet<String> = requested
+                .iter()
+                .filter(|name| !upstream.contains_key(name.as_str()))
+                .cloned()
+                .collect();
+            let overlay = ryeos_vault::dotenv::read_dotenv_overlay_pinned(&root, &wanted)
+                .map_err(|error| VaultReadError::Internal(anyhow!("dotenv overlay: {error:#}")))?;
+            for (name, value) in overlay {
+                upstream.entry(name).or_insert(value);
+            }
+            upstream
+        }
+        ryeos_state::objects::EnvironmentAuthority::Vault { namespace, .. } => {
+            if namespace != "operator" {
+                return Err(VaultReadError::Internal(anyhow!(
+                    "unsupported vault namespace {namespace:?}; this node exposes only the explicit operator namespace"
+                )));
+            }
+            vault.read_all(principal)?
+        }
+        ryeos_state::objects::EnvironmentAuthority::Delegated {
+            provider, grant_id, ..
+        } => {
+            return Err(VaultReadError::Internal(anyhow!(
+                "delegated environment provider {provider:?} grant {grant_id:?} is not installed"
+            )));
+        }
+    };
+    resolved.retain(|name, _| requested_set.contains(name.as_str()));
+    let missing: Vec<String> = required_secrets
+        .iter()
+        .filter(|name| !resolved.contains_key(name.as_str()))
+        .cloned()
+        .collect();
+    if !missing.is_empty() {
+        return Err(VaultReadError::MissingSecrets {
+            principal: principal.to_string(),
+            names: missing,
+        });
+    }
+    Ok(resolved)
+}
+
 fn read_declared_host_env(required_secrets: &[String]) -> Result<HashMap<String, String>> {
     let mut out = HashMap::new();
     for key in required_secrets {

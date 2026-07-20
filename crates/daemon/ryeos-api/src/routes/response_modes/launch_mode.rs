@@ -582,6 +582,7 @@ mod tests {
             scopes: vec![],
             verifier_key: "hmac",
             verified: true,
+            authenticated_origin_site_id: None,
             metadata,
         };
         let body = serde_json::json!({"action": "opened"});

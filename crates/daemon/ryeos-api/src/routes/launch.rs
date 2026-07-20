@@ -59,7 +59,7 @@ impl LaunchSpawnError {
 /// item_ref/project/parameters identity.
 pub(crate) struct DispatchLaunchOptions {
     pub ref_bindings: BTreeMap<String, String>,
-    /// Launch mode (e.g. "inline", "detached").
+    /// Caller response mode (`"wait"` or `"detached"`).
     pub launch_mode: String,
     /// Target site id for remote forwarding. `None` means local execution.
     pub target_site_id: Option<String>,
@@ -72,6 +72,7 @@ pub(crate) struct DispatchLaunchOptions {
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
+    pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     /// Exact verified subject and captured policy returned by synchronous
     /// dispatch preflight. This may name a terminal target behind the
     /// caller-named wrapper; both success and failure persistence consume this
@@ -114,13 +115,15 @@ impl DispatchLaunchOptions {
         }
         Ok(Self {
             ref_bindings,
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             target_site_id: None,
             validate_only: false,
             usage_subject: None,
             usage_subject_asserted_by: None,
             call: None,
             previous_thread_id: None,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
             root_admission,
             project_path,
             captured_generation: None,
@@ -133,10 +136,6 @@ impl DispatchLaunchOptions {
     ) -> Self {
         self.captured_generation = captured;
         self
-    }
-
-    pub(crate) fn project_path(&self) -> &std::path::Path {
-        &self.project_path
     }
 }
 
@@ -153,6 +152,7 @@ pub(crate) fn preflight_dispatch_launch(
     ref_bindings: &BTreeMap<String, String>,
     principal_id: &str,
     principal_scopes: &[String],
+    origin_site_id: &str,
     call: Option<ryeos_engine::method_call::MethodCall>,
     launch_mode: &str,
     validate_only: bool,
@@ -179,7 +179,7 @@ pub(crate) fn preflight_dispatch_launch(
         }),
         project_context: ProjectContext::LocalPath { path: project_path },
         current_site_id: state.threads.site_id().to_string(),
-        origin_site_id: state.threads.site_id().to_string(),
+        origin_site_id: origin_site_id.to_string(),
         execution_hints: Default::default(),
         validate_only,
     };
@@ -283,6 +283,7 @@ fn spawn_dispatch_launch_inner(
     let usage_subject_asserted_by = options.usage_subject_asserted_by;
     let call = options.call;
     let previous_thread_id = options.previous_thread_id;
+    let lifecycle_authority = options.lifecycle_authority;
     let root_admission = options.root_admission;
     let ref_bindings = options.ref_bindings;
     let captured_generation = options.captured_generation;
@@ -292,11 +293,9 @@ fn spawn_dispatch_launch_inner(
         // cancellation and the complete background dispatch. The authoritative
         // birth/result rows become the long-lived roots before this drops.
         let _captured_generation = captured_generation;
-        let site_id = current_site_id;
-        let current_site_id_for_failure_row = site_id.clone();
-        let origin_site_id_for_failure_row = site_id.clone();
-
         let plan_ctx = root_admission.plan_context().clone();
+        let current_site_id_for_failure_row = plan_ctx.current_site_id.clone();
+        let origin_site_id_for_failure_row = plan_ctx.origin_site_id.clone();
 
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: principal_id.clone(),
@@ -318,6 +317,7 @@ fn spawn_dispatch_launch_inner(
             acting_principal: principal_id.as_str(),
             project_path: project_path_buf.as_path(),
             provenance,
+            lifecycle_authority,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
             usage_subject,
@@ -422,10 +422,11 @@ fn spawn_dispatch_launch_inner(
                                 plan_context: exec_ctx.plan_ctx.clone(),
                                 root_admission: Some(root_admission.clone()),
                             };
-                        match state_clone
-                            .threads
-                            .create_root_thread_with_id(&pre_minted_thread_id, &failure_request)
-                        {
+                        match state_clone.threads.create_root_thread_with_id(
+                            &pre_minted_thread_id,
+                            &failure_request,
+                            dispatch_req.provenance.project_authority().clone(),
+                        ) {
                             Ok(_) => state_clone
                                 .threads
                                 .get_thread(&pre_minted_thread_id)

@@ -469,6 +469,7 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
             scopes: vec![],
             verifier_key: "hmac",
             verified: true,
+            authenticated_origin_site_id: None,
             metadata,
         }))
     }

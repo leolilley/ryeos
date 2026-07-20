@@ -89,6 +89,17 @@ pub async fn spawn_detached_child(
         .threads
         .get_thread(&parent_thread_id)?
         .ok_or_else(|| anyhow::anyhow!("detach: parent thread not found: {parent_thread_id}"))?;
+    let parent_lifecycle_authority = state
+        .state_store
+        .get_launch_metadata(&parent_thread_id)?
+        .and_then(|metadata| metadata.resume_context)
+        .map(|resume| resume.lifecycle_authority)
+        .ok_or_else(|| {
+            anyhow::anyhow!("detach: parent {parent_thread_id} has no sealed lifecycle authority")
+        })?;
+    if !parent_lifecycle_authority.permits_durable_handoff() {
+        anyhow::bail!("detach: request-scoped execution cannot spawn a durable child");
+    }
 
     // The callback capability carries the chain root it was minted under; confirm
     // it against authoritative state before minting a linked child.
@@ -102,12 +113,22 @@ pub async fn spawn_detached_child(
         &parent_thread_id,
         &request_hash,
         &new_thread_id(),
+        None,
     )?;
+    let reserved_intent = state
+        .state_store
+        .get_detached_spawn_intent(operation_id)?
+        .ok_or_else(|| anyhow::anyhow!("detach: reserved operation disappeared: {operation_id}"))?;
 
     // A retry after the child birth transaction must repair lineage and launch
     // progress, never mint another child. The immutable launch metadata saved
     // with the row is sufficient for the normal recovery launcher.
     if let Some(child) = state.threads.get_thread(&child_thread_id)? {
+        if reserved_intent.child_project_authority.is_none() {
+            anyhow::bail!(
+                "detach: child {child_thread_id} exists without sealed project authority"
+            );
+        }
         let inherited_stop =
             state
                 .state_store
@@ -148,64 +169,142 @@ pub async fn spawn_detached_child(
         ));
     }
 
+    let parent_project_authority = cap
+        .provenance
+        .execution_project_authority(&cap.effective_caps)?;
+    let authority_already_bound = reserved_intent.child_project_authority.is_some();
+    let mut explicit_child_generation = None;
+    let mut child_project_authority =
+        if let Some(authority) = reserved_intent.child_project_authority.clone() {
+            authority
+        } else {
+            match parent_project_authority.child_policy() {
+                ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit => {
+                    parent_project_authority.clone().for_child()?
+                }
+                ryeos_state::objects::ChildProjectAuthorityPolicy::PinAtSpawn { realization } => {
+                    let snapshot_hash = if let Some(snapshot_hash) =
+                        parent_project_authority.base_snapshot_projection()
+                    {
+                        snapshot_hash.to_string()
+                    } else {
+                        let generation = crate::execution::run_bounded_project_capture(|| {
+                            crate::execution::capture_live_project_snapshot(
+                                state,
+                                cap.provenance.original_project_path(),
+                                &parent.origin_site_id,
+                                "detached-pin-at-spawn",
+                            )
+                        })
+                        .await?;
+                        let snapshot_hash = generation.snapshot_hash().to_string();
+                        explicit_child_generation = Some(generation);
+                        snapshot_hash
+                    };
+                    crate::execution::derive_pinned_child_authority(
+                        &parent_project_authority,
+                        snapshot_hash,
+                        realization,
+                        &cap.effective_caps,
+                    )?
+                }
+            }
+        };
+
     // A borrowed daemon workspace cannot be reconstructed safely from its old
     // path: manufacturing a second TempDirGuard would race the parent's real
     // guard. Inherit only the parent's immutable snapshot and reconstruct the
     // child into a fresh non-lineage checkout after a crash/queued launch.
-    let launch_snapshot_hash = if cap.provenance.captured_snapshot_hash().is_some() {
-        Some(
-            state
-                .state_store
-                .get_launch_metadata(&parent_thread_id)?
-                .and_then(|metadata| metadata.resume_context)
-                .and_then(|resume| {
-                    resume
-                        .durable_project_snapshot_hash()
-                        .map(str::to_owned)
-                })
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "detach: parent {parent_thread_id} owns an ephemeral workspace but has no durable project snapshot"
-                    )
-                })?,
-        )
+    let launch_snapshot_hash = parent_project_authority
+        .base_snapshot_projection()
+        .map(str::to_owned);
+    let mut inherited_generation = if !authority_already_bound
+        && matches!(
+            &parent_project_authority,
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+                ..
+            }
+        ) {
+        if let Some(base) = launch_snapshot_hash.as_deref() {
+            let frozen = crate::execution::run_bounded_project_capture(|| {
+                crate::execution::seal_callback_workspace_generation(
+                    state,
+                    &parent_thread_id,
+                    cap.provenance.effective_path(),
+                    base,
+                )
+            })
+            .await?;
+            crate::execution::ensure_control_tree_unchanged(state, base, frozen.snapshot_hash())?;
+            Some(frozen)
+        } else {
+            None
+        }
     } else {
         None
     };
-    let inherited_generation = launch_snapshot_hash
-        .as_deref()
-        .map(|base| {
-            let frozen = crate::execution::seal_callback_workspace_generation(
-                state,
-                &parent_thread_id,
-                cap.provenance.effective_path(),
-                base,
-            )?;
-            crate::execution::ensure_control_tree_unchanged(state, base, frozen.snapshot_hash())?;
-            Ok::<_, anyhow::Error>(frozen)
-        })
-        .transpose()?;
     let inherited_snapshot_hash = inherited_generation
         .as_ref()
-        .map(|generation| generation.snapshot_hash().to_string());
+        .map(|generation| generation.snapshot_hash().to_string())
+        .or_else(|| {
+            explicit_child_generation
+                .as_ref()
+                .map(|generation| generation.snapshot_hash().to_string())
+        })
+        .or_else(|| {
+            child_project_authority
+                .base_snapshot_projection()
+                .map(str::to_owned)
+        });
+    if let Some(generation) = inherited_generation.as_ref() {
+        child_project_authority = child_project_authority
+            .transition_operational_generation(
+                ryeos_state::objects::OperationalProjectAuthorityTransition::SelectPinnedChildGeneration {
+                    snapshot_hash: generation.snapshot_hash(),
+                },
+            )?;
+    }
+    state
+        .state_store
+        .bind_detached_spawn_project_authority(operation_id, &child_project_authority)?;
+    // The intent now roots the exact generation. Drop staging leases before
+    // resolving the child so retries consume the bound authority and never
+    // capture/freeze a second generation.
+    if let Some(generation) = explicit_child_generation.take() {
+        generation.publish()?;
+    }
+    if let Some(generation) = inherited_generation.take() {
+        generation.publish()?;
+    }
 
     // Execute authority over the child was already enforced at the callback trust
     // boundary (`enforce_callback_caps` in the dispatch handler) against this same
     // item_id; no second check is needed here — the parent's `effective_caps`
     // bound the child under `FollowChildHybrid` at launch exactly as for follow.
     if let Some(snapshot_hash) = inherited_snapshot_hash.as_deref() {
-        let child_context = crate::execution::project_source::resolve_pinned_snapshot_context(
-            state,
-            snapshot_hash,
-            cap.provenance.original_project_path().to_path_buf(),
-            &child_thread_id,
-        )?;
-        child_provenance = cap.provenance.clone_for_borrowed_child_workspace(
+        let realization =
+            crate::execution::project_source::pinned_context_realization(&child_project_authority)?;
+        let child_context = crate::execution::run_bounded_project_capture(|| {
+            crate::execution::project_source::resolve_pinned_snapshot_context(
+                state,
+                snapshot_hash,
+                cap.provenance.original_project_path().to_path_buf(),
+                &child_thread_id,
+                realization,
+            )
+        })
+        .await?;
+        let child_lifeline = child_context
+            .temp_dir
+            .ok_or_else(|| anyhow::anyhow!("detach: child workspace has no lifecycle guard"))?;
+        child_provenance = cap.provenance.clone_for_pinned_child_workspace(
+            child_context.request_engine,
             child_context.effective_path,
-            child_context
-                .temp_dir
-                .ok_or_else(|| anyhow::anyhow!("detach: child workspace has no lifecycle guard"))?,
-        );
+            child_lifeline,
+            snapshot_hash.to_string(),
+            child_project_authority.clone(),
+        )?;
     }
 
     // Managed-runtime children only: a child kind served by a registered runtime
@@ -283,10 +382,23 @@ pub async fn spawn_detached_child(
         SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref.clone())?;
 
     // Build the complete immutable launch identity and authoritative generic
-    // launch authority before minting any observable row. `effective_caps`
-    // carries the PARENT's caps — the bounding authority handed to
-    // `CapabilityPolicy::FollowChildHybrid`.
+    // launch authority before minting any observable row. Parent delegation
+    // authority is kept separate from the child's own composed capabilities.
+    let project_context = ProjectContext::LocalPath {
+        path: child_provenance.effective_path().to_path_buf(),
+    };
+    let stable_project_identity = ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+        cap.provenance.original_project_path(),
+        &parent.origin_site_id,
+    )?;
+    let project_authority = child_project_authority.clone();
+    let local_overlay_root = matches!(
+        project_authority.environment(),
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
+    )
+    .then(|| cap.provenance.original_project_path().to_path_buf());
     let mut meta = RuntimeLaunchMetadata::default()
+        .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
         .with_resume_context(ResumeContext {
             kind: child_thread_profile.clone(),
             item_ref: child_item_ref.to_string(),
@@ -295,18 +407,11 @@ pub async fn spawn_detached_child(
             parameters: child_parameters.clone(),
             // Resume identity derives from validated server-side provenance, never
             // the request body — same rule as follow.
-            project_context: ProjectContext::LocalPath {
-                path: child_provenance.effective_path().to_path_buf(),
-            },
-            stable_project_identity: Some(
-                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                    cap.provenance.original_project_path(),
-                    &parent.origin_site_id,
-                )?,
-            ),
-            local_overlay_root: (cap.provenance.project_source()
-                == ryeos_app::execution_provenance::ProjectSourceKind::LiveFs)
-                .then(|| cap.provenance.original_project_path().to_path_buf()),
+            project_context,
+            project_authority,
+            lifecycle_authority: parent_lifecycle_authority,
+            stable_project_identity: Some(stable_project_identity),
+            local_overlay_root,
             original_snapshot_hash: inherited_snapshot_hash,
             // A detached child borrows the parent's workspace; it never owns snapshot
             // lineage, so no pushed-head identity is seeded.
@@ -321,7 +426,15 @@ pub async fn spawn_detached_child(
             origin_site_id: parent.origin_site_id.clone(),
             requested_by: requested_by.clone(),
             execution_hints: ExecutionHints::default(),
-            effective_caps: cap.effective_caps.clone(),
+            effective_caps: Vec::new(),
+            parent_delegation_caps: Some(
+                cap.effective_caps
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            ),
             executor_ref: Some(child_executor_ref.clone()),
             runtime_ref: Some(child_runtime_ref.clone()),
         })
@@ -365,11 +478,18 @@ pub async fn spawn_detached_child(
             });
         }
     }
+    state.state_store.seal_detached_spawn_intent(
+        operation_id,
+        &child_project_authority,
+        prepared.launch_metadata(),
+        &initial_events,
+    )?;
     state
         .threads
         .create_root_thread_with_events_and_launch_metadata(
             &child_thread_id,
             prepared.resolved_request(),
+            child_project_authority.clone(),
             initial_events,
             Some(prepared.launch_metadata()),
         )?;
@@ -426,7 +546,6 @@ pub async fn spawn_detached_child(
             "detach: parent {parent_thread_id} was stop-requested during child admission"
         );
     }
-
     // ── Launch admission (bounded fanout) ───────────────────────────────────
     // A windowed spawn minted its row / identity / facets above
     // unconditionally — the launch table and cohort are complete the moment
@@ -531,10 +650,6 @@ pub async fn spawn_detached_child(
     for other in &co_admitted {
         crate::execution::launch::launch_admitted_window_member(state, other);
     }
-    if let Some(generation) = inherited_generation {
-        generation.publish()?;
-    }
-
     tracing::info!(
         parent_thread_id = %parent_thread_id,
         child_thread_id = %child_thread_id,

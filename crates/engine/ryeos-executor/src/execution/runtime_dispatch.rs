@@ -326,7 +326,7 @@ fn enforce_callback_caps(
 ///
 /// Routes `runtime.dispatch_action` through `dispatch::dispatch` (the
 /// same entry point `/execute` uses) instead of calling
-/// `service_executor::resolve_root_execution + run_inline` directly.
+/// `service_executor::resolve_root_execution + run_and_wait` directly.
 /// This preserves typed `DispatchError` mapping, the V5.3 root/runtime
 /// split, the schema-driven hop loop, and the V5.5 route-system seam.
 ///
@@ -498,8 +498,22 @@ async fn handle_execute(
     // to its origin below.
     let diag_source = child_provenance.project_source();
     let diag_effective_path = child_provenance.effective_path().to_path_buf();
+    let lifecycle_authority = state
+        .state_store
+        .get_launch_metadata(&cap.thread_id)?
+        .and_then(|metadata| metadata.resume_context)
+        .map(|resume| resume.lifecycle_authority)
+        .ok_or_else(|| {
+            hook_integrity(format!(
+                "parent {} has no sealed lifecycle authority",
+                cap.thread_id
+            ))
+        })?;
     let dispatch_req = crate::dispatch::DispatchRequest {
-        launch_mode: params.action.thread.as_str(),
+        // Callback `thread=inline` is the unary leaf protocol. Persist the
+        // execution dispatch vocabulary independently: the caller waits for
+        // this leaf, so its thread launch mode is `wait`.
+        launch_mode: "wait",
         target_site_id: None,
         validate_only: false,
         params: params.action.params.clone(),
@@ -507,6 +521,7 @@ async fn handle_execute(
         acting_principal: caller_principal_id.as_str(),
         project_path: project_path.as_path(),
         provenance: child_provenance,
+        lifecycle_authority,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
         usage_subject: None,
@@ -641,7 +656,6 @@ fn callback_dispatch_scopes(cap: &ryeos_app::callback_token::CallbackCapability)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -662,21 +676,39 @@ mod tests {
         ))
     }
 
+    fn live_provenance() -> (
+        tempfile::TempDir,
+        ryeos_app::execution_provenance::ExecutionProvenance,
+    ) {
+        let project = tempfile::tempdir().unwrap();
+        let authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
+            project.path(),
+            vec!["project.write".to_string()],
+        )
+        .unwrap()
+        .project;
+        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project.path().canonicalize().unwrap(),
+            minimal_engine(),
+            authority,
+        )
+        .unwrap();
+        (project, provenance)
+    }
+
     #[test]
     fn callback_capability_maps_to_parent_execution_context_without_kind_checks() {
+        let (project, provenance) = live_provenance();
         let cap = ryeos_app::callback_token::CallbackCapability {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-parent".to_string(),
             launch_owner: None,
             chain_root_id: "T-parent".to_string(),
-            project_path: PathBuf::from("/project"),
+            project_path: project.path().to_path_buf(),
             expires_at: Instant::now() + Duration::from_secs(300),
             effective_caps: vec!["ryeos.*".to_string()],
-            provenance: ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                PathBuf::from("/project"),
-                minimal_engine(),
-            ),
+            provenance,
             effective_bundle_id: None,
             item_ref: Some("graph:team/parent".to_string()),
             root_content_digest: "0".repeat(64),
@@ -695,19 +727,17 @@ mod tests {
 
     #[test]
     fn callback_dispatch_scopes_use_effective_caps_not_transport_scopes() {
+        let (project, provenance) = live_provenance();
         let cap = ryeos_app::callback_token::CallbackCapability {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-parent".to_string(),
             launch_owner: None,
             chain_root_id: "T-parent".to_string(),
-            project_path: PathBuf::from("/project"),
+            project_path: project.path().to_path_buf(),
             expires_at: Instant::now() + Duration::from_secs(300),
             effective_caps: vec!["ryeos.execute.knowledge.arc/*".to_string()],
-            provenance: ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                PathBuf::from("/project"),
-                minimal_engine(),
-            ),
+            provenance,
             effective_bundle_id: None,
             item_ref: Some("graph:arc/solve".to_string()),
             root_content_digest: "0".repeat(64),

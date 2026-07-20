@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
@@ -292,25 +292,14 @@ pub async fn execute_service_verified(
             kind: thread_profile,
             item_ref: service_ref.to_string(),
             executor_ref: endpoint.clone(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: ctx.plan_ctx.current_site_id.clone(),
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: Some(ctx.principal_fingerprint.clone()),
-            project_root: match &ctx.plan_ctx.project_context {
-                ryeos_engine::contracts::ProjectContext::LocalPath { path } => {
-                    Some(path.canonicalize().with_context(|| {
-                        format!("canonicalize recorded service project {}", path.display())
-                    })?)
-                }
-                _ => None,
-            },
-            base_project_snapshot_hash: match &ctx.plan_ctx.project_context {
-                ryeos_engine::contracts::ProjectContext::SnapshotHash { hash } => {
-                    Some(hash.clone())
-                }
-                _ => None,
-            },
+            project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: None,

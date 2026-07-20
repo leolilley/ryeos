@@ -1,0 +1,486 @@
+use serde::{Deserialize, Serialize};
+
+use super::{
+    validate_trimmed_control_free, ExecutionLaunchDriver, ExecutionLifecycleAuthority,
+    ExecutionProjectAuthority, ExecutionRecoveryAuthority,
+};
+
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DirectExecutableIdentity {
+    VerifiedContent {
+        content_hash: String,
+    },
+    /// The exact command spelling remains sealed in `execution_plan_hash`, but
+    /// executable authorization comes from the node's signed isolation policy
+    /// rather than a bundle/CAS content identity. This driver is not eligible
+    /// for autonomous restart recovery.
+    NodePolicy,
+}
+
+/// Exact installed code closure selected for one admitted launch. References
+/// remain useful diagnostics, but recovery authorization comes from these
+/// verified content identities rather than from re-looking up those names in
+/// the current registries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "driver", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdmittedLaunchArtifactIdentity {
+    ManagedRuntime {
+        runtime_ref: String,
+        runtime_content_hash: String,
+        runtime_signer_fingerprint: String,
+        protocol_ref: String,
+        protocol_content_hash: String,
+        protocol_signer_fingerprint: String,
+        executor_ref: String,
+        executor_content_hash: String,
+        executor_bundle_manifest_hash: String,
+        executor_bundle_signer_fingerprint: String,
+    },
+    DirectItemExecutor {
+        executor_ref: String,
+        executor_item_content_hash: String,
+        executor_item_signer_fingerprint: Option<String>,
+        executor_bundle_manifest_hash: Option<String>,
+        executor_bundle_signer_fingerprint: Option<String>,
+        protocol_ref: String,
+        protocol_content_hash: String,
+        protocol_signer_fingerprint: String,
+        execution_plan_hash: String,
+        executable_identity: DirectExecutableIdentity,
+    },
+}
+
+impl AdmittedLaunchArtifactIdentity {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let validate_hash = |label: &str, value: &str| {
+            super::thread_snapshot::validate_canonical_hash(label, value)
+        };
+        match self {
+            Self::ManagedRuntime {
+                runtime_ref,
+                runtime_content_hash,
+                runtime_signer_fingerprint,
+                protocol_ref,
+                protocol_content_hash,
+                protocol_signer_fingerprint,
+                executor_ref,
+                executor_content_hash,
+                executor_bundle_manifest_hash,
+                executor_bundle_signer_fingerprint,
+            } => {
+                for (label, value) in [
+                    ("runtime ref", runtime_ref),
+                    ("runtime signer", runtime_signer_fingerprint),
+                    ("protocol ref", protocol_ref),
+                    ("protocol signer", protocol_signer_fingerprint),
+                    ("executor ref", executor_ref),
+                    ("executor bundle signer", executor_bundle_signer_fingerprint),
+                ] {
+                    validate_trimmed_control_free(label, value, false)?;
+                }
+                for (label, value) in [
+                    ("runtime content hash", runtime_content_hash),
+                    ("protocol content hash", protocol_content_hash),
+                    ("executor content hash", executor_content_hash),
+                    (
+                        "executor bundle manifest hash",
+                        executor_bundle_manifest_hash,
+                    ),
+                ] {
+                    validate_hash(label, value)?;
+                }
+            }
+            Self::DirectItemExecutor {
+                executor_ref,
+                executor_item_content_hash,
+                executor_item_signer_fingerprint,
+                executor_bundle_manifest_hash,
+                executor_bundle_signer_fingerprint,
+                protocol_ref,
+                protocol_content_hash,
+                protocol_signer_fingerprint,
+                execution_plan_hash,
+                executable_identity,
+            } => {
+                validate_trimmed_control_free("executor ref", executor_ref, false)?;
+                validate_hash("executor item content hash", executor_item_content_hash)?;
+                if let Some(signer) = executor_item_signer_fingerprint {
+                    validate_trimmed_control_free("executor item signer", signer, false)?;
+                }
+                match (
+                    executor_bundle_manifest_hash,
+                    executor_bundle_signer_fingerprint,
+                ) {
+                    (Some(hash), Some(signer)) => {
+                        validate_hash("executor bundle manifest hash", hash)?;
+                        validate_trimmed_control_free("executor bundle signer", signer, false)?;
+                    }
+                    (None, None) => {}
+                    _ => anyhow::bail!("executor bundle identity must be complete or absent"),
+                }
+                validate_trimmed_control_free("protocol ref", protocol_ref, false)?;
+                validate_hash("protocol content hash", protocol_content_hash)?;
+                validate_trimmed_control_free(
+                    "protocol signer",
+                    protocol_signer_fingerprint,
+                    false,
+                )?;
+                validate_hash("execution plan hash", execution_plan_hash)?;
+                if let DirectExecutableIdentity::VerifiedContent { content_hash } =
+                    executable_identity
+                {
+                    validate_hash("verified executable content hash", content_hash)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn launch_driver(&self) -> ExecutionLaunchDriver {
+        match self {
+            Self::ManagedRuntime { .. } => ExecutionLaunchDriver::ManagedRuntime,
+            Self::DirectItemExecutor { .. } => ExecutionLaunchDriver::DirectItemExecutor,
+        }
+    }
+
+    pub fn runtime_ref(&self) -> Option<&str> {
+        match self {
+            Self::ManagedRuntime { runtime_ref, .. } => Some(runtime_ref),
+            Self::DirectItemExecutor { .. } => None,
+        }
+    }
+
+    pub fn executor_ref(&self) -> &str {
+        match self {
+            Self::ManagedRuntime { executor_ref, .. }
+            | Self::DirectItemExecutor { executor_ref, .. } => executor_ref,
+        }
+    }
+}
+
+/// Secret-free, content-addressed closure of the authority that crossed one
+/// managed execution's first-launch boundary. Recovery consumes the exact
+/// program payload; it never asks mutable project or bundle space to recreate
+/// an earlier admission.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedLaunchCapsule {
+    pub schema: u32,
+    pub kind: String,
+    pub exact_program: serde_json::Value,
+    pub exact_program_hash: String,
+    pub sealed_invocation: serde_json::Value,
+    pub project_authority: ExecutionProjectAuthority,
+    pub lifecycle_authority: ExecutionLifecycleAuthority,
+    pub launch_driver: ExecutionLaunchDriver,
+    pub artifact_identity: AdmittedLaunchArtifactIdentity,
+    /// Exact secret-free output of launch preparation. Managed recovery
+    /// consumes this CAS-rooted value rather than re-running mutable config,
+    /// binding resolution, augmentations, or launch-preparer handlers.
+    pub prepared_launch: Option<serde_json::Value>,
+    pub effective_caps: Vec<String>,
+    pub runtime_ref: String,
+    pub executor_ref: String,
+}
+
+impl AdmittedLaunchCapsule {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if self.schema != ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
+            || self.kind != "admitted_launch_capsule"
+        {
+            anyhow::bail!("invalid admitted launch capsule wire identity");
+        }
+        if !self.exact_program.is_object() {
+            anyhow::bail!("admitted launch capsule exact_program must be an object");
+        }
+        if !self.sealed_invocation.is_object() {
+            anyhow::bail!("admitted launch capsule sealed_invocation must be an object");
+        }
+        super::thread_snapshot::validate_canonical_hash(
+            "launch capsule exact program hash",
+            &self.exact_program_hash,
+        )?;
+        let canonical_program = lillux::canonical_json(&self.exact_program)?;
+        let observed_program_hash = lillux::sha256_hex(canonical_program.as_bytes());
+        if observed_program_hash != self.exact_program_hash {
+            anyhow::bail!(
+                "admitted launch capsule exact program hash mismatch: declared {}, observed {}",
+                self.exact_program_hash,
+                observed_program_hash
+            );
+        }
+        let mut invocation_program = self.sealed_invocation.clone();
+        let invocation_object = invocation_program
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("sealed invocation must be an object"))?;
+        for invocation_field in [
+            "parameters",
+            "requested_by",
+            "planning_principal",
+            "project_context",
+            "usage_subject",
+            "usage_subject_asserted_by",
+        ] {
+            invocation_object.remove(invocation_field).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "admitted launch capsule sealed invocation is missing {invocation_field}"
+                )
+            })?;
+        }
+        if invocation_program != self.exact_program {
+            anyhow::bail!(
+                "admitted launch capsule sealed invocation does not match its exact program"
+            );
+        }
+        self.project_authority.validate()?;
+        self.lifecycle_authority.validate()?;
+        self.artifact_identity.validate()?;
+        if self.lifecycle_authority.recovery == ExecutionRecoveryAuthority::RestartRecoverable
+            && matches!(
+                self.artifact_identity,
+                AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                    executable_identity: DirectExecutableIdentity::NodePolicy,
+                    ..
+                }
+            )
+        {
+            anyhow::bail!(
+                "node-policy direct execution is not eligible for autonomous restart recovery"
+            );
+        }
+        if self.artifact_identity.launch_driver() != self.launch_driver {
+            anyhow::bail!("admitted launch artifact identity contradicts launch driver");
+        }
+        match (self.launch_driver, self.prepared_launch.as_ref()) {
+            (ExecutionLaunchDriver::ManagedRuntime, Some(value)) if value.is_object() => {}
+            (ExecutionLaunchDriver::ManagedRuntime, _) => {
+                anyhow::bail!("managed admitted launch capsule has no prepared launch object")
+            }
+            (ExecutionLaunchDriver::DirectItemExecutor, None) => {}
+            (ExecutionLaunchDriver::DirectItemExecutor, Some(_)) => anyhow::bail!(
+                "direct admitted launch capsule cannot carry managed prepared launch state"
+            ),
+        }
+        if self.artifact_identity.executor_ref() != self.executor_ref {
+            anyhow::bail!("admitted launch artifact identity contradicts executor ref");
+        }
+        if self.launch_driver == ExecutionLaunchDriver::ManagedRuntime
+            && self.artifact_identity.runtime_ref() != Some(self.runtime_ref.as_str())
+        {
+            anyhow::bail!("admitted launch artifact identity contradicts runtime ref");
+        }
+        validate_trimmed_control_free("launch capsule runtime ref", &self.runtime_ref, false)?;
+        validate_trimmed_control_free("launch capsule executor ref", &self.executor_ref, false)?;
+        let mut canonical_caps = self.effective_caps.clone();
+        for capability in &canonical_caps {
+            validate_trimmed_control_free("launch capsule capability", capability, false)?;
+        }
+        canonical_caps.sort();
+        canonical_caps.dedup();
+        if canonical_caps != self.effective_caps {
+            anyhow::bail!("admitted launch capsule capabilities are not canonical");
+        }
+        Ok(())
+    }
+
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("admitted launch capsule serialization cannot fail")
+    }
+
+    pub fn content_hash(&self) -> anyhow::Result<String> {
+        self.validate()?;
+        let canonical = lillux::canonical_json(&self.to_value())?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    /// Compare the immutable admission authority shared by continuation
+    /// segments. `sealed_invocation` records the birth segment's realization
+    /// and remains rooted in the original capsule; a later operational
+    /// invocation is validated separately and may point at the chain's next
+    /// pinned-COW realization without minting a replacement capsule.
+    pub fn same_continuation_admission(&self, other: &Self) -> anyhow::Result<bool> {
+        self.validate()?;
+        other.validate()?;
+        Ok(self.schema == other.schema
+            && self.kind == other.kind
+            && self.exact_program == other.exact_program
+            && self.exact_program_hash == other.exact_program_hash
+            && self.project_authority == other.project_authority
+            && self.lifecycle_authority == other.lifecycle_authority
+            && self.launch_driver == other.launch_driver
+            && self.artifact_identity == other.artifact_identity
+            && self.prepared_launch == other.prepared_launch
+            && self.effective_caps == other.effective_caps
+            && self.runtime_ref == other.runtime_ref
+            && self.executor_ref == other.executor_ref)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::objects::{
+        ExecutionOwnershipAuthority, ExecutionProjectAuthority, ExecutionRecoveryAuthority,
+    };
+
+    fn direct_capsule(executable_identity: DirectExecutableIdentity) -> AdmittedLaunchCapsule {
+        let exact_program = serde_json::json!({
+            "item_ref": "tool:test/run",
+            "runtime_ref": "runtime:direct",
+            "executor_ref": "tool:test/executor",
+        });
+        let exact_program_hash =
+            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
+        let mut sealed_invocation = exact_program.clone();
+        let object = sealed_invocation.as_object_mut().unwrap();
+        for field in [
+            "parameters",
+            "requested_by",
+            "planning_principal",
+            "project_context",
+            "usage_subject",
+            "usage_subject_asserted_by",
+        ] {
+            object.insert(field.to_string(), serde_json::Value::Null);
+        }
+        AdmittedLaunchCapsule {
+            schema: ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            kind: "admitted_launch_capsule".to_string(),
+            exact_program,
+            exact_program_hash,
+            sealed_invocation,
+            project_authority: ExecutionProjectAuthority::PROJECTLESS,
+            lifecycle_authority: ExecutionLifecycleAuthority {
+                ownership: ExecutionOwnershipAuthority::DaemonOwned,
+                recovery: ExecutionRecoveryAuthority::RestartRecoverable,
+            },
+            launch_driver: ExecutionLaunchDriver::DirectItemExecutor,
+            artifact_identity: AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                executor_ref: "tool:test/executor".to_string(),
+                executor_item_content_hash: "a".repeat(64),
+                executor_item_signer_fingerprint: Some("fp:test".to_string()),
+                executor_bundle_manifest_hash: Some("b".repeat(64)),
+                executor_bundle_signer_fingerprint: Some("fp:bundle".to_string()),
+                protocol_ref: "protocol:test/direct".to_string(),
+                protocol_content_hash: "c".repeat(64),
+                protocol_signer_fingerprint: "fp:protocol".to_string(),
+                execution_plan_hash: "e".repeat(64),
+                executable_identity,
+            },
+            prepared_launch: None,
+            effective_caps: vec!["project.read".to_string()],
+            runtime_ref: "runtime:direct".to_string(),
+            executor_ref: "tool:test/executor".to_string(),
+        }
+    }
+
+    fn managed_capsule(prepared_launch: Option<serde_json::Value>) -> AdmittedLaunchCapsule {
+        let exact_program = serde_json::json!({
+            "item_ref": "directive:test/run",
+            "runtime_ref": "runtime:test/directive",
+            "executor_ref": "executor:test/subprocess",
+        });
+        let exact_program_hash =
+            lillux::sha256_hex(lillux::canonical_json(&exact_program).unwrap().as_bytes());
+        let mut sealed_invocation = exact_program.clone();
+        let object = sealed_invocation.as_object_mut().unwrap();
+        for field in [
+            "parameters",
+            "requested_by",
+            "planning_principal",
+            "project_context",
+            "usage_subject",
+            "usage_subject_asserted_by",
+        ] {
+            object.insert(field.to_string(), serde_json::Value::Null);
+        }
+        AdmittedLaunchCapsule {
+            schema: ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            kind: "admitted_launch_capsule".to_string(),
+            exact_program,
+            exact_program_hash,
+            sealed_invocation,
+            project_authority: ExecutionProjectAuthority::PROJECTLESS,
+            lifecycle_authority: ExecutionLifecycleAuthority {
+                ownership: ExecutionOwnershipAuthority::DaemonOwned,
+                recovery: ExecutionRecoveryAuthority::RestartRecoverable,
+            },
+            launch_driver: ExecutionLaunchDriver::ManagedRuntime,
+            artifact_identity: AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                runtime_ref: "runtime:test/directive".to_string(),
+                runtime_content_hash: "a".repeat(64),
+                runtime_signer_fingerprint: "fp:runtime".to_string(),
+                protocol_ref: "protocol:test/directive".to_string(),
+                protocol_content_hash: "b".repeat(64),
+                protocol_signer_fingerprint: "fp:protocol".to_string(),
+                executor_ref: "executor:test/subprocess".to_string(),
+                executor_content_hash: "c".repeat(64),
+                executor_bundle_manifest_hash: "d".repeat(64),
+                executor_bundle_signer_fingerprint: "fp:executor-bundle".to_string(),
+            },
+            prepared_launch,
+            effective_caps: vec!["project.read".to_string()],
+            runtime_ref: "runtime:test/directive".to_string(),
+            executor_ref: "executor:test/subprocess".to_string(),
+        }
+    }
+
+    #[test]
+    fn restart_recovery_accepts_a_content_verified_direct_executable() {
+        let capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+            content_hash: "f".repeat(64),
+        });
+        capsule.validate().unwrap();
+        assert_eq!(capsule.content_hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn restart_recovery_rejects_a_node_policy_direct_executable() {
+        let capsule = direct_capsule(DirectExecutableIdentity::NodePolicy);
+        let error = capsule.validate().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("not eligible for autonomous restart recovery"));
+    }
+
+    #[test]
+    fn exact_program_hash_is_verified_not_trusted() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+            content_hash: "f".repeat(64),
+        });
+        capsule.exact_program_hash = "0".repeat(64);
+        assert!(capsule
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("mismatch"));
+    }
+
+    #[test]
+    fn managed_recovery_requires_and_accepts_exact_prepared_launch_state() {
+        let capsule = managed_capsule(Some(serde_json::json!({
+            "argv": ["ryeos-directive-runtime"],
+            "environment_names": ["OPENROUTER_API_KEY"],
+        })));
+        capsule.validate().unwrap();
+
+        let error = managed_capsule(None).validate().unwrap_err();
+        assert!(error.to_string().contains("no prepared launch object"));
+    }
+
+    #[test]
+    fn direct_capsule_rejects_managed_prepared_launch_state() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+            content_hash: "f".repeat(64),
+        });
+        capsule.prepared_launch = Some(serde_json::json!({"argv": ["unexpected"]}));
+        assert!(capsule
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("cannot carry managed prepared launch state"));
+    }
+}

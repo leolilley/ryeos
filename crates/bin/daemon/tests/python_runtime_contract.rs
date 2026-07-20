@@ -178,7 +178,7 @@ fn run_tool_with_hints(
         project_context: ProjectContext::LocalPath {
             path: project_dir.to_path_buf(),
         },
-        launch_mode: LaunchMode::Inline,
+        launch_mode: LaunchMode::Wait,
     };
 
     engine

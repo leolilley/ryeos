@@ -5289,14 +5289,15 @@ mod tests {
         let (_dir, db) = open_temp_trusted(&signer);
         let authority = db.pinned_authority().unwrap();
         let guard = authority.acquire_exclusive_guard(true).unwrap();
-        let principal_key = crate::refs::principal_storage_key(signer.fingerprint()).unwrap();
+        let principal_id = format!("fp:{}", signer.fingerprint());
+        let principal_key = crate::refs::principal_storage_key(&principal_id).unwrap();
         let principal_project_hash = "a".repeat(64);
         let deployed_project_hash = "b".repeat(64);
         let principal_snapshot_hash = "c".repeat(64);
         let deployed_snapshot_hash = "d".repeat(64);
 
         db.write_project_head_ref(
-            &principal_key,
+            principal_key,
             &principal_project_hash,
             &principal_snapshot_hash,
             &signer,
@@ -5321,7 +5322,7 @@ mod tests {
             2
         );
         assert!(db
-            .read_project_head(&principal_key, &principal_project_hash)
+            .read_project_head(principal_key, &principal_project_hash)
             .unwrap()
             .is_none());
         assert!(db
@@ -6094,7 +6095,7 @@ mod tests {
                     .payload(serde_json::json!({
                         "item_ref": "directive:apps/tv-tracker/ai_chat",
                         "executor_ref": "runtime:directive-runtime",
-                        "launch_mode": "inline",
+                        "launch_mode": "wait",
                         "usage_subject": {
                             "namespace": "tv-tracker",
                             "subject": "csm01"

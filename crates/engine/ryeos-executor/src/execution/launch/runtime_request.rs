@@ -18,6 +18,7 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub binary: &'a str,
     pub project_path: &'a Path,
     pub project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
+    pub live_access: Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     pub envelope: &'a LaunchEnvelope,
@@ -107,6 +108,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         binary,
         project_path,
         project_authority,
+        live_access,
         state_root,
         workspace_lifeline,
         envelope,
@@ -216,12 +218,18 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
 
     let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
     let isolation_item_ref = item_ref.to_string();
+    if !isolation.is_enforced() {
+        anyhow::bail!(
+            "durable managed execution requires enforced isolation so attach-before-exec can be guaranteed"
+        );
+    }
     let applied = isolation
         .apply_with_provenance(
             request,
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: &spec.project_path,
                 project_authority,
+                live_access: live_access.as_ref(),
                 state_root,
                 checkpoint_dir,
                 daemon_socket_path: isolation_daemon_socket_path,
@@ -238,7 +246,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         .seed_isolation_provenance(thread_id, applied.provenance)
         .context("persist managed-runtime isolation provenance")?;
     let request = applied.request;
-    let spawned = match lillux::spawn(request) {
+    let mut spawned = match lillux::spawn(request) {
         Ok(spawned) => spawned,
         Err(result) => {
             return Ok(SpawnedRuntime {
@@ -291,6 +299,18 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         spawned.abort();
         drop(workspace_lifeline);
         return Err(error.context("attach managed runtime process identity"));
+    }
+    let gate_release = spawned.release_start_gate();
+    if let Err(error) = gate_release.as_ref() {
+        spawned.abort();
+        drop(workspace_lifeline);
+        return Err(anyhow::Error::msg(error.clone()))
+            .context("release managed runtime after durable process attachment");
+    }
+    if !gate_release.expect("checked above") {
+        spawned.abort();
+        drop(workspace_lifeline);
+        anyhow::bail!("managed runtime launched without the mandatory pre-exec start gate");
     }
     Ok(SpawnedRuntime {
         process: Some(spawned),

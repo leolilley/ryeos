@@ -51,6 +51,30 @@ pub enum PullResultsError {
     Other(#[from] anyhow::Error),
 }
 
+impl From<std::io::Error> for PullResultsError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Other(error.into())
+    }
+}
+
+impl From<std::num::TryFromIntError> for PullResultsError {
+    fn from(error: std::num::TryFromIntError) -> Self {
+        Self::Other(error.into())
+    }
+}
+
+impl From<serde_json::Error> for PullResultsError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Other(error.into())
+    }
+}
+
+impl From<lillux::CanonicalJsonError> for PullResultsError {
+    fn from(error: lillux::CanonicalJsonError) -> Self {
+        Self::Other(error.into())
+    }
+}
+
 /// Pull remote execution results and apply to local workspace.
 ///
 /// # Arguments
@@ -319,24 +343,28 @@ async fn fetch_remote_blob_streaming(
                 )
                 .await?;
             if chunk.kind == "missing" {
-                anyhow::bail!("project blob {} is absent", file.blob_hash);
+                return Err(anyhow::anyhow!("project blob {} is absent", file.blob_hash).into());
             }
             if chunk.total_size != Some(file.size) {
-                anyhow::bail!(
+                return Err(anyhow::anyhow!(
                     "project blob {} changed its declared size during transfer",
                     file.blob_hash
-                );
+                )
+                .into());
             }
             let bytes = chunk.decoded_data()?;
             if bytes.is_empty() {
-                anyhow::bail!("project blob transfer made no progress");
+                return Err(anyhow::anyhow!("project blob transfer made no progress").into());
             }
             destination.write_all(&bytes)?;
             offset = offset
                 .checked_add(u64::try_from(bytes.len())?)
                 .ok_or_else(|| anyhow::anyhow!("project blob transfer size overflow"))?;
             if chunk.eof != Some(offset == file.size) {
-                anyhow::bail!("project blob transfer returned a contradictory EOF marker");
+                return Err(anyhow::anyhow!(
+                    "project blob transfer returned a contradictory EOF marker"
+                )
+                .into());
             }
         }
     }
@@ -551,10 +579,10 @@ fn apply_tree_diff(
             }
             // File deleted on remote
             (Some(_), None) => {
-                if local_file.is_some() {
+                if let Some(expected_live) = local_file {
                     planned.push(PlannedChange::Delete {
                         rel_path: path.clone(),
-                        expected_live: local_file.expect("base file was verified above"),
+                        expected_live,
                         expected_blob_hash: base_file
                             .as_ref()
                             .expect("deleted base file was loaded")
@@ -613,9 +641,13 @@ fn apply_tree_diff(
         } = change
         {
             let artifact = scratch_artifact_name(rel_path);
-            let staged_path = staging.directory().descriptor_child_path(&artifact)?;
             local_cas
-                .materialize_blob_to_new_file(blob_hash, &staged_path, *normalized_mode)
+                .materialize_blob_to_new_regular(
+                    blob_hash,
+                    staging.directory(),
+                    &artifact,
+                    *normalized_mode,
+                )
                 .with_context(|| format!("stage file {}", rel_path))
                 .map_err(PullResultsError::Other)?;
         }
@@ -646,12 +678,12 @@ fn apply_tree_diff(
                 )?;
                 if expected_live.is_some() {
                     let artifact = scratch_artifact_name(rel_path);
-                    let backup_path = backup.directory().descriptor_child_path(&artifact)?;
-                    local_cas.materialize_blob_to_new_file(
+                    local_cas.materialize_blob_to_new_regular(
                         expected_blob_hash
                             .as_deref()
                             .expect("existing write has a base blob"),
-                        &backup_path,
+                        backup.directory(),
+                        &artifact,
                         expected_mode.expect("existing write has a base mode"),
                     )?;
                 }
@@ -670,10 +702,10 @@ fn apply_tree_diff(
                     Some(*expected_mode),
                 )?;
                 let artifact = scratch_artifact_name(rel_path);
-                let backup_path = backup.directory().descriptor_child_path(&artifact)?;
-                local_cas.materialize_blob_to_new_file(
+                local_cas.materialize_blob_to_new_regular(
                     expected_blob_hash,
-                    &backup_path,
+                    backup.directory(),
+                    &artifact,
                     *expected_mode,
                 )?;
             }
@@ -1869,60 +1901,6 @@ fn rollback_writes_and_deletes(
     }
 }
 
-#[cfg(test)]
-fn hash_local_regular(path: &Path) -> Result<Option<String>, PullResultsError> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_file() => metadata,
-        Ok(_) => return Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(PullResultsError::Other(error.into())),
-    };
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .ok_or_else(|| PullResultsError::Other(anyhow::anyhow!("local file has no name")))?;
-    let pinned = lillux::PinnedDirectory::open(parent)?
-        .ok_or_else(|| anyhow::anyhow!("local file parent disappeared"))?;
-    let mut source = match pinned.open_regular(name, false)? {
-        Some(source) => source,
-        None => return Ok(None),
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let opened = source.metadata().map_err(anyhow::Error::from)?;
-        if opened.dev() != metadata.dev() || opened.ino() != metadata.ino() {
-            return Err(PullResultsError::LocalConflict(path.display().to_string()));
-        }
-    }
-    use sha2::Digest as _;
-    let mut digest = sha2::Sha256::new();
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = source.read(&mut buffer).map_err(anyhow::Error::from)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        let after = source.metadata().map_err(anyhow::Error::from)?;
-        if after.dev() != metadata.dev()
-            || after.ino() != metadata.ino()
-            || after.size() != metadata.size()
-            || after.mtime() != metadata.mtime()
-            || after.mtime_nsec() != metadata.mtime_nsec()
-            || after.ctime() != metadata.ctime()
-            || after.ctime_nsec() != metadata.ctime_nsec()
-        {
-            return Err(PullResultsError::LocalConflict(path.display().to_string()));
-        }
-    }
-    Ok(Some(format!("{:x}", digest.finalize())))
-}
-
 /// Verify that a result snapshot is a valid descendant of the pushed
 /// snapshot (lineage check).
 ///
@@ -2089,23 +2067,6 @@ fn load_project_file(cas: &CasStore, file_hash: &str) -> Result<ProjectFile, Pul
     )
     .map_err(PullResultsError::Other)?;
     ProjectFile::from_value(&object).map_err(PullResultsError::Other)
-}
-
-#[cfg(test)]
-fn local_normalized_mode(path: &Path) -> Option<u32> {
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    if !metadata.file_type().is_file() {
-        return None;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        Some(ProjectFile::normalize_mode(metadata.permissions().mode()))
-    }
-    #[cfg(not(unix))]
-    {
-        Some(ProjectFile::REGULAR_MODE)
-    }
 }
 
 /// Extract snapshot_hash from a remote execute response.

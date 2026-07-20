@@ -236,11 +236,19 @@ fn run_offline_thread_history_gc_inner(
     };
 
     let operational_roots = if options.sweep_cas {
-        Some(inspect_operational_gc_roots(
+        let mut roots = inspect_operational_gc_roots(
             &runtime_directory,
             &runtime_directory_lock,
             options.dry_run,
-        )?)
+        )?;
+        roots.object_hashes.extend(
+            runtime_db
+                .handoff_cas_object_roots()
+                .context("collect durable handoff CAS roots before offline CAS sweep")?,
+        );
+        roots.object_hashes.sort();
+        roots.object_hashes.dedup();
+        Some(roots)
     } else {
         None
     };

@@ -192,6 +192,47 @@ pub enum WildcardPolicy {
     AllowBootstrap,
 }
 
+const AUTHORIZED_KEY_SCHEMA_VERSION: u32 = 2;
+
+/// Validate the one wire spelling accepted for authenticated RyeOS site
+/// identities. Site ids are protocol identifiers, not display names: keeping
+/// the alphabet deliberately small makes the value byte-stable across TOML,
+/// JSON, signatures, and remote admission claims.
+pub fn validate_canonical_site_id(site_id: &str) -> Result<()> {
+    let Some(name) = site_id.strip_prefix("site:") else {
+        bail!("site id must begin with `site:`");
+    };
+    if name.is_empty() || site_id.len() > 255 {
+        bail!("site id must contain a name and be at most 255 bytes");
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        bail!("site id may contain only ASCII letters, digits, `.`, `_`, and `-` after `site:`");
+    }
+    Ok(())
+}
+
+enum AuthorizedKeySubject<'a> {
+    LocalClient,
+    RemoteNode { origin_site_id: &'a str },
+}
+
+#[derive(Serialize)]
+struct AuthorizedKeyGrantBody<'a> {
+    schema_version: u32,
+    principal_class: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_site_id: Option<&'a str>,
+    fingerprint: &'a str,
+    public_key: String,
+    scopes: &'a [String],
+    label: &'a str,
+    granted_by: &'a str,
+    created_at: &'a str,
+}
+
 /// Write a node-signed authorized-key TOML entry.
 ///
 /// Used by bootstrap (local operator) and the authorize-key handler
@@ -219,6 +260,65 @@ pub fn write_authorized_key_toml(
     node_signing_key: &lillux::crypto::SigningKey,
     wildcard: WildcardPolicy,
 ) -> Result<std::path::PathBuf> {
+    write_authorized_key_toml_for_subject(
+        auth_dir,
+        fingerprint,
+        public_key_b64,
+        scopes,
+        label,
+        granted_by,
+        created_at,
+        node_signing_key,
+        wildcard,
+        AuthorizedKeySubject::LocalClient,
+    )
+}
+
+/// Write a node-signed grant for a remote RyeOS node. Unlike a normal client
+/// grant, this binds the admitted signing key to the node's authenticated site
+/// identity. The binding is consumed by remote execution admission; it never
+/// comes from an execute request body or header.
+#[allow(clippy::too_many_arguments)]
+pub fn write_authorized_remote_node_key_toml(
+    auth_dir: &Path,
+    fingerprint: &str,
+    public_key_b64: &str,
+    scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    origin_site_id: &str,
+    node_signing_key: &lillux::crypto::SigningKey,
+) -> Result<std::path::PathBuf> {
+    validate_canonical_site_id(origin_site_id)
+        .context("remote-node origin_site_id is not canonical")?;
+    write_authorized_key_toml_for_subject(
+        auth_dir,
+        fingerprint,
+        public_key_b64,
+        scopes,
+        label,
+        granted_by,
+        created_at,
+        node_signing_key,
+        WildcardPolicy::Reject,
+        AuthorizedKeySubject::RemoteNode { origin_site_id },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_authorized_key_toml_for_subject(
+    auth_dir: &Path,
+    fingerprint: &str,
+    public_key_b64: &str,
+    scopes: &[String],
+    label: &str,
+    granted_by: &str,
+    created_at: &str,
+    node_signing_key: &lillux::crypto::SigningKey,
+    wildcard: WildcardPolicy,
+    subject: AuthorizedKeySubject<'_>,
+) -> Result<std::path::PathBuf> {
     use std::fs;
 
     // Reject wildcard delegation unless the policy permits it.
@@ -229,29 +329,53 @@ pub fn write_authorized_key_toml(
              Specify explicit scopes instead."
         );
     }
+    for scope in scopes {
+        ryeos_runtime::authorizer::validate_scope_pattern(scope)
+            .map_err(|error| anyhow::anyhow!("authorized-key scope is not canonical: {error}"))?;
+    }
+    if fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("authorized-key fingerprint must be a lowercase SHA-256 digest");
+    }
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(public_key_b64)
+        .context("decode authorized-key public key")?;
+    let key_bytes: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("authorized-key public key must be 32 bytes"))?;
+    let public_key =
+        VerifyingKey::from_bytes(&key_bytes).context("decode authorized-key Ed25519 public key")?;
+    let computed_fingerprint = lillux::signature::compute_fingerprint(&public_key);
+    if computed_fingerprint != fingerprint {
+        bail!(
+            "authorized-key fingerprint does not match its public key: declared {fingerprint}, computed {computed_fingerprint}"
+        );
+    }
+    if granted_by.trim().is_empty() || created_at.trim().is_empty() {
+        bail!("authorized-key audit fields must not be empty");
+    }
 
-    // Build scope list as TOML array
-    let scopes_str = scopes
-        .iter()
-        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    let body = format!(
-        r#"fingerprint = "{fp}"
-public_key = "ed25519:{key_b64}"
-scopes = [{scopes_str}]
-label = "{lbl}"
-granted_by = "{granted_by}"
-created_at = "{ca}"
-"#,
-        fp = fingerprint,
-        key_b64 = public_key_b64,
-        scopes_str = scopes_str,
-        lbl = label.replace('"', "\\\""),
-        granted_by = granted_by,
-        ca = created_at,
-    );
+    let (principal_class, origin_site_id) = match subject {
+        AuthorizedKeySubject::LocalClient => ("local_client", None),
+        AuthorizedKeySubject::RemoteNode { origin_site_id } => {
+            ("remote_node", Some(origin_site_id))
+        }
+    };
+    let body = toml::to_string(&AuthorizedKeyGrantBody {
+        schema_version: AUTHORIZED_KEY_SCHEMA_VERSION,
+        principal_class,
+        origin_site_id,
+        fingerprint,
+        public_key: format!("ed25519:{public_key_b64}"),
+        scopes,
+        label,
+        granted_by,
+        created_at,
+    })
+    .context("serialize authorized-key grant")?;
 
     // Sign with the NODE key
     let signed = lillux::signature::sign_content(&body, node_signing_key, "#", None);
@@ -409,9 +533,58 @@ mod tests {
             .filter(|l| !l.starts_with("# ryeos:signed:"))
             .collect::<Vec<_>>()
             .join("\n");
+        assert!(body.contains("schema_version = 2"));
+        assert!(body.contains("principal_class = \"local_client\""));
+        assert!(!body.contains("origin_site_id"));
         assert!(body.contains(&format!("fingerprint = \"{fp}\"")));
         assert!(body.contains("ryeos.execute.service.remote/admin"));
         assert!(body.contains("test-label"));
         assert!(body.contains("test-granter"));
+    }
+
+    #[test]
+    fn canonical_site_ids_have_one_exact_grammar() {
+        for valid in ["site:node-1", "site:region.nz_2", "site:A"] {
+            validate_canonical_site_id(valid).unwrap();
+        }
+        for invalid in [
+            "node-1",
+            "site:",
+            "site:two words",
+            "site:slash/value",
+            "site:unicode-λ",
+            " site:node",
+        ] {
+            assert!(
+                validate_canonical_site_id(invalid).is_err(),
+                "accepted invalid site id {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn authorized_key_writer_uses_toml_escaping_for_audit_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = test_signing_key();
+        let vk = key.verifying_key();
+        let fp = lillux::sha256_hex(vk.as_bytes());
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        let path = write_authorized_key_toml(
+            dir.path(),
+            &fp,
+            &key_b64,
+            &["ryeos.execute.service.remote/admin".to_string()],
+            "operator \"one\"",
+            "bootstrap\\owner",
+            "2026-01-01T00:00:00Z",
+            &key,
+            WildcardPolicy::Reject,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(path).unwrap();
+        let (_, body) = content.split_once('\n').unwrap();
+        let parsed: toml::Value = toml::from_str(body).unwrap();
+        assert_eq!(parsed["label"].as_str(), Some("operator \"one\""));
+        assert_eq!(parsed["granted_by"].as_str(), Some("bootstrap\\owner"));
     }
 }

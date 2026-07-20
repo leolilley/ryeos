@@ -204,11 +204,19 @@ pub async fn run(
     )
     .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     let admitted_request = root_admission
-        .execution_request(executor_ref.clone(), "inline".to_string(), Value::Null)
+        .execution_request(executor_ref.clone(), "wait".to_string(), Value::Null)
         .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     state
         .threads
-        .create_root_thread_with_id(&child_thread_id, &admitted_request)
+        .create_root_thread_with_id(
+            &child_thread_id,
+            &admitted_request,
+            provenance
+                .project_authority()
+                .clone()
+                .for_child()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
+        )
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &child_thread_id);
@@ -457,6 +465,9 @@ pub async fn run(
             inherited_fds: Vec::new(),
             supervised_status: None,
         };
+        let live_access = provenance
+            .isolation_live_access_authority()
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
         let applied = state
             .isolation
             .apply_with_provenance(
@@ -464,6 +475,7 @@ pub async fn run(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path,
                     project_authority: provenance.isolation_project_authority(),
+                    live_access: live_access.as_ref(),
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: callback_ipc_requested

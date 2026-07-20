@@ -3,7 +3,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
@@ -80,6 +80,7 @@ pub struct RuntimeInfo {
     /// another service response. Internal owners use `get_launch_metadata`.
     #[serde(skip_serializing)]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
+    pub recovery_wait: Option<RecoveryWaitDisposition>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -88,6 +89,7 @@ pub struct RuntimeThreadHistoryDiscardReport {
     pub thread_commands: usize,
     pub hook_dispatch_ledger: usize,
     pub detached_spawn_intents: usize,
+    pub recovery_waits: usize,
     pub thread_launch_claims: usize,
     pub thread_launch_epochs: usize,
     pub execution_workspaces: usize,
@@ -104,6 +106,7 @@ impl RuntimeThreadHistoryDiscardReport {
             + self.thread_commands
             + self.hook_dispatch_ledger
             + self.detached_spawn_intents
+            + self.recovery_waits
             + self.thread_launch_claims
             + self.thread_launch_epochs
             + self.execution_workspaces
@@ -291,12 +294,90 @@ pub enum HookDispatchReservation {
     PendingUnknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DetachedSpawnIntent {
     pub operation_id: String,
     pub parent_thread_id: String,
     pub request_hash: String,
     pub child_thread_id: String,
+    pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
+    pub admitted_launch_capsule_hash: Option<String>,
+    pub launch_metadata: Option<crate::launch_metadata::RuntimeLaunchMetadata>,
+    pub initial_events: Option<Vec<crate::state_store::NewEventRecord>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RecoveryWaitDisposition {
+    pub thread_id: String,
+    pub reason: String,
+    pub detail: String,
+    pub started_at_ms: i64,
+    pub deadline_at_ms: i64,
+}
+
+fn decode_detached_spawn_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<DetachedSpawnIntent> {
+    Ok(DetachedSpawnIntent {
+        operation_id: row.get(0)?,
+        parent_thread_id: row.get(1)?,
+        request_hash: row.get(2)?,
+        child_thread_id: row.get(3)?,
+        child_project_authority: row
+            .get::<_, Option<String>>(4)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        admitted_launch_capsule_hash: row.get(5)?,
+        launch_metadata: row
+            .get::<_, Option<String>>(6)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        initial_events: row
+            .get::<_, Option<String>>(7)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+    })
+}
+
+fn validate_runtime_thread_id(thread_id: &str) -> Result<()> {
+    if thread_id.is_empty()
+        || thread_id.trim() != thread_id
+        || thread_id.len() > 256
+        || thread_id.chars().any(char::is_control)
+    {
+        bail!("runtime thread id is not canonical");
+    }
+    Ok(())
+}
+
+fn validate_bounded_runtime_text(label: &str, value: &str, max_bytes: usize) -> Result<()> {
+    if value.is_empty()
+        || value.trim() != value
+        || value.len() > max_bytes
+        || value.chars().any(char::is_control)
+    {
+        bail!("{label} is not canonical or exceeds {max_bytes} bytes");
+    }
+    Ok(())
 }
 
 /// Validate the closed command vocabulary at the durable database boundary.
@@ -388,6 +469,20 @@ pub struct WorkspaceRecord {
     pub process_identity: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+/// Complete durable evidence published when a constructed workspace becomes
+/// ready. Grouping these same-shaped optional values prevents call-site
+/// argument reordering while preserving the journal's explicit nullable
+/// representation for pre-bind recovery.
+pub struct WorkspaceBinding<'a> {
+    pub workspace_id: &'a str,
+    pub thread_id: &'a str,
+    pub launch_owner: Option<&'a str>,
+    pub backend_id: Option<&'a str>,
+    pub backend_version: Option<&'a str>,
+    pub pinned_root_identities: Option<&'a str>,
+    pub mount_identity: Option<&'a str>,
 }
 
 /// Canonical durable execution-workspace lifecycle. SQLite stores the stable
@@ -502,6 +597,7 @@ pub struct NewFollowWaiter {
     pub frontier_id: Option<String>,
     pub fanout: bool,
     pub expected_children: u32,
+    pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
 }
 
 #[derive(Debug, Clone)]
@@ -556,6 +652,7 @@ pub struct FollowWaiter {
     pub frontier_id: Option<String>,
     pub fanout: bool,
     pub expected_children: u32,
+    pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
     pub children: Vec<FollowWaiterChild>,
     pub phase: String,
     pub created_at_ms: i64,
@@ -653,7 +750,20 @@ CREATE TABLE IF NOT EXISTS detached_spawn_intent (
     parent_thread_id TEXT NOT NULL,
     request_hash TEXT NOT NULL,
     child_thread_id TEXT NOT NULL UNIQUE,
+    child_project_authority TEXT,
+    admitted_launch_capsule_hash TEXT,
+    launch_metadata TEXT,
+    initial_events TEXT,
     created_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS thread_recovery_wait (
+    thread_id TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    started_at_ms INTEGER NOT NULL,
+    deadline_at_ms INTEGER NOT NULL,
+    CHECK (deadline_at_ms > started_at_ms)
 );
 
 CREATE TABLE IF NOT EXISTS thread_launch_claim (
@@ -702,7 +812,8 @@ CREATE TABLE IF NOT EXISTS follow_waiter (
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL,
     fanout INTEGER NOT NULL DEFAULT 0,
-    expected_children INTEGER NOT NULL DEFAULT 1
+    expected_children INTEGER NOT NULL DEFAULT 1,
+    child_project_authority TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_follow_waiter_successor
@@ -1009,7 +1120,66 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         not_null: true,
                     },
                     sqlite_schema::ColumnSpec {
+                        name: "child_project_authority",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "admitted_launch_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_metadata",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "initial_events",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
                         name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "thread_recovery_wait",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reason",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "detail",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "started_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "deadline_at_ms",
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
@@ -1237,6 +1407,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "INTEGER",
                         pk: false,
                         not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "child_project_authority",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
                     },
                 ],
             },
@@ -1515,9 +1691,7 @@ fn validate_current_launch_metadata(raw: &str) -> Result<()> {
     }
     let decoded: RuntimeLaunchMetadata =
         serde_json::from_value(value.clone()).context("validate current launch metadata")?;
-    if let Some(resume) = &decoded.resume_context {
-        resume.authoritative_project_identity()?;
-    }
+    decoded.validate()?;
     let canonical =
         lillux::canonical_json(&value).context("canonicalize current launch metadata")?;
     if canonical != raw {
@@ -1529,6 +1703,7 @@ fn validate_current_launch_metadata(raw: &str) -> Result<()> {
 }
 
 fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<String> {
+    metadata.validate()?;
     let value = serde_json::to_value(metadata).context("encode current launch metadata")?;
     lillux::canonical_json(&value).context("canonicalize current launch metadata")
 }
@@ -1552,11 +1727,12 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
             "SELECT thread_id,launch_metadata FROM thread_runtime
              WHERE launch_metadata IS NOT NULL",
         )?;
-        statement
+        let rows = statement
             .query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
-            .collect::<rusqlite::Result<Vec<_>>>()?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
     };
     for (thread_id, raw) in rows {
         validate_current_launch_metadata(&raw)
@@ -1844,6 +2020,46 @@ fn validate_detached_spawn_intent(
     Ok(())
 }
 
+fn validate_detached_spawn_intent_record(intent: &DetachedSpawnIntent) -> Result<()> {
+    validate_detached_spawn_intent(
+        &intent.operation_id,
+        &intent.parent_thread_id,
+        &intent.request_hash,
+        &intent.child_thread_id,
+    )?;
+    if let Some(authority) = &intent.child_project_authority {
+        authority.validate()?;
+    }
+    let sealed = intent.launch_metadata.is_some();
+    let sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
+        && intent.launch_metadata.is_some()
+        && intent.initial_events.is_some()
+        && intent.child_project_authority.is_some();
+    let unsealed_fields_empty = intent.admitted_launch_capsule_hash.is_none()
+        && intent.launch_metadata.is_none()
+        && intent.initial_events.is_none();
+    if (sealed && !sealed_fields_complete) || (!sealed && !unsealed_fields_empty) {
+        bail!(
+            "detached operation `{}` has an incomplete sealed authority",
+            intent.operation_id
+        );
+    }
+    if let Some(metadata) = &intent.launch_metadata {
+        metadata.validate()?;
+        let expected = metadata
+            .admitted_launch_capsule()?
+            .ok_or_else(|| anyhow!("detached operation has no admitted launch capsule"))?
+            .content_hash()?;
+        if intent.admitted_launch_capsule_hash.as_deref() != Some(expected.as_str()) {
+            bail!(
+                "detached operation `{}` admitted capsule hash is not canonical",
+                intent.operation_id
+            );
+        }
+    }
+    Ok(())
+}
+
 fn decode_completed_hook_response(
     dispatch_key: &str,
     response_json: Option<&[u8]>,
@@ -1917,6 +2133,7 @@ impl RuntimeDb {
                 thread_commands: count(&self.conn, "thread_commands")?,
                 hook_dispatch_ledger: count(&self.conn, "hook_dispatch_ledger")?,
                 detached_spawn_intents: count(&self.conn, "detached_spawn_intent")?,
+                recovery_waits: count(&self.conn, "thread_recovery_wait")?,
                 thread_launch_claims: count(&self.conn, "thread_launch_claim")?,
                 thread_launch_epochs: count(&self.conn, "thread_launch_epoch")?,
                 execution_workspaces: count(&self.conn, "execution_workspace")?,
@@ -1941,6 +2158,7 @@ impl RuntimeDb {
             seat_leases: conn.execute("DELETE FROM seat_lease", [])?,
             hook_dispatch_ledger: conn.execute("DELETE FROM hook_dispatch_ledger", [])?,
             detached_spawn_intents: conn.execute("DELETE FROM detached_spawn_intent", [])?,
+            recovery_waits: conn.execute("DELETE FROM thread_recovery_wait", [])?,
             thread_runtime: conn.execute("DELETE FROM thread_runtime", [])?,
         };
         conn.execute(
@@ -2029,6 +2247,7 @@ impl RuntimeDb {
         parent_thread_id: &str,
         request_hash: &str,
         proposed_child_thread_id: &str,
+        child_project_authority: Option<&ryeos_state::objects::ExecutionProjectAuthority>,
     ) -> Result<String> {
         validate_detached_spawn_intent(
             operation_id,
@@ -2039,58 +2258,304 @@ impl RuntimeDb {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO detached_spawn_intent(
-                operation_id, parent_thread_id, request_hash, child_thread_id, created_at_ms
-             ) VALUES(?1, ?2, ?3, ?4, ?5)
+                operation_id, parent_thread_id, request_hash, child_thread_id,
+                child_project_authority, created_at_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(operation_id) DO NOTHING",
             params![
                 operation_id,
                 parent_thread_id,
                 request_hash,
                 proposed_child_thread_id,
+                child_project_authority
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 lillux::time::timestamp_millis(),
             ],
         )?;
-        let (stored_parent, stored_request, child_thread_id): (String, String, String) = tx
-            .query_row(
-                "SELECT parent_thread_id, request_hash, child_thread_id
+        let (stored_parent, stored_request, child_thread_id, stored_authority): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT parent_thread_id, request_hash, child_thread_id, child_project_authority
                    FROM detached_spawn_intent WHERE operation_id=?1",
-                params![operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )?;
+            params![operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
         if stored_parent != parent_thread_id || stored_request != request_hash {
             bail!(
                 "detached operation `{operation_id}` was reused with different parent or request authority"
+            );
+        }
+        let stored_authority = stored_authority
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?;
+        if child_project_authority.is_some() && stored_authority.as_ref() != child_project_authority
+        {
+            bail!(
+                "detached operation `{operation_id}` was reused with different project authority"
             );
         }
         tx.commit()?;
         Ok(child_thread_id)
     }
 
+    /// Bind the project authority selected for a previously-reserved detached
+    /// operation. Reservation and authority selection are deliberately two
+    /// phases: the stable child identity is durable before an explicit project
+    /// capture starts, while the capture itself is not authoritative until its
+    /// exact snapshot authority is sealed here. Concurrent retries may bind the
+    /// same value; a different value is an authority conflict.
+    pub fn bind_detached_spawn_project_authority(
+        &self,
+        operation_id: &str,
+        child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<()> {
+        child_project_authority.validate()?;
+        let encoded = serde_json::to_string(child_project_authority)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE detached_spawn_intent
+                SET child_project_authority=?2
+              WHERE operation_id=?1 AND child_project_authority IS NULL",
+            params![operation_id, encoded],
+        )?;
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT child_project_authority FROM detached_spawn_intent WHERE operation_id=?1",
+                params![operation_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
+        let stored: ryeos_state::objects::ExecutionProjectAuthority = stored
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .ok_or_else(|| {
+                anyhow!("detached operation `{operation_id}` project authority was not bound")
+            })?;
+        if stored != *child_project_authority {
+            bail!("detached operation `{operation_id}` was bound to different project authority");
+        }
+        debug_assert!(changed <= 1);
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn seal_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+        child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+        admitted_launch_capsule_hash: &str,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        initial_events: &[crate::state_store::NewEventRecord],
+    ) -> Result<()> {
+        child_project_authority.validate()?;
+        launch_metadata.validate()?;
+        validate_sha256(
+            "detached admitted_launch_capsule_hash",
+            admitted_launch_capsule_hash,
+        )?;
+        let expected_capsule_hash = launch_metadata
+            .admitted_launch_capsule()?
+            .ok_or_else(|| anyhow!("detached sealed launch has no admitted capsule"))?
+            .content_hash()?;
+        if admitted_launch_capsule_hash != expected_capsule_hash {
+            bail!(
+                "detached admitted capsule hash mismatch: expected {expected_capsule_hash}, got {admitted_launch_capsule_hash}"
+            );
+        }
+        let authority = serde_json::to_string(child_project_authority)?;
+        let metadata = serde_json::to_string(launch_metadata)?;
+        let events = serde_json::to_string(initial_events)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE detached_spawn_intent
+             SET child_project_authority=?2, admitted_launch_capsule_hash=?3,
+                 launch_metadata=?4, initial_events=?5
+             WHERE operation_id=?1 AND launch_metadata IS NULL",
+            params![
+                operation_id,
+                authority,
+                admitted_launch_capsule_hash,
+                metadata,
+                events
+            ],
+        )?;
+        let persisted = tx
+            .query_row(
+                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                        child_project_authority, admitted_launch_capsule_hash,
+                        launch_metadata, initial_events
+                 FROM detached_spawn_intent WHERE operation_id=?1",
+                params![operation_id],
+                decode_detached_spawn_intent,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
+        if persisted
+            .child_project_authority
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?
+            .as_deref()
+            != Some(authority.as_str())
+            || persisted.admitted_launch_capsule_hash.as_deref()
+                != Some(admitted_launch_capsule_hash)
+            || persisted
+                .launch_metadata
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+                .as_deref()
+                != Some(metadata.as_str())
+            || persisted
+                .initial_events
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+                .as_deref()
+                != Some(events.as_str())
+        {
+            bail!("detached operation `{operation_id}` was sealed with different launch authority");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn get_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+    ) -> Result<Option<DetachedSpawnIntent>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                        child_project_authority, admitted_launch_capsule_hash,
+                        launch_metadata, initial_events
+                   FROM detached_spawn_intent WHERE operation_id=?1",
+                params![operation_id],
+                decode_detached_spawn_intent,
+            )
+            .optional()?;
+        if let Some(intent) = &row {
+            validate_detached_spawn_intent_record(intent)?;
+        }
+        Ok(row)
+    }
+
     pub fn detached_spawn_intents(&self) -> Result<Vec<DetachedSpawnIntent>> {
         let mut statement = self.conn.prepare(
-            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id
+            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                    child_project_authority, admitted_launch_capsule_hash,
+                    launch_metadata, initial_events
                FROM detached_spawn_intent ORDER BY created_at_ms, operation_id",
         )?;
-        statement
-            .query_map([], |row| {
-                Ok(DetachedSpawnIntent {
-                    operation_id: row.get(0)?,
-                    parent_thread_id: row.get(1)?,
-                    request_hash: row.get(2)?,
-                    child_thread_id: row.get(3)?,
-                })
-            })?
+        let intents = statement
+            .query_map([], decode_detached_spawn_intent)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(anyhow::Error::from)?;
         for intent in &intents {
-            validate_detached_spawn_intent(
-                &intent.operation_id,
-                &intent.parent_thread_id,
-                &intent.request_hash,
-                &intent.child_thread_id,
-            )?;
+            validate_detached_spawn_intent_record(intent)?;
         }
         Ok(intents)
+    }
+
+    pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM detached_spawn_intent
+             WHERE operation_id=?1 AND launch_metadata IS NULL",
+            params![operation_id],
+        )? > 0)
+    }
+
+    /// CAS objects referenced by durable handoff intents before their child
+    /// rows become authoritative chain roots. GC must retain these roots
+    /// for the entire intent lifetime, including crash recovery between
+    /// authority sealing and child birth.
+    pub fn handoff_cas_object_roots(&self) -> Result<Vec<String>> {
+        let mut roots = BTreeSet::new();
+        for intent in self.detached_spawn_intents()? {
+            if let Some(hash) = intent.admitted_launch_capsule_hash {
+                roots.insert(hash);
+            }
+            if let Some(hash) = intent
+                .child_project_authority
+                .as_ref()
+                .and_then(|authority| authority.base_snapshot_projection())
+            {
+                roots.insert(hash.to_string());
+            }
+        }
+        for waiter in self.list_follow_waiters()? {
+            if let Some(hash) = waiter
+                .child_project_authority
+                .as_ref()
+                .and_then(|authority| authority.base_snapshot_projection())
+            {
+                roots.insert(hash.to_string());
+            }
+        }
+        Ok(roots.into_iter().collect())
+    }
+
+    pub fn wait_for_project_authority(
+        &self,
+        thread_id: &str,
+        reason: &str,
+        detail: &str,
+        now_ms: i64,
+        deadline_at_ms: i64,
+    ) -> Result<RecoveryWaitDisposition> {
+        validate_runtime_thread_id(thread_id)?;
+        validate_bounded_runtime_text("recovery wait reason", reason, 128)?;
+        validate_bounded_runtime_text("recovery wait detail", detail, 4096)?;
+        if deadline_at_ms <= now_ms {
+            bail!("recovery wait deadline must be later than its start");
+        }
+        self.conn.execute(
+            "INSERT INTO thread_recovery_wait(
+                thread_id, reason, detail, started_at_ms, deadline_at_ms
+             ) VALUES(?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(thread_id) DO UPDATE SET
+                reason=excluded.reason,
+                detail=excluded.detail",
+            params![thread_id, reason, detail, now_ms, deadline_at_ms],
+        )?;
+        self.recovery_wait(thread_id)?
+            .ok_or_else(|| anyhow!("recovery wait disappeared for thread {thread_id}"))
+    }
+
+    pub fn recovery_wait(&self, thread_id: &str) -> Result<Option<RecoveryWaitDisposition>> {
+        self.conn
+            .query_row(
+                "SELECT thread_id, reason, detail, started_at_ms, deadline_at_ms
+                   FROM thread_recovery_wait WHERE thread_id=?1",
+                params![thread_id],
+                |row| {
+                    Ok(RecoveryWaitDisposition {
+                        thread_id: row.get(0)?,
+                        reason: row.get(1)?,
+                        detail: row.get(2)?,
+                        started_at_ms: row.get(3)?,
+                        deadline_at_ms: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(anyhow::Error::from)
+    }
+
+    pub fn clear_recovery_wait(&self, thread_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM thread_recovery_wait WHERE thread_id=?1",
+            params![thread_id],
+        )?;
+        Ok(())
     }
 
     /// Seal the exact callback response for a previously reserved dispatch.
@@ -2914,6 +3379,10 @@ impl RuntimeDb {
                     params![&thread_id],
                 )?;
                 deleted += self.conn.execute(
+                    "DELETE FROM thread_recovery_wait WHERE thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
                     "DELETE FROM thread_commands WHERE thread_id=?1",
                     params![&thread_id],
                 )?;
@@ -2995,7 +3464,7 @@ impl RuntimeDb {
         let existing = self
             .conn
             .query_row(
-                "SELECT pid, pgid, process_identity, stop_requested_at_ms
+                "SELECT pid, pgid, process_identity, stop_requested_at_ms, launch_metadata
                    FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
@@ -3004,6 +3473,7 @@ impl RuntimeDb {
                         row.get::<_, Option<i64>>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
@@ -3011,7 +3481,29 @@ impl RuntimeDb {
             .ok_or_else(|| {
                 anyhow::anyhow!("thread_runtime row missing for thread_id: {thread_id}")
             })?;
-        let (existing_pid, existing_pgid, existing_identity, stop_requested_at_ms) = existing;
+        let (
+            existing_pid,
+            existing_pgid,
+            existing_identity,
+            stop_requested_at_ms,
+            existing_launch_metadata,
+        ) = existing;
+        let existing_launch_metadata = existing_launch_metadata
+            .map(|raw| {
+                validate_current_launch_metadata(&raw)?;
+                serde_json::from_str::<RuntimeLaunchMetadata>(&raw)
+                    .context("decode authoritative launch metadata during process attach")
+            })
+            .transpose()?;
+        let merged_launch_metadata = match existing_launch_metadata {
+            Some(authoritative) if launch_metadata.is_empty() => Some(authoritative),
+            Some(authoritative) => Some(authoritative.merge_for_process_attach(launch_metadata)?),
+            None if launch_metadata.is_empty() => None,
+            None => {
+                launch_metadata.validate()?;
+                Some(launch_metadata.clone())
+            }
+        };
         if let Some(existing_identity) = existing_identity {
             let existing_identity =
                 serde_json::from_str::<ExecutionProcessIdentity>(&existing_identity)
@@ -3027,8 +3519,10 @@ impl RuntimeDb {
             // intentionally left empty, but it cannot change process identity.
             // Once a stop is tombstoned, keep the exact repeat idempotent but do
             // not mutate launch metadata during cancellation.
-            if stop_requested_at_ms.is_none() && !launch_metadata.is_empty() {
-                let lm_json = encode_current_launch_metadata(launch_metadata)
+            if let (None, Some(merged_launch_metadata)) =
+                (stop_requested_at_ms, merged_launch_metadata.as_ref())
+            {
+                let lm_json = encode_current_launch_metadata(merged_launch_metadata)
                     .context("failed to encode launch_metadata")?;
                 self.conn.execute(
                     "UPDATE thread_runtime SET launch_metadata = ?2 WHERE thread_id = ?1",
@@ -3048,7 +3542,7 @@ impl RuntimeDb {
         // thread/pid, so its `launch_metadata` is the serde default (empty); do
         // NOT let that clobber metadata already seeded on the row at spawn
         // (resume context / continuation spec). Update only pid/pgid in that case.
-        if launch_metadata.is_empty() {
+        let Some(merged_launch_metadata) = merged_launch_metadata else {
             let updated = self.conn.execute(
                 "UPDATE thread_runtime
                     SET pid = ?2, pgid = ?3, process_identity = ?4
@@ -3061,8 +3555,8 @@ impl RuntimeDb {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
             }
             return Ok(());
-        }
-        let lm_json = encode_current_launch_metadata(launch_metadata)
+        };
+        let lm_json = encode_current_launch_metadata(&merged_launch_metadata)
             .context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime
@@ -3298,6 +3792,7 @@ impl RuntimeDb {
                 "incomplete durable stop tombstone for thread {thread_id}: timestamp and intent must be present together"
             );
         }
+        let recovery_wait = self.recovery_wait(thread_id)?;
         Ok(Some(RuntimeInfo {
             pid,
             pgid,
@@ -3306,6 +3801,7 @@ impl RuntimeDb {
             stop_requested_at_ms,
             stop_intent,
             launch_metadata,
+            recovery_wait,
         }))
     }
 
@@ -3604,16 +4100,16 @@ impl RuntimeDb {
         Ok(())
     }
 
-    pub fn bind_workspace(
-        &self,
-        workspace_id: &str,
-        thread_id: &str,
-        launch_owner: Option<&str>,
-        backend_id: Option<&str>,
-        backend_version: Option<&str>,
-        pinned_root_identities: Option<&str>,
-        mount_identity: Option<&str>,
-    ) -> Result<()> {
+    pub fn bind_workspace(&self, binding: WorkspaceBinding<'_>) -> Result<()> {
+        let WorkspaceBinding {
+            workspace_id,
+            thread_id,
+            launch_owner,
+            backend_id,
+            backend_version,
+            pinned_root_identities,
+            mount_identity,
+        } = binding;
         let changed = self.conn.execute(
             "UPDATE execution_workspace
                 SET backend_id=?4,
@@ -3672,12 +4168,18 @@ impl RuntimeDb {
         );
         let now = lillux::time::timestamp_millis();
         let mut values: Vec<rusqlite::types::Value> = vec![
-            workspace_id.into(),
-            next.as_str().into(),
-            process_identity.map_or(rusqlite::types::Value::Null, Into::into),
+            workspace_id.to_owned().into(),
+            next.as_str().to_owned().into(),
+            process_identity.map_or(rusqlite::types::Value::Null, |value| {
+                value.to_owned().into()
+            }),
             now.into(),
         ];
-        values.extend(expected.iter().map(|value| value.as_str().into()));
+        values.extend(
+            expected
+                .iter()
+                .map(|value| rusqlite::types::Value::from(value.as_str().to_owned())),
+        );
         let changed = self
             .conn
             .execute(&sql, rusqlite::params_from_iter(values))?;
@@ -3710,14 +4212,20 @@ impl RuntimeDb {
                 AND state IN ({placeholders})"
         );
         let mut values: Vec<rusqlite::types::Value> = vec![
-            workspace_id.into(),
-            next.as_str().into(),
-            process_identity.map_or(rusqlite::types::Value::Null, Into::into),
+            workspace_id.to_owned().into(),
+            next.as_str().to_owned().into(),
+            process_identity.map_or(rusqlite::types::Value::Null, |value| {
+                value.to_owned().into()
+            }),
             lillux::time::timestamp_millis().into(),
-            thread_id.into(),
-            launch_owner.into(),
+            thread_id.to_owned().into(),
+            launch_owner.to_owned().into(),
         ];
-        values.extend(expected.iter().map(|value| value.as_str().into()));
+        values.extend(
+            expected
+                .iter()
+                .map(|value| rusqlite::types::Value::from(value.as_str().to_owned())),
+        );
         let changed = self
             .conn
             .execute(&sql, rusqlite::params_from_iter(values))?;
@@ -3814,6 +4322,11 @@ impl RuntimeDb {
         }
         resume.original_snapshot_hash = Some(snapshot_hash.to_string());
         resume.original_pushed_head_ref = None;
+        resume.project_authority = resume.project_authority.transition_operational_generation(
+            ryeos_state::objects::OperationalProjectAuthorityTransition::SealPinnedCowCheckpoint {
+                snapshot_hash,
+            },
+        )?;
         let launch_metadata_json = encode_current_launch_metadata(&launch_metadata)?;
         let workspace_updated = tx.execute(
             "UPDATE execution_workspace
@@ -4417,8 +4930,9 @@ impl RuntimeDb {
             "INSERT INTO follow_waiter (
                  follow_key, parent_thread_id, parent_chain_root_id,
                  follow_node, graph_run_id, step_count, frontier_id,
-                 fanout, expected_children, phase, created_at_ms, updated_at_ms
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'reserved', ?10, ?10)
+                 fanout, expected_children, child_project_authority,
+                 phase, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'reserved', ?11, ?11)
              ON CONFLICT(follow_key) DO NOTHING",
             params![
                 seed.follow_key,
@@ -4430,6 +4944,10 @@ impl RuntimeDb {
                 seed.frontier_id,
                 seed.fanout,
                 seed.expected_children,
+                seed.child_project_authority
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
                 now,
             ],
         )?;
@@ -4442,6 +4960,8 @@ impl RuntimeDb {
             || existing.frontier_id != seed.frontier_id
             || existing.fanout != seed.fanout
             || existing.expected_children != seed.expected_children
+            || (seed.child_project_authority.is_some()
+                && existing.child_project_authority != seed.child_project_authority)
         {
             bail!(
                 "follow reservation conflict for follow_key {}: seed does not match the persisted row",
@@ -4449,6 +4969,25 @@ impl RuntimeDb {
             );
         }
         Ok(existing)
+    }
+
+    pub fn bind_follow_project_authority(
+        &self,
+        follow_key: &str,
+        authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<()> {
+        authority.validate()?;
+        let encoded = serde_json::to_string(authority)?;
+        self.conn.execute(
+            "UPDATE follow_waiter SET child_project_authority=?2, updated_at_ms=?3
+             WHERE follow_key=?1 AND child_project_authority IS NULL",
+            params![follow_key, encoded, lillux::time::timestamp_millis()],
+        )?;
+        let persisted = self.require_follow_waiter(follow_key)?;
+        if persisted.child_project_authority.as_ref() != Some(authority) {
+            bail!("follow waiter {follow_key} was bound to different project authority");
+        }
+        Ok(())
     }
 
     /// Record the spawned child's identities. Allowed only when unset (first
@@ -5265,7 +5804,7 @@ impl RuntimeDb {
 
 const FOLLOW_WAITER_COLUMNS: &str = "follow_key, parent_thread_id, parent_chain_root_id, \
      parent_successor_thread_id, follow_node, graph_run_id, step_count, frontier_id, \
-     fanout, expected_children, phase, created_at_ms, updated_at_ms";
+     fanout, expected_children, child_project_authority, phase, created_at_ms, updated_at_ms";
 
 const FOLLOW_WAITER_SUMMARY_QUERY_BATCH: usize = 500;
 const FOLLOW_WAITER_SUMMARY_COLUMNS: &str = "fw.follow_key, fw.parent_thread_id, \
@@ -5283,6 +5822,17 @@ const FOLLOW_WAITER_SUMMARY_COLUMNS: &str = "fw.follow_key, fw.parent_thread_id,
      fw.created_at_ms";
 
 fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWaiter> {
+    let child_project_authority = row
+        .get::<_, Option<String>>(10)?
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                10,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
     Ok(FollowWaiter {
         follow_key: row.get(0)?,
         parent_thread_id: row.get(1)?,
@@ -5294,10 +5844,11 @@ fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWai
         frontier_id: row.get(7)?,
         fanout: row.get(8)?,
         expected_children: row.get(9)?,
+        child_project_authority,
         children: Vec::new(),
-        phase: row.get(10)?,
-        created_at_ms: row.get(11)?,
-        updated_at_ms: row.get(12)?,
+        phase: row.get(11)?,
+        created_at_ms: row.get(12)?,
+        updated_at_ms: row.get(13)?,
     })
 }
 
@@ -5687,6 +6238,7 @@ mod tests {
                 "T-parent",
                 &request_hash,
                 "T-child-first",
+                None,
             )
             .unwrap(),
             "T-child-first"
@@ -5697,6 +6249,7 @@ mod tests {
                 "T-parent",
                 &request_hash,
                 "T-child-retry",
+                None,
             )
             .unwrap(),
             "T-child-first"
@@ -5707,6 +6260,7 @@ mod tests {
                 "T-parent",
                 &"f".repeat(64),
                 "T-child-retry",
+                None,
             )
             .is_err());
     }
@@ -7040,7 +7594,13 @@ mod tests {
         // The live claim still belongs to the first caller.
         let claim = db.get_launch_claim("t1").unwrap().expect("claim present");
         assert_eq!(claim.claim_id, "c1");
-        assert_eq!(claim.claimed_by, "daemon-a");
+        assert_eq!(claim.owner.thread_id, "t1");
+        assert_eq!(claim.owner.unpredictable_nonce, "c1");
+        assert_eq!(claim.owner.daemon_generation_id, "daemon-a");
+        assert_eq!(
+            claim.claimed_by,
+            lillux::canonical_json(&serde_json::to_value(&claim.owner).unwrap()).unwrap()
+        );
     }
 
     #[test]
@@ -7057,7 +7617,13 @@ mod tests {
         );
         let claim = db.get_launch_claim("t1").unwrap().expect("claim present");
         assert_eq!(claim.claim_id, "c1");
-        assert_eq!(claim.claimed_by, "daemon-a");
+        assert_eq!(claim.owner.thread_id, "t1");
+        assert_eq!(claim.owner.unpredictable_nonce, "c1");
+        assert_eq!(claim.owner.daemon_generation_id, "daemon-a");
+        assert_eq!(
+            claim.claimed_by,
+            lillux::canonical_json(&serde_json::to_value(&claim.owner).unwrap()).unwrap()
+        );
         assert_eq!(claim.lease_expires_at_ms, i64::MAX);
     }
 
@@ -7091,6 +7657,7 @@ mod tests {
             frontier_id: None,
             fanout: false,
             expected_children: 1,
+            child_project_authority: None,
         }
     }
 

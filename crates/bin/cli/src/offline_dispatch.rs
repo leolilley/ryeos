@@ -67,7 +67,7 @@ pub async fn try_offline_dispatch(
     // replacement generation.
     let _generation_guard = isolation
         .begin_registered_generation_operation()
-        .map_err(local_err)?;
+        .map_err(|error| local_err(anyhow::Error::new(error)))?;
     let node_trust = isolation
         .registered_generation_node_trust()
         .ok_or_else(|| CliError::Local {
@@ -610,6 +610,7 @@ fn exec_tool(
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: Path::new(project_path),
                 project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+                live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
                 daemon_socket_path: None,

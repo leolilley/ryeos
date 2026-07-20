@@ -675,24 +675,21 @@ pub fn write_authorized_key_with_scopes(
         .join("node")
         .join("auth")
         .join("authorized_keys");
-    fs::create_dir_all(&auth_dir)?;
-
     let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
-    let scopes_toml = scopes
-        .iter()
-        .map(|s| format!("\"{s}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let toml_body = format!(
-        r#"fingerprint = "{fp}"
-public_key = "ed25519:{key_b64}"
-scopes = [{scopes_toml}]
-label = "fast-fixture-authorized-key"
-"#
-    );
-    let signed =
-        lillux::signature::sign_content_at(&toml_body, signer_sk, "#", None, FAST_FIXTURE_TIME);
-    fs::write(auth_dir.join(format!("{fp}.toml")), signed)?;
+    ryeos_app::identity::write_authorized_key_toml(
+        &auth_dir,
+        &fp,
+        &key_b64,
+        &scopes
+            .iter()
+            .map(|scope| (*scope).to_string())
+            .collect::<Vec<_>>(),
+        "fast-fixture-authorized-key",
+        &lillux::signature::compute_fingerprint(&signer_sk.verifying_key()),
+        FAST_FIXTURE_TIME,
+        signer_sk,
+        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+    )?;
     Ok(())
 }
 

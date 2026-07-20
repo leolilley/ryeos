@@ -134,22 +134,22 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
              runtime.spawn_follow_child requires a checkpoint-resumable parent"
         );
     }
-    let launch_snapshot_hash = if cap.provenance.captured_snapshot_hash().is_some() {
-        Some(
-            parent_launch_metadata
-                .as_ref()
-                .and_then(|metadata| metadata.resume_context.as_ref())
-                .and_then(ResumeContext::durable_project_snapshot_hash)
-                .map(str::to_owned)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "follow: parent {parent_thread_id} owns an ephemeral workspace but has no durable project snapshot"
-                    )
-                })?,
-        )
-    } else {
-        None
-    };
+    let parent_lifecycle_authority = parent_launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.resume_context.as_ref())
+        .map(|resume| resume.lifecycle_authority)
+        .ok_or_else(|| {
+            anyhow::anyhow!("follow: parent {parent_thread_id} has no sealed lifecycle authority")
+        })?;
+    if !parent_lifecycle_authority.permits_durable_handoff() {
+        bail!("follow: request-scoped execution cannot suspend or spawn a durable cohort");
+    }
+    let parent_project_authority = cap
+        .provenance
+        .execution_project_authority(&cap.effective_caps)?;
+    let parent_snapshot_hash = parent_project_authority
+        .base_snapshot_projection()
+        .map(str::to_owned);
     let follow_key = format!(
         "{parent_thread_id}/{}/{}/{}",
         params.graph_run_id, params.follow_node, params.step_count
@@ -167,9 +167,12 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    // ── Admission (authorize before resource resolution; before any mutation) ─
-    let mut resolved_children = Vec::with_capacity(children.len());
-    for (item_index, child) in children.iter().enumerate() {
+    // ── Admission ceiling (authorize before capture or resolution) ────────
+    // Keep this pass deliberately free of item/runtime resolution. A
+    // pin-at-spawn cohort must select its one immutable generation before any
+    // sibling observes project content.
+    let mut canonical_children = Vec::with_capacity(children.len());
+    for child in &children {
         crate::execution::launch_preparation::validate_ref_bindings(&child.ref_bindings)?;
         let child_ref = CanonicalRef::parse(&child.item_ref)
             .with_context(|| format!("follow: invalid child item_ref '{}'", child.item_ref))?;
@@ -209,6 +212,157 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 );
             }
         }
+        canonical_children.push(child_ref);
+    }
+
+    // Reserve the logical cohort before an explicit capture. Once the exact
+    // child authority is bound below, every retry consumes it and therefore
+    // cannot recapture a newer live generation.
+    let waiter = state.state_store.reserve_follow(&NewFollowWaiter {
+        follow_key: follow_key.clone(),
+        parent_thread_id: parent_thread_id.clone(),
+        parent_chain_root_id: parent.chain_root_id.clone(),
+        follow_node: params.follow_node.clone(),
+        graph_run_id: params.graph_run_id.clone(),
+        step_count: params.step_count,
+        frontier_id: params.frontier_id.clone(),
+        fanout,
+        expected_children: u32::try_from(children.len()).context("follow: too many children")?,
+        child_project_authority: None,
+    })?;
+    if waiter.expected_children as usize != children.len() {
+        bail!("follow: persisted child count conflicts with re-driven cohort");
+    }
+    let re_drive = waiter.phase != follow_phase::RESERVED;
+    if !re_drive {
+        enforce_follow_nesting_depth(state, &parent.chain_root_id)?;
+    }
+
+    let mut captured_live_generation = None;
+    let mut sealed_cow_generation = None;
+    let child_project_authority = if let Some(authority) = waiter.child_project_authority.clone() {
+        authority
+    } else {
+        let mut selected = match parent_project_authority.child_policy() {
+            ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit => {
+                parent_project_authority.clone().for_child()?
+            }
+            ryeos_state::objects::ChildProjectAuthorityPolicy::PinAtSpawn { realization } => {
+                let snapshot_hash = if let Some(snapshot_hash) = parent_snapshot_hash.as_deref() {
+                    snapshot_hash.to_string()
+                } else {
+                    let generation = crate::execution::run_bounded_project_capture(|| {
+                        crate::execution::capture_live_project_snapshot(
+                            state,
+                            cap.provenance.original_project_path(),
+                            &parent.origin_site_id,
+                            "follow-pin-at-spawn",
+                        )
+                    })
+                    .await?;
+                    let snapshot_hash = generation.snapshot_hash().to_string();
+                    captured_live_generation = Some(generation);
+                    snapshot_hash
+                };
+                crate::execution::derive_pinned_child_authority(
+                    &parent_project_authority,
+                    snapshot_hash,
+                    realization,
+                    &cap.effective_caps,
+                )?
+            }
+        };
+
+        // A pinned-COW parent's operational layer is newer than its immutable
+        // lower. Freeze and select it before child resolution, rather than
+        // resolving against the lower and launching against a later overlay.
+        if matches!(
+            &parent_project_authority,
+            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+                ..
+            }
+        ) {
+            let base = parent_snapshot_hash
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("follow: pinned-COW parent has no base snapshot"))?;
+            let generation = crate::execution::run_bounded_project_capture(|| {
+                crate::execution::seal_callback_workspace_generation(
+                    state,
+                    &parent_thread_id,
+                    cap.provenance.effective_path(),
+                    base,
+                )
+            })
+            .await?;
+            crate::execution::ensure_control_tree_unchanged(
+                state,
+                base,
+                generation.snapshot_hash(),
+            )?;
+            selected = selected.transition_operational_generation(
+                ryeos_state::objects::OperationalProjectAuthorityTransition::SelectPinnedChildGeneration {
+                    snapshot_hash: generation.snapshot_hash(),
+                },
+            )?;
+            sealed_cow_generation = Some(generation);
+        }
+
+        state
+            .state_store
+            .bind_follow_project_authority(&follow_key, &selected)?;
+        // The bound waiter is now the durable GC root for this generation.
+        if let Some(generation) = captured_live_generation.take() {
+            generation.publish()?;
+        }
+        if let Some(generation) = sealed_cow_generation.take() {
+            generation.publish()?;
+        }
+        selected
+    };
+    let child_snapshot_hash = child_project_authority
+        .base_snapshot_projection()
+        .map(str::to_owned);
+    // Child pin-at-spawn selects only the child's immutable generation. The
+    // parent's continuation advances solely when the parent itself is a COW
+    // generation whose operational overlay was frozen above.
+    let parent_successor_operational_generation = parent_successor_operational_generation(
+        &parent_project_authority,
+        &child_project_authority,
+    );
+
+    // Resolve every sibling through one immutable admission view. Per-child
+    // workspaces are still created later; this shared view establishes the
+    // exact item/runtime/signature/policy identity for the cohort.
+    let pinned_admission_context = if let Some(snapshot_hash) = child_snapshot_hash.as_deref() {
+        Some(
+            crate::execution::run_bounded_project_capture(|| {
+                crate::execution::project_source::resolve_pinned_snapshot_context(
+                    state,
+                    snapshot_hash,
+                    cap.provenance.original_project_path().to_path_buf(),
+                    &format!("follow-admission-{parent_thread_id}"),
+                    crate::execution::project_source::PinnedContextRealization::ReadOnly,
+                )
+            })
+            .await?,
+        )
+    } else {
+        None
+    };
+    let resolution_engine = pinned_admission_context
+        .as_ref()
+        .map(|context| &context.request_engine)
+        .unwrap_or_else(|| cap.provenance.request_engine());
+    let resolution_path = pinned_admission_context
+        .as_ref()
+        .map(|context| context.effective_path.as_path())
+        .unwrap_or_else(|| cap.provenance.effective_path());
+
+    let mut resolved_children = Vec::with_capacity(children.len());
+    for (item_index, (child, child_ref)) in
+        children.iter().zip(canonical_children.iter()).enumerate()
+    {
         let item_index = u32::try_from(item_index).context("follow: too many children")?;
         let sealed_root_request = if let Some(slot) = state
             .state_store
@@ -223,9 +377,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             // A new slot captures the complete verified request before any root
             // row is created. Re-drives consume this value from the slot and do
             // not reinterpret mutable item, kind, runtime, or policy source.
-            let child_runtime = cap
-                .provenance
-                .request_engine()
+            let child_runtime = resolution_engine
                 .runtimes
                 .resolve_for_launch(None, &child_ref.kind)
                 .map_err(|e| {
@@ -243,10 +395,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             let child_runtime_ref = child_runtime.canonical_ref.to_string();
             let child_preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
                 ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-                    engine: cap.provenance.request_engine(),
+                    engine: resolution_engine,
                     node_history_policy: &state.node_history_policy,
                     site_id: &parent.current_site_id,
-                    project_path: cap.provenance.effective_path(),
+                    project_path: resolution_path,
                     item_ref: &child.item_ref,
                     launch_mode: "detached",
                     parameters: child.parameters.clone(),
@@ -272,7 +424,13 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             )?;
             SealedRootExecutionRequest::capture(&child_execution, child_runtime_ref)?
         };
-        let restored = sealed_root_request.restore(cap.provenance.request_engine())?;
+        let capsule_root = ryeos_app::launch_metadata::daemon_thread_state_dir(
+            &state.config.app_root,
+            &parent_thread_id,
+        )
+        .join("admission-capsules")
+        .join(format!("follow-{item_index}"));
+        let restored = sealed_root_request.restore(resolution_engine, &capsule_root)?;
         if restored.item_ref != child.item_ref
             || restored.ref_bindings != child.ref_bindings
             || restored.parameters != child.parameters
@@ -282,7 +440,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             || restored.requested_by.as_deref() != Some(thread_auth.acting_principal.as_str())
             || restored.plan_context.project_context
                 != (ProjectContext::LocalPath {
-                    path: cap.provenance.effective_path().to_path_buf(),
+                    path: resolution_path.to_path_buf(),
                 })
         {
             bail!("follow: sealed child authority conflicts at index {item_index}");
@@ -291,24 +449,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     }
 
     // ── Ordered spawn sequence, idempotent by follow_key ────────────────────
-    // 1. Reserve the waiter. ALWAYS go through `reserve_follow` (never a pre-read):
-    //    it is the get-or-create primitive AND validates that an existing row's
-    //    seed matches this request, so a duplicate follow_key with conflicting seed
-    //    fields (e.g. a different frontier_id) is rejected, not silently adopted.
-    let waiter = state.state_store.reserve_follow(&NewFollowWaiter {
-        follow_key: follow_key.clone(),
-        parent_thread_id: parent_thread_id.clone(),
-        parent_chain_root_id: parent.chain_root_id.clone(),
-        follow_node: params.follow_node.clone(),
-        graph_run_id: params.graph_run_id.clone(),
-        step_count: params.step_count,
-        frontier_id: params.frontier_id.clone(),
-        fanout,
-        expected_children: u32::try_from(children.len()).context("follow: too many children")?,
-    })?;
-    if waiter.expected_children as usize != children.len() {
-        bail!("follow: persisted child count conflicts with re-driven cohort");
-    }
+    // 1. The waiter and exact child authority were reserved and bound before
+    //    item resolution. Validate any durable child slots now.
     for (index, child) in children.iter().enumerate() {
         if let Some(slot) = state
             .state_store
@@ -325,7 +467,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // The waiter phase says whether the parent suspension committed; it does not
     // say which child roots committed before a crash. Reserve every stable slot
     // first, then classify each slot from its own durable row.
-    let re_drive = waiter.phase != follow_phase::RESERVED;
     let window_key = params
         .launch_window_width
         .map(|_| format!("follow:{follow_key}"));
@@ -333,12 +474,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         key: format!("follow:{follow_key}"),
         width,
     });
-
-    if !re_drive {
-        // Follow-nesting depth is an admission limit, not a condition that can
-        // retroactively invalidate an already-admitted duplicate drive.
-        enforce_follow_nesting_depth(state, &parent.chain_root_id)?;
-    }
 
     // Reserve the exact stable identities before launch authority is prepared.
     // Augmentations, checkpoint paths, audit, metadata, and the eventual root
@@ -380,27 +515,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         };
         reserved_child_ids.insert(item_index, child_thread_id);
     }
-
-    // Persist the complete cohort intent and every sealed child request before
-    // quiescing the runtime. A daemon crash can therefore re-drive an admitted
-    // intent; it never discovers an unexplained stopped predecessor. No child
-    // or successor row is visible yet.
-    let inherited_generation = launch_snapshot_hash
-        .as_deref()
-        .map(|base| {
-            let frozen = crate::execution::seal_callback_workspace_generation(
-                state,
-                &parent_thread_id,
-                cap.provenance.effective_path(),
-                base,
-            )?;
-            crate::execution::ensure_control_tree_unchanged(state, base, frozen.snapshot_hash())?;
-            Ok::<_, anyhow::Error>(frozen)
-        })
-        .transpose()?;
-    let inherited_snapshot_hash = inherited_generation
-        .as_ref()
-        .map(|generation| generation.snapshot_hash().to_string());
 
     let expected_parent_context = PersistedParentExecutionContext {
         parent_thread_id: cap.thread_id.clone(),
@@ -517,27 +631,41 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             let sealed_root_request = resolved_children.get(item_index).ok_or_else(|| {
                 anyhow::anyhow!("follow: missing sealed child authority at index {item_index}")
             })?;
-            let child_execution = sealed_root_request.restore(cap.provenance.request_engine())?;
+            let capsule_root = ryeos_app::launch_metadata::daemon_thread_state_dir(
+                &state.config.app_root,
+                &parent_thread_id,
+            )
+            .join("admission-capsules")
+            .join(format!("follow-{item_index}"));
+            let child_execution = sealed_root_request.restore(resolution_engine, &capsule_root)?;
+            let project_context = ProjectContext::LocalPath {
+                path: resolution_path.to_path_buf(),
+            };
+            let stable_project_identity =
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    cap.provenance.original_project_path(),
+                    &parent.origin_site_id,
+                )?;
+            let project_authority = child_project_authority.clone();
+            let local_overlay_root = matches!(
+                project_authority.environment(),
+                ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
+            )
+            .then(|| cap.provenance.original_project_path().to_path_buf());
             let mut meta = RuntimeLaunchMetadata::default()
+                .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
                 .with_resume_context(ResumeContext {
                     kind: child_execution.kind.clone(),
                     item_ref: child.item_ref.clone(),
                     ref_bindings: child.ref_bindings.clone(),
                     launch_mode: "detached".to_string(),
                     parameters: child.parameters.clone(),
-                    project_context: ProjectContext::LocalPath {
-                        path: cap.provenance.effective_path().to_path_buf(),
-                    },
-                    stable_project_identity: Some(
-                        ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                            cap.provenance.original_project_path(),
-                            &parent.origin_site_id,
-                        )?,
-                    ),
-                    local_overlay_root: (cap.provenance.project_source()
-                        == ryeos_app::execution_provenance::ProjectSourceKind::LiveFs)
-                        .then(|| cap.provenance.original_project_path().to_path_buf()),
-                    original_snapshot_hash: inherited_snapshot_hash.clone(),
+                    project_context,
+                    project_authority,
+                    lifecycle_authority: parent_lifecycle_authority,
+                    stable_project_identity: Some(stable_project_identity),
+                    local_overlay_root,
+                    original_snapshot_hash: child_snapshot_hash.clone(),
                     original_pushed_head_ref: None,
                     state_root: cap
                         .provenance
@@ -547,7 +675,15 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                     origin_site_id: parent.origin_site_id.clone(),
                     requested_by: requested_by.clone(),
                     execution_hints: ExecutionHints::default(),
-                    effective_caps: cap.effective_caps.clone(),
+                    effective_caps: Vec::new(),
+                    parent_delegation_caps: Some(
+                        cap.effective_caps
+                            .iter()
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect(),
+                    ),
                     executor_ref: Some(child_execution.executor_ref.clone()),
                     runtime_ref: Some(sealed_root_request.runtime_ref().to_string()),
                 })
@@ -559,19 +695,30 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         let child_thread_id = reserved_child_ids.get(&item_index).ok_or_else(|| {
             anyhow::anyhow!("follow: missing reserved child ID at index {item_index}")
         })?;
-        let launch_provenance = if let Some(snapshot_hash) = inherited_snapshot_hash.as_deref() {
-            let child_context = crate::execution::project_source::resolve_pinned_snapshot_context(
-                state,
-                snapshot_hash,
-                cap.provenance.original_project_path().to_path_buf(),
-                child_thread_id,
+        let launch_provenance = if let Some(snapshot_hash) = child_snapshot_hash.as_deref() {
+            let realization = crate::execution::project_source::pinned_context_realization(
+                &child_project_authority,
             )?;
-            cap.provenance.clone_for_borrowed_child_workspace(
+            let child_context = crate::execution::run_bounded_project_capture(|| {
+                crate::execution::project_source::resolve_pinned_snapshot_context(
+                    state,
+                    snapshot_hash,
+                    cap.provenance.original_project_path().to_path_buf(),
+                    child_thread_id,
+                    realization,
+                )
+            })
+            .await?;
+            let child_lifeline = child_context
+                .temp_dir
+                .ok_or_else(|| anyhow::anyhow!("follow: child workspace has no lifecycle guard"))?;
+            cap.provenance.clone_for_pinned_child_workspace(
+                child_context.request_engine,
                 child_context.effective_path,
-                child_context.temp_dir.ok_or_else(|| {
-                    anyhow::anyhow!("follow: child workspace has no lifecycle guard")
-                })?,
-            )
+                child_lifeline,
+                snapshot_hash.to_string(),
+                child_project_authority.clone(),
+            )?
         } else {
             cap.provenance.clone_for_borrowed_child()
         };
@@ -580,6 +727,16 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 path: launch_provenance.effective_path().to_path_buf(),
             };
         }
+        let rebound_sealed_request = meta
+            .sealed_root_request
+            .as_ref()
+            .ok_or_else(|| {
+                anyhow::anyhow!("follow: child {child_thread_id} has no sealed admitted request")
+            })?
+            .for_continuation_invocation(meta.resume_context.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("follow: child {child_thread_id} has no sealed resume authority")
+            })?)?;
+        meta.set_sealed_root_request(rebound_sealed_request);
         let prepared = if existing_row {
             crate::execution::launch::prepare_existing_follow_child_launch(
                 state,
@@ -649,6 +806,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 .create_root_thread_with_events_and_launch_metadata(
                     &child_thread_id,
                     fresh_prepared.resolved_request(),
+                    child_project_authority.clone(),
                     initial_events,
                     Some(fresh_prepared.launch_metadata()),
                 )?;
@@ -863,7 +1021,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                                 &successor_id,
                             ),
                         );
-                    if let Some(frozen) = inherited_snapshot_hash.as_deref() {
+                    if let Some(frozen) = parent_successor_operational_generation.as_deref() {
                         let resume = successor_launch_metadata
                             .resume_context
                             .as_mut()
@@ -872,7 +1030,35 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                             })?;
                         resume.original_snapshot_hash = Some(frozen.to_string());
                         resume.original_pushed_head_ref = None;
+                        if matches!(
+                            resume.project_authority,
+                            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+                        ) {
+                            resume.project_authority = resume
+                                .project_authority
+                                .transition_operational_generation(
+                                    ryeos_state::objects::OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                                        result_snapshot_hash: frozen,
+                                    },
+                                )?;
+                        }
                     }
+                    let successor_resume = successor_launch_metadata
+                        .resume_context
+                        .as_ref()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("follow: successor lost its durable ResumeContext")
+                        })?;
+                    let successor_sealed_request = parent_launch_metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.sealed_root_request.as_ref())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "follow: parent {parent_thread_id} has no admitted launch capsule"
+                            )
+                        })?
+                        .for_continuation_invocation(successor_resume)?;
+                    successor_launch_metadata.set_sealed_root_request(successor_sealed_request);
                     // Via the lifecycle service so the parent-`continued` + successor-
                     // `created` events reach live subscribers, not just the event store.
                     state.threads.create_follow_resume_successor(
@@ -896,6 +1082,15 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                                 .as_ref()
                                 .and_then(|resume| resume.durable_project_snapshot_hash())
                                 .map(str::to_owned),
+                            project_authority: successor_launch_metadata
+                                .resume_context
+                                .as_ref()
+                                .map(|resume| resume.project_authority.clone())
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "follow successor lost its sealed project authority"
+                                    )
+                                })?,
                             usage_subject: None,
                             usage_subject_asserted_by: None,
                             captured_history_policy: None,
@@ -904,7 +1099,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                         &parent.chain_root_id,
                         &params.completion,
                         &successor_launch_metadata,
-                        inherited_snapshot_hash.as_deref(),
+                        child_snapshot_hash.as_deref(),
                     )?;
                     if let Err(error) = state
                         .state_store
@@ -1047,10 +1242,6 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     // therefore fenced even if a faulty runtime continues after the response.
     state.callback_tokens.invalidate(&cap.token);
     state.thread_auth.invalidate(&thread_auth.token);
-    if let Some(generation) = inherited_generation {
-        generation.publish()?;
-    }
-
     let child_thread_id = child_thread_ids[0].clone();
 
     tracing::info!(
@@ -1092,4 +1283,73 @@ fn enforce_follow_nesting_depth(state: &AppState, chain_root_id: &str) -> Result
         chain = waiter.parent_chain_root_id;
     }
     Ok(())
+}
+
+fn parent_successor_operational_generation(
+    parent: &ryeos_state::objects::ExecutionProjectAuthority,
+    child: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> Option<String> {
+    matches!(
+        parent,
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+            ..
+        }
+    )
+    .then(|| child.base_snapshot_projection().map(str::to_owned))
+    .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parent_successor_operational_generation;
+    use ryeos_state::objects::{
+        EnvironmentAuthority, ExecutionProjectAuthority, LiveProjectAccess,
+        PinnedProjectRealization, PinnedTerminalPublication,
+    };
+
+    fn pinned(hash_byte: char, realization: PinnedProjectRealization) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::pinned(
+            "project:test".to_string(),
+            Some(std::path::PathBuf::from("/project")),
+            hash_byte.to_string().repeat(64),
+            realization,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn live_pin_at_spawn_does_not_advance_the_parent_successor() {
+        let project = tempfile::tempdir().unwrap();
+        let parent = ExecutionProjectAuthority::live(
+            project.path().canonicalize().unwrap(),
+            "project:test".to_string(),
+            LiveProjectAccess::ReadWrite,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let child = pinned('b', PinnedProjectRealization::ReadOnly);
+        assert_eq!(
+            parent_successor_operational_generation(&parent, &child),
+            None
+        );
+    }
+
+    #[test]
+    fn pinned_cow_parent_advances_to_the_frozen_operational_generation() {
+        let parent = pinned(
+            'a',
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+        );
+        let child = pinned('b', PinnedProjectRealization::ReadOnly);
+        assert_eq!(
+            parent_successor_operational_generation(&parent, &child),
+            Some("b".repeat(64))
+        );
+    }
 }

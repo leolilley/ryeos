@@ -515,7 +515,6 @@ struct FileState {
 #[derive(Debug)]
 struct CapturedFile {
     state: FileState,
-    bytes: Vec<u8>,
 }
 
 fn build_project_tree(
@@ -747,7 +746,6 @@ fn capture_regular_file_no_follow(root: &Path, path: &Path) -> Result<Option<Cap
             mode,
             size: bytes.len() as u64,
         },
-        bytes,
     }))
 }
 

@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -38,6 +39,26 @@ pub fn read_dotenv_overlay(
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         parse_dotenv_text(&content, &path, wanted, &mut out)?;
     }
+    Ok(out)
+}
+
+/// Read one project overlay through an already descriptor-pinned root.
+/// `.env` must be a direct regular child; links and special files fail closed.
+pub fn read_dotenv_overlay_pinned(
+    root: &lillux::secure_fs::PinnedDirectory,
+    wanted: &HashSet<String>,
+) -> Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    if wanted.is_empty() {
+        return Ok(out);
+    }
+    let Some(mut file) = root.open_regular(std::ffi::OsStr::new(".env"), false)? else {
+        return Ok(out);
+    };
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .with_context(|| format!("read {}", root.path().join(".env").display()))?;
+    parse_dotenv_text(&content, &root.path().join(".env"), wanted, &mut out)?;
     Ok(out)
 }
 

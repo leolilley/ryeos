@@ -23,6 +23,8 @@ pub struct TempDirGuard {
     inner: Mutex<Option<PathBuf>>,
     leases: Mutex<Vec<std::fs::File>>,
     explicit_cleanup: bool,
+    remove_on_drop: bool,
+    owns_removal: bool,
 }
 
 impl TempDirGuard {
@@ -31,6 +33,8 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path)),
             leases: Mutex::new(Vec::new()),
             explicit_cleanup: false,
+            remove_on_drop: true,
+            owns_removal: true,
         }
     }
 
@@ -41,6 +45,21 @@ impl TempDirGuard {
             inner: Mutex::new(Some(path)),
             leases: Mutex::new(Vec::new()),
             explicit_cleanup: true,
+            remove_on_drop: false,
+            owns_removal: true,
+        }
+    }
+
+    /// Hold a lease and stable path to a shared derived cache generation.
+    /// Dropping the guard releases the lease but never removes the shared
+    /// generation; cache eviction owns deletion after all leases are gone.
+    pub fn new_borrowed_cache(path: PathBuf) -> Self {
+        Self {
+            inner: Mutex::new(Some(path)),
+            leases: Mutex::new(Vec::new()),
+            explicit_cleanup: false,
+            remove_on_drop: false,
+            owns_removal: false,
         }
     }
 
@@ -64,6 +83,9 @@ impl TempDirGuard {
     /// Remove the exact pinned directory tree now. Failure leaves the guard
     /// armed so recovery retains both the journal evidence and the path.
     pub fn remove_now(&self) -> anyhow::Result<()> {
+        if !self.owns_removal {
+            anyhow::bail!("borrowed cache/workspace guard does not own directory removal");
+        }
         let mut path_slot = self.inner.lock().unwrap();
         let Some(path) = path_slot.as_ref() else {
             return Ok(());
@@ -97,8 +119,10 @@ impl Drop for TempDirGuard {
                     path = %p.display(),
                     "backend workspace guard dropped while still armed; preserving for journal reconciliation"
                 );
-            } else if let Err(error) = std::fs::remove_dir_all(&p) {
-                tracing::warn!(path = %p.display(), %error, "temporary directory cleanup failed");
+            } else if self.remove_on_drop {
+                if let Err(error) = std::fs::remove_dir_all(&p) {
+                    tracing::warn!(path = %p.display(), %error, "temporary directory cleanup failed");
+                }
             }
         }
     }

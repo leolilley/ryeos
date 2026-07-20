@@ -18,6 +18,52 @@ use ryeos_state::objects::ThreadStatus;
 /// and settle. A second live sweep after this boundary may revoke a provably
 /// dead exact owner; an in-memory task registration alone is not a heartbeat.
 const ACTIVE_OWNER_DEAD_SETTLEMENT_GRACE_MS: i64 = 5_000;
+const PROJECT_AUTHORITY_WAIT_MS: i64 = 15 * 60 * 1_000;
+
+fn live_project_authority_available(resume: &ResumeContext) -> Result<(), String> {
+    let ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+        canonical_root,
+        authored_project_identity,
+        live_access,
+        ..
+    } = &resume.project_authority
+    else {
+        return Ok(());
+    };
+    let root = lillux::PinnedDirectory::open(canonical_root)
+        .map_err(|error| format!("open authorized live project root: {error:#}"))?
+        .ok_or_else(|| {
+            format!(
+                "authorized live project root is unavailable: {}",
+                canonical_root.display()
+            )
+        })?;
+    if !root
+        .entry_names()
+        .map_err(|error| format!("inspect authorized live project root: {error:#}"))?
+        .iter()
+        .any(|name| name.as_os_str() == std::ffi::OsStr::new(ryeos_engine::AI_DIR))
+    {
+        return Err(format!(
+            "authorized live project root no longer contains {}: {}",
+            ryeos_engine::AI_DIR,
+            canonical_root.display()
+        ));
+    }
+    let expected = format!("local:{}", canonical_root.display());
+    if authored_project_identity != &expected {
+        return Err("authorized live project identity no longer matches its canonical root".into());
+    }
+    live_access
+        .validate()
+        .map_err(|error| format!("invalid persisted live access authority: {error:#}"))?;
+    Ok(())
+}
+
+fn bounded_recovery_detail(detail: &str) -> String {
+    let normalized = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(2048).collect()
+}
 
 /// The structural shape of a continuation successor stranded `created`: never
 /// launched, links upstream, and carries a captured `ResumeContext`. Lineage wins
@@ -189,6 +235,9 @@ pub fn decide_resume(
 /// paths once the daemon's listeners are bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeKind {
+    /// A fresh admitted root whose signed birth committed but whose first
+    /// process never attached. Launch exactly once from its sealed capsule.
+    AdmittedRoot,
     /// Checkpoint resume of a `native_resume` thread: re-run the SAME thread from
     /// its checkpoint via `run_existing_detached`.
     NativeResume,
@@ -212,6 +261,9 @@ pub struct ResumeIntent {
     pub thread_id: String,
     pub chain_root_id: String,
     pub resume_context: ResumeContext,
+    /// Executor boundary admitted with the launch capsule. Dispatch must never
+    /// infer this from item kind or ref spelling during recovery.
+    pub launch_driver: ryeos_state::objects::ExecutionLaunchDriver,
     /// Status of the thread row at reconcile time. The dispatcher uses
     /// this to decide whether to call `mark_running` after attaching the new
     /// spawn: `created` rows have never made that transition, while resumed
@@ -319,7 +371,7 @@ fn dead_identity_safe_to_clear(
     match execution_identity_is_current_boot(identity) {
         Ok(false) => true,
         Ok(true)
-            if ryeos_app::process::process_group_presence(identity.pgid)
+            if ryeos_app::process::process_group_presence(identity.pgid())
                 == IdentityLiveness::DeadOrStale =>
         {
             true
@@ -711,6 +763,77 @@ async fn reconcile_active_threads_inner(
 
         let interrupted_spawn = pgid.is_none();
 
+        if let Some(resume) = thread
+            .runtime
+            .launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.resume_context.as_ref())
+        {
+            if resume.lifecycle_authority.recovery
+                == ryeos_state::objects::ExecutionRecoveryAuthority::None
+            {
+                state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                finalize_dead(
+                    state,
+                    &thread.thread_id,
+                    pgid,
+                    &thread.status,
+                    Some((
+                        "execution_not_restart_recoverable",
+                        json!({
+                            "reason": "the admitted execution lifecycle authority forbids restart recovery"
+                        }),
+                    )),
+                    &mut reconciled,
+                )?;
+                continue;
+            }
+            match live_project_authority_available(resume) {
+                Ok(()) => {
+                    if thread.runtime.recovery_wait.is_some() {
+                        state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                    }
+                }
+                Err(detail) => {
+                    let now_ms = lillux::time::timestamp_millis();
+                    let wait = state.state_store.wait_for_project_authority(
+                        &thread.thread_id,
+                        "waiting_for_project_authority",
+                        &bounded_recovery_detail(&detail),
+                        now_ms,
+                        now_ms.saturating_add(PROJECT_AUTHORITY_WAIT_MS),
+                    )?;
+                    if now_ms >= wait.deadline_at_ms {
+                        finalize_dead(
+                            state,
+                            &thread.thread_id,
+                            pgid,
+                            &thread.status,
+                            Some((
+                                "project_authority_unavailable",
+                                json!({
+                                    "reason": wait.reason,
+                                    "detail": wait.detail,
+                                    "started_at_ms": wait.started_at_ms,
+                                    "deadline_at_ms": wait.deadline_at_ms,
+                                }),
+                            )),
+                            &mut reconciled,
+                        )?;
+                        state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                    } else {
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            deadline_at_ms = wait.deadline_at_ms,
+                            detail = %wait.detail,
+                            "thread is waiting for its admitted live project authority"
+                        );
+                    }
+                    continue;
+                }
+            }
+        }
+
         // Continuation successor safety net: a `created` thread that links upstream
         // and carries a captured `ResumeContext`. A crash between create and the
         // spawned launch strands it here. Lineage is classified BEFORE
@@ -723,6 +846,14 @@ async fn reconcile_active_threads_inner(
         {
             let lm = thread.runtime.launch_metadata.as_ref();
             if continuation_shape(thread) {
+                let launch_driver =
+                    lm.and_then(|metadata| metadata.launch_driver)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "continuation successor {} has no admitted launch driver",
+                                thread.thread_id
+                            )
+                        })?;
                 let upstream_id = thread
                     .upstream_thread_id
                     .as_deref()
@@ -771,6 +902,7 @@ async fn reconcile_active_threads_inner(
                         thread_id: thread.thread_id.clone(),
                         chain_root_id: thread.chain_root_id.clone(),
                         resume_context,
+                        launch_driver,
                         prior_status: thread.status.clone(),
                         kind: ResumeKind::Continuation,
                     });
@@ -799,6 +931,7 @@ async fn reconcile_active_threads_inner(
                         thread_id: thread.thread_id.clone(),
                         chain_root_id: thread.chain_root_id.clone(),
                         resume_context,
+                        launch_driver,
                         prior_status: thread.status.clone(),
                         kind: ResumeKind::OperatorContinuation,
                     });
@@ -817,6 +950,52 @@ async fn reconcile_active_threads_inner(
                 thread_id = %thread.thread_id,
                 "follow child stranded pre-launch — leaving for reconcile_follow relaunch"
             );
+            continue;
+        }
+
+        // A fresh root can crash after its atomic admitted birth but before a
+        // process attaches. That is not a checkpoint resume and does not need
+        // a native-resume declaration: it has never begun executing. Relaunch
+        // only when the complete current capsule authority is present.
+        if thread.status == ThreadStatus::Created.as_str()
+            && thread.upstream_thread_id.is_none()
+            && thread.runtime.pgid.is_none()
+            && thread.admitted_launch_capsule_hash.is_some()
+            && thread
+                .runtime
+                .launch_metadata
+                .as_ref()
+                .is_some_and(|metadata| {
+                    metadata.resume_context.is_some()
+                        && metadata.sealed_root_request.is_some()
+                        && metadata.launch_driver.is_some()
+                })
+        {
+            let launch_metadata = thread
+                .runtime
+                .launch_metadata
+                .as_ref()
+                .expect("pending admitted root requires launch metadata");
+            let resume_context = launch_metadata
+                .resume_context
+                .clone()
+                .expect("pending admitted root requires resume context");
+            let launch_driver = launch_metadata
+                .launch_driver
+                .expect("pending admitted root requires launch driver");
+            tracing::info!(
+                thread_id = %thread.thread_id,
+                "fresh admitted root stranded before first launch — collecting exact capsule intent"
+            );
+            intents.push(ResumeIntent {
+                thread_id: thread.thread_id.clone(),
+                chain_root_id: thread.chain_root_id.clone(),
+                resume_context,
+                launch_driver,
+                prior_status: thread.status.clone(),
+                kind: ResumeKind::AdmittedRoot,
+            });
+            reconciled += 1;
             continue;
         }
 
@@ -953,6 +1132,17 @@ async fn reconcile_active_threads_inner(
                     .as_ref()
                     .and_then(|m| m.resume_context.clone())
                     .expect("decide_resume==Resume implies resume_context is Some");
+                let launch_driver = thread
+                    .runtime
+                    .launch_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.launch_driver)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "native-resume thread {} has no admitted launch driver",
+                            thread.thread_id
+                        )
+                    })?;
                 tracing::info!(
                     thread_id = %thread.thread_id,
                     attempt = next_attempt,
@@ -963,6 +1153,7 @@ async fn reconcile_active_threads_inner(
                     thread_id: thread.thread_id.clone(),
                     chain_root_id: thread.chain_root_id.clone(),
                     resume_context,
+                    launch_driver,
                     prior_status: thread.status.clone(),
                     kind: ResumeKind::NativeResume,
                 });
@@ -984,10 +1175,95 @@ async fn reconcile_active_threads_inner(
 
 fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
     for intent in state.state_store.detached_spawn_intents()? {
-        let Some(child) = state.state_store.get_thread(&intent.child_thread_id)? else {
-            // The durable reservation intentionally precedes child birth.
-            continue;
+        let child = match state.state_store.get_thread(&intent.child_thread_id)? {
+            Some(child) => child,
+            None => {
+                let (Some(authority), Some(capsule_hash), Some(metadata), Some(initial_events)) = (
+                    intent.child_project_authority.as_ref(),
+                    intent.admitted_launch_capsule_hash.as_ref(),
+                    intent.launch_metadata.as_ref(),
+                    intent.initial_events.as_ref(),
+                ) else {
+                    if state
+                        .state_store
+                        .abort_unsealed_detached_spawn_intent(&intent.operation_id)?
+                    {
+                        tracing::warn!(
+                            operation_id = %intent.operation_id,
+                            "aborted detached reservation that never crossed its sealed authority boundary"
+                        );
+                    }
+                    continue;
+                };
+                let resume = metadata.resume_context.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "sealed detached operation {} has no resume context",
+                        intent.operation_id
+                    )
+                })?;
+                let sealed = metadata.sealed_root_request.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "sealed detached operation {} has no sealed root request",
+                        intent.operation_id
+                    )
+                })?;
+                let expected_capsule_hash = metadata
+                    .admitted_launch_capsule()?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "sealed detached operation {} has no admitted launch capsule",
+                            intent.operation_id
+                        )
+                    })?
+                    .content_hash()?;
+                if capsule_hash != &expected_capsule_hash {
+                    anyhow::bail!(
+                        "sealed detached operation {} capsule drift: intent={}, metadata={}",
+                        intent.operation_id,
+                        capsule_hash,
+                        expected_capsule_hash
+                    );
+                }
+                let execution =
+                    ryeos_executor::execution::runner::execution_params_from_sealed_root_request(
+                        state,
+                        &intent.child_thread_id,
+                        resume,
+                        sealed,
+                        None,
+                    )?;
+                state
+                    .threads
+                    .create_root_thread_with_events_and_launch_metadata(
+                        &intent.child_thread_id,
+                        &execution.resolved,
+                        authority.clone(),
+                        initial_events.clone(),
+                        Some(metadata),
+                    )?;
+                state
+                    .state_store
+                    .get_thread(&intent.child_thread_id)?
+                    .ok_or_else(|| anyhow::anyhow!("repaired detached child birth disappeared"))?
+            }
         };
+        if child.project_authority.as_ref() != intent.child_project_authority.as_ref() {
+            anyhow::bail!(
+                "detached child {} project authority differs from its sealed intent",
+                child.thread_id
+            );
+        }
+        if state
+            .state_store
+            .admitted_launch_capsule_hash(&child.thread_id)?
+            .as_deref()
+            != intent.admitted_launch_capsule_hash.as_deref()
+        {
+            anyhow::bail!(
+                "detached child {} admitted capsule differs from its sealed intent",
+                child.thread_id
+            );
+        }
         let _inherited_stop = state.state_store.record_child_link(
             &intent.parent_thread_id,
             &intent.child_thread_id,
@@ -1013,6 +1289,11 @@ fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
                     &window.key,
                     window.width,
                     lillux::time::timestamp_millis(),
+                )?;
+            } else {
+                let _ = ryeos_executor::execution::launch::prepare_and_spawn_follow_child_recovery(
+                    state.clone(),
+                    &intent.child_thread_id,
                 )?;
             }
         }
@@ -1301,15 +1582,15 @@ fn cleanup_dead_execution_workspace(
             Some(
                 state
                     .isolation
-                    .workspace_lifecycle(
-                        ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
-                        &workspace.workspace_id,
+                    .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+                        operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Create,
+                        workspace_id: &workspace.workspace_id,
                         launch_owner,
-                        &workspace.lower_snapshot,
-                        &layout.lower,
-                        &layout.upper,
-                        &layout.work,
-                    )
+                        lower_snapshot: &workspace.lower_snapshot,
+                        lower_path: &layout.lower,
+                        upper_path: &layout.upper,
+                        work_path: &layout.work,
+                    })
                     .map_err(|error| anyhow::anyhow!(error.to_string()))?,
             )
         } else {
@@ -1317,15 +1598,15 @@ fn cleanup_dead_execution_workspace(
         };
     let response = state
         .isolation
-        .workspace_lifecycle(
-            ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
-            &workspace.workspace_id,
+        .workspace_lifecycle(ryeos_engine::isolation::WorkspaceLifecycleInvocation {
+            operation: ryeos_isolation_protocol::WorkspaceLifecycleOperation::Destroy,
+            workspace_id: &workspace.workspace_id,
             launch_owner,
-            &workspace.lower_snapshot,
-            &layout.lower,
-            &layout.upper,
-            &layout.work,
-        )
+            lower_snapshot: &workspace.lower_snapshot,
+            lower_path: &layout.lower,
+            upper_path: &layout.upper,
+            work_path: &layout.work,
+        })
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let pinned = lillux::canonical_json(&serde_json::to_value(&response.pinned_root_identities)?)?;
     let expected_pinned = match recovered_create.as_ref() {
@@ -1706,24 +1987,47 @@ mod tests {
     }
 
     fn ctx() -> ResumeContext {
+        let project_context = ProjectContext::LocalPath {
+            path: PathBuf::from("/tmp/p"),
+        };
+        let stable_project_identity = Some(
+            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                std::path::Path::new("/tmp/p"),
+                "site:a",
+            )
+            .unwrap(),
+        );
+        let local_overlay_root = Some(PathBuf::from("/tmp/p"));
+        let project_root = PathBuf::from("/tmp/p");
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "site:a:/tmp/p".to_string(),
+            Some(project_root.clone()),
+            "a".repeat(64),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: lillux::sha256_hex(b"live-project\0site:a:/tmp/p\0/tmp/p"),
+                source_identity: "dotenv:/tmp/p/.env".to_string(),
+                include_operator_vault: true,
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+            },
+            Vec::new(),
+        )
+        .unwrap();
         ResumeContext {
             kind: "tool_run".into(),
             item_ref: "ns/foo".into(),
             ref_bindings: std::collections::BTreeMap::new(),
             launch_mode: "detached".into(),
             parameters: serde_json::json!({}),
-            project_context: ProjectContext::LocalPath {
-                path: PathBuf::from("/tmp/p"),
-            },
-            stable_project_identity: Some(
-                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                    std::path::Path::new("/tmp/p"),
-                    "site:a",
-                )
-                .unwrap(),
-            ),
-            local_overlay_root: Some(PathBuf::from("/tmp/p")),
-            original_snapshot_hash: None,
+            project_context,
+            project_authority,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity,
+            local_overlay_root,
+            original_snapshot_hash: Some("a".repeat(64)),
             original_pushed_head_ref: None,
             state_root: None,
             current_site_id: "site:a".into(),
@@ -1731,6 +2035,7 @@ mod tests {
             requested_by: principal(),
             execution_hints: ExecutionHints::default(),
             effective_caps: Vec::new(),
+            parent_delegation_caps: None,
             executor_ref: None,
             runtime_ref: None,
         }
@@ -1757,6 +2062,9 @@ mod tests {
             successor_thread_id: successor.map(Into::into),
             requested_by: None,
             project_root: None,
+            project_authority: None,
+            lifecycle_authority: None,
+            admitted_launch_capsule_hash: None,
             created_at: "t".into(),
             updated_at: "t".into(),
             started_at: None,
@@ -1769,6 +2077,7 @@ mod tests {
                 stop_requested_at_ms: None,
                 stop_intent: None,
                 launch_metadata: lm,
+                recovery_wait: None,
             },
         }
     }
@@ -2040,6 +2349,7 @@ mod tests {
             frontier_id: None,
             fanout: false,
             expected_children: 1,
+            child_project_authority: None,
             children: Vec::new(),
             phase: ryeos_app::runtime_db::follow_phase::WAITING.into(),
             created_at_ms: 0,

@@ -34,6 +34,85 @@ pub struct PushResult {
     pub blobs_skipped: usize,
 }
 
+/// Upload one already-admitted project generation without reopening or
+/// recapturing a live project. The destination HEAD boundary must be an exact
+/// parent of the selected snapshot; otherwise forwarding fails rather than
+/// manufacturing a replacement snapshot with different authority.
+pub async fn push_snapshot_generation(
+    client: &RemoteClient,
+    authority: &PinnedStateAuthority,
+    snapshot_hash: &str,
+    project_path_for_ref: &str,
+) -> Result<PushResult> {
+    let local_cas = authority.cas_store()?;
+    let snapshot_value = local_cas
+        .get_object(snapshot_hash)?
+        .ok_or_else(|| anyhow::anyhow!("project snapshot {snapshot_hash} is absent"))?;
+    let snapshot = ProjectSnapshot::from_value(&snapshot_value)?;
+    let tree_value = local_cas
+        .get_object(&snapshot.project_tree_hash)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "project tree {} for snapshot {snapshot_hash} is absent",
+                snapshot.project_tree_hash
+            )
+        })?;
+    let tree = ProjectTree::from_value(&tree_value)?;
+    let recovery = authority.require_recovery()?;
+    let mut staged_roots = {
+        let guard = authority.acquire_shared_guard()?;
+        recovery.begin_staged_cas_roots_admitted(&guard, "remote-push-pinned-generation")?
+    };
+
+    let operation = async {
+        let upload_session = client
+            .objects_put(None, project_path_for_ref, &[], &[])
+            .await?;
+        let upload_closure = collect_snapshot_upload_hashes(
+            &local_cas,
+            snapshot_hash,
+            upload_session.expected_previous_hash.as_deref(),
+        )?;
+        {
+            let guard = authority.acquire_shared_guard()?;
+            staged_roots.protect_cas_closure_admitted(
+                &guard,
+                upload_closure.object_hashes.iter().map(String::as_str),
+                upload_closure.blob_hashes.iter().map(String::as_str),
+            )?;
+        }
+        let upload = upload_missing(
+            client,
+            &local_cas,
+            &upload_closure,
+            snapshot_hash,
+            project_path_for_ref,
+            upload_session,
+        )
+        .await?;
+        client
+            .push_head(
+                project_path_for_ref,
+                snapshot_hash,
+                &upload.staging_id,
+                upload.expected_previous_hash.as_deref(),
+            )
+            .await?;
+
+        Ok(PushResult {
+            snapshot_hash: snapshot_hash.to_string(),
+            tree_hash: snapshot.project_tree_hash,
+            tree_entries: tree.files.len(),
+            tree,
+            blobs_uploaded: upload.uploaded,
+            blobs_skipped: upload.skipped,
+        })
+    }
+    .await;
+
+    finish_staged_roots(authority, &mut staged_roots, operation)
+}
+
 /// Build, upload, and stage an AI-only project snapshot.
 ///
 /// Unlike [`push_project`], this captures the curated `.ai` allow-list rather
@@ -338,25 +417,6 @@ pub(crate) fn finish_staged_roots<T>(
 pub(crate) struct SnapshotCasClosure {
     pub object_hashes: Vec<String>,
     pub blob_hashes: Vec<String>,
-}
-
-pub(crate) fn collect_snapshot_hashes(
-    cas: &CasStore,
-    snapshot_hash: &str,
-) -> Result<SnapshotCasClosure> {
-    let limits = ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
-    let report = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
-        cas,
-        [snapshot_hash.to_string()],
-        limits,
-    )?;
-    if !report.is_complete() {
-        anyhow::bail!("project snapshot CAS closure is incomplete: {report:?}");
-    }
-    Ok(SnapshotCasClosure {
-        object_hashes: report.object_hashes.into_iter().collect(),
-        blob_hashes: report.blob_hashes.into_iter().collect(),
-    })
 }
 
 pub(crate) fn collect_snapshot_upload_hashes(

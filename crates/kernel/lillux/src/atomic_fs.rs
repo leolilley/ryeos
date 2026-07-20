@@ -335,7 +335,7 @@ pub fn rename_path_noreplace_durable(source: &Path, target: &Path) -> AtomicMuta
         if renamed != 0 {
             return Err(AtomicMutationError::before(std::io::Error::last_os_error()));
         }
-        return sync_open_parent(&parent).map_err(AtomicMutationError::durability);
+        sync_open_parent(&parent).map_err(AtomicMutationError::durability)
     }
     #[cfg(not(target_os = "linux"))]
     {

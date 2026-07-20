@@ -650,6 +650,25 @@ impl CasStore {
         target: &Path,
         normalized_mode: u32,
     ) -> Result<u64> {
+        let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
+        let parent = crate::secure_fs::PinnedDirectory::open_or_create(parent_path)?;
+        let name = target
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("materialization target has no file name"))?;
+        self.materialize_blob_to_new_regular(hash, &parent, name, normalized_mode)
+    }
+
+    /// Stream a verified CAS blob into one create-new child of an exact pinned
+    /// directory. This is the authority-preserving form for callers that
+    /// already hold the destination inode and must not convert it back into a
+    /// `/proc/self/fd` pathname for a second traversal.
+    pub fn materialize_blob_to_new_regular(
+        &self,
+        hash: &str,
+        parent: &crate::secure_fs::PinnedDirectory,
+        name: &OsStr,
+        normalized_mode: u32,
+    ) -> Result<u64> {
         if !matches!(normalized_mode, 0o644 | 0o755) {
             anyhow::bail!("unsupported materialized project mode {normalized_mode:#o}");
         }
@@ -659,11 +678,6 @@ impl CasStore {
         let (mut source, source_path) =
             open_existing_entry(&self.root, self.pinned_root.as_ref(), "blobs", hash, "")?
                 .ok_or_else(|| anyhow::anyhow!("CAS blob {hash} is missing"))?;
-        let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
-        let parent = crate::secure_fs::PinnedDirectory::open_or_create(parent_path)?;
-        let name = target
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("materialization target has no file name"))?;
         let mut destination = parent.open_regular_create(name, true, true, normalized_mode)?;
         #[cfg(unix)]
         {

@@ -106,32 +106,30 @@ impl SchedulerContext for AppSchedulerContext {
                 .context("scheduler app root is not valid UTF-8")?,
         };
         let project_path_buf = std::path::PathBuf::from(project_path);
+        ryeos_app::execution_policy::authorize_standard_local_live_execution(&spec.capabilities)?;
         let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
             &self.0,
             &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
             &project_path_buf,
             &spec.requester_fingerprint,
             &format!("schedule-{thread_id}"),
+            ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
         )
-        .map_err(|error| anyhow::anyhow!("capture scheduled project generation: {error}"))?;
+        .map_err(|error| anyhow::anyhow!("resolve scheduled live project authority: {error}"))?;
         let original_root_kind = CanonicalRef::parse(&spec.item_ref)
             .with_context(|| format!("invalid scheduled item ref `{}`", spec.item_ref))?
             .kind;
 
-        let provenance =
-            ryeos_app::execution_provenance::ExecutionProvenance::root_materialized_live_fs(
-                project_ctx.effective_path.clone(),
-                project_ctx.original_path.clone(),
-                project_ctx.request_engine.clone(),
-                project_ctx
-                    .temp_dir
-                    .clone()
-                    .context("scheduled project has no workspace guard")?,
-                project_ctx
-                    .snapshot_hash
-                    .clone()
-                    .context("scheduled project has no captured snapshot")?,
-            );
+        let resolved_authority =
+            ryeos_app::execution_policy::resolve_standard_local_live_authority(
+                &project_ctx.effective_path,
+                spec.capabilities.clone(),
+            )?;
+        let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_ctx.effective_path.clone(),
+            project_ctx.request_engine.clone(),
+            resolved_authority.project,
+        )?;
 
         let site_id = self.0.threads.site_id().to_string();
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
@@ -179,7 +177,7 @@ impl SchedulerContext for AppSchedulerContext {
             )
         })?;
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
-            launch_mode: "inline",
+            launch_mode: "wait",
             target_site_id: None,
             validate_only: false,
             params,
@@ -187,6 +185,7 @@ impl SchedulerContext for AppSchedulerContext {
             acting_principal: &spec.requester_fingerprint,
             project_path: std::path::Path::new(project_path),
             provenance,
+            lifecycle_authority: resolved_authority.lifecycle,
             original_root_kind: &original_root_kind,
             pre_minted_thread_id: Some(thread_id.to_string()),
             usage_subject: None,

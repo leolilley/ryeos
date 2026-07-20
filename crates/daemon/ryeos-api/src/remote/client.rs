@@ -182,6 +182,10 @@ pub struct RemoteClient {
     http: reqwest::Client,
     /// This node's identity for signing outbound requests.
     identity: Arc<NodeIdentity>,
+    /// Local site identity used only for the self-signed admission claim.
+    /// Normal signed HTTP requests never send this as caller-controlled
+    /// metadata; their locus comes from the destination's node-signed grant.
+    origin_site_id: Option<String>,
 }
 
 impl RemoteClient {
@@ -200,6 +204,7 @@ impl RemoteClient {
                 .build()
                 .expect("failed to build remote signed HTTP client"),
             identity,
+            origin_site_id: None,
         }
     }
 
@@ -228,7 +233,9 @@ impl RemoteClient {
     /// Callers that need project layering should resolve via
     /// [`super::config::load_remotes_layered`] first.
     pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {
-        Self::new(&remote.url, &remote.principal_id, state.identity.clone())
+        let mut client = Self::new(&remote.url, &remote.principal_id, state.identity.clone());
+        client.origin_site_id = Some(state.threads.site_id().to_string());
+        client
     }
 
     /// GET /public-key (no auth required).
@@ -883,16 +890,16 @@ impl RemoteClient {
         &self,
         item_ref: &str,
         ref_bindings: &BTreeMap<String, String>,
-        project_path: &str,
+        project_path: Option<&str>,
         parameters: &Value,
-        project_source: &str,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
     ) -> Result<Value> {
         let body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
-            "project_source": { "kind": project_source },
+            "execution_policy": execution_policy,
         });
         self.signed_post("/execute", &body).await
     }
@@ -911,17 +918,17 @@ impl RemoteClient {
         &self,
         item_ref: &str,
         ref_bindings: &BTreeMap<String, String>,
-        project_path: &str,
+        project_path: Option<&str>,
         parameters: &Value,
-        project_source: &str,
         call: Option<&ryeos_engine::method_call::MethodCall>,
+        execution_policy: &ryeos_app::execution_policy::ExecutionPolicy,
     ) -> Result<Value> {
         let mut body = serde_json::json!({
             "item_ref": item_ref,
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": parameters,
-            "project_source": { "kind": project_source },
+            "execution_policy": execution_policy,
         });
         // Forward the `call` block only when it carries intent.
         if let Some(call) = call.filter(|c| !c.is_empty()) {
@@ -978,6 +985,9 @@ impl RemoteClient {
         label: Option<&str>,
         scopes: &[String],
     ) -> Result<Value> {
+        let origin_site_id = self.origin_site_id.as_deref().context(
+            "admission claim requires a RemoteClient created from authenticated node state",
+        )?;
         let scopes = normalize_admission_scopes(scopes)?;
         let signed_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -990,6 +1000,7 @@ impl RemoteClient {
             &self.audience,
             &token_hash,
             public_key,
+            origin_site_id,
             &scopes,
             signed_at,
             &nonce,
@@ -998,8 +1009,10 @@ impl RemoteClient {
         let signature =
             lillux::crypto::Signer::sign(self.identity.signing_key(), content_hash.as_bytes());
         let mut body = serde_json::json!({
+            "protocol_version": 2,
             "token": token,
             "public_key": public_key,
+            "origin_site_id": origin_site_id,
             "scopes": scopes,
             "signed_at": signed_at,
             "nonce": nonce,
@@ -1269,15 +1282,17 @@ fn admission_claim_string(
     audience: &str,
     token_hash: &str,
     public_key: &str,
+    origin_site_id: &str,
     scopes: &[String],
     signed_at: u64,
     nonce: &str,
 ) -> String {
     format!(
-        "ryeos-admission-claim-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         audience,
         token_hash,
         public_key,
+        origin_site_id,
         scopes.join(","),
         signed_at,
         nonce,
@@ -1359,9 +1374,8 @@ impl PublicKeyResponse {
                 self.principal_id,
             );
         }
-        if self.site_id.trim().is_empty() {
-            anyhow::bail!("remote /public-key site_id must not be empty");
-        }
+        ryeos_app::identity::validate_canonical_site_id(&self.site_id)
+            .context("remote /public-key site_id is not canonical")?;
         if self.vault_fingerprint.trim().is_empty() {
             anyhow::bail!("remote /public-key vault_fingerprint must not be empty");
         }

@@ -18,6 +18,7 @@
 //! descriptor-driven and dispatched through the offline/dual path
 //! (see `offline_dispatch.rs`) or forwarded to the daemon.
 
+use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -78,6 +79,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "gc"],
         summary: "Run explicit offline node garbage collection",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "auth-reset"],
+        summary: "Discard grants and recreate the local operator authorization",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -145,6 +151,10 @@ pub async fn try_dispatch(
             run_node_gc_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("auth-reset")) => {
+            run_node_auth_reset_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("start", _) => {
             run_start_command(&argv[1..], console)
                 .await
@@ -159,6 +169,126 @@ pub async fn try_dispatch(
         }
         _ => Ok(false),
     }
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node auth-reset",
+    about = "Discard every authorized-key grant and recreate only the local operator grant",
+    long_about = "Perform the explicit no-backcompat authorized-key cutover. The daemon must be stopped. Every local-client and remote-node grant is discarded atomically; only the configured local operator key is re-authorized. Remote nodes must be admitted again.",
+    no_binary_name = true
+)]
+struct NodeAuthResetArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that every existing authorization is discarded.
+    #[arg(long)]
+    confirm_discard_authorized_keys: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeAuthResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.confirm_discard_authorized_keys {
+        anyhow::bail!("discarding every authorized key requires --confirm-discard-authorized-keys");
+    }
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for authorization reset")?;
+    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
+        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    )
+    .context("authorization reset requires the daemon to be stopped")?;
+
+    let node = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
+        .context("load node identity for authorization reset")?;
+    let operator = ryeos_app::identity::NodeIdentity::load(&config.operator_signing_key_path)
+        .context("load operator identity for authorization reset")?;
+    let parent = config
+        .authorized_keys_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("authorized-key namespace has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    if let Ok(metadata) = fs::symlink_metadata(&config.authorized_keys_dir) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            anyhow::bail!(
+                "authorized-key namespace is not a regular directory: {}",
+                config.authorized_keys_dir.display()
+            );
+        }
+    }
+    let nonce = std::process::id();
+    let staging = parent.join(format!(".authorized_keys.reset-{nonce}"));
+    if staging.exists() {
+        anyhow::bail!(
+            "authorization reset staging paths already exist; inspect {}",
+            parent.display()
+        );
+    }
+    fs::create_dir(&staging)?;
+    let operator_key = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        operator.verifying_key().as_bytes(),
+    );
+    ryeos_app::identity::write_authorized_key_toml(
+        &staging,
+        operator.fingerprint(),
+        &operator_key,
+        &["*".to_string()],
+        "bootstrap-authorized-user",
+        operator.fingerprint(),
+        &lillux::time::iso8601_now(),
+        node.signing_key(),
+        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+    )?;
+    lillux::sync_tree_durable(&staging)
+        .context("durably flush reset authorized-key namespace before publication")?;
+    let discarded = if config.authorized_keys_dir.exists() {
+        let count = fs::read_dir(&config.authorized_keys_dir)?.count();
+        // Exchange keeps the live namespace present at every instant. The
+        // exchanged staging path becomes the retired tree only after the new
+        // namespace is durably published in the parent directory.
+        lillux::atomic_exchange_paths(&config.authorized_keys_dir, &staging)
+            .map_err(anyhow::Error::from)
+            .context("atomically publish reset authorized-key namespace")?;
+        lillux::remove_dir_all_durable(&staging)
+            .context("durably remove retired authorized-key namespace")?;
+        count
+    } else {
+        lillux::rename_path_noreplace_durable(&staging, &config.authorized_keys_dir)
+            .map_err(anyhow::Error::from)
+            .context("durably publish initial authorized-key namespace")?;
+        0
+    };
+    let result = serde_json::json!({
+        "discarded_grants": discarded,
+        "operator_fingerprint": operator.fingerprint(),
+        "authorized_keys_dir": config.authorized_keys_dir,
+    });
+    if args.json {
+        crate::tty::write_json(&result)?;
+    } else {
+        let mut status = crate::tty::StatusBanner::new(
+            crate::tty::Tone::Success,
+            "AUTHORIZATION RESET COMPLETE",
+        );
+        status.rows = vec![
+            crate::tty::Row::key_value("discarded grants", discarded.to_string()),
+            crate::tty::Row::key_value("operator", operator.fingerprint()),
+            crate::tty::Row::key_value("remote nodes", "re-admission required"),
+        ];
+        console.success(&status)?;
+    }
+    Ok(())
 }
 
 // ── ryeos node gc ──────────────────────────────────────────────────

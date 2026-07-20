@@ -317,6 +317,10 @@ fn build_top_level_help(
             "Offline checklist answering \"why won't it start\"",
         ),
         crate::tty::Row::key_value("node gc", "Run explicit offline node garbage collection"),
+        crate::tty::Row::key_value(
+            "node auth-reset",
+            "Reset authorized keys for a schema cutover",
+        ),
     ];
     document.sections.push(lifecycle);
     document.sections.push(

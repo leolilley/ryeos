@@ -13,9 +13,11 @@
 //! Distributed trust types:
 //! - [`Attestation`] — signed claim about a CAS object
 
+pub mod admitted_launch_capsule;
 pub mod attestation;
 pub mod bundle_event;
 pub mod chain_state;
+pub mod execution_project_authority;
 pub mod item_source;
 pub mod live_input;
 pub mod project_file;
@@ -26,6 +28,10 @@ pub mod source_manifest;
 pub mod thread_event;
 pub mod thread_snapshot;
 
+pub use admitted_launch_capsule::{
+    AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, DirectExecutableIdentity,
+    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+};
 pub use attestation::Attestation;
 pub use bundle_event::{
     hash_bundle_event, validate_bundle_identifier, BundleEventAttachment, BundleEventAttribution,
@@ -33,6 +39,13 @@ pub use bundle_event::{
     MAX_BUNDLE_EVENT_ATTACHMENT_BYTES, MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
+pub use execution_project_authority::{
+    ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
+    ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionOwnershipAuthority,
+    ExecutionProjectAuthority, ExecutionRecoveryAuthority, LiveAccessAuthority, LiveProjectAccess,
+    LiveSymlinkPolicy, OperationalProjectAuthorityTransition, PinnedChildProjectRealization,
+    PinnedProjectRealization, PinnedTerminalPublication,
+};
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};
 pub use project_file::ProjectFile;

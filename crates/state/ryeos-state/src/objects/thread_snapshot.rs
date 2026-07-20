@@ -11,11 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use super::validate_object_kind;
 
-/// Clean-cut current thread-snapshot format. Schema 2 requires every chain
-/// root to carry a concrete captured history policy. Schema identifiers are
-/// immutable CAS wire identities, so the deployed schema-1 shape must never be
-/// reused for different bytes; there is deliberately no schema-1 reader.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// Clean-cut current thread-snapshot format. Schema 4 makes typed project
+/// authority and the admitted launch capsule root part of every snapshot.
+/// Schema identifiers are immutable CAS wire identities; older shapes are not
+/// accepted through a compatibility reader.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -564,7 +564,7 @@ impl std::fmt::Display for ThreadStatus {
 /// Matches the JSON schema from ARCHITECTURE.md §3:
 /// ```json
 /// {
-///   "schema": 2,
+///   "schema": 4,
 ///   "kind": "thread_snapshot",
 ///   "thread_id": "T-root",
 ///   "chain_root_id": "T-root",
@@ -572,7 +572,7 @@ impl std::fmt::Display for ThreadStatus {
 ///   "kind_name": "agent",
 ///   "item_ref": "directive:foo/bar",
 ///   "executor_ref": "native:directive-runtime",
-///   "launch_mode": "inline",
+///   "launch_mode": "wait",
 ///   "current_site_id": "site:host",
 ///   "origin_site_id": "site:host",
 ///   "upstream_thread_id": null,
@@ -615,7 +615,7 @@ pub struct ThreadSnapshot {
     pub item_ref: String,
     /// The executor reference (e.g. "native:directive-runtime").
     pub executor_ref: String,
-    /// Launch mode: "inline" or "detached".
+    /// Dispatch mode: "wait" or "detached".
     pub launch_mode: String,
     /// Current execution site (e.g. "site:host").
     pub current_site_id: String,
@@ -631,6 +631,15 @@ pub struct ThreadSnapshot {
     /// snapshot-backed project contexts intentionally remain unattributed.
     #[serde(deserialize_with = "deserialize_required_option")]
     pub project_root: Option<PathBuf>,
+    /// Canonical tagged project authority. `project_root` and snapshot-hash
+    /// fields below are query/projection columns and must agree with this value;
+    /// they are never used to infer execution semantics.
+    pub project_authority: super::ExecutionProjectAuthority,
+    /// CAS object sealing the exact admitted program, runtime, project,
+    /// lifecycle, capability, and isolation authority used to launch this
+    /// thread. It is attached in the created -> running commit.
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub admitted_launch_capsule_hash: Option<String>,
     /// History policy captured from verified, typed execution resolution. Only
     /// roots may carry it; every root must carry it in the current format.
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -723,9 +732,9 @@ impl ThreadSnapshot {
         if self.executor_ref.is_empty() {
             anyhow::bail!("executor_ref must not be empty");
         }
-        if !matches!(self.launch_mode.as_str(), "inline" | "detached") {
+        if !matches!(self.launch_mode.as_str(), "wait" | "detached") {
             anyhow::bail!(
-                "invalid launch_mode: '{}' (expected 'inline' or 'detached')",
+                "invalid launch_mode: '{}' (expected 'wait' or 'detached')",
                 self.launch_mode
             );
         }
@@ -750,6 +759,15 @@ impl ThreadSnapshot {
                     self.item_ref
                 );
             }
+        }
+        self.project_authority.validate()?;
+        if self.project_root.as_deref() != self.project_authority.project_root_projection() {
+            anyhow::bail!("project_root projection contradicts project_authority");
+        }
+        if self.base_project_snapshot_hash.as_deref()
+            != self.project_authority.base_snapshot_projection()
+        {
+            anyhow::bail!("base_project_snapshot_hash projection contradicts project_authority");
         }
         let created_at = parse_canonical_timestamp(&self.created_at)
             .map_err(|error| anyhow::anyhow!("invalid created_at: {error}"))?;
@@ -811,6 +829,10 @@ impl ThreadSnapshot {
                 "result_project_snapshot_hash",
                 self.result_project_snapshot_hash.as_deref(),
             ),
+            (
+                "admitted_launch_capsule_hash",
+                self.admitted_launch_capsule_hash.as_deref(),
+            ),
             ("last_event_hash", self.last_event_hash.as_deref()),
         ] {
             if let Some(hash) = hash {
@@ -847,6 +869,8 @@ pub struct ThreadSnapshotBuilder {
     upstream_thread_id: Option<String>,
     requested_by: Option<String>,
     project_root: Option<PathBuf>,
+    project_authority: super::ExecutionProjectAuthority,
+    admitted_launch_capsule_hash: Option<String>,
     captured_history_policy: Option<CapturedThreadHistoryPolicy>,
     base_project_snapshot_hash: Option<String>,
     result_project_snapshot_hash: Option<String>,
@@ -867,6 +891,9 @@ pub struct ThreadSnapshotBuilder {
 
 impl ThreadSnapshotBuilder {
     /// Start building a new thread snapshot with required fields.
+    /// Start a projectless snapshot. Project-backed callers must replace the
+    /// authority explicitly with [`Self::project_authority`]; the builder never
+    /// reconstructs authority from projection fields.
     pub fn new(
         thread_id: impl Into<String>,
         chain_root_id: impl Into<String>,
@@ -882,12 +909,14 @@ impl ThreadSnapshotBuilder {
             kind_name: kind_name.into(),
             item_ref: item_ref.into(),
             executor_ref: executor_ref.into(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: "site:host".to_string(),
             origin_site_id: "site:host".to_string(),
             upstream_thread_id: None,
             requested_by: None,
             project_root: None,
+            project_authority: super::ExecutionProjectAuthority::PROJECTLESS,
+            admitted_launch_capsule_hash: None,
             captured_history_policy: None,
             base_project_snapshot_hash: None,
             result_project_snapshot_hash: None,
@@ -939,6 +968,16 @@ impl ThreadSnapshotBuilder {
 
     pub fn project_root(mut self, root: Option<PathBuf>) -> Self {
         self.project_root = root;
+        self
+    }
+
+    pub fn project_authority(mut self, authority: super::ExecutionProjectAuthority) -> Self {
+        self.project_authority = authority;
+        self
+    }
+
+    pub fn admitted_launch_capsule_hash(mut self, hash: impl Into<String>) -> Self {
+        self.admitted_launch_capsule_hash = Some(hash.into());
         self
     }
 
@@ -1039,6 +1078,8 @@ impl ThreadSnapshotBuilder {
             upstream_thread_id: self.upstream_thread_id,
             requested_by: self.requested_by,
             project_root: self.project_root,
+            project_authority: self.project_authority,
+            admitted_launch_capsule_hash: self.admitted_launch_capsule_hash,
             captured_history_policy: self.captured_history_policy,
             base_project_snapshot_hash: self.base_project_snapshot_hash,
             result_project_snapshot_hash: self.result_project_snapshot_hash,
@@ -1296,7 +1337,7 @@ mod tests {
         assert_eq!(snap.thread_id, "T-1");
         assert_eq!(snap.chain_root_id, "T-root");
         assert_eq!(snap.status, ThreadStatus::Created);
-        assert_eq!(snap.launch_mode, "inline");
+        assert_eq!(snap.launch_mode, "wait");
         assert_eq!(snap.current_site_id, "site:host");
         assert!(snap.upstream_thread_id.is_none());
         assert!(snap.requested_by.is_none());
@@ -1314,11 +1355,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_2_requires_current_nullable_wire_fields() {
+    fn schema_4_requires_current_wire_fields() {
         for field in [
             "upstream_thread_id",
             "requested_by",
             "project_root",
+            "project_authority",
+            "admitted_launch_capsule_hash",
             "captured_history_policy",
             "base_project_snapshot_hash",
             "result_project_snapshot_hash",

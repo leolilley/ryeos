@@ -340,6 +340,17 @@ pub struct SpawnedExecution {
 }
 
 impl SpawnedExecution {
+    /// Release the isolation backend's one-shot pre-exec barrier after the
+    /// daemon has durably attached this exact process identity.
+    ///
+    /// `false` means isolation is explicitly disabled and no backend gate was
+    /// installed; enforced launches always return `true`.
+    pub fn release_start_gate(&mut self) -> Result<bool, EngineError> {
+        self.running
+            .release_start_gate()
+            .map_err(|reason| EngineError::ExecutionFailed { reason })
+    }
+
     /// Block until the subprocess completes and return the completion.
     pub fn wait(self) -> ExecutionCompletion {
         let result = self.running.wait();
@@ -438,6 +449,7 @@ fn isolation_plan_request(
         crate::isolation::IsolationLaunchContext {
             project_path,
             project_authority: ctx.isolation_project_authority,
+            live_access: None,
             state_root: ctx.isolation_state_root.as_deref(),
             checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
             daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
@@ -548,7 +560,7 @@ mod tests {
                 scopes: vec!["execute".into()],
             }),
             project_context: ProjectContext::None,
-            launch_mode: LaunchMode::Inline,
+            launch_mode: LaunchMode::Wait,
         }
     }
 

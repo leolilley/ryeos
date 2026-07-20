@@ -325,6 +325,7 @@ async fn dispatch_managed_subprocess(
     // Minting here (pre-composition) would miss that narrowing.
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
+        lifecycle_authority: request.lifecycle_authority,
         // The serving runtime's canonical ref, captured so a continuation
         // successor reattaches the same runtime identity (not just the kind's
         // current default).
@@ -638,6 +639,12 @@ async fn dispatch_streaming_subprocess(
                     parent.parent_thread_id
                 ))
             })?;
+        let project_authority = request
+            .provenance
+            .project_authority()
+            .clone()
+            .for_child()
+            .map_err(DispatchError::Internal)?;
         state
             .threads
             .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
@@ -651,12 +658,13 @@ async fn dispatch_streaming_subprocess(
                 origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
                 upstream_thread_id: Some(durable_parent.thread_id.clone()),
                 requested_by: Some(request.acting_principal.to_string()),
-                project_root: Some(project_path.clone()),
-                base_project_snapshot_hash: state
-                    .state_store
-                    .authoritative_project_generation(&durable_parent.thread_id)
-                    .map_err(DispatchError::Internal)?
-                    .and_then(|(base, result)| result.or(base)),
+                project_root: project_authority
+                    .project_root_projection()
+                    .map(std::path::Path::to_path_buf),
+                base_project_snapshot_hash: project_authority
+                    .base_snapshot_projection()
+                    .map(str::to_owned),
+                project_authority,
                 usage_subject: request.usage_subject.clone(),
                 usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
                 captured_history_policy: None,
@@ -702,9 +710,11 @@ async fn dispatch_streaming_subprocess(
                 Vec::new(),
             )
         } else {
-            state
-                .threads
-                .create_root_thread_with_id(&thread_id, &resolved_stream)
+            state.threads.create_root_thread_with_id(
+                &thread_id,
+                &resolved_stream,
+                request.provenance.project_authority().clone(),
+            )
         }
     };
     created.map_err(|error| {
@@ -789,6 +799,10 @@ async fn dispatch_streaming_subprocess(
             inherited_fds: Vec::new(),
             supervised_status: None,
         };
+        let live_access = request
+            .provenance
+            .isolation_live_access_authority()
+            .map_err(DispatchError::Internal)?;
         let applied = state
             .isolation
             .apply_with_provenance(
@@ -796,6 +810,7 @@ async fn dispatch_streaming_subprocess(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
+                    live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: None,
@@ -1118,6 +1133,7 @@ async fn dispatch_tool_subprocess(
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
         provenance: request.provenance.clone(),
+        lifecycle_authority: request.lifecycle_authority,
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
         runtime_ref: None,
@@ -1128,7 +1144,7 @@ async fn dispatch_tool_subprocess(
     };
 
     if request.launch_mode == "detached" {
-        // `run_detached` and `run_inline` are independent, large lifecycle
+        // `run_detached` and `run_and_wait` are independent, large lifecycle
         // futures. Boxing the selected leaf prevents this tool router from
         // carrying both state machines inline on every poll.
         let result = Box::pin(crate::execution::runner::run_detached(
@@ -1146,7 +1162,7 @@ async fn dispatch_tool_subprocess(
             "detached": true,
         }))
     } else {
-        let result = Box::pin(crate::execution::runner::run_inline(
+        let result = Box::pin(crate::execution::runner::run_and_wait(
             state.clone(),
             params,
             launch_handoff,
