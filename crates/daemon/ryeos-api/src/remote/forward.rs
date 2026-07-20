@@ -73,9 +73,9 @@ pub struct RemoteForwardResult {
     /// Push summary.
     pub push_summary: PushSummary,
     /// Snapshot hash of the remote execution result.
-    pub result_snapshot_hash: String,
+    pub result_snapshot_hash: Option<String>,
     /// Pull summary.
-    pub pull_summary: PullSummary,
+    pub pull_summary: Option<PullSummary>,
 }
 
 /// Push-phase summary for the response envelope.
@@ -92,6 +92,21 @@ pub struct PullSummary {
     pub cas_objects_fetched: usize,
     pub files_updated: usize,
     pub files_deleted: usize,
+}
+
+fn requests_terminal_project_generation(
+    policy: &ryeos_app::execution_policy::ExecutionPolicy,
+) -> bool {
+    matches!(
+        &policy.project,
+        ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
+            realization: ryeos_app::execution_policy::PinnedRealization::Cow {
+                terminal_publication: ryeos_app::execution_policy::TerminalPublication::RetainResult
+                    | ryeos_app::execution_policy::TerminalPublication::AdvanceHead { .. },
+            },
+            ..
+        }
+    )
 }
 
 /// Errors from the unary forward pipeline.
@@ -315,7 +330,7 @@ pub async fn execute_unary_forward(
             req.item_ref,
             req.ref_bindings,
             (!matches!(
-                req.execution_policy.project,
+                &req.execution_policy.project,
                 ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
             ))
             .then_some(req.remote_project_path),
@@ -353,7 +368,49 @@ pub async fn execute_unary_forward(
         }
     };
 
-    // 3. Extract result snapshot hash.
+    // Read-only and discard executions intentionally produce no terminal
+    // project generation. Their remote result is already complete; requiring
+    // a synthetic snapshot here would silently strengthen the selected
+    // publication contract.
+    if !requests_terminal_project_generation(req.execution_policy) {
+        let completed_result = serde_json::json!({
+            "project_generation": "not_requested",
+        });
+        finish_sync_job_attempt_and_update_job(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Completed,
+                phase: "completed_without_pull".to_string(),
+                error: None,
+                result: Some(completed_result.clone()),
+            },
+            &job_id,
+            SyncJobUpdate {
+                state: SyncJobState::Completed,
+                phase: "completed_without_pull".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![push_result.snapshot_hash.clone()],
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: Some(completed_result),
+            },
+        )?;
+        return Ok(RemoteForwardResult {
+            remote_result,
+            push_summary: PushSummary {
+                pushed_snapshot_hash: push_result.snapshot_hash,
+                tree_entries: push_result.tree_entries,
+                blobs_uploaded: push_result.blobs_uploaded,
+                blobs_skipped: push_result.blobs_skipped,
+            },
+            result_snapshot_hash: None,
+            pull_summary: None,
+        });
+    }
+
+    // 3. Extract the explicitly requested result snapshot hash.
     let Some(result_snapshot_hash) = extract_snapshot_hash(&remote_result) else {
         finish_sync_job_attempt_and_update_job(
             state,
@@ -479,13 +536,13 @@ pub async fn execute_unary_forward(
             blobs_uploaded: push_result.blobs_uploaded,
             blobs_skipped: push_result.blobs_skipped,
         },
-        result_snapshot_hash,
-        pull_summary: PullSummary {
+        result_snapshot_hash: Some(result_snapshot_hash),
+        pull_summary: Some(PullSummary {
             snapshot_hash: pull_result.snapshot_hash,
             cas_objects_fetched: pull_result.cas_objects_fetched,
             files_updated: pull_result.files_updated,
             files_deleted: pull_result.files_deleted,
-        },
+        }),
     })
 }
 

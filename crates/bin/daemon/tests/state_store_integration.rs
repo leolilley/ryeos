@@ -78,7 +78,7 @@ mod integration_tests {
             kind: kind.to_string(),
             item_ref: item_ref.to_string(),
             executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: upstream.map(|s| s.to_string()),
@@ -295,7 +295,7 @@ mod integration_tests {
                         kind: kind.into(),
                         item_ref: item_ref.into(),
                         ref_bindings: std::collections::BTreeMap::new(),
-                        launch_mode: "inline".into(),
+                        launch_mode: "wait".into(),
                         parameters: serde_json::json!({}),
                         project_context: ProjectContext::LocalPath {
                             path: std::path::PathBuf::from("/tmp/p"),
@@ -329,6 +329,7 @@ mod integration_tests {
                         }),
                         execution_hints: ExecutionHints::default(),
                         effective_caps: vec![],
+                        parent_delegation_caps: None,
                         executor_ref: None,
                         runtime_ref: None,
                     }),
@@ -1409,7 +1410,7 @@ mod integration_tests {
             kind: "directive".into(),
             item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
-            launch_mode: "inline".into(),
+            launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
@@ -1443,6 +1444,7 @@ mod integration_tests {
             }),
             execution_hints: ExecutionHints::default(),
             effective_caps: vec![],
+            parent_delegation_caps: None,
             executor_ref: None,
             runtime_ref: None,
         };
@@ -1547,7 +1549,7 @@ mod integration_tests {
             kind: "directive".into(),
             item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
-            launch_mode: "inline".into(),
+            launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
@@ -1581,6 +1583,7 @@ mod integration_tests {
             }),
             execution_hints: ExecutionHints::default(),
             effective_caps: vec![],
+            parent_delegation_caps: None,
             executor_ref: None,
             runtime_ref: None,
         };

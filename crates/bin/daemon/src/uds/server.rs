@@ -1439,10 +1439,37 @@ mod tests {
     type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
 
     fn test_provenance(state: &AppState, path: &str) -> TestProvenance {
+        let project_path = std::path::PathBuf::from(path);
+        let authored_project_identity = format!("test:{path}");
+        let authority_id = lillux::sha256_hex(
+            format!("live-project\0{authored_project_identity}\0{path}").as_bytes(),
+        );
+        let authority = ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+            authority_id: authority_id.clone(),
+            authored_project_identity,
+            canonical_root: project_path.clone(),
+            live_access: ryeos_state::objects::LiveAccessAuthority {
+                access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                denied_control_paths:
+                    ryeos_state::project_sync::live_execution_denied_control_paths(),
+                authorized_write_namespaces: vec!["project".to_string()],
+                symlink_policy: ryeos_state::objects::LiveSymlinkPolicy::DescriptorRootedNoEscape,
+            },
+            environment: ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: authority_id,
+                source_identity: format!("dotenv:{path}/.env"),
+                include_operator_vault: true,
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+            },
+            capability_ceiling: Vec::new(),
+            child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+        };
         ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            std::path::PathBuf::from(path),
+            project_path,
             state.engine.clone(),
+            authority,
         )
+        .expect("synthetic UDS test live authority must be valid")
     }
 
     fn bind_test_callback_owner(
@@ -1697,7 +1724,7 @@ mod tests {
             kind: "system_task".to_string(),
             item_ref: "directive:test/directive".to_string(),
             executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
@@ -2344,6 +2371,7 @@ mod tests {
                         }),
                         execution_hints: ExecutionHints::default(),
                         effective_caps: vec![],
+                        parent_delegation_caps: None,
                         executor_ref: None,
                         runtime_ref: None,
                     }),
@@ -2422,6 +2450,7 @@ mod tests {
         let sealed =
             ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
         let mut metadata = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
             .with_resume_context(ResumeContext {
                 kind: "graph_run".to_string(),
                 item_ref: sealed.item_ref().to_string(),
@@ -2445,9 +2474,30 @@ mod tests {
                 }),
                 execution_hints: Default::default(),
                 effective_caps: Vec::new(),
+                parent_delegation_caps: Some(Vec::new()),
                 executor_ref: Some(sealed.executor_ref().to_string()),
                 runtime_ref: Some(sealed.runtime_ref().to_string()),
             })
+            .with_admitted_artifact_identity(
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                    runtime_ref: sealed.runtime_ref().to_string(),
+                    runtime_content_hash: "a".repeat(64),
+                    runtime_signer_fingerprint: "fp:test-runtime".to_string(),
+                    protocol_ref: "protocol:test/runtime".to_string(),
+                    protocol_content_hash: "b".repeat(64),
+                    protocol_signer_fingerprint: "fp:test-protocol".to_string(),
+                    executor_ref: sealed.executor_ref().to_string(),
+                    executor_content_hash: "c".repeat(64),
+                    executor_bundle_manifest_hash: "d".repeat(64),
+                    executor_bundle_signer_fingerprint: "fp:test-executor-bundle".to_string(),
+                },
+            )
+            .with_admitted_prepared_launch(json!({
+                "runtime_data": {},
+                "required_secrets": [],
+                "runtime_facts": {},
+                "binding_records": {},
+            }))
             .with_sealed_root_request(sealed);
         metadata.follow_parent_context = Some(PersistedParentExecutionContext {
             parent_thread_id: "P".to_string(),
@@ -4928,7 +4978,7 @@ mod tests {
                     kind: "system_task".to_string(),
                     item_ref: "directive:test/directive".to_string(),
                     executor_ref: "test/executor".to_string(),
-                    launch_mode: "inline".to_string(),
+                    launch_mode: "wait".to_string(),
                     current_site_id: "site:test".to_string(),
                     origin_site_id: "site:test".to_string(),
                     upstream_thread_id: Some("T-pred".to_string()),

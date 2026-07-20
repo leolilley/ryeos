@@ -610,6 +610,7 @@ fn exec_tool(
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: Path::new(project_path),
                 project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+                live_access: None,
                 state_root: None,
                 checkpoint_dir: None,
                 daemon_socket_path: None,

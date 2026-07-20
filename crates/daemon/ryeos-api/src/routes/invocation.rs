@@ -35,6 +35,10 @@ pub struct RoutePrincipal {
     pub verifier_key: &'static str,
     /// Whether the principal was cryptographically verified.
     pub verified: bool,
+    /// Site identity cryptographically bound to a v2 remote-node grant.
+    /// `None` for local clients and non-RyeOS verifiers. Execute routes must
+    /// never populate this from request data.
+    pub authenticated_origin_site_id: Option<String>,
     /// Verifier-supplied metadata for downstream consumption.
     ///
     /// `BTreeMap` for deterministic JSON serialization order.
@@ -49,9 +53,22 @@ impl RoutePrincipal {
             scopes: Vec::new(),
             verifier_key,
             verified: false,
+            authenticated_origin_site_id: None,
             metadata: BTreeMap::new(),
         }
     }
+}
+
+/// Select execution origin exclusively from authenticated route authority.
+/// Remote request payloads never participate; local and non-RyeOS principals
+/// resolve to the serving node.
+pub(crate) fn authenticated_execution_origin(
+    principal: Option<&RoutePrincipal>,
+    current_site_id: &str,
+) -> String {
+    principal
+        .and_then(|value| value.authenticated_origin_site_id.clone())
+        .unwrap_or_else(|| current_site_id.to_string())
 }
 
 // ── Invocation context (input) ─────────────────────────────────────────────
@@ -275,4 +292,32 @@ pub async fn invoke_checked(
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod origin_tests {
+    use super::*;
+
+    #[test]
+    fn authenticated_remote_site_is_the_execution_origin() {
+        let mut principal = RoutePrincipal::anonymous("fp:remote".to_string(), "ryeos_signed");
+        principal.authenticated_origin_site_id = Some("site:remote".to_string());
+        assert_eq!(
+            authenticated_execution_origin(Some(&principal), "site:local"),
+            "site:remote"
+        );
+    }
+
+    #[test]
+    fn local_principal_uses_the_serving_site_as_origin() {
+        let principal = RoutePrincipal::anonymous("fp:local".to_string(), "ryeos_signed");
+        assert_eq!(
+            authenticated_execution_origin(Some(&principal), "site:local"),
+            "site:local"
+        );
+        assert_eq!(
+            authenticated_execution_origin(None, "site:local"),
+            "site:local"
+        );
+    }
 }

@@ -85,17 +85,21 @@ pub async fn handle(
         .project_path
         .ok_or_else(|| HandlerError::BadRequest("project_path is required".to_string()))?;
     let project_path = std::path::PathBuf::from(project_path);
+    ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
         &state,
         &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
         &project_path,
         &ctx.fingerprint,
         &format!("command-{}", ryeos_app::thread_lifecycle::new_thread_id()),
+        ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
     )
     .map_err(|error| HandlerError::BadRequest(format!("capture command project: {error}")))?;
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
     let site_id = state.threads.site_id().to_string();
+    let origin_site_id = ctx.execution_origin(&site_id);
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
@@ -105,7 +109,7 @@ pub async fn handle(
             path: project_ctx.effective_path.clone(),
         },
         current_site_id: site_id.clone(),
-        origin_site_id: site_id,
+        origin_site_id,
         execution_hints: Default::default(),
         validate_only: false,
     };
@@ -116,13 +120,20 @@ pub async fn handle(
         plan_ctx,
         requested_call: None,
     };
+    let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
+        &project_ctx.effective_path,
+        ctx.scopes.clone(),
+    )
+    .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         project_ctx.effective_path.clone(),
         project_ctx.request_engine.clone(),
-    );
+        resolved_authority.project,
+    )
+    .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let kind = item_ref.split(':').next().unwrap_or("");
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
-        launch_mode: "inline",
+        launch_mode: "wait",
         target_site_id: None,
         validate_only: false,
         params: parameters,
@@ -130,7 +141,7 @@ pub async fn handle(
         acting_principal: ctx.fingerprint.as_str(),
         project_path: &project_ctx.effective_path,
         provenance,
-        lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+        lifecycle_authority: resolved_authority.lifecycle,
         original_root_kind: kind,
         pre_minted_thread_id: None,
         usage_subject: None,

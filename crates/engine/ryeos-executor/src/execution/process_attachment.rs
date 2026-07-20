@@ -15,7 +15,7 @@ use ryeos_app::state_store::{is_terminal_status, StopIntent};
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{ThreadAttachProcessParams, ThreadFinalizeParams};
 
-/// RAII ownership for any inline lifecycle row whose async request may be
+/// RAII ownership for any waiting lifecycle row whose async request may be
 /// cancelled after creation. Explicit terminal/preserve paths disarm it; an
 /// unplanned future drop delegates to the same exact-identity tree stop used by
 /// the unified runner.
@@ -77,12 +77,12 @@ impl Drop for LifecycleOwnerGuard {
             Ok(super::runner::OwnerDropStopOutcome::Settled) => {}
             Ok(super::runner::OwnerDropStopOutcome::PreservedForShutdown) => tracing::info!(
                 thread_id = %self.thread_id,
-                "inline lifecycle owner preserved row for shutdown coordinator"
+                "waiting lifecycle owner preserved row for shutdown coordinator"
             ),
             Err(error) => tracing::error!(
                 thread_id = %self.thread_id,
                 error = %error,
-                "inline lifecycle owner could not fully stop and settle execution tree"
+                "waiting lifecycle owner could not fully stop and settle execution tree"
             ),
         }
     }
@@ -211,7 +211,12 @@ pub(crate) fn run_lillux_attached(
     workspace_lifeline: Option<Arc<TempDirGuard>>,
 ) -> Result<lillux::SubprocessResult> {
     let _workspace_lifeline = workspace_lifeline;
-    let spawned = match lillux::spawn(request) {
+    if !state.isolation.is_enforced() {
+        anyhow::bail!(
+            "durable callback subprocess execution requires enforced isolation so attach-before-exec can be guaranteed"
+        );
+    }
+    let mut spawned = match lillux::spawn(request) {
         Ok(spawned) => spawned,
         Err(result) => return Ok(result),
     };
@@ -248,6 +253,18 @@ pub(crate) fn run_lillux_attached(
             anyhow::bail!("callback subprocess attachment refused after durable stop request");
         }
         return Err(error).context("attach callback subprocess identity");
+    }
+    match spawned.release_start_gate() {
+        Ok(true) => {}
+        Ok(false) => {
+            spawned.abort();
+            anyhow::bail!("callback subprocess launched without the mandatory pre-exec start gate");
+        }
+        Err(error) => {
+            spawned.abort();
+            return Err(anyhow::Error::msg(error))
+                .context("release callback subprocess after durable attachment");
+        }
     }
     Ok(spawned.wait())
 }

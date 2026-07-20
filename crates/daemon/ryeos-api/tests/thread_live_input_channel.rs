@@ -48,7 +48,7 @@ fn create_running_directive(state: &AppState, thread_id: &str, requested_by: &st
         kind: "directive".to_string(),
         item_ref: "directive:test/live".to_string(),
         executor_ref: "test/executor".to_string(),
-        launch_mode: "inline".to_string(),
+        launch_mode: "wait".to_string(),
         current_site_id: "site:test".to_string(),
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,

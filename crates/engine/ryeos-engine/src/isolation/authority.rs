@@ -2,10 +2,21 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IsolationLiveAccessAuthority {
+    pub root_device_id: u64,
+    pub root_inode: u64,
+    pub denied_control_paths: Vec<PathBuf>,
+    pub authorized_write_namespaces: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationProjectAuthority {
     External,
     RuntimeWorkspace,
+    /// Daemon-created, request-owned projectless scratch directory. This is
+    /// writable but has no snapshot/fold-back semantics.
+    EphemeralScratch,
     /// Pure node handler launch. The project path supplies a read-only cwd;
     /// no configured host writable mount is granted for this launch.
     ReadOnly,
@@ -24,6 +35,7 @@ pub struct IsolationVerifiedCode {
 pub struct IsolationLaunchContext<'a> {
     pub project_path: &'a Path,
     pub project_authority: IsolationProjectAuthority,
+    pub live_access: Option<&'a IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub checkpoint_dir: Option<&'a Path>,
     pub daemon_socket_path: Option<&'a Path>,

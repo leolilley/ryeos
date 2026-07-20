@@ -217,7 +217,7 @@ pub async fn touch_seat_thread(client: &DaemonClient, thread_id: &str) -> bool {
 
 fn seat_execution_policy() -> serde_json::Value {
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "ownership": "daemon_owned",
         "recovery": "restart_recoverable",
         "response": "wait",
@@ -225,7 +225,7 @@ fn seat_execution_policy() -> serde_json::Value {
         "environment": {
             "kind": "project_overlay",
             "include_operator_vault": true,
-            "allowed_names": [],
+            "name_policy": { "kind": "declared_required" },
         },
         "project": {
             "kind": "live_direct",

@@ -486,6 +486,20 @@ impl PinnedDirectory {
         &self.path
     }
 
+    /// Return the concrete filesystem identity pinned by this descriptor.
+    /// Callers use this to compare a durable authority fence with the object
+    /// they will actually traverse, without reopening the pathname.
+    pub fn device_inode(&self) -> Result<(u64, u64)> {
+        #[cfg(not(unix))]
+        anyhow::bail!("secure directory identity is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = self.directory.metadata()?;
+            Ok((metadata.dev(), metadata.ino()))
+        }
+    }
+
     /// Linux descriptor-rooted child pathname for APIs (notably SQLite) that
     /// cannot accept an already-open directory handle. The child remains bound
     /// to this directory inode even if its ordinary pathname is replaced.

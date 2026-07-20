@@ -16,6 +16,7 @@ ryeos-app = { workspace = true }
 ryeos-engine = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-runtime = { workspace = true }
+ryeos-state = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -31,4 +32,3 @@ tempfile = { workspace = true }
 ryeos-engine = { workspace = true, features = ["test-support"] }
 ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }
-ryeos-state = { workspace = true }

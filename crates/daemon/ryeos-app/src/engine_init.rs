@@ -497,7 +497,7 @@ fn inspect_isolation_backend(
             })
             .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
         let request = AdapterInspectionRequest {
-            protocol: IsolationAdapterProtocolVersion::V2,
+            protocol: IsolationAdapterProtocolVersion::V3,
             target,
             backend_id: declaration.id.clone(),
             artifacts,
@@ -542,7 +542,7 @@ fn inspect_isolation_backend(
         let mut response: AdapterInspectionResponse =
             ryeos_isolation_protocol::from_json_str_strict(&result.stdout)
                 .context("parse strict isolation adapter inspection response")?;
-        if response.protocol != IsolationAdapterProtocolVersion::V2 {
+        if response.protocol != IsolationAdapterProtocolVersion::V3 {
             anyhow::bail!("isolation adapter returned a different protocol version");
         }
         response

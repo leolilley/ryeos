@@ -59,7 +59,7 @@ impl LaunchSpawnError {
 /// item_ref/project/parameters identity.
 pub(crate) struct DispatchLaunchOptions {
     pub ref_bindings: BTreeMap<String, String>,
-    /// Launch mode (e.g. "inline", "detached").
+    /// Caller response mode (`"wait"` or `"detached"`).
     pub launch_mode: String,
     /// Target site id for remote forwarding. `None` means local execution.
     pub target_site_id: Option<String>,
@@ -115,7 +115,7 @@ impl DispatchLaunchOptions {
         }
         Ok(Self {
             ref_bindings,
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             target_site_id: None,
             validate_only: false,
             usage_subject: None,
@@ -123,7 +123,7 @@ impl DispatchLaunchOptions {
             call: None,
             previous_thread_id: None,
             lifecycle_authority:
-                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
             root_admission,
             project_path,
             captured_generation: None,
@@ -152,6 +152,7 @@ pub(crate) fn preflight_dispatch_launch(
     ref_bindings: &BTreeMap<String, String>,
     principal_id: &str,
     principal_scopes: &[String],
+    origin_site_id: &str,
     call: Option<ryeos_engine::method_call::MethodCall>,
     launch_mode: &str,
     validate_only: bool,
@@ -178,7 +179,7 @@ pub(crate) fn preflight_dispatch_launch(
         }),
         project_context: ProjectContext::LocalPath { path: project_path },
         current_site_id: state.threads.site_id().to_string(),
-        origin_site_id: state.threads.site_id().to_string(),
+        origin_site_id: origin_site_id.to_string(),
         execution_hints: Default::default(),
         validate_only,
     };
@@ -292,11 +293,9 @@ fn spawn_dispatch_launch_inner(
         // cancellation and the complete background dispatch. The authoritative
         // birth/result rows become the long-lived roots before this drops.
         let _captured_generation = captured_generation;
-        let site_id = current_site_id;
-        let current_site_id_for_failure_row = site_id.clone();
-        let origin_site_id_for_failure_row = site_id.clone();
-
         let plan_ctx = root_admission.plan_context().clone();
+        let current_site_id_for_failure_row = plan_ctx.current_site_id.clone();
+        let origin_site_id_for_failure_row = plan_ctx.origin_site_id.clone();
 
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: principal_id.clone(),

@@ -294,13 +294,16 @@ pub enum HookDispatchReservation {
     PendingUnknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct DetachedSpawnIntent {
     pub operation_id: String,
     pub parent_thread_id: String,
     pub request_hash: String,
     pub child_thread_id: String,
     pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
+    pub admitted_launch_capsule_hash: Option<String>,
+    pub launch_metadata: Option<crate::launch_metadata::RuntimeLaunchMetadata>,
+    pub initial_events: Option<Vec<crate::state_store::NewEventRecord>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -325,6 +328,29 @@ fn decode_detached_spawn_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Det
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        admitted_launch_capsule_hash: row.get(5)?,
+        launch_metadata: row
+            .get::<_, Option<String>>(6)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+        initial_events: row
+            .get::<_, Option<String>>(7)?
+            .map(|raw| serde_json::from_str(&raw))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
                     rusqlite::types::Type::Text,
                     Box::new(error),
                 )
@@ -725,6 +751,9 @@ CREATE TABLE IF NOT EXISTS detached_spawn_intent (
     request_hash TEXT NOT NULL,
     child_thread_id TEXT NOT NULL UNIQUE,
     child_project_authority TEXT,
+    admitted_launch_capsule_hash TEXT,
+    launch_metadata TEXT,
+    initial_events TEXT,
     created_at_ms INTEGER NOT NULL
 );
 
@@ -1092,6 +1121,24 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                     sqlite_schema::ColumnSpec {
                         name: "child_project_authority",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "admitted_launch_capsule_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_metadata",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "initial_events",
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
@@ -1644,9 +1691,7 @@ fn validate_current_launch_metadata(raw: &str) -> Result<()> {
     }
     let decoded: RuntimeLaunchMetadata =
         serde_json::from_value(value.clone()).context("validate current launch metadata")?;
-    if let Some(resume) = &decoded.resume_context {
-        resume.authoritative_project_identity()?;
-    }
+    decoded.validate()?;
     let canonical =
         lillux::canonical_json(&value).context("canonicalize current launch metadata")?;
     if canonical != raw {
@@ -1658,6 +1703,7 @@ fn validate_current_launch_metadata(raw: &str) -> Result<()> {
 }
 
 fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<String> {
+    metadata.validate()?;
     let value = serde_json::to_value(metadata).context("encode current launch metadata")?;
     lillux::canonical_json(&value).context("canonicalize current launch metadata")
 }
@@ -1974,6 +2020,46 @@ fn validate_detached_spawn_intent(
     Ok(())
 }
 
+fn validate_detached_spawn_intent_record(intent: &DetachedSpawnIntent) -> Result<()> {
+    validate_detached_spawn_intent(
+        &intent.operation_id,
+        &intent.parent_thread_id,
+        &intent.request_hash,
+        &intent.child_thread_id,
+    )?;
+    if let Some(authority) = &intent.child_project_authority {
+        authority.validate()?;
+    }
+    let sealed = intent.launch_metadata.is_some();
+    let sealed_fields_complete = intent.admitted_launch_capsule_hash.is_some()
+        && intent.launch_metadata.is_some()
+        && intent.initial_events.is_some()
+        && intent.child_project_authority.is_some();
+    let unsealed_fields_empty = intent.admitted_launch_capsule_hash.is_none()
+        && intent.launch_metadata.is_none()
+        && intent.initial_events.is_none();
+    if (sealed && !sealed_fields_complete) || (!sealed && !unsealed_fields_empty) {
+        bail!(
+            "detached operation `{}` has an incomplete sealed authority",
+            intent.operation_id
+        );
+    }
+    if let Some(metadata) = &intent.launch_metadata {
+        metadata.validate()?;
+        let expected = metadata
+            .admitted_launch_capsule()?
+            .ok_or_else(|| anyhow!("detached operation has no admitted launch capsule"))?
+            .content_hash()?;
+        if intent.admitted_launch_capsule_hash.as_deref() != Some(expected.as_str()) {
+            bail!(
+                "detached operation `{}` admitted capsule hash is not canonical",
+                intent.operation_id
+            );
+        }
+    }
+    Ok(())
+}
+
 fn decode_completed_hook_response(
     dispatch_key: &str,
     response_json: Option<&[u8]>,
@@ -2260,6 +2346,87 @@ impl RuntimeDb {
         Ok(())
     }
 
+    pub fn seal_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+        child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+        admitted_launch_capsule_hash: &str,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        initial_events: &[crate::state_store::NewEventRecord],
+    ) -> Result<()> {
+        child_project_authority.validate()?;
+        launch_metadata.validate()?;
+        validate_sha256(
+            "detached admitted_launch_capsule_hash",
+            admitted_launch_capsule_hash,
+        )?;
+        let expected_capsule_hash = launch_metadata
+            .admitted_launch_capsule()?
+            .ok_or_else(|| anyhow!("detached sealed launch has no admitted capsule"))?
+            .content_hash()?;
+        if admitted_launch_capsule_hash != expected_capsule_hash {
+            bail!(
+                "detached admitted capsule hash mismatch: expected {expected_capsule_hash}, got {admitted_launch_capsule_hash}"
+            );
+        }
+        let authority = serde_json::to_string(child_project_authority)?;
+        let metadata = serde_json::to_string(launch_metadata)?;
+        let events = serde_json::to_string(initial_events)?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE detached_spawn_intent
+             SET child_project_authority=?2, admitted_launch_capsule_hash=?3,
+                 launch_metadata=?4, initial_events=?5
+             WHERE operation_id=?1 AND launch_metadata IS NULL",
+            params![
+                operation_id,
+                authority,
+                admitted_launch_capsule_hash,
+                metadata,
+                events
+            ],
+        )?;
+        let persisted = tx
+            .query_row(
+                "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                        child_project_authority, admitted_launch_capsule_hash,
+                        launch_metadata, initial_events
+                 FROM detached_spawn_intent WHERE operation_id=?1",
+                params![operation_id],
+                decode_detached_spawn_intent,
+            )
+            .optional()?
+            .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
+        if persisted
+            .child_project_authority
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?
+            .as_deref()
+            != Some(authority.as_str())
+            || persisted.admitted_launch_capsule_hash.as_deref()
+                != Some(admitted_launch_capsule_hash)
+            || persisted
+                .launch_metadata
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+                .as_deref()
+                != Some(metadata.as_str())
+            || persisted
+                .initial_events
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?
+                .as_deref()
+                != Some(events.as_str())
+        {
+            bail!("detached operation `{operation_id}` was sealed with different launch authority");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_detached_spawn_intent(
         &self,
         operation_id: &str,
@@ -2268,29 +2435,24 @@ impl RuntimeDb {
             .conn
             .query_row(
                 "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
-                        child_project_authority
+                        child_project_authority, admitted_launch_capsule_hash,
+                        launch_metadata, initial_events
                    FROM detached_spawn_intent WHERE operation_id=?1",
                 params![operation_id],
                 decode_detached_spawn_intent,
             )
             .optional()?;
         if let Some(intent) = &row {
-            validate_detached_spawn_intent(
-                &intent.operation_id,
-                &intent.parent_thread_id,
-                &intent.request_hash,
-                &intent.child_thread_id,
-            )?;
-            if let Some(authority) = &intent.child_project_authority {
-                authority.validate()?;
-            }
+            validate_detached_spawn_intent_record(intent)?;
         }
         Ok(row)
     }
 
     pub fn detached_spawn_intents(&self) -> Result<Vec<DetachedSpawnIntent>> {
         let mut statement = self.conn.prepare(
-            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id, child_project_authority
+            "SELECT operation_id, parent_thread_id, request_hash, child_thread_id,
+                    child_project_authority, admitted_launch_capsule_hash,
+                    launch_metadata, initial_events
                FROM detached_spawn_intent ORDER BY created_at_ms, operation_id",
         )?;
         let intents = statement
@@ -2298,23 +2460,29 @@ impl RuntimeDb {
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(anyhow::Error::from)?;
         for intent in &intents {
-            validate_detached_spawn_intent(
-                &intent.operation_id,
-                &intent.parent_thread_id,
-                &intent.request_hash,
-                &intent.child_thread_id,
-            )?;
+            validate_detached_spawn_intent_record(intent)?;
         }
         Ok(intents)
     }
 
-    /// Snapshot objects referenced by durable handoff intents before their
-    /// child rows become authoritative chain roots. GC must retain these roots
+    pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM detached_spawn_intent
+             WHERE operation_id=?1 AND launch_metadata IS NULL",
+            params![operation_id],
+        )? > 0)
+    }
+
+    /// CAS objects referenced by durable handoff intents before their child
+    /// rows become authoritative chain roots. GC must retain these roots
     /// for the entire intent lifetime, including crash recovery between
     /// authority sealing and child birth.
-    pub fn handoff_project_snapshot_roots(&self) -> Result<Vec<String>> {
+    pub fn handoff_cas_object_roots(&self) -> Result<Vec<String>> {
         let mut roots = BTreeSet::new();
         for intent in self.detached_spawn_intents()? {
+            if let Some(hash) = intent.admitted_launch_capsule_hash {
+                roots.insert(hash);
+            }
             if let Some(hash) = intent
                 .child_project_authority
                 .as_ref()
@@ -3296,7 +3464,7 @@ impl RuntimeDb {
         let existing = self
             .conn
             .query_row(
-                "SELECT pid, pgid, process_identity, stop_requested_at_ms
+                "SELECT pid, pgid, process_identity, stop_requested_at_ms, launch_metadata
                    FROM thread_runtime WHERE thread_id = ?1",
                 params![thread_id],
                 |row| {
@@ -3305,6 +3473,7 @@ impl RuntimeDb {
                         row.get::<_, Option<i64>>(1)?,
                         row.get::<_, Option<String>>(2)?,
                         row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
@@ -3312,7 +3481,29 @@ impl RuntimeDb {
             .ok_or_else(|| {
                 anyhow::anyhow!("thread_runtime row missing for thread_id: {thread_id}")
             })?;
-        let (existing_pid, existing_pgid, existing_identity, stop_requested_at_ms) = existing;
+        let (
+            existing_pid,
+            existing_pgid,
+            existing_identity,
+            stop_requested_at_ms,
+            existing_launch_metadata,
+        ) = existing;
+        let existing_launch_metadata = existing_launch_metadata
+            .map(|raw| {
+                validate_current_launch_metadata(&raw)?;
+                serde_json::from_str::<RuntimeLaunchMetadata>(&raw)
+                    .context("decode authoritative launch metadata during process attach")
+            })
+            .transpose()?;
+        let merged_launch_metadata = match existing_launch_metadata {
+            Some(authoritative) if launch_metadata.is_empty() => Some(authoritative),
+            Some(authoritative) => Some(authoritative.merge_for_process_attach(launch_metadata)?),
+            None if launch_metadata.is_empty() => None,
+            None => {
+                launch_metadata.validate()?;
+                Some(launch_metadata.clone())
+            }
+        };
         if let Some(existing_identity) = existing_identity {
             let existing_identity =
                 serde_json::from_str::<ExecutionProcessIdentity>(&existing_identity)
@@ -3328,8 +3519,10 @@ impl RuntimeDb {
             // intentionally left empty, but it cannot change process identity.
             // Once a stop is tombstoned, keep the exact repeat idempotent but do
             // not mutate launch metadata during cancellation.
-            if stop_requested_at_ms.is_none() && !launch_metadata.is_empty() {
-                let lm_json = encode_current_launch_metadata(launch_metadata)
+            if let (None, Some(merged_launch_metadata)) =
+                (stop_requested_at_ms, merged_launch_metadata.as_ref())
+            {
+                let lm_json = encode_current_launch_metadata(merged_launch_metadata)
                     .context("failed to encode launch_metadata")?;
                 self.conn.execute(
                     "UPDATE thread_runtime SET launch_metadata = ?2 WHERE thread_id = ?1",
@@ -3349,7 +3542,7 @@ impl RuntimeDb {
         // thread/pid, so its `launch_metadata` is the serde default (empty); do
         // NOT let that clobber metadata already seeded on the row at spawn
         // (resume context / continuation spec). Update only pid/pgid in that case.
-        if launch_metadata.is_empty() {
+        let Some(merged_launch_metadata) = merged_launch_metadata else {
             let updated = self.conn.execute(
                 "UPDATE thread_runtime
                     SET pid = ?2, pgid = ?3, process_identity = ?4
@@ -3362,8 +3555,8 @@ impl RuntimeDb {
                 bail!("thread_runtime row missing for thread_id: {thread_id}");
             }
             return Ok(());
-        }
-        let lm_json = encode_current_launch_metadata(launch_metadata)
+        };
+        let lm_json = encode_current_launch_metadata(&merged_launch_metadata)
             .context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
             "UPDATE thread_runtime
@@ -4129,6 +4322,11 @@ impl RuntimeDb {
         }
         resume.original_snapshot_hash = Some(snapshot_hash.to_string());
         resume.original_pushed_head_ref = None;
+        resume.project_authority = resume.project_authority.transition_operational_generation(
+            ryeos_state::objects::OperationalProjectAuthorityTransition::SealPinnedCowCheckpoint {
+                snapshot_hash,
+            },
+        )?;
         let launch_metadata_json = encode_current_launch_metadata(&launch_metadata)?;
         let workspace_updated = tx.execute(
             "UPDATE execution_workspace
@@ -4762,7 +4960,8 @@ impl RuntimeDb {
             || existing.frontier_id != seed.frontier_id
             || existing.fanout != seed.fanout
             || existing.expected_children != seed.expected_children
-            || existing.child_project_authority != seed.child_project_authority
+            || (seed.child_project_authority.is_some()
+                && existing.child_project_authority != seed.child_project_authority)
         {
             bail!(
                 "follow reservation conflict for follow_key {}: seed does not match the persisted row",
@@ -4770,6 +4969,25 @@ impl RuntimeDb {
             );
         }
         Ok(existing)
+    }
+
+    pub fn bind_follow_project_authority(
+        &self,
+        follow_key: &str,
+        authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<()> {
+        authority.validate()?;
+        let encoded = serde_json::to_string(authority)?;
+        self.conn.execute(
+            "UPDATE follow_waiter SET child_project_authority=?2, updated_at_ms=?3
+             WHERE follow_key=?1 AND child_project_authority IS NULL",
+            params![follow_key, encoded, lillux::time::timestamp_millis()],
+        )?;
+        let persisted = self.require_follow_waiter(follow_key)?;
+        if persisted.child_project_authority.as_ref() != Some(authority) {
+            bail!("follow waiter {follow_key} was bound to different project authority");
+        }
+        Ok(())
     }
 
     /// Record the spawned child's identities. Allowed only when unset (first

@@ -49,13 +49,15 @@ pub struct RefBindingLaunchRecord {
     pub resolution: ryeos_engine::resolution::AsLaunchedResolutionDigest,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedSecret {
     pub name: String,
     pub origin: LaunchSecretOriginWire,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PreparedRuntimeLaunch {
     pub runtime_data: BTreeMap<String, Value>,
     pub required_secrets: Vec<PreparedSecret>,

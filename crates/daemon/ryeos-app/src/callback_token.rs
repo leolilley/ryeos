@@ -440,7 +440,9 @@ mod tests {
     }
 
     fn provenance(path: PathBuf) -> TestProvenance {
-        ExecutionProvenance::root_live_fs(path, minimal_engine())
+        let authority =
+            crate::execution_policy::synthetic_test_live_project_authority(path.as_path());
+        ExecutionProvenance::root_live_fs(path, minimal_engine(), authority).unwrap()
     }
 
     #[test]
@@ -693,13 +695,27 @@ mod tests {
         let engine = minimal_engine();
         let tmp = tempfile::tempdir().unwrap();
         let lifeline = Arc::new(TempDirGuard::new(tmp.path().to_path_buf()));
+        let snapshot_hash = "a".repeat(64);
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "site:test:/original".to_string(),
+            Some(PathBuf::from("/original")),
+            snapshot_hash.clone(),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
         let provenance = ExecutionProvenance::root_pushed_head(
             tmp.path().to_path_buf(),
             PathBuf::from("/original"),
             engine.clone(),
             lifeline.clone(),
-            "snap".to_string(),
-        );
+            snapshot_hash,
+            project_authority,
+        )
+        .unwrap();
 
         let cap = store.generate(
             "T-test",
@@ -722,10 +738,10 @@ mod tests {
         );
         assert_eq!(validated.provenance.effective_path(), tmp.path());
         match &validated.provenance {
-            ExecutionProvenance::RootPushedHead {
+            ExecutionProvenance::RootPinnedGeneration {
                 workspace_lifeline, ..
             } => assert!(Arc::ptr_eq(workspace_lifeline, &lifeline)),
-            other => panic!("expected RootPushedHead, got {other:?}"),
+            other => panic!("expected RootPinnedGeneration, got {other:?}"),
         }
     }
 
@@ -744,7 +760,11 @@ mod tests {
             provenance: ExecutionProvenance::root_live_fs(
                 PathBuf::from("/project"),
                 engine.clone(),
-            ),
+                crate::execution_policy::synthetic_test_live_project_authority(Path::new(
+                    "/project",
+                )),
+            )
+            .unwrap(),
             effective_bundle_id: None,
             item_ref: None,
             root_content_digest: "0".repeat(64),

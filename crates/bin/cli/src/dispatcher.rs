@@ -306,16 +306,16 @@ fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
         serde_json::json!({ "kind": "projectless" })
     };
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "ownership": "daemon_owned",
-        "recovery": "restart_recoverable",
+        "recovery": if project_backed { "none" } else { "restart_recoverable" },
         "response": if accepted { "accepted" } else { "wait" },
         "target": { "kind": "here" },
         "environment": if project_backed {
             serde_json::json!({
                 "kind": "project_overlay",
                 "include_operator_vault": true,
-                "allowed_names": [],
+                "name_policy": { "kind": "declared_required" },
             })
         } else {
             serde_json::json!({ "kind": "none" })
@@ -1727,6 +1727,24 @@ mod tests {
             source_file: PathBuf::new(),
             provenance: ryeos_runtime::CommandProvenance::default(),
         }
+    }
+
+    #[test]
+    fn live_project_execute_is_daemon_owned_but_not_restart_recoverable() {
+        let policy = execution_policy_value(true, true);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "none");
+        assert_eq!(policy["response"], "accepted");
+        assert_eq!(policy["project"]["kind"], "live_direct");
+    }
+
+    #[test]
+    fn projectless_execute_can_be_restart_recoverable() {
+        let policy = execution_policy_value(false, false);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "restart_recoverable");
+        assert_eq!(policy["response"], "wait");
+        assert_eq!(policy["project"]["kind"], "projectless");
     }
 
     #[test]

@@ -173,7 +173,7 @@ pub async fn handle_open(
             kind: SEAT_KIND.to_string(),
             item_ref: surface_ref.clone(),
             executor_ref: client_ref.clone(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: site_id.clone(),
             origin_site_id: site_id,
             upstream_thread_id: None,

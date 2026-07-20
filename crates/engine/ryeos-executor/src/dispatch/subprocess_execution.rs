@@ -325,6 +325,7 @@ async fn dispatch_managed_subprocess(
     // Minting here (pre-composition) would miss that narrowing.
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
+        lifecycle_authority: request.lifecycle_authority,
         // The serving runtime's canonical ref, captured so a continuation
         // successor reattaches the same runtime identity (not just the kind's
         // current default).
@@ -798,6 +799,10 @@ async fn dispatch_streaming_subprocess(
             inherited_fds: Vec::new(),
             supervised_status: None,
         };
+        let live_access = request
+            .provenance
+            .isolation_live_access_authority()
+            .map_err(DispatchError::Internal)?;
         let applied = state
             .isolation
             .apply_with_provenance(
@@ -805,6 +810,7 @@ async fn dispatch_streaming_subprocess(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
+                    live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: None,
@@ -1138,7 +1144,7 @@ async fn dispatch_tool_subprocess(
     };
 
     if request.launch_mode == "detached" {
-        // `run_detached` and `run_inline` are independent, large lifecycle
+        // `run_detached` and `run_and_wait` are independent, large lifecycle
         // futures. Boxing the selected leaf prevents this tool router from
         // carrying both state machines inline on every poll.
         let result = Box::pin(crate::execution::runner::run_detached(
@@ -1156,7 +1162,7 @@ async fn dispatch_tool_subprocess(
             "detached": true,
         }))
     } else {
-        let result = Box::pin(crate::execution::runner::run_inline(
+        let result = Box::pin(crate::execution::runner::run_and_wait(
             state.clone(),
             params,
             launch_handoff,

@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v2";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v3";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -152,6 +152,8 @@ pub enum IsolationAdapterProtocolVersion {
     V1,
     #[serde(rename = "ryeos.isolation-adapter/v2")]
     V2,
+    #[serde(rename = "ryeos.isolation-adapter/v3")]
+    V3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -691,6 +693,15 @@ pub struct AdapterLaunchRequest {
     pub authorities: Vec<IsolationAuthority>,
     pub artifacts: BTreeMap<IsolationArtifactRole, u32>,
     pub status_fd: u32,
+    /// Read end of the daemon-owned one-shot launch barrier. The backend must
+    /// report the target PID while the target remains blocked, then consume
+    /// this descriptor immediately before target exec.
+    pub start_gate_fd: u32,
+    /// Child-owned duplicate of the gate writer. Keeping this descriptor open
+    /// ensures parent death cannot surface as EOF on `start_gate_fd` and
+    /// accidentally satisfy a backend that treats any completed read as a
+    /// release.
+    pub start_gate_keepalive_fd: u32,
 }
 
 /// Adapter-owned lifecycle operations for one durable project workspace.
@@ -719,9 +730,9 @@ pub struct AdapterWorkspaceRequest {
 
 impl AdapterWorkspaceRequest {
     pub fn validate(&self) -> Result<(), ProtocolValidationError> {
-        if self.protocol != IsolationAdapterProtocolVersion::V2 {
+        if self.protocol != IsolationAdapterProtocolVersion::V3 {
             return Err(ProtocolValidationError::new(
-                "workspace lifecycle requires isolation adapter protocol v2",
+                "workspace lifecycle requires isolation adapter protocol v3",
             ));
         }
         validate_identifier("workspace id", &self.workspace_id)?;
@@ -829,7 +840,7 @@ impl AdapterWorkspaceResponse {
         &self,
         request: &AdapterWorkspaceRequest,
     ) -> Result<(), ProtocolValidationError> {
-        if self.protocol != IsolationAdapterProtocolVersion::V2
+        if self.protocol != IsolationAdapterProtocolVersion::V3
             || self.operation != request.operation
             || self.workspace_id != request.workspace_id
             || self.launch_owner != request.launch_owner
@@ -911,6 +922,16 @@ impl AdapterLaunchRequest {
             ));
         }
         let mut descriptors = validate_artifact_descriptors(&self.artifacts, Some(self.status_fd))?;
+        if self.start_gate_fd <= 2 || !descriptors.insert(self.start_gate_fd) {
+            return Err(ProtocolValidationError::new(
+                "start-gate descriptor overlaps stdio or another isolation protocol role",
+            ));
+        }
+        if self.start_gate_keepalive_fd <= 2 || !descriptors.insert(self.start_gate_keepalive_fd) {
+            return Err(ProtocolValidationError::new(
+                "start-gate keepalive descriptor overlaps stdio or another isolation protocol role",
+            ));
+        }
         for authority in &self.authorities {
             if !descriptors.insert(authority.inherited_fd) {
                 return Err(ProtocolValidationError::new(
@@ -1358,12 +1379,14 @@ mod tests {
             authorities,
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 5)]),
             status_fd: 6,
+            start_gate_fd: 5,
+            start_gate_keepalive_fd: 7,
         };
         assert!(request
             .validate()
             .unwrap_err()
             .to_string()
-            .contains("reused across"));
+            .contains("start-gate descriptor overlaps stdio or another isolation protocol role"));
     }
 
     #[test]

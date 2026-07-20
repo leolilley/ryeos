@@ -69,7 +69,7 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         kind: "directive".to_string(),
         item_ref: "directive:test/directive".to_string(),
         executor_ref: "test/executor".to_string(),
-        launch_mode: "inline".to_string(),
+        launch_mode: "wait".to_string(),
         current_site_id: "site:test".to_string(),
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,

@@ -243,8 +243,8 @@ fn run_offline_thread_history_gc_inner(
         )?;
         roots.object_hashes.extend(
             runtime_db
-                .handoff_project_snapshot_roots()
-                .context("collect durable handoff project roots before offline CAS sweep")?,
+                .handoff_cas_object_roots()
+                .context("collect durable handoff CAS roots before offline CAS sweep")?,
         );
         roots.object_hashes.sort();
         roots.object_hashes.dedup();

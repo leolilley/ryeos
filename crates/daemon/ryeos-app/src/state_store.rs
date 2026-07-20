@@ -133,7 +133,8 @@ pub struct NewThreadRecord {
     pub captured_history_policy: Option<ryeos_state::objects::CapturedThreadHistoryPolicy>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NewEventRecord {
     pub event_type: String,
     pub storage_class: String,
@@ -630,6 +631,8 @@ pub struct ThreadListItem {
     pub project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted_launch_capsule_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -715,6 +718,8 @@ pub struct ThreadDetail {
     pub project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted_launch_capsule_hash: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub started_at: Option<String>,
@@ -834,6 +839,149 @@ impl StateMutationPermit {
     }
 }
 
+fn attach_admitted_launch_capsule(
+    state_authority: &ryeos_state::PinnedStateAuthority,
+    cas_guard: &ryeos_state::CasMutationGuard,
+    mut snapshot: ThreadSnapshot,
+    launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+) -> Result<ThreadSnapshot> {
+    let Some(capsule) = launch_metadata
+        .map(crate::launch_metadata::RuntimeLaunchMetadata::admitted_launch_capsule)
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(snapshot);
+    };
+    if capsule.project_authority != snapshot.project_authority {
+        bail!(
+            "admitted launch capsule project authority contradicts thread {} birth authority",
+            snapshot.thread_id
+        );
+    }
+    if capsule.executor_ref != snapshot.executor_ref || capsule.runtime_ref.is_empty() {
+        bail!(
+            "admitted launch capsule runtime identity contradicts thread {} birth identity",
+            snapshot.thread_id
+        );
+    }
+    state_authority.ensure_guard(cas_guard)?;
+    let expected_hash = capsule.content_hash()?;
+    let stored_hash = state_authority
+        .cas_store()?
+        .store_object(&capsule.to_value())
+        .context("store admitted launch capsule before thread birth")?;
+    if stored_hash != expected_hash {
+        bail!(
+            "admitted launch capsule hash mismatch: expected {expected_hash}, stored {stored_hash}"
+        );
+    }
+    snapshot.admitted_launch_capsule_hash = Some(stored_hash);
+    Ok(snapshot)
+}
+
+fn load_admitted_launch_capsule(
+    state_authority: &ryeos_state::PinnedStateAuthority,
+    capsule_hash: &str,
+) -> Result<ryeos_state::objects::AdmittedLaunchCapsule> {
+    let value = state_authority
+        .cas_store()?
+        .get_object(capsule_hash)?
+        .ok_or_else(|| anyhow!("admitted launch capsule is missing from CAS: {capsule_hash}"))?;
+    let capsule: ryeos_state::objects::AdmittedLaunchCapsule =
+        serde_json::from_value(value).context("decode admitted launch capsule")?;
+    capsule.validate()?;
+    if capsule.content_hash()? != capsule_hash {
+        bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
+    }
+    Ok(capsule)
+}
+
+fn attach_continuation_launch_capsule(
+    state_authority: &ryeos_state::PinnedStateAuthority,
+    inner: &Inner,
+    chain_root_id: &str,
+    source_thread_id: &str,
+    snapshot: ThreadSnapshot,
+    launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+) -> Result<ThreadSnapshot> {
+    let source_snapshot =
+        authoritative_snapshot_for_transition(inner, chain_root_id, source_thread_id)?;
+    let source_capsule = source_snapshot
+        .admitted_launch_capsule_hash
+        .as_deref()
+        .map(|hash| load_admitted_launch_capsule(state_authority, hash))
+        .transpose()?;
+    let successor_capsule = launch_metadata
+        .map(crate::launch_metadata::RuntimeLaunchMetadata::admitted_launch_capsule)
+        .transpose()?
+        .flatten();
+    match (&source_capsule, &successor_capsule) {
+        (None, None) => {}
+        (Some(_), None) => bail!(
+            "continuation successor {} dropped source {} admitted program authority",
+            snapshot.thread_id,
+            source_thread_id
+        ),
+        (None, Some(_)) => bail!(
+            "continuation successor {} introduced admitted program authority absent from source {}",
+            snapshot.thread_id,
+            source_thread_id
+        ),
+        (Some(source), Some(successor)) if !source.same_continuation_admission(successor)? => {
+            bail!(
+                "continuation successor {} changed immutable admitted launch capsule from source {}",
+                snapshot.thread_id,
+                source_thread_id
+            );
+        }
+        (Some(_), Some(_)) => {}
+    }
+    let mut snapshot = snapshot;
+    snapshot.admitted_launch_capsule_hash = source_snapshot.admitted_launch_capsule_hash;
+    Ok(snapshot)
+}
+
+fn verify_admitted_launch_capsule(
+    state_authority: &ryeos_state::PinnedStateAuthority,
+    snapshot: &ThreadSnapshot,
+    launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+) -> Result<()> {
+    let expected = launch_metadata
+        .map(crate::launch_metadata::RuntimeLaunchMetadata::admitted_launch_capsule)
+        .transpose()?
+        .flatten();
+    match (snapshot.admitted_launch_capsule_hash.as_deref(), expected) {
+        (None, None) => Ok(()),
+        (Some(_), None) => bail!(
+            "thread {} has an admitted launch capsule but no matching runtime launch identity",
+            snapshot.thread_id
+        ),
+        (None, Some(_)) => bail!(
+            "thread {} managed launch is missing its authoritative admitted capsule",
+            snapshot.thread_id
+        ),
+        (Some(rooted_hash), Some(expected)) => {
+            let expected_hash = expected.content_hash()?;
+            if snapshot.upstream_thread_id.is_none() && rooted_hash != expected_hash {
+                bail!(
+                    "thread {} admitted capsule drift: authoritative {}, attempted {}",
+                    snapshot.thread_id,
+                    rooted_hash,
+                    expected_hash
+                );
+            }
+            let rooted = load_admitted_launch_capsule(state_authority, rooted_hash)?;
+            if !rooted.same_continuation_admission(&expected)? {
+                bail!(
+                    "thread {} launch attempt changed immutable admitted capsule authority",
+                    snapshot.thread_id
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 impl std::fmt::Debug for StateStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StateStore")
@@ -860,6 +1008,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         requested_by: thread.requested_by.clone(),
         project_root: thread.project_root.clone(),
         project_authority: thread.project_authority.clone(),
+        admitted_launch_capsule_hash: None,
         base_project_snapshot_hash: thread.base_project_snapshot_hash.clone(),
         result_project_snapshot_hash: None,
         created_at: now.clone(),
@@ -2265,6 +2414,12 @@ impl StateStore {
         });
         events.extend(initial_events);
         let thread_events = convert_events(&events, &thread.chain_root_id, &thread.thread_id);
+        let birth_snapshot = attach_admitted_launch_capsule(
+            &self.state_authority,
+            permit.cas_guard(),
+            build_snapshot(thread),
+            launch_metadata,
+        )?;
         // Establish the auxiliary runtime row before the authoritative commit.
         // If chain creation fails, remove it; an orphan auxiliary row is
         // recoverable, while a committed launch row with no runtime ledger is
@@ -2284,7 +2439,7 @@ impl StateStore {
         }
         let committed = g.state_db.create_chain_with_events_admitted(
             &thread.chain_root_id,
-            build_snapshot(thread),
+            birth_snapshot,
             thread_events,
             g.signer.as_ref(),
             &g.runtime_db,
@@ -2419,6 +2574,16 @@ impl StateStore {
                 intent.as_str()
             );
         }
+        let authoritative_snapshot = authoritative_snapshot_for_transition(
+            &g,
+            &thread_row.chain_root_id,
+            &thread_row.thread_id,
+        )?;
+        verify_admitted_launch_capsule(
+            &self.state_authority,
+            &authoritative_snapshot,
+            runtime.launch_metadata.as_ref(),
+        )?;
 
         let transition_created = match thread_row.status.as_str() {
             // Fresh launch: fall through to the created -> running transition
@@ -2438,11 +2603,7 @@ impl StateStore {
         };
 
         let snapshot_updates = if transition_created {
-            let mut updated_snapshot = authoritative_snapshot_for_transition(
-                &g,
-                &thread_row.chain_root_id,
-                &thread_row.thread_id,
-            )?;
+            let mut updated_snapshot = authoritative_snapshot;
             let authoritative_base = updated_snapshot
                 .project_authority
                 .base_snapshot_projection()
@@ -2463,7 +2624,6 @@ impl StateStore {
             updated_snapshot.started_at = Some(now);
             updated_snapshot.finished_at = None;
             updated_snapshot.base_project_snapshot_hash = authoritative_base;
-
             initial_events.push(NewEventRecord {
                 event_type: "thread_started".to_string(),
                 storage_class: "indexed".to_string(),
@@ -3028,6 +3188,14 @@ impl StateStore {
         if successor_with_upstream.upstream_thread_id.is_none() {
             successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
         }
+        let successor_snapshot = attach_continuation_launch_capsule(
+            &self.state_authority,
+            &g,
+            chain_root_id,
+            source_thread_id,
+            build_snapshot(&successor_with_upstream),
+            launch_metadata,
+        )?;
         {
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
@@ -3072,7 +3240,7 @@ impl StateStore {
         );
         let successor_commit = g.state_db.add_thread_with_events_and_append_admitted(
             chain_root_id,
-            build_snapshot(&successor_with_upstream),
+            successor_snapshot,
             successor_thread_events,
             source_thread_id,
             ste,
@@ -3345,12 +3513,6 @@ impl StateStore {
         {
             bail!("follow-resume source thread {source_thread_id} does not declare native_resume");
         }
-        if expected_resume_context.is_some_and(|expected| expected != &source_resume_context) {
-            bail!(
-                "source thread {source_thread_id} ResumeContext changed during authoritative preparation"
-            );
-        }
-
         // Successor preconditions BEFORE any write: it must belong to the source's
         // chain and, if it names an upstream, name THIS source — never braid a
         // successor into the wrong chain or contradict the edge being created (a
@@ -3374,19 +3536,56 @@ impl StateStore {
         let mut successor_with_upstream = successor.clone();
         successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
 
+        let mut successor_meta = successor_launch_metadata.cloned().unwrap_or_else(|| {
+            source_launch_metadata.continuation_successor_seed(source_resume_context.clone())
+        });
+        let successor_resume_context =
+            successor_meta
+                .resume_context
+                .as_ref()
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "successor {} has no captured ResumeContext",
+                        successor.thread_id
+                    )
+                })?;
+        if expected_resume_context.is_some_and(|expected| expected != &successor_resume_context) {
+            bail!(
+                "successor {} ResumeContext changed during authoritative preparation",
+                successor.thread_id
+            );
+        }
+        successor_resume_context.validate_continuation_transition_from(
+            &source_resume_context,
+            source_result_snapshot_hash,
+        )?;
+        if successor_meta
+            .continuation_source_thread_id
+            .as_deref()
+            .is_some_and(|source| source != source_thread_id)
+        {
+            bail!("prepared successor names a different continuation source");
+        }
+        successor_meta.continuation_source_thread_id = Some(source_thread_id.to_string());
+        let successor_snapshot = attach_continuation_launch_capsule(
+            &self.state_authority,
+            &g,
+            chain_root_id,
+            source_thread_id,
+            build_continuation_snapshot(&successor_with_upstream, &successor_resume_context)?,
+            Some(&successor_meta),
+        )?;
+
         // Runtime-db writes FIRST: insert the successor runtime row and seed its
         // launch identity before any state-db successor snapshot or source
         // settle. If the seed fails, only an orphan runtime row exists — no
         // state-db successor edge, source untouched and still running.
         {
             if let Some(prepared) = successor_launch_metadata {
-                if prepared.resume_context.as_ref() != Some(&source_resume_context) {
-                    bail!(
-                        "prepared successor launch identity differs from its source ResumeContext"
-                    );
-                }
                 if prepared.native_resume != source_launch_metadata.native_resume
                     || prepared.cancellation_mode != source_launch_metadata.cancellation_mode
+                    || prepared.launch_driver != source_launch_metadata.launch_driver
                 {
                     bail!(
                         "prepared successor execution policy differs from its source launch metadata"
@@ -3396,18 +3595,6 @@ impl StateStore {
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-            let mut successor_meta = successor_launch_metadata.cloned().unwrap_or_else(|| {
-                source_launch_metadata.continuation_successor_seed(source_resume_context.clone())
-            });
-            if successor_meta
-                .continuation_source_thread_id
-                .as_deref()
-                .is_some_and(|source| source != source_thread_id)
-            {
-                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                bail!("prepared successor names a different continuation source");
-            }
-            successor_meta.continuation_source_thread_id = Some(source_thread_id.to_string());
             if let Err(error) = g
                 .runtime_db
                 .set_launch_metadata(&successor.thread_id, &successor_meta)
@@ -3474,7 +3661,7 @@ impl StateStore {
         );
         let successor_commit = g.state_db.add_thread_with_events_and_append_admitted(
             chain_root_id,
-            build_continuation_snapshot(&successor_with_upstream, &source_resume_context)?,
+            successor_snapshot,
             successor_thread_events,
             source_thread_id,
             ste,
@@ -3601,6 +3788,35 @@ impl StateStore {
         if successor_with_upstream.upstream_thread_id.is_none() {
             successor_with_upstream.upstream_thread_id = Some(source_thread_id.to_string());
         }
+        let effective_launch_metadata = launch_metadata
+            .map(|metadata| {
+                let mut metadata = metadata.clone();
+                if metadata
+                    .continuation_source_thread_id
+                    .as_deref()
+                    .is_some_and(|source| source != source_thread_id)
+                {
+                    bail!("prepared successor names a different continuation source");
+                }
+                metadata.continuation_source_thread_id = Some(source_thread_id.to_string());
+                Ok(metadata)
+            })
+            .transpose()?;
+        let base_successor_snapshot = match effective_launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.resume_context.as_ref())
+        {
+            Some(resume) => build_continuation_snapshot(&successor_with_upstream, resume)?,
+            None => build_snapshot(&successor_with_upstream),
+        };
+        let successor_snapshot = attach_continuation_launch_capsule(
+            &self.state_authority,
+            &g,
+            chain_root_id,
+            source_thread_id,
+            base_successor_snapshot,
+            effective_launch_metadata.as_ref(),
+        )?;
         // Seed runtime state before the atomic signed-head transition. Failure
         // leaves at most an auxiliary runtime row, which is removed below; the
         // successor snapshot and source edge are indivisible.
@@ -3610,21 +3826,8 @@ impl StateStore {
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
 
             // Seed the operator launch context before the successor is visible.
-            if let Some(meta) = launch_metadata {
-                let mut meta = meta.clone();
-                if meta
-                    .continuation_source_thread_id
-                    .as_deref()
-                    .is_some_and(|source| source != source_thread_id)
-                {
-                    let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                    bail!("prepared successor names a different continuation source");
-                }
-                meta.continuation_source_thread_id = Some(source_thread_id.to_string());
-                if let Err(error) = g
-                    .runtime_db
-                    .set_launch_metadata(&successor.thread_id, &meta)
-                {
+            if let Some(meta) = effective_launch_metadata.as_ref() {
+                if let Err(error) = g.runtime_db.set_launch_metadata(&successor.thread_id, meta) {
                     let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
                     return Err(error);
                 }
@@ -3659,11 +3862,6 @@ impl StateStore {
             chain_root_id,
             source_thread_id,
         );
-        let successor_snapshot = match launch_metadata.and_then(|meta| meta.resume_context.as_ref())
-        {
-            Some(resume) => build_continuation_snapshot(&successor_with_upstream, resume)?,
-            None => build_snapshot(&successor_with_upstream),
-        };
         let successor_commit = g.state_db.add_thread_with_events_and_append_admitted(
             chain_root_id,
             successor_snapshot,
@@ -3710,6 +3908,7 @@ impl StateStore {
     ) -> Result<ContinuationOutcome> {
         let launch_metadata = resume_context.cloned().map(|resume_context| {
             crate::launch_metadata::RuntimeLaunchMetadata::default()
+                .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
                 .with_resume_context(resume_context)
         });
         self.create_or_get_continuation_admitted(
@@ -3792,6 +3991,7 @@ impl StateStore {
             project_root: thread_row.project_root,
             project_authority,
             lifecycle_authority,
+            admitted_launch_capsule_hash: thread_row.admitted_launch_capsule_hash,
             created_at: thread_row.created_at,
             updated_at: thread_row.updated_at,
             started_at: thread_row.started_at,
@@ -3865,6 +4065,7 @@ impl StateStore {
                 .map(|path| path.to_string_lossy().into_owned()),
             project_authority: Some(snapshot.project_authority),
             lifecycle_authority,
+            admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash,
             created_at: snapshot.created_at,
             updated_at: snapshot.updated_at,
             started_at: snapshot.started_at,
@@ -4699,12 +4900,12 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
-                project_authority: None,
-                // The high-frequency list projection deliberately remains
-                // bounded to projection rows and continuation payloads. Exact
-                // signed project/lifecycle authority is exposed by the detail
-                // endpoint, without adding per-row CAS/runtime reads here.
+                project_authority: Some(row.project_authority),
+                // The high-frequency list remains projection-only. Lifecycle
+                // authority is operational metadata; project authority is now
+                // a signed-snapshot-derived projection column.
                 lifecycle_authority: None,
+                admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
             });
@@ -4891,12 +5092,13 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
-                project_authority: None,
+                project_authority: Some(row.project_authority),
                 lifecycle_authority: runtime
                     .launch_metadata
                     .as_ref()
                     .and_then(|metadata| metadata.resume_context.as_ref())
                     .map(|resume| resume.lifecycle_authority),
+                admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -4936,12 +5138,13 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
-                project_authority: None,
+                project_authority: Some(row.project_authority),
                 lifecycle_authority: runtime
                     .launch_metadata
                     .as_ref()
                     .and_then(|metadata| metadata.resume_context.as_ref())
                     .map(|resume| resume.lifecycle_authority),
+                admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -4999,12 +5202,13 @@ impl StateStore {
                 successor_thread_id,
                 requested_by: row.requested_by,
                 project_root: row.project_root,
-                project_authority: None,
+                project_authority: Some(row.project_authority),
                 lifecycle_authority: runtime
                     .launch_metadata
                     .as_ref()
                     .and_then(|metadata| metadata.resume_context.as_ref())
                     .map(|resume| resume.lifecycle_authority),
+                admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
                 started_at: row.started_at,
@@ -5051,6 +5255,60 @@ impl StateStore {
             .and_then(|snapshot| snapshot.result_project_snapshot_hash))
     }
 
+    pub fn admitted_launch_capsule_hash(&self, thread_id: &str) -> Result<Option<String>> {
+        let g = self.lock()?;
+        Ok(g.state_db
+            .get_thread(thread_id)?
+            .and_then(|thread| thread.admitted_launch_capsule_hash))
+    }
+
+    /// Load the authoritative CAS-rooted launch capsule for an admitted
+    /// thread. Operational SQLite metadata is deliberately not consulted.
+    pub fn admitted_launch_capsule(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ryeos_state::objects::AdmittedLaunchCapsule>> {
+        let g = self.lock()?;
+        let Some(snapshot) = g.state_db.get_thread(thread_id)? else {
+            return Ok(None);
+        };
+        snapshot
+            .admitted_launch_capsule_hash
+            .as_deref()
+            .map(|hash| load_admitted_launch_capsule(&self.state_authority, hash))
+            .transpose()
+    }
+
+    /// Compare a recovery attempt with the CAS-rooted artifact identity before
+    /// any process is permitted to execute. Runtime SQLite metadata is an
+    /// operational index; the signed thread snapshot and its capsule are the
+    /// authority boundary.
+    pub fn verify_admitted_artifact_identity(
+        &self,
+        thread_id: &str,
+        attempted: &ryeos_state::objects::AdmittedLaunchArtifactIdentity,
+    ) -> Result<()> {
+        attempted.validate()?;
+        let g = self.lock()?;
+        let snapshot = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+        let capsule_hash = snapshot
+            .admitted_launch_capsule_hash
+            .as_deref()
+            .ok_or_else(|| {
+                anyhow!("thread {thread_id} has no authoritative admitted launch capsule")
+            })?;
+        let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
+        if &capsule.artifact_identity != attempted {
+            bail!(
+                "thread {thread_id} recovery artifact identity differs from its authoritative admitted capsule"
+            );
+        }
+        Ok(())
+    }
+
     /// Immutable project snapshots required by active or queued runtimes.
     ///
     /// These runtime-DB references are not signed CAS heads, so online GC must
@@ -5094,7 +5352,7 @@ impl StateStore {
                 roots.insert(frozen);
             }
         }
-        roots.extend(g.runtime_db.handoff_project_snapshot_roots()?);
+        roots.extend(g.runtime_db.handoff_cas_object_roots()?);
         Ok(roots.into_iter().collect())
     }
 
@@ -5825,6 +6083,13 @@ impl StateStore {
         self.lock()?.runtime_db.detached_spawn_intents()
     }
 
+    pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .abort_unsealed_detached_spawn_intent(operation_id)
+    }
+
     pub fn get_detached_spawn_intent(
         &self,
         operation_id: &str,
@@ -5845,6 +6110,41 @@ impl StateStore {
             .bind_detached_spawn_project_authority(operation_id, child_project_authority)
     }
 
+    pub fn seal_detached_spawn_intent(
+        &self,
+        operation_id: &str,
+        child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        initial_events: &[NewEventRecord],
+    ) -> Result<()> {
+        let permit = self.acquire_write_permit()?;
+        let capsule = launch_metadata
+            .admitted_launch_capsule()?
+            .ok_or_else(|| anyhow!("detached launch cannot seal without an admitted capsule"))?;
+        if &capsule.project_authority != child_project_authority {
+            bail!("detached launch capsule contradicts selected child project authority");
+        }
+        self.state_authority.ensure_guard(permit.cas_guard())?;
+        let expected_capsule_hash = capsule.content_hash()?;
+        let admitted_launch_capsule_hash = self
+            .state_authority
+            .cas_store()?
+            .store_object(&capsule.to_value())
+            .context("store detached admitted launch capsule")?;
+        if admitted_launch_capsule_hash != expected_capsule_hash {
+            bail!(
+                "detached admitted capsule hash mismatch: expected {expected_capsule_hash}, stored {admitted_launch_capsule_hash}"
+            );
+        }
+        self.lock()?.runtime_db.seal_detached_spawn_intent(
+            operation_id,
+            child_project_authority,
+            &admitted_launch_capsule_hash,
+            launch_metadata,
+            initial_events,
+        )
+    }
+
     // ── Follow waiters ───────────────────────────────────────────────────
 
     pub fn reserve_follow(
@@ -5858,6 +6158,17 @@ impl StateStore {
             .state_db
             .authorize_runtime_pin(&seed.parent_chain_root_id)?;
         g.runtime_db.reserve_follow(seed)
+    }
+
+    pub fn bind_follow_project_authority(
+        &self,
+        follow_key: &str,
+        authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        self.lock()?
+            .runtime_db
+            .bind_follow_project_authority(follow_key, authority)
     }
 
     // Slot identity, item/spec identity, child lineage, and sealed authority
@@ -7057,7 +7368,7 @@ mod tests {
             kind: "directive".to_string(),
             item_ref: "directive:test".to_string(),
             executor_ref: "native:test".to_string(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
@@ -7305,10 +7616,12 @@ mod tests {
                 terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
             },
             ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
-                project_authority_id: lillux::sha256_hex(b"live-project\0/work/project"),
+                project_authority_id: lillux::sha256_hex(
+                    b"live-project\0local:/work/project\0/work/project",
+                ),
                 source_identity: "dotenv:/work/project/.env".to_string(),
                 include_operator_vault: true,
-                allowed_names: Vec::new(),
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
             },
             Vec::new(),
         )
@@ -7317,7 +7630,7 @@ mod tests {
             kind: "directive".to_string(),
             item_ref: "directive:test".to_string(),
             ref_bindings: std::collections::BTreeMap::new(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             parameters: json!({}),
             project_context,
             project_authority,
@@ -7336,6 +7649,7 @@ mod tests {
             }),
             execution_hints: ExecutionHints::default(),
             effective_caps: Vec::new(),
+            parent_delegation_caps: None,
             executor_ref: Some("native:test".to_string()),
             runtime_ref: None,
         }

@@ -904,6 +904,30 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                 None,
                 &mut edges,
             )?;
+            push_optional_object_edge(
+                value,
+                "admitted_launch_capsule_hash",
+                ExpectedObject::Kind("admitted_launch_capsule"),
+                None,
+                &mut edges,
+            )?;
+        }
+        "admitted_launch_capsule" => {
+            let project_authority = value
+                .get("project_authority")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "admitted_launch_capsule missing project_authority object".to_string()
+                })?;
+            if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
+                push_required_object_edge(
+                    &Value::Object(project_authority.clone()),
+                    "snapshot_hash",
+                    ExpectedObject::Kind("project_snapshot"),
+                    None,
+                    &mut edges,
+                )?;
+            }
         }
         "thread_event" => {
             push_optional_object_edge(
@@ -1075,6 +1099,11 @@ fn validate_current_object(value: &Value) -> Result<(), String> {
                 .context("deserialize thread_snapshot")
                 .and_then(|object| object.validate())
         }
+        "admitted_launch_capsule" => {
+            serde_json::from_value::<crate::objects::AdmittedLaunchCapsule>(value.clone())
+                .context("deserialize admitted_launch_capsule")
+                .and_then(|object| object.validate())
+        }
         "thread_event" => serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
             .context("deserialize thread_event")
             .and_then(|object| object.validate()),
@@ -1130,6 +1159,26 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
                 &mut links.object_hashes,
             )?;
             push_optional_hash(value, "last_event_hash", &mut links.object_hashes)?;
+            push_optional_hash(
+                value,
+                "admitted_launch_capsule_hash",
+                &mut links.object_hashes,
+            )?;
+        }
+        "admitted_launch_capsule" => {
+            let project_authority = value
+                .get("project_authority")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "admitted_launch_capsule missing project_authority object".to_string()
+                })?;
+            if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
+                push_required_hash(
+                    &Value::Object(project_authority.clone()),
+                    "snapshot_hash",
+                    &mut links.object_hashes,
+                )?;
+            }
         }
         "thread_event" => {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
@@ -1449,7 +1498,7 @@ mod tests {
         for value in [
             json!({"kind": "attestation", "schema": 0}),
             json!({"kind": "chain_state", "schema": 1}),
-            json!({"kind": "thread_snapshot", "schema": 3}),
+            json!({"kind": "thread_snapshot", "schema": 4}),
             json!({"kind": "thread_event", "schema": 1}),
             json!({"kind": "bundle_event", "schema": 1}),
             json!({

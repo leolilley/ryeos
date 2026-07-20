@@ -87,12 +87,34 @@ impl OutputLimitExceeded {
 /// that PGID owned until Lillux has terminated every remaining group member.
 pub struct SupervisedProcessStatus {
     reader: std::fs::File,
+    /// Parent-owned release end of the launch barrier installed by the
+    /// trusted launcher. When present, the supervised target has been created
+    /// and reported but cannot exec user code until the daemon explicitly
+    /// releases this gate after durable process attachment.
+    start_gate: Option<ProcessStartGate>,
+}
+
+/// Parent-owned release end of a trusted launcher's pre-exec start barrier.
+///
+/// The read end is inherited by the trusted launcher and consumed by its
+/// backend immediately before target exec. Dropping this value without
+/// release closes the pipe; [`RunningProcess::drop`] then terminates the whole
+/// supervised group, so a failed durable attachment can never leak a runnable
+/// target.
+pub struct ProcessStartGate {
+    writer: Option<std::fs::File>,
 }
 
 /// Both ends needed to connect Lillux supervision to a trusted launcher.
 pub struct SupervisedLauncherStatusPipe {
     pub reader: SupervisedProcessStatus,
     pub writer: Arc<std::fs::File>,
+    /// Read end to inherit into the trusted launcher and bind to its pre-exec
+    /// barrier. Present only for the gated factory.
+    pub start_gate_reader: Option<Arc<std::fs::File>>,
+    /// Child-side duplicate of the gate writer. The trusted launcher keeps it
+    /// open while blocked so parent death cannot turn pipe EOF into a release.
+    pub start_gate_keepalive_writer: Option<Arc<std::fs::File>>,
 }
 
 impl SupervisedLauncherStatusPipe {
@@ -133,14 +155,74 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
     let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     Ok(SupervisedLauncherStatusPipe {
-        reader: SupervisedProcessStatus { reader },
+        reader: SupervisedProcessStatus {
+            reader,
+            start_gate: None,
+        },
         writer: Arc::new(writer),
+        start_gate_reader: None,
+        start_gate_keepalive_writer: None,
     })
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
     Err("supervised-launcher status is supported only on Linux".to_string())
+}
+
+/// Create the target-status channel together with an explicit pre-exec start
+/// barrier for a trusted launcher.
+///
+/// Unlike stopping in `pre_exec`, the backend-owned barrier does not deadlock
+/// `Command::spawn`: the launcher execs normally, creates and reports its
+/// target, and that target blocks at the final backend boundary until the
+/// parent releases the writer retained in [`SupervisedProcessStatus`].
+#[cfg(target_os = "linux")]
+pub fn supervised_launcher_gated_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
+    use std::os::fd::FromRawFd as _;
+
+    let mut status_fds = [-1; 2];
+    if unsafe { libc::pipe2(status_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "create supervised-launcher status pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let mut gate_fds = [-1; 2];
+    if unsafe { libc::pipe2(gate_fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(status_fds[0]);
+            libc::close(status_fds[1]);
+        }
+        return Err(format!("create supervised-launcher start gate: {error}"));
+    }
+
+    // SAFETY: both pipe2 calls initialized uniquely owned descriptors. Each is
+    // transferred into exactly one File below.
+    let status_reader = unsafe { std::fs::File::from_raw_fd(status_fds[0]) };
+    let status_writer = unsafe { std::fs::File::from_raw_fd(status_fds[1]) };
+    let gate_reader = unsafe { std::fs::File::from_raw_fd(gate_fds[0]) };
+    let gate_writer = unsafe { std::fs::File::from_raw_fd(gate_fds[1]) };
+    let gate_keepalive_writer = gate_writer
+        .try_clone()
+        .map_err(|error| format!("duplicate supervised-launcher gate keepalive: {error}"))?;
+    Ok(SupervisedLauncherStatusPipe {
+        reader: SupervisedProcessStatus {
+            reader: status_reader,
+            start_gate: Some(ProcessStartGate {
+                writer: Some(gate_writer),
+            }),
+        },
+        writer: Arc::new(status_writer),
+        start_gate_reader: Some(Arc::new(gate_reader)),
+        start_gate_keepalive_writer: Some(Arc::new(gate_keepalive_writer)),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn supervised_launcher_gated_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
+    Err("supervised-launcher start gates are supported only on Linux".to_string())
 }
 
 /// Create an immutable, rewound anonymous file for descriptor-backed protocol
@@ -404,11 +486,37 @@ pub struct RunningProcess {
     output_overflow_rx: std::sync::mpsc::Receiver<CapturedStream>,
     start: Instant,
     timeout: f64,
+    /// Present only for a trusted-launcher spawn whose target is blocked at
+    /// the backend's final pre-exec boundary. Authoritative lifecycle callers
+    /// release it only after persisting the exact reported process identity.
+    start_gate: Option<ProcessStartGate>,
     groups_terminated: bool,
     wrapper_reaped: bool,
 }
 
 impl RunningProcess {
+    /// Release a trusted launcher's target after durable process attachment.
+    ///
+    /// Returns `Ok(true)` when a configured barrier was released and
+    /// `Ok(false)` for an explicitly ungated spawn (including isolation-
+    /// disabled development fixtures). A failed write leaves the process
+    /// fail-closed; the caller must abort or drop this handle.
+    pub fn release_start_gate(&mut self) -> Result<bool, String> {
+        let Some(mut gate) = self.start_gate.take() else {
+            return Ok(false);
+        };
+        let Some(mut writer) = gate.writer.take() else {
+            return Err("supervised process start gate was already consumed".to_string());
+        };
+        writer
+            .write_all(&[1])
+            .map_err(|error| format!("release supervised process start gate: {error}"))?;
+        // Closing the descriptor makes the one-shot boundary explicit and
+        // prevents a retained writer from hiding backend failure.
+        drop(writer);
+        Ok(true)
+    }
+
     /// Terminate every supervised process group and reap the outer child.
     ///
     /// This consumes the handle so callers cannot accidentally wait on or
@@ -420,6 +528,27 @@ impl RunningProcess {
 
     /// Wait for the process to finish (or time out) and return the result.
     pub fn wait(mut self) -> SubprocessResult {
+        if self.start_gate.is_some() {
+            self.kill_supervised_processes();
+            self.reap_wrapper();
+            let (out, err) = self.finish_drains();
+            return SubprocessResult {
+                success: false,
+                stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
+                stderr: append_diagnostic(
+                    &String::from_utf8_lossy(&err.bytes),
+                    "Refused to wait: supervised process start gate was not released after durable attachment",
+                ),
+                exit_code: -1,
+                duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
+                pid: self.pid,
+                timed_out: false,
+                launcher_refusal: None,
+                output_limit_exceeded: output_limit_exceeded(&out, &err),
+                stdout_truncated: out.truncated,
+                stderr_truncated: err.truncated,
+            };
+        }
         let timeout = request_timeout_duration(self.timeout);
 
         loop {
@@ -916,10 +1045,14 @@ fn lib_spawn_with_stdio(
             }
         };
 
-    let (identity, status_thread) = if let Some(status) = supervised_status {
+    let (identity, status_thread, start_gate) = if let Some(status) = supervised_status {
+        let SupervisedProcessStatus { reader, start_gate } = status;
         let (status_tx, status_rx) = std::sync::mpsc::channel();
         let status_thread = match spawn_supervised_launcher_status_reader(
-            status,
+            SupervisedProcessStatus {
+                reader,
+                start_gate: None,
+            },
             status_tx,
             Arc::clone(&drain_stop),
         ) {
@@ -1030,13 +1163,14 @@ fn lib_spawn_with_stdio(
                 ));
             }
         };
-        (identity, Some(status_thread))
+        (identity, Some(status_thread), start_gate)
     } else {
         (
             ProcessIdentity {
                 pid: wrapper_pid,
                 pgid: wrapper_pgid,
             },
+            None,
             None,
         )
     };
@@ -1057,6 +1191,7 @@ fn lib_spawn_with_stdio(
         output_overflow_rx,
         start,
         timeout,
+        start_gate,
         groups_terminated: false,
         wrapper_reaped: false,
     })

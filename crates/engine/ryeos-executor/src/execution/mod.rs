@@ -25,6 +25,7 @@ pub mod workspace;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::Result;
 use ryeos_app::runtime_db::WorkspaceState;
@@ -33,6 +34,25 @@ use ryeos_state::objects::{ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::signer::Signer;
 
 use self::cache::MaterializationCache;
+
+/// Project capture/materialization is both filesystem- and CAS-heavy. Keep a
+/// small daemon-wide admission window so independent async callbacks cannot
+/// amplify one large project into unbounded concurrent copies.
+const MAX_CONCURRENT_PROJECT_CAPTURE_WORK: usize = 2;
+static PROJECT_CAPTURE_PERMITS: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_PROJECT_CAPTURE_WORK));
+
+pub async fn run_bounded_project_capture<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    let permit = PROJECT_CAPTURE_PERMITS
+        .acquire()
+        .await
+        .expect("static project-capture semaphore is never closed");
+    let result = tokio::task::block_in_place(operation);
+    drop(permit);
+    result
+}
 
 /// A descriptor-pinned CAS publication whose immutable objects are protected
 /// by durable recovery roots until a daemon-authoritative consumer is visible.
@@ -114,10 +134,7 @@ pub(crate) struct StagedProjectTree {
 /// materialization, continuation and recovery.
 pub struct CapturedProjectGeneration {
     pub(crate) snapshot_hash: String,
-    pub(crate) tree_hash: String,
-    pub(crate) policy_hash: String,
     pub(crate) stable_project_identity: ryeos_app::launch_metadata::StableProjectIdentity,
-    pub(crate) local_overlay_root: Option<PathBuf>,
     publication: PendingCasPublication,
 }
 
@@ -152,7 +169,6 @@ pub(crate) fn capture_live_project_snapshot(
         pending.hash,
         pending.policy_hash,
         ryeos_app::launch_metadata::StableProjectIdentity::from_path(project_path, origin_site)?,
-        Some(project_path.to_path_buf()),
         source,
         pending.publication,
     )
@@ -275,7 +291,6 @@ pub(crate) fn capture_tree_project_snapshot(
     tree_hash: String,
     policy_hash: String,
     stable_project_identity: ryeos_app::launch_metadata::StableProjectIdentity,
-    local_overlay_root: Option<PathBuf>,
     source: &str,
     mut publication: PendingCasPublication,
 ) -> Result<CapturedProjectGeneration> {
@@ -319,10 +334,7 @@ pub(crate) fn capture_tree_project_snapshot(
     )?;
     Ok(CapturedProjectGeneration {
         snapshot_hash: hash,
-        tree_hash,
-        policy_hash,
         stable_project_identity,
-        local_overlay_root,
         publication,
     })
 }
@@ -357,7 +369,7 @@ pub fn checkout_project_lower(
     authority: &ryeos_state::PinnedStateAuthority,
     cas_mutation_guard: &ryeos_state::CasMutationGuard,
     snapshot_hash: &str,
-    target_dir: &Path,
+    target_dir: Option<&Path>,
     cache: &MaterializationCache,
 ) -> Result<(PathBuf, std::fs::File)> {
     authority.ensure_guard(cas_mutation_guard)?;
@@ -435,16 +447,21 @@ pub fn checkout_project_lower(
     }
     cache.verify_complete_for_tree(&cas, &tree, snapshot_hash)?;
 
-    let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
-    for (relative, project_file) in &project_files {
-        let content = cache.ensure_content_file(&cas, project_file)?;
-        let (parent, name) = pinned_output_parent(&target_root, relative)?;
-        content.link_to(&parent, &name)?;
-    }
     let lease = cache.generation_lease(snapshot_hash)?;
+    let realized_path = if let Some(target_dir) = target_dir {
+        let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
+        for (relative, project_file) in &project_files {
+            let content = cache.ensure_content_file(&cas, project_file)?;
+            let (parent, name) = pinned_output_parent(&target_root, relative)?;
+            content.link_to(&parent, &name)?;
+        }
+        target_dir.to_path_buf()
+    } else {
+        cache.cache_dir(snapshot_hash)
+    };
     drop(_build_lock);
     cache.prune(128)?;
-    Ok((target_dir.to_path_buf(), lease))
+    Ok((realized_path, lease))
 }
 
 fn pinned_output_parent(
@@ -612,7 +629,8 @@ pub(crate) fn advance_after_foldback(
     principal_key: &str,
     project_path_hash: &str,
     new_tree_hash: &str,
-    current_snapshot_hash: &str,
+    snapshot_parent_hash: &str,
+    expected_head_hash: &str,
     publication: &mut PendingCasPublication,
 ) -> Result<String> {
     authority.ensure_guard(cas_mutation_guard)?;
@@ -623,7 +641,7 @@ pub(crate) fn advance_after_foldback(
         authority,
         cas_mutation_guard,
         new_tree_hash,
-        current_snapshot_hash,
+        snapshot_parent_hash,
         publication,
     )?;
 
@@ -631,7 +649,7 @@ pub(crate) fn advance_after_foldback(
         principal_key,
         project_path_hash,
         &new_snapshot_hash,
-        current_snapshot_hash,
+        expected_head_hash,
         signer,
         cas_mutation_guard,
     )?;

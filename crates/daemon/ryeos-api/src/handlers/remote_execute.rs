@@ -206,6 +206,14 @@ pub async fn handle(
     .map_err(remote_forward_error_to_handler_error)?;
 
     // Return composite response matching the existing shape.
+    let pull = forward_result.pull_summary.as_ref().map(|summary| {
+        serde_json::json!({
+            "snapshot_hash": summary.snapshot_hash,
+            "cas_objects_fetched": summary.cas_objects_fetched,
+            "files_updated": summary.files_updated,
+            "files_deleted": summary.files_deleted,
+        })
+    });
     Ok(serde_json::json!({
         "push": {
             "snapshot_hash": forward_result.push_summary.pushed_snapshot_hash,
@@ -217,12 +225,7 @@ pub async fn handle(
             "snapshot_hash": forward_result.result_snapshot_hash,
             "result": forward_result.remote_result,
         },
-        "pull": {
-            "snapshot_hash": forward_result.pull_summary.snapshot_hash,
-            "cas_objects_fetched": forward_result.pull_summary.cas_objects_fetched,
-            "files_updated": forward_result.pull_summary.files_updated,
-            "files_deleted": forward_result.pull_summary.files_deleted,
-        },
+        "pull": pull,
     }))
 }
 
@@ -239,7 +242,22 @@ fn destination_execution_policy(
             "remote execute receives a destination-local policy; target must be `here`".to_string(),
         ));
     }
-    match requested.project {
+    if matches!(
+        &requested.project,
+        ProjectExecutionPolicy::Pinned {
+            realization: ryeos_app::execution_policy::PinnedRealization::Cow {
+                terminal_publication:
+                    ryeos_app::execution_policy::TerminalPublication::AdvanceHead { .. },
+            },
+            ..
+        }
+    ) {
+        return Err(HandlerError::BadRequest(
+            "remote advance-head publication requires destination-scoped delegated authority and is not supported in v1; use retain-result"
+                .to_string(),
+        ));
+    }
+    match &requested.project {
         ProjectExecutionPolicy::Projectless
         | ProjectExecutionPolicy::Pinned {
             source: PinnedSource::CaptureLive { .. },

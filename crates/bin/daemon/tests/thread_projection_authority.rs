@@ -119,7 +119,7 @@ fn create_params(thread_id: &str, kind: &str) -> ThreadCreateParams {
         kind: kind.to_string(),
         item_ref: item_ref.to_string(),
         executor_ref: "test/executor".to_string(),
-        launch_mode: "inline".to_string(),
+        launch_mode: "wait".to_string(),
         current_site_id: "site:test".to_string(),
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,

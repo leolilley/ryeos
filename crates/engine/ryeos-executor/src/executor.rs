@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
@@ -292,7 +292,7 @@ pub async fn execute_service_verified(
             kind: thread_profile,
             item_ref: service_ref.to_string(),
             executor_ref: endpoint.clone(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: ctx.plan_ctx.current_site_id.clone(),
             origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
             upstream_thread_id: None,

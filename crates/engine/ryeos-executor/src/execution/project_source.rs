@@ -70,6 +70,30 @@ pub enum ProjectSource {
     CaptureLiveFullProject,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedContextRealization {
+    ReadOnly,
+    Cow,
+}
+
+pub fn pinned_context_realization(
+    authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> Result<PinnedContextRealization, ProjectSourceError> {
+    match authority {
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ..
+        } => Ok(PinnedContextRealization::ReadOnly),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+            ..
+        } => Ok(PinnedContextRealization::Cow),
+        _ => Err(ProjectSourceError::Other(
+            "pinned realization requested for non-pinned project authority".to_string(),
+        )),
+    }
+}
+
 /// Request-scoped project execution context.
 ///
 /// Built BEFORE item resolution to ensure the engine resolves, verifies,
@@ -162,6 +186,7 @@ pub fn resolve_project_context(
     project_path: &std::path::Path,
     principal_id: &str,
     checkout_id: &str,
+    pinned_realization: PinnedContextRealization,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
     let original_path = project_path.to_path_buf();
 
@@ -218,6 +243,7 @@ pub fn resolve_project_context(
                 checkout_id,
                 source: ProjectSource::PushedHead,
                 captured_generation: None,
+                realization: pinned_realization,
             })?
         }
         ProjectSource::Snapshot { hash } => {
@@ -232,6 +258,7 @@ pub fn resolve_project_context(
                 checkout_id,
                 source: source.clone(),
                 captured_generation: None,
+                realization: pinned_realization,
             })?
         }
         ProjectSource::CaptureLiveFullProject => {
@@ -253,6 +280,7 @@ pub fn resolve_project_context(
                 checkout_id,
                 source: source.clone(),
                 captured_generation: Some(captured),
+                realization: pinned_realization,
             })?
         }
     };
@@ -282,6 +310,7 @@ pub fn resolve_pinned_snapshot_context(
     snapshot_hash: &str,
     original_path: PathBuf,
     checkout_id: &str,
+    realization: PinnedContextRealization,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
     let authority = crate::execution::pinned_state_authority(state)?;
     let cas_mutation_guard = authority.acquire_shared_guard()?;
@@ -295,6 +324,7 @@ pub fn resolve_pinned_snapshot_context(
         checkout_id,
         source: ProjectSource::PushedHead,
         captured_generation: None,
+        realization,
     })
 }
 
@@ -307,6 +337,7 @@ struct PinnedSnapshotContextParams<'a> {
     checkout_id: &'a str,
     source: ProjectSource,
     captured_generation: Option<super::CapturedProjectGeneration>,
+    realization: PinnedContextRealization,
 }
 
 fn resolve_pinned_snapshot_context_admitted(
@@ -321,6 +352,7 @@ fn resolve_pinned_snapshot_context_admitted(
         checkout_id,
         source,
         captured_generation,
+        realization,
     } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
@@ -336,67 +368,82 @@ fn resolve_pinned_snapshot_context_admitted(
         })?;
     ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
-    // ── 1. Build the request-owned COW workspace lower ──────────────
+    // ── 1. Realize the selected immutable filesystem contract ───────
     let runtime_cache = state.config.runtime_root().cache();
-    let execution_root = runtime_cache.join("executions");
-    std::fs::create_dir_all(&execution_root)
-        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    }
-    let workspace_root = execution_root.join(checkout_id);
-    state
-        .state_store
-        .reserve_execution_workspace(
-            checkout_id,
-            snapshot_hash,
-            workspace_root.to_str().ok_or_else(|| {
-                ProjectSourceError::CheckoutFailed(
-                    "execution workspace path is not valid UTF-8".to_string(),
-                )
-            })?,
-        )
-        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    let workspace =
-        crate::execution::workspace::WorkspaceLayout::create(&execution_root, checkout_id)
-            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    let reserved = state
-        .state_store
-        .execution_workspace(checkout_id)
-        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?
-        .ok_or_else(|| {
-            ProjectSourceError::CheckoutFailed("workspace reservation disappeared".to_string())
-        })?;
-    if reserved.state == WorkspaceState::Reserved {
-        state
-            .state_store
-            .transition_execution_workspace(
-                checkout_id,
-                &[WorkspaceState::Reserved],
-                WorkspaceState::Constructing,
-                None,
-            )
-            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    } else if reserved.state != WorkspaceState::Constructing {
-        return Err(ProjectSourceError::CheckoutFailed(format!(
-            "workspace {checkout_id} cannot be adopted from state {}",
-            reserved.state
-        )));
-    }
-    let project_guard = Arc::new(TempDirGuard::new_workspace(workspace.root.clone()));
     let materialization_cache =
         crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
-    let (_, generation_lease) = crate::execution::checkout_project_lower(
+    let (target_path, project_guard) = match realization {
+        PinnedContextRealization::ReadOnly => (None, None),
+        PinnedContextRealization::Cow => {
+            let execution_root = runtime_cache.join("executions");
+            std::fs::create_dir_all(&execution_root)
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            }
+            let workspace_root = execution_root.join(checkout_id);
+            state
+                .state_store
+                .reserve_execution_workspace(
+                    checkout_id,
+                    snapshot_hash,
+                    workspace_root.to_str().ok_or_else(|| {
+                        ProjectSourceError::CheckoutFailed(
+                            "execution workspace path is not valid UTF-8".to_string(),
+                        )
+                    })?,
+                )
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            let workspace =
+                crate::execution::workspace::WorkspaceLayout::create(&execution_root, checkout_id)
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            let reserved = state
+                .state_store
+                .execution_workspace(checkout_id)
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?
+                .ok_or_else(|| {
+                    ProjectSourceError::CheckoutFailed(
+                        "workspace reservation disappeared".to_string(),
+                    )
+                })?;
+            if reserved.state == WorkspaceState::Reserved {
+                state
+                    .state_store
+                    .transition_execution_workspace(
+                        checkout_id,
+                        &[WorkspaceState::Reserved],
+                        WorkspaceState::Constructing,
+                        None,
+                    )
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            } else if reserved.state != WorkspaceState::Constructing {
+                return Err(ProjectSourceError::CheckoutFailed(format!(
+                    "workspace {checkout_id} cannot be adopted from state {}",
+                    reserved.state
+                )));
+            }
+            let lower = workspace.lower;
+            (
+                Some(lower),
+                Some(Arc::new(TempDirGuard::new_workspace(workspace.root))),
+            )
+        }
+    };
+    let (effective_path, generation_lease) = crate::execution::checkout_project_lower(
         authority,
         cas_mutation_guard,
         snapshot_hash,
-        &workspace.lower,
+        target_path.as_deref(),
         &materialization_cache,
     )
     .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+    let project_guard = match project_guard {
+        Some(guard) => guard,
+        None => Arc::new(TempDirGuard::new_borrowed_cache(effective_path.clone())),
+    };
     project_guard.retain_lease(generation_lease);
 
     // ── 2. Check cache for a previously-built engine ──
@@ -427,7 +474,7 @@ fn resolve_pinned_snapshot_context_admitted(
     )?;
 
     Ok(ResolvedProjectContext {
-        effective_path: workspace.lower,
+        effective_path,
         original_path,
         source,
         snapshot_hash: Some(snapshot_hash.to_string()),

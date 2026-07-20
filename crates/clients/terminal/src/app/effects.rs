@@ -200,7 +200,7 @@ async fn effect_data(
 fn execute_policy(project_path: Option<&str>) -> serde_json::Value {
     let project_backed = project_path.is_some();
     serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "ownership": "daemon_owned",
         "recovery": "restart_recoverable",
         "response": "wait",
@@ -209,7 +209,7 @@ fn execute_policy(project_path: Option<&str>) -> serde_json::Value {
             serde_json::json!({
                 "kind": "project_overlay",
                 "include_operator_vault": true,
-                "allowed_names": [],
+                "name_policy": { "kind": "declared_required" },
             })
         } else {
             serde_json::json!({ "kind": "none" })

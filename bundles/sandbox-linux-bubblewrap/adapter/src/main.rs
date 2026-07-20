@@ -92,7 +92,7 @@ fn workspace(request_fd: RawFd) -> Result<AdapterWorkspaceResponse, String> {
         WorkspaceLifecycleOperation::FreezeAndDiff => scan_workspace_upper(upper)?,
     };
     let response = AdapterWorkspaceResponse {
-        protocol: IsolationAdapterProtocolVersion::V2,
+        protocol: IsolationAdapterProtocolVersion::V3,
         operation: request.operation,
         workspace_id: request.workspace_id.clone(),
         launch_owner: request.launch_owner.clone(),
@@ -341,7 +341,7 @@ fn directory_is_opaque_fd(fd: RawFd) -> Result<bool, String> {
 
 fn inspect(request_fd: RawFd) -> Result<AdapterInspectionResponse, String> {
     let request: AdapterInspectionRequest = read_sealed_request(request_fd)?;
-    if request.protocol != IsolationAdapterProtocolVersion::V2 {
+    if request.protocol != IsolationAdapterProtocolVersion::V3 {
         return Err("unsupported isolation adapter protocol".to_string());
     }
     validate_inspection_identity(&request)?;
@@ -394,9 +394,11 @@ fn inspect(request_fd: RawFd) -> Result<AdapterInspectionResponse, String> {
         "--args",
         "--argv0",
         "--bind-fd",
+        "--block-fd",
         "--chdir",
         "--clearenv",
         "--dev",
+        "--die-with-parent",
         "--dir",
         "--json-status-fd",
         "--overlay",
@@ -419,7 +421,7 @@ fn inspect(request_fd: RawFd) -> Result<AdapterInspectionResponse, String> {
 
     let digest = digest_fd(launcher_fd)?;
     Ok(AdapterInspectionResponse {
-        protocol: IsolationAdapterProtocolVersion::V2,
+        protocol: IsolationAdapterProtocolVersion::V3,
         adapter_build: ADAPTER_BUILD.to_string(),
         effective_capabilities: supported_capabilities(),
         artifacts: BTreeMap::from([(
@@ -601,13 +603,14 @@ impl NeverResultExt for Result<std::convert::Infallible, String> {
 #[derive(Debug)]
 struct PreparedLaunch {
     launcher_fd: RawFd,
+    start_gate_keepalive_fd: RawFd,
     inherited_fds: BTreeSet<RawFd>,
     arguments: Vec<String>,
     retained_files: Vec<File>,
 }
 
 fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, String> {
-    if request.protocol != IsolationAdapterProtocolVersion::V2 {
+    if request.protocol != IsolationAdapterProtocolVersion::V3 {
         return Err("unsupported isolation adapter protocol".to_string());
     }
     let required = request
@@ -627,6 +630,11 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
         as RawFd;
     validate_inherited_fd(launcher_fd, "launcher artifact")?;
     validate_inherited_fd(request.status_fd as RawFd, "status writer")?;
+    validate_inherited_fd(request.start_gate_fd as RawFd, "start-gate reader")?;
+    validate_inherited_fd(
+        request.start_gate_keepalive_fd as RawFd,
+        "start-gate keepalive writer",
+    )?;
     for authority in &request.authorities {
         validate_inherited_fd(authority.inherited_fd as RawFd, "plan authority")?;
     }
@@ -658,6 +666,9 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
     let mut arguments = vec![
         "--json-status-fd".to_string(),
         request.status_fd.to_string(),
+        "--block-fd".to_string(),
+        request.start_gate_fd.to_string(),
+        "--die-with-parent".to_string(),
         "--clearenv".to_string(),
         "--unshare-user".to_string(),
         "--unshare-ipc".to_string(),
@@ -751,11 +762,17 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
         .authorities
         .iter()
         .map(|authority| authority.inherited_fd as RawFd)
-        .chain([launcher_fd, request.status_fd as RawFd])
+        .chain([
+            launcher_fd,
+            request.status_fd as RawFd,
+            request.start_gate_fd as RawFd,
+            request.start_gate_keepalive_fd as RawFd,
+        ])
         .chain(retained_files.iter().map(|file| file.as_raw_fd()))
         .collect();
     Ok(PreparedLaunch {
         launcher_fd,
+        start_gate_keepalive_fd: request.start_gate_keepalive_fd as RawFd,
         inherited_fds,
         arguments,
         retained_files,
@@ -771,10 +788,65 @@ fn exec_launcher(mut prepared: PreparedLaunch) -> Result<std::convert::Infallibl
     // embedded in the sealed Bubblewrap argument vector.
     let _retained_files = prepared.retained_files;
 
+    spawn_start_gate_keepalive(prepared.start_gate_keepalive_fd)?;
+    prepared
+        .inherited_fds
+        .remove(&prepared.start_gate_keepalive_fd);
+    close_fd(prepared.start_gate_keepalive_fd);
     seal_descriptor_boundary(prepared.launcher_fd, &prepared.inherited_fds)?;
 
     let error = exact_launcher_command(prepared.launcher_fd, argument_fd).exec();
     Err(format!("exec exact Bubblewrap launcher: {error}"))
+}
+
+/// Retain a child-side gate writer until Bubblewrap exits.
+///
+/// Bubblewrap deliberately treats EOF on `--block-fd` as a completed wait. A
+/// daemon crash must therefore not close the final writer and accidentally
+/// run an unattached target. This tiny same-group keeper owns the duplicate,
+/// dies with the adapter/Bubblewrap parent, and never crosses into the target
+/// process. The backend's `--die-with-parent` independently kills the blocked
+/// sandbox child when the outer launcher dies.
+fn spawn_start_gate_keepalive(writer_fd: RawFd) -> Result<(), String> {
+    let parent_pid = unsafe { libc::getpid() };
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return Err(format!(
+            "fork start-gate keepalive: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if child == 0 {
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0
+            || unsafe { libc::getppid() } != parent_pid
+        {
+            unsafe { libc::_exit(125) };
+        }
+        let close_before = writer_fd > 3
+            && unsafe {
+                libc::syscall(
+                    libc::SYS_close_range,
+                    3_u32,
+                    (writer_fd - 1) as u32,
+                    0_u32,
+                )
+            } != 0;
+        let close_after = unsafe {
+            libc::syscall(
+                libc::SYS_close_range,
+                (writer_fd + 1) as u32,
+                u32::MAX,
+                0_u32,
+            )
+        } != 0;
+        if close_before || close_after {
+            unsafe { libc::_exit(125) };
+        }
+        loop {
+            unsafe { libc::pause() };
+        }
+    }
+    Ok(())
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
@@ -1120,7 +1192,7 @@ mod tests {
 
     fn valid_inspection_request() -> AdapterInspectionRequest {
         AdapterInspectionRequest {
-            protocol: IsolationAdapterProtocolVersion::V2,
+            protocol: IsolationAdapterProtocolVersion::V3,
             target: host_target().expect("adapter tests require a supported Linux GNU target"),
             backend_id: BACKEND_ID.to_string(),
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 3)]),
@@ -1136,12 +1208,17 @@ mod tests {
             .write(true)
             .open("/dev/null")
             .unwrap();
+        let start_gate = File::open("/dev/null").unwrap();
+        let start_gate_keepalive = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
 
         let target_id = IsolationAuthorityId::new("target").unwrap();
         let project_id = IsolationAuthorityId::new("project").unwrap();
         let workspace_id = IsolationAuthorityId::new("workspace").unwrap();
         let request = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V2,
+            protocol: IsolationAdapterProtocolVersion::V3,
             plan: IsolationPlan {
                 target: IsolationTarget {
                     executable: target_id.clone(),
@@ -1204,8 +1281,21 @@ mod tests {
                 launcher.as_raw_fd() as u32,
             )]),
             status_fd: status.as_raw_fd() as u32,
+            start_gate_fd: start_gate.as_raw_fd() as u32,
+            start_gate_keepalive_fd: start_gate_keepalive.as_raw_fd() as u32,
         };
-        (request, vec![launcher, target, project, workspace, status])
+        (
+            request,
+            vec![
+                launcher,
+                target,
+                project,
+                workspace,
+                status,
+                start_gate,
+                start_gate_keepalive,
+            ],
+        )
     }
 
     #[test]
@@ -1251,7 +1341,7 @@ mod tests {
         let launcher_path = directory.path().join("bwrap");
         std::fs::write(
             &launcher_path,
-            b"#!/bin/sh\ncase \"$1\" in\n  --version) printf 'bubblewrap 0.11.0\\n' ;;\n  --help) printf '%s\\n' '--args --argv0 --bind-fd --chdir --clearenv --dev --dir --json-status-fd --overlay --overlay-src --ro-bind-fd --seccomp --setenv --tmpfs --unshare-ipc --unshare-net --unshare-user --unshare-uts' ;;\n  *) exit 2 ;;\nesac\n",
+            b"#!/bin/sh\ncase \"$1\" in\n  --version) printf 'bubblewrap 0.11.0\\n' ;;\n  --help) printf '%s\\n' '--args --argv0 --bind-fd --block-fd --chdir --clearenv --dev --die-with-parent --dir --json-status-fd --overlay --overlay-src --ro-bind-fd --seccomp --setenv --sync-fd --tmpfs --unshare-ipc --unshare-net --unshare-user --unshare-uts' ;;\n  *) exit 2 ;;\nesac\n",
         )
         .unwrap();
         std::fs::set_permissions(&launcher_path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1304,6 +1394,13 @@ mod tests {
             .arguments
             .windows(2)
             .any(|pair| pair == ["--tmpfs", "/tmp"]));
+        assert!(prepared.arguments.windows(2).any(|pair| {
+            pair[0] == "--block-fd" && pair[1] == request.start_gate_fd.to_string()
+        }));
+        assert!(prepared
+            .arguments
+            .iter()
+            .any(|argument| argument == "--die-with-parent"));
         assert!(prepared
             .arguments
             .iter()
@@ -1369,9 +1466,18 @@ mod tests {
         assert!(!host.arguments.iter().any(|value| value == "--unshare-net"));
 
         let isolated = prepare_launch(&isolated_request).unwrap();
-        let mut expected = isolated.arguments;
+        let normalize_seccomp_fd = |mut arguments: Vec<String>| {
+            let index = arguments
+                .iter()
+                .position(|value| value == "--seccomp")
+                .expect("compiled launch has seccomp authority");
+            arguments[index + 1] = "<seccomp-fd>".to_string();
+            arguments
+        };
+        let host = normalize_seccomp_fd(host.arguments);
+        let mut expected = normalize_seccomp_fd(isolated.arguments);
         expected.retain(|value| value != "--unshare-net");
-        assert_eq!(host.arguments, expected);
+        assert_eq!(host, expected);
     }
 
     #[test]
@@ -1418,7 +1524,7 @@ mod tests {
                 .contains("not sealed")
         );
 
-        let duplicate = br#"{"protocol":"ryeos.isolation-adapter/v2","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
+        let duplicate = br#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
         let sealed_duplicate = create_sealed_memfd(c"adapter-test-duplicate", duplicate).unwrap();
         assert!(
             read_sealed_request::<AdapterInspectionRequest>(sealed_duplicate.into_raw_fd())

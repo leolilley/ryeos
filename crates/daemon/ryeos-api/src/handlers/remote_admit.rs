@@ -80,6 +80,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
         "remote": req.remote,
         "url": remote_cfg.url,
         "local_public_key": local_public_key,
+        "local_site_id": state.threads.site_id(),
         "claim": resp,
     }))
 }

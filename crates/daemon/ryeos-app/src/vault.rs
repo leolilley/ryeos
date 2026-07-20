@@ -340,8 +340,7 @@ pub fn read_required_secrets_with_authority(
     vault: &dyn NodeVault,
     principal: &str,
     required_secrets: &[String],
-    authority: &ryeos_state::objects::EnvironmentAuthority,
-    project_root: Option<&std::path::Path>,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
 ) -> std::result::Result<HashMap<String, String>, VaultReadError> {
     if required_secrets.is_empty() {
         return Ok(HashMap::new());
@@ -351,31 +350,80 @@ pub fn read_required_secrets_with_authority(
         crate::process::validate_spawn_secret_name(key)
             .map_err(|error| anyhow!("vault: invalid declared secret `{key}`: {error:#}"))?;
     }
-    let allowed_names = match authority {
-        ryeos_state::objects::EnvironmentAuthority::None => &[][..],
-        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { allowed_names, .. }
-        | ryeos_state::objects::EnvironmentAuthority::Vault { allowed_names, .. }
-        | ryeos_state::objects::EnvironmentAuthority::Delegated { allowed_names, .. } => {
-            allowed_names.as_slice()
+    project_authority
+        .validate()
+        .map_err(VaultReadError::Internal)?;
+    let authority = project_authority.environment();
+    let name_authority = match authority {
+        ryeos_state::objects::EnvironmentAuthority::None => None,
+        ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { name_authority, .. }
+        | ryeos_state::objects::EnvironmentAuthority::Vault { name_authority, .. }
+        | ryeos_state::objects::EnvironmentAuthority::Delegated { name_authority, .. } => {
+            Some(name_authority)
         }
     };
-    let requested: Vec<String> = required_secrets
+    let unauthorized: Vec<String> = required_secrets
         .iter()
-        .filter(|name| allowed_names.is_empty() || allowed_names.binary_search(name).is_ok())
+        .filter(|name| {
+            !name_authority.is_some_and(|authority| authority.permits_declared(name.as_str()))
+        })
         .cloned()
         .collect();
+    if !unauthorized.is_empty() {
+        return Err(VaultReadError::Internal(anyhow!(
+            "declared secret name(s) exceed the admitted environment authority: [{}]",
+            unauthorized.join(", ")
+        )));
+    }
+    let requested = required_secrets.to_vec();
     let requested_set: HashSet<&str> = requested.iter().map(String::as_str).collect();
     let mut resolved = match authority {
         ryeos_state::objects::EnvironmentAuthority::None => HashMap::new(),
         ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+            project_authority_id,
+            source_identity,
             include_operator_vault,
             ..
         } => {
-            let root = project_root.ok_or_else(|| {
+            let root = project_authority.open_environment_root()?.ok_or_else(|| {
                 VaultReadError::Internal(anyhow!(
                     "project environment authority has no authorized project root"
                 ))
             })?;
+            let stable_identity = match project_authority {
+                ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                    authored_project_identity,
+                    ..
+                } => authored_project_identity,
+                ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+                    stable_project_identity,
+                    ..
+                } => stable_project_identity,
+                ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
+                    return Err(VaultReadError::Internal(anyhow!(
+                        "projectless authority cannot carry a project environment overlay"
+                    )))
+                }
+            };
+            let expected_authority_id = lillux::sha256_hex(
+                format!(
+                    "live-project\0{}\0{}",
+                    stable_identity,
+                    root.path().display()
+                )
+                .as_bytes(),
+            );
+            if project_authority_id != &expected_authority_id {
+                return Err(VaultReadError::Internal(anyhow!(
+                    "project environment authority id does not match the descriptor-opened overlay root"
+                )));
+            }
+            let expected_source = format!("dotenv:{}", root.path().join(".env").display());
+            if source_identity != &expected_source {
+                return Err(VaultReadError::Internal(anyhow!(
+                    "project environment source identity mismatch: expected {expected_source:?}, got {source_identity:?}"
+                )));
+            }
             let mut upstream = if *include_operator_vault {
                 vault.read_all(principal)?
             } else {
@@ -386,7 +434,7 @@ pub fn read_required_secrets_with_authority(
                 .filter(|name| !upstream.contains_key(name.as_str()))
                 .cloned()
                 .collect();
-            let overlay = ryeos_vault::dotenv::read_dotenv_overlay(&[root.to_path_buf()], &wanted)
+            let overlay = ryeos_vault::dotenv::read_dotenv_overlay_pinned(&root, &wanted)
                 .map_err(|error| VaultReadError::Internal(anyhow!("dotenv overlay: {error:#}")))?;
             for (name, value) in overlay {
                 upstream.entry(name).or_insert(value);

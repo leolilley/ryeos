@@ -604,7 +604,7 @@ fn sse_dispatch_launch_collision() {
         kind: "directive_run".to_string(),
         item_ref: "directive:test/collision".to_string(),
         executor_ref: "native:test-runtime".to_string(),
-        launch_mode: "inline".to_string(),
+        launch_mode: "wait".to_string(),
         current_site_id: "site:test".to_string(),
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,

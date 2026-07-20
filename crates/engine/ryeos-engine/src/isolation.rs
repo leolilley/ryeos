@@ -29,7 +29,10 @@ mod inspection;
 mod policy;
 mod provenance;
 
-pub use authority::{IsolationLaunchContext, IsolationProjectAuthority, IsolationVerifiedCode};
+pub use authority::{
+    IsolationLaunchContext, IsolationLiveAccessAuthority, IsolationProjectAuthority,
+    IsolationVerifiedCode,
+};
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
 pub use policy::{
@@ -66,6 +69,9 @@ pub struct IsolationRuntime {
     app_root_authority: Option<Arc<lillux::PinnedDirectory>>,
     /// Exact daemon-owned parent of runtime workspace project directories.
     runtime_workspaces: Option<Arc<lillux::PinnedDirectory>>,
+    /// Empty descriptor-pinned directory overlaid on non-bypassable live
+    /// project control paths after the project mount.
+    live_control_mask: Option<Arc<lillux::PinnedDirectory>>,
     /// Node-configured spelling recreated inside the isolation namespace.
     app_root_destination: Option<PathBuf>,
     daemon_socket: Option<PinnedDaemonSocket>,
@@ -881,7 +887,7 @@ impl IsolationRuntime {
                 },
             ];
             let request = AdapterWorkspaceRequest {
-                protocol: IsolationAdapterProtocolVersion::V2,
+                protocol: IsolationAdapterProtocolVersion::V3,
                 operation,
                 workspace_id: workspace_id.to_string(),
                 launch_owner: launch_owner.to_string(),
@@ -1183,6 +1189,12 @@ impl IsolationRuntime {
             )));
         }
         if self.state == IsolationRuntimeState::Disabled {
+            if context.live_access.is_some() {
+                return Err(refused(
+                    "live project authority requires enforced descriptor-rooted path masking"
+                        .to_string(),
+                ));
+            }
             if context.project_authority == IsolationProjectAuthority::RuntimeWorkspace {
                 return Err(refused(
                     "durable project execution requires an enforced isolation backend with filesystem.project_workspace_cow and filesystem.workspace_delta"
@@ -1279,6 +1291,55 @@ impl IsolationRuntime {
             validate_namespace_destination("app root", path)?;
         }
         let canonical_project = canonicalize_context_mount("project", &project_destination)?;
+        let live_mask_destinations = match context.live_access {
+            Some(authority) => {
+                let write_enabled = !authority.authorized_write_namespaces.is_empty();
+                if write_enabled
+                    != (context.project_authority == IsolationProjectAuthority::External)
+                {
+                    return Err(refused(
+                        "live project write namespaces contradict isolation project authority"
+                            .to_string(),
+                    ));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt as _;
+                    let metadata = std::fs::metadata(&canonical_project).map_err(|error| {
+                        refused(format!(
+                            "live project identity cannot be inspected: {error}"
+                        ))
+                    })?;
+                    if metadata.dev() != authority.root_device_id
+                        || metadata.ino() != authority.root_inode
+                    {
+                        return Err(refused(format!(
+                            "live project root identity changed before launch: {}",
+                            canonical_project.display()
+                        )));
+                    }
+                }
+                let mut previous: Option<&Path> = None;
+                let mut destinations = Vec::with_capacity(authority.denied_control_paths.len());
+                for relative in &authority.denied_control_paths {
+                    if relative.is_absolute()
+                        || relative
+                            .components()
+                            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                        || previous.is_some_and(|value| value >= relative.as_path())
+                    {
+                        return Err(refused(format!(
+                            "invalid canonical live control path {}",
+                            relative.display()
+                        )));
+                    }
+                    previous = Some(relative);
+                    destinations.push(project_destination.join(relative));
+                }
+                destinations
+            }
+            None => Vec::new(),
+        };
         let canonical_cwd = canonicalize_context_mount("working directory", &cwd_destination)?;
         let mount_namespace = MountNamespace {
             project_destination: &project_destination,
@@ -1377,6 +1438,48 @@ impl IsolationRuntime {
                     })?),
                 }),
             )
+        } else if context.project_authority == IsolationProjectAuthority::EphemeralScratch {
+            let app_root = self.app_root_authority.as_deref().ok_or_else(|| {
+                refused("projectless scratch authority requires a pinned app root".to_string())
+            })?;
+            let execution_root = open_relative_directory(
+                app_root,
+                &[crate::AI_DIR, "state", "cache", "executions"],
+                "projectless execution root",
+            )?;
+            let scratch_name = canonical_project
+                .file_name()
+                .ok_or_else(|| refused("projectless scratch path has no child name".to_string()))?;
+            if canonical_project.parent() != Some(execution_root.path()) {
+                return Err(refused(format!(
+                    "projectless scratch {} is not a direct child of {}",
+                    canonical_project.display(),
+                    execution_root.path().display()
+                )));
+            }
+            let expected = execution_root
+                .open_child_directory(scratch_name)
+                .map_err(|error| refused(format!("projectless scratch cannot be opened: {error}")))?
+                .ok_or_else(|| refused("projectless scratch disappeared".to_string()))?;
+            let requested = lillux::PinnedDirectory::open(&canonical_project)
+                .map_err(|error| refused(format!("projectless scratch cannot be pinned: {error}")))?
+                .ok_or_else(|| refused("projectless scratch disappeared".to_string()))?;
+            if !expected.is_same_directory(&requested).map_err(|error| {
+                refused(format!(
+                    "projectless scratch identity cannot be compared: {error}"
+                ))
+            })? {
+                return Err(refused(
+                    "projectless scratch does not match its daemon-owned child authority"
+                        .to_string(),
+                ));
+            }
+            let handle = Arc::new(expected.try_clone_descriptor().map_err(|error| {
+                refused(format!(
+                    "projectless scratch authority cannot be cloned: {error}"
+                ))
+            })?);
+            (true, Some(handle), None)
         } else {
             (false, None, None)
         };
@@ -1748,13 +1851,29 @@ impl IsolationRuntime {
             )));
         }
         validate_namespace_destination("command", &command_path)?;
-        let status = lillux::supervised_launcher_status_pipe().map_err(|reason| {
+        let status = lillux::supervised_launcher_gated_status_pipe().map_err(|reason| {
             refused(format!(
-                "supervised launcher process tracking cannot be initialized: {reason}"
+                "supervised launcher process tracking/start gate cannot be initialized: {reason}"
             ))
         })?;
         let status_fd = status.writer_fd();
         inherited_fds.push(status.writer);
+        let start_gate_reader = status.start_gate_reader.ok_or_else(|| {
+            refused("supervised launcher start-gate reader is unavailable".to_string())
+        })?;
+        let start_gate_fd = mount_fd_arg(&start_gate_reader)
+            .parse::<u32>()
+            .map_err(|error| refused(format!("invalid start-gate descriptor: {error}")))?;
+        inherited_fds.push(start_gate_reader);
+        let start_gate_keepalive_writer = status.start_gate_keepalive_writer.ok_or_else(|| {
+            refused("supervised launcher start-gate keepalive is unavailable".to_string())
+        })?;
+        let start_gate_keepalive_fd = mount_fd_arg(&start_gate_keepalive_writer)
+            .parse::<u32>()
+            .map_err(|error| {
+                refused(format!("invalid start-gate keepalive descriptor: {error}"))
+            })?;
+        inherited_fds.push(start_gate_keepalive_writer);
         let mut authorities = Vec::new();
         let mut mounts = Vec::new();
         let mut authority_handles = Vec::new();
@@ -1856,6 +1975,24 @@ impl IsolationRuntime {
                     IsolationAuthorityPurpose::ReadOnlyMount,
                     20,
                 )?;
+            }
+            if !live_mask_destinations.is_empty() {
+                let mask = self.live_control_mask.as_deref().ok_or_else(|| {
+                    refused("live control-path mask authority is unavailable".to_string())
+                })?;
+                for (index, destination) in live_mask_destinations.iter().enumerate() {
+                    add_mount(
+                        "live-mask",
+                        index,
+                        Arc::new(mask.try_clone_descriptor().map_err(|error| {
+                            refused(format!("live control mask cannot be cloned: {error}"))
+                        })?),
+                        destination,
+                        IsolationMountAccess::ReadOnly,
+                        IsolationAuthorityPurpose::ReadOnlyMount,
+                        25,
+                    )?;
+                }
             }
             let mut target_authority = None;
             for (index, mount) in verified_code_mounts.iter().enumerate() {
@@ -1995,12 +2132,14 @@ impl IsolationRuntime {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let launch_request = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V2,
+            protocol: IsolationAdapterProtocolVersion::V3,
             plan,
             authorities,
             artifacts: artifact_fds,
             status_fd: u32::try_from(status_fd)
                 .map_err(|_| refused("invalid isolation status descriptor".to_string()))?,
+            start_gate_fd,
+            start_gate_keepalive_fd,
         };
         launch_request
             .validate()
@@ -2076,7 +2215,7 @@ impl IsolationRuntime {
             signer_fingerprint: self.inspection.backend.signer_fingerprint.clone(),
             adapter_digest: self.inspection.backend.adapter_digest.clone(),
             adapter_protocol: (self.state == IsolationRuntimeState::Enforced)
-                .then_some(IsolationAdapterProtocolVersion::V2),
+                .then_some(IsolationAdapterProtocolVersion::V3),
             payloads: self.inspection.backend.artifacts.clone(),
             effective_capabilities: self.inspection.backend.effective_capabilities.clone(),
             plan_digest,
@@ -2161,6 +2300,34 @@ impl IsolationRuntime {
         } else {
             None
         };
+        let live_control_mask = if state == IsolationRuntimeState::Enforced {
+            let app_root = app_root_authority.as_deref().ok_or_else(|| {
+                refused("enforced isolation runtime requires pinned app-root authority".to_string())
+            })?;
+            let mask = open_or_create_relative_directory(
+                app_root,
+                &[crate::AI_DIR, "state", "cache", "live-control-mask-empty"],
+                0o700,
+                "live control-path mask",
+            )?;
+            if !mask
+                .entry_names()
+                .map_err(|error| refused(format!("inspect live control mask: {error}")))?
+                .is_empty()
+            {
+                return Err(refused(
+                    "live control-path mask directory is not empty".to_string(),
+                ));
+            }
+            mask.set_mode(0o500).map_err(|error| {
+                refused(format!(
+                    "live control-path mask cannot be protected: {error}"
+                ))
+            })?;
+            Some(Arc::new(mask))
+        } else {
+            None
+        };
         let bundle_manifest_digest = captured_backend
             .as_ref()
             .map(|backend| backend.bundle_manifest_digest.clone());
@@ -2215,6 +2382,7 @@ impl IsolationRuntime {
             app_root,
             app_root_authority,
             runtime_workspaces,
+            live_control_mask,
             app_root_destination,
             daemon_socket,
             verified_artifacts,
@@ -3254,9 +3422,11 @@ fn validate_writable_mount(
 
     if let Some(app_root) = validation.app_root {
         let execution_root = app_root.join(crate::AI_DIR).join("state/cache/executions");
-        let is_exact_runtime_workspace = validation.project_authority
-            == IsolationProjectAuthority::RuntimeWorkspace
-            && validation.runtime_workspace_authorized
+        let is_exact_runtime_workspace = matches!(
+            validation.project_authority,
+            IsolationProjectAuthority::RuntimeWorkspace
+                | IsolationProjectAuthority::EphemeralScratch
+        ) && validation.runtime_workspace_authorized
             && validation.canonical_project.parent() == Some(execution_root.as_path())
             && path.starts_with(validation.canonical_project);
         let is_exact_daemon_checkpoint = mount_authority

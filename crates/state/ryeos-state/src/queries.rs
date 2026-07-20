@@ -8,7 +8,7 @@ use rusqlite::OptionalExtension;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::objects::CapturedThreadHistoryPolicy;
+use crate::objects::{CapturedThreadHistoryPolicy, ExecutionProjectAuthority};
 use crate::projection::ProjectionDb;
 
 /// Stay below SQLite's conservative host-parameter ceiling regardless of the
@@ -31,6 +31,8 @@ pub struct ThreadRow {
     pub upstream_thread_id: Option<String>,
     pub requested_by: Option<String>,
     pub project_root: Option<String>,
+    pub project_authority: ExecutionProjectAuthority,
+    pub admitted_launch_capsule_hash: Option<String>,
     pub base_project_snapshot_hash: Option<String>,
     pub result_project_snapshot_hash: Option<String>,
     pub captured_history_policy: Option<CapturedThreadHistoryPolicy>,
@@ -54,6 +56,14 @@ impl ThreadRow {
                     Box::new(error),
                 )
             })?;
+        let project_authority_json: String = row.get("project_authority_json")?;
+        let project_authority = serde_json::from_str(&project_authority_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
         Ok(Self {
             thread_id: row.get("thread_id")?,
             chain_root_id: row.get("chain_root_id")?,
@@ -67,6 +77,8 @@ impl ThreadRow {
             upstream_thread_id: row.get("upstream_thread_id")?,
             requested_by: row.get("requested_by")?,
             project_root: row.get("project_root")?,
+            project_authority,
+            admitted_launch_capsule_hash: row.get("admitted_launch_capsule_hash")?,
             base_project_snapshot_hash: row.get("base_project_snapshot_hash")?,
             result_project_snapshot_hash: row.get("result_project_snapshot_hash")?,
             captured_history_policy,
@@ -384,6 +396,7 @@ const THREAD_COLUMNS: &str = r#"
     thread_id, chain_root_id, kind, status,
     item_ref, executor_ref, launch_mode,
     current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
+    project_authority_json, admitted_launch_capsule_hash,
     base_project_snapshot_hash, result_project_snapshot_hash,
     captured_history_policy_json, created_at, updated_at, started_at, finished_at
 "#;
@@ -2477,7 +2490,7 @@ mod tests {
         assert_eq!(row.chain_root_id, "chain-A");
         assert_eq!(row.status, "created");
         assert_eq!(row.kind, "directive");
-        assert_eq!(row.launch_mode, "inline");
+        assert_eq!(row.launch_mode, "wait");
     }
 
     #[test]
@@ -3005,7 +3018,7 @@ mod tests {
                 "kind": "directive",
                 "item_ref": "directive:apps/tv-tracker/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
-                "launch_mode": "inline",
+                "launch_mode": "wait",
                 "usage_subject": {
                     "namespace": "tv-tracker",
                     "subject": "csm01"
@@ -3034,7 +3047,7 @@ mod tests {
                 "kind": "directive",
                 "item_ref": "directive:apps/tv-tracker/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
-                "launch_mode": "inline",
+                "launch_mode": "wait",
                 "usage_subject": { "namespace": "tv-tracker", "subject": "user-a" },
                 "usage_subject_asserted_by": "fp:backend"
             }))
@@ -3050,7 +3063,7 @@ mod tests {
                 "kind": "directive",
                 "item_ref": "directive:apps/tv-tracker/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
-                "launch_mode": "inline",
+                "launch_mode": "wait",
                 "usage_subject": { "namespace": "tv-tracker", "subject": "user-b" },
                 "usage_subject_asserted_by": "fp:other"
             }))
@@ -3088,7 +3101,7 @@ mod tests {
                 "kind": "directive",
                 "item_ref": "directive:apps/tv-tracker/ai_chat",
                 "executor_ref": "runtime:directive-runtime",
-                "launch_mode": "inline",
+                "launch_mode": "wait",
                 "usage_subject": { "namespace": "tv-tracker", "subject": "user-a" },
                 "usage_subject_asserted_by": "fp:backend"
             }))
@@ -3129,10 +3142,15 @@ mod tests {
             .execute(
                 "INSERT INTO threads \
                  (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
-                  launch_mode, current_site_id, origin_site_id, created_at, updated_at) \
+                  launch_mode, current_site_id, origin_site_id, project_authority_json, created_at, updated_at) \
                  VALUES (?1, ?1, 'directive', ?2, 'directive:test', 'test/exec', \
-                  'inline', 'site:test', 'site:test', ?3, ?3)",
-                rusqlite::params![id, status, created_at],
+                  'inline', 'site:test', 'site:test', ?4, ?3, ?3)",
+                rusqlite::params![
+                    id,
+                    status,
+                    created_at,
+                    r#"{"kind":"projectless","environment":{"kind":"none"}}"#
+                ],
             )
             .unwrap();
     }
@@ -3186,10 +3204,16 @@ mod tests {
             .execute(
                 "INSERT INTO threads \
                  (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
-                  launch_mode, current_site_id, origin_site_id, requested_by, created_at, updated_at) \
+                  launch_mode, current_site_id, origin_site_id, requested_by, project_authority_json, created_at, updated_at) \
                  VALUES (?1, ?1, ?2, ?3, 'directive:test', 'test/exec', \
-                  'inline', 'site:test', 'site:test', ?4, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
-                rusqlite::params![id, kind, status, requested_by],
+                  'inline', 'site:test', 'site:test', ?4, ?5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![
+                    id,
+                    kind,
+                    status,
+                    requested_by,
+                    r#"{"kind":"projectless","environment":{"kind":"none"}}"#
+                ],
             )
             .unwrap();
     }

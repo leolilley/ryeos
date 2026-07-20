@@ -1284,12 +1284,12 @@ pub(crate) async fn dispatch_method(
     //    short-circuit, so a `validate_only` request with a bad mode is
     //    rejected rather than reported valid. Method dispatch runs the
     //    runtime synchronously and returns its result, so it only supports
-    //    `inline`: `detached` is a known-but-unsupported capability, and
+    //    `wait`: `detached` is a known-but-unsupported capability, and
     //    anything else is an outright invalid mode (which must not be
     //    silently recorded on the thread or surface as an opaque internal
     //    error).
     match request.launch_mode {
-        "inline" => {}
+        "wait" => {}
         "detached" => {
             return Err(DispatchError::CapabilityRejected {
                 reason: "detached mode not yet supported for method dispatch".into(),
@@ -1814,6 +1814,10 @@ pub(crate) async fn dispatch_method(
             supervised_status: None,
         };
         let node_trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+        let live_access = request
+            .provenance
+            .isolation_live_access_authority()
+            .map_err(DispatchError::Internal)?;
         let applied = state
             .isolation
             .apply_with_provenance(
@@ -1821,6 +1825,7 @@ pub(crate) async fn dispatch_method(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
+                    live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: callback_ipc_requested
@@ -2454,15 +2459,15 @@ async fn dispatch_via_method_executor(
     // A method-dispatch recall runs synchronously. Inline is the normal path
     // (directive tool-calls; `execute` without `--async`). Accepted (`--async`)
     // is supported too — the accepted route mints the thread and runs the
-    // background dispatch with launch_mode "inline", and `preflight_root_dispatch`
+    // background dispatch with launch_mode "wait", and `preflight_root_dispatch`
     // has already validated the target. Only detached (fire-and-forget, no
     // result capture) has no meaningful form for a recall.
     match LaunchMode::from_wire(request.launch_mode) {
-        Some(LaunchMode::Inline) => {}
+        Some(LaunchMode::Wait) => {}
         Some(LaunchMode::Detached) => {
             return Err(DispatchError::CapabilityRejected {
                 reason: format!(
-                    "tool `{wrapper_ref}` routes to a method dispatch, which is inline-only; \
+                    "tool `{wrapper_ref}` routes to a method dispatch, which is wait-only; \
                      detached launch is not supported"
                 ),
             });
@@ -2967,6 +2972,17 @@ pub async fn dispatch(
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<Value, DispatchError> {
+    if request.lifecycle_authority.ownership
+        == ryeos_state::objects::ExecutionOwnershipAuthority::DaemonOwned
+    {
+        return dispatch_daemon_owned(item_ref, request, ctx, state)
+            .await
+            .map_err(|error| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "daemon-owned dispatch task ended before settlement: {error}"
+                ))
+            })?;
+    }
     // `dispatch_inner` owns every terminal branch and is intentionally large.
     // Keep that state machine behind one heap indirection: runtime callbacks
     // enter here from a Tokio worker with the UDS router already on its stack,
@@ -3036,7 +3052,10 @@ pub fn dispatch_daemon_owned(
             root_admission,
             parent_execution_context,
         };
-        dispatch(&item_ref, &request, &ctx, &state).await
+        Box::pin(dispatch_inner(
+            &item_ref, None, None, &request, &ctx, &state, None,
+        ))
+        .await
     })
 }
 
@@ -4363,7 +4382,7 @@ metadata:
             kind: "tool_run".into(),
             item_ref: item_ref.into(),
             executor_ref: "@subprocess".into(),
-            launch_mode: "inline".into(),
+            launch_mode: "wait".into(),
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             target_site_id: None,

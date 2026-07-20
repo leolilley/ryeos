@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T00:27:45Z:88c613eab686d8b214ecc727def7ccb4cb22c167218349b9adcd92955450c749:j3Ynz8kKyxt1hkv9R1ebRJv92Dw0RPfOPmF+Pyb/trxEJJQXfY8iqfK1T8pwOXDbb+wzqAjJiqJwF5fzcAFtDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-20T06:21:36Z:27483e58548a62c1e553236a58a790ed6f9e6250ef08a195c45bdf4e3689202b:5kNfJv7LHa5/cGzzY5SqEHTZs39Xu0VuwQz8gmTfghKECZMhzpWf9WyWNiPRSNEpFOCAfdTiW0LnDoqYgtS1BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - remote
 - execute
@@ -18,7 +18,7 @@ project:
 defaults:
   ref_bindings: {}
   execution_policy:
-    schema_version: 1
+    schema_version: 2
     ownership: daemon_owned
     recovery: restart_recoverable
     response: wait
@@ -27,7 +27,8 @@ defaults:
     environment:
       kind: project_overlay
       include_operator_vault: true
-      allowed_names: []
+      name_policy:
+        kind: declared_required
     project:
       kind: pinned
       source:

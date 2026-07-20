@@ -19,7 +19,7 @@ pub(super) fn validate_kind(kind: &str, profiles: &KindProfileRegistry) -> Resul
 
 pub(super) fn validate_launch_mode(launch_mode: &str) -> Result<()> {
     match launch_mode {
-        "inline" | "detached" => Ok(()),
+        "wait" | "detached" => Ok(()),
         other => bail!("invalid launch mode: {other}"),
     }
 }
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn launch_mode_preserves_accepted_values_and_error_text() {
-        assert!(validate_launch_mode("inline").is_ok());
+        assert!(validate_launch_mode("wait").is_ok());
         assert!(validate_launch_mode("detached").is_ok());
         assert_eq!(
             validate_launch_mode("managed").unwrap_err().to_string(),

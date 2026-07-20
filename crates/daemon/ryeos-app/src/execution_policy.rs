@@ -1,6 +1,7 @@
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
-pub const EXECUTION_POLICY_SCHEMA_VERSION: u32 = 1;
+pub const EXECUTION_POLICY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,20 +33,30 @@ pub enum ExecutionTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExecutionEnvironmentNamePolicy {
+    /// Permit exactly the environment names declared as required by the
+    /// admitted launch contract.
+    DeclaredRequired,
+    /// Permit only this canonical, sorted set of environment names.
+    Exact { names: Vec<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ExecutionEnvironmentPolicy {
     None,
     ProjectOverlay {
         include_operator_vault: bool,
-        allowed_names: Vec<String>,
+        name_policy: ExecutionEnvironmentNamePolicy,
     },
     Vault {
         namespace: String,
-        allowed_names: Vec<String>,
+        name_policy: ExecutionEnvironmentNamePolicy,
     },
     Delegated {
         provider: String,
         grant_id: String,
-        allowed_names: Vec<String>,
+        name_policy: ExecutionEnvironmentNamePolicy,
     },
 }
 
@@ -78,7 +89,6 @@ pub enum TerminalPublication {
     AdvanceHead {
         head_ref: String,
         expected_hash: String,
-        publication_grant: String,
     },
 }
 
@@ -156,12 +166,12 @@ impl ExecutionPolicy {
         Self {
             schema_version: EXECUTION_POLICY_SCHEMA_VERSION,
             ownership: ExecutionOwnership::DaemonOwned,
-            recovery: ExecutionRecovery::RestartRecoverable,
+            recovery: ExecutionRecovery::None,
             response,
             target: ExecutionTarget::Here,
             environment: ExecutionEnvironmentPolicy::ProjectOverlay {
                 include_operator_vault: true,
-                allowed_names: Vec::new(),
+                name_policy: ExecutionEnvironmentNamePolicy::DeclaredRequired,
             },
             project: ProjectExecutionPolicy::LiveDirect {
                 access: LiveAccess::ReadWrite,
@@ -172,6 +182,7 @@ impl ExecutionPolicy {
 
     pub fn projectless(response: ExecutionResponse) -> Self {
         Self {
+            recovery: ExecutionRecovery::RestartRecoverable,
             environment: ExecutionEnvironmentPolicy::None,
             project: ProjectExecutionPolicy::Projectless,
             ..Self::local_live(response)
@@ -195,20 +206,36 @@ impl ExecutionPolicy {
                 anyhow::bail!("request-scoped execution cannot return an accepted response");
             }
         }
+        if self.recovery == ExecutionRecovery::RestartRecoverable
+            && matches!(&self.project, ProjectExecutionPolicy::LiveDirect { .. })
+        {
+            anyhow::bail!(
+                "live-direct execution cannot be restart-recoverable; select pinned project authority for restart recovery"
+            );
+        }
         if let ExecutionTarget::Site { site_id } = &self.target {
-            if site_id.is_empty()
-                || site_id.trim() != site_id
-                || site_id.chars().any(char::is_control)
-            {
-                anyhow::bail!("execution target site_id must be non-empty and canonical");
-            }
-            if matches!(self.project, ProjectExecutionPolicy::LiveDirect { .. }) {
+            crate::identity::validate_canonical_site_id(site_id)
+                .context("execution target site_id is not canonical")?;
+            if matches!(&self.project, ProjectExecutionPolicy::LiveDirect { .. }) {
                 anyhow::bail!(
                     "remote execution requires pinned portable project authority; request explicit pin-at-admission"
                 );
             }
             if matches!(
-                self.environment,
+                &self.project,
+                ProjectExecutionPolicy::Pinned {
+                    realization: PinnedRealization::Cow {
+                        terminal_publication: TerminalPublication::AdvanceHead { .. },
+                    },
+                    ..
+                }
+            ) {
+                anyhow::bail!(
+                    "remote advance-head publication is not supported in v1; use retain-result and publish under destination-scoped authority explicitly"
+                );
+            }
+            if matches!(
+                &self.environment,
                 ExecutionEnvironmentPolicy::ProjectOverlay { .. }
             ) {
                 anyhow::bail!(
@@ -218,7 +245,7 @@ impl ExecutionPolicy {
         }
         validate_environment_policy(
             &self.environment,
-            !matches!(self.project, ProjectExecutionPolicy::Projectless),
+            !matches!(&self.project, ProjectExecutionPolicy::Projectless),
         )?;
         if let ProjectExecutionPolicy::Pinned {
             source,
@@ -234,18 +261,196 @@ impl ExecutionPolicy {
                     TerminalPublication::AdvanceHead {
                         head_ref,
                         expected_hash,
-                        publication_grant,
                     },
             } = realization
             {
-                if head_ref.is_empty() || publication_grant.is_empty() {
-                    anyhow::bail!("advance-head publication requires ref and grant authority");
+                if head_ref.is_empty() {
+                    anyhow::bail!("advance-head publication requires a target ref");
                 }
                 validate_hash("advance-head expected hash", expected_hash)?;
             }
         }
         Ok(())
     }
+
+    /// Compile the live-project leg of an execution policy into the exact
+    /// authority consumed by provenance. This is the sole constructor used by
+    /// daemon entry points; they may not manufacture a read/write or environment
+    /// profile inside `ExecutionProvenance`.
+    pub fn resolve_live_project_authority(
+        &self,
+        project_path: &std::path::Path,
+        capability_ceiling: Vec<String>,
+    ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
+        self.validate()?;
+        let ProjectExecutionPolicy::LiveDirect {
+            access,
+            child_policy,
+        } = &self.project
+        else {
+            anyhow::bail!("live project authority requires a live-direct execution policy");
+        };
+        let root = project_path.canonicalize().with_context(|| {
+            format!(
+                "canonicalize live execution project {}",
+                project_path.display()
+            )
+        })?;
+        let name_authority = |policy: &ExecutionEnvironmentNamePolicy| match policy {
+            ExecutionEnvironmentNamePolicy::DeclaredRequired => {
+                ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired
+            }
+            ExecutionEnvironmentNamePolicy::Exact { names } => {
+                ryeos_state::objects::EnvironmentNameAuthority::Exact {
+                    names: names.clone(),
+                }
+            }
+        };
+        let environment = match &self.environment {
+            ExecutionEnvironmentPolicy::None => ryeos_state::objects::EnvironmentAuthority::None,
+            ExecutionEnvironmentPolicy::ProjectOverlay {
+                include_operator_vault,
+                name_policy,
+            } => ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: "pending".to_string(),
+                source_identity: format!("dotenv:{}", root.join(".env").display()),
+                include_operator_vault: *include_operator_vault,
+                name_authority: name_authority(name_policy),
+            },
+            ExecutionEnvironmentPolicy::Vault {
+                namespace,
+                name_policy,
+            } => ryeos_state::objects::EnvironmentAuthority::Vault {
+                namespace: namespace.clone(),
+                name_authority: name_authority(name_policy),
+            },
+            ExecutionEnvironmentPolicy::Delegated {
+                provider,
+                grant_id,
+                name_policy,
+            } => ryeos_state::objects::EnvironmentAuthority::Delegated {
+                provider: provider.clone(),
+                grant_id: grant_id.clone(),
+                name_authority: name_authority(name_policy),
+            },
+        };
+        let child_policy = match child_policy {
+            ChildProjectPolicy::Inherit => {
+                ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit
+            }
+            ChildProjectPolicy::PinAtSpawn { realization } => {
+                ryeos_state::objects::ChildProjectAuthorityPolicy::PinAtSpawn {
+                    realization: match realization {
+                        PinnedChildRealization::ReadOnly => {
+                            ryeos_state::objects::PinnedChildProjectRealization::ReadOnly
+                        }
+                        PinnedChildRealization::CowDiscard => {
+                            ryeos_state::objects::PinnedChildProjectRealization::CowDiscard
+                        }
+                    },
+                }
+            }
+        };
+        ryeos_state::objects::ExecutionProjectAuthority::live(
+            root.clone(),
+            format!("local:{}", root.display()),
+            match access {
+                LiveAccess::ReadOnly => ryeos_state::objects::LiveProjectAccess::ReadOnly,
+                LiveAccess::ReadWrite => ryeos_state::objects::LiveProjectAccess::ReadWrite,
+            },
+            environment,
+            capability_ceiling,
+        )?
+        .with_child_policy(child_policy)
+    }
+}
+
+/// The inseparable authority contract produced by the standard local-live
+/// policy profile. Keeping these values together prevents an operational
+/// entry point from resolving project authority under one policy while
+/// independently claiming different lifecycle semantics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedStandardLocalLiveAuthority {
+    pub project: ryeos_state::objects::ExecutionProjectAuthority,
+    pub lifecycle: ryeos_state::objects::ExecutionLifecycleAuthority,
+}
+
+/// Compile the standard local-live profile through the same closed policy
+/// resolver used by explicit execution requests. Operational entry points use
+/// this when they intentionally select that profile; provenance itself has no
+/// defaults.
+pub fn resolve_standard_local_live_authority(
+    project_path: &std::path::Path,
+    capability_ceiling: Vec<String>,
+) -> anyhow::Result<ResolvedStandardLocalLiveAuthority> {
+    authorize_standard_local_live_execution(&capability_ceiling)?;
+    let policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+    policy.validate()?;
+    Ok(ResolvedStandardLocalLiveAuthority {
+        project: policy.resolve_live_project_authority(project_path, capability_ceiling)?,
+        lifecycle: policy.lifecycle_authority(),
+    })
+}
+
+/// Authorize the standard read-write live profile before any project capture,
+/// checkout, or other filesystem/CAS work begins.
+pub fn authorize_standard_local_live_execution(capabilities: &[String]) -> anyhow::Result<()> {
+    ryeos_runtime::authorizer::Authorizer::new()
+        .authorize(
+            capabilities,
+            &ryeos_runtime::authorizer::AuthorizationPolicy::require("project.write"),
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "standard local-live execution requires explicit project.write authority"
+            )
+        })
+}
+
+/// Build a structurally valid live authority for unit tests whose filesystem
+/// path is intentionally synthetic. Production code must always use
+/// `resolve_live_project_authority`, which canonicalizes and proves the root.
+#[cfg(test)]
+pub(crate) fn synthetic_test_live_project_authority(
+    project_path: &std::path::Path,
+) -> ryeos_state::objects::ExecutionProjectAuthority {
+    use ryeos_state::objects::{
+        ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
+        ExecutionProjectAuthority, LiveAccessAuthority, LiveProjectAccess, LiveSymlinkPolicy,
+    };
+
+    let authored_project_identity = format!("test:{}", project_path.display());
+    let authority_id = lillux::sha256_hex(
+        format!(
+            "live-project\0{}\0{}",
+            authored_project_identity,
+            project_path.display()
+        )
+        .as_bytes(),
+    );
+    let authority = ExecutionProjectAuthority::LiveProject {
+        authority_id: authority_id.clone(),
+        authored_project_identity,
+        canonical_root: project_path.to_path_buf(),
+        live_access: LiveAccessAuthority {
+            access: LiveProjectAccess::ReadWrite,
+            denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths(),
+            authorized_write_namespaces: vec!["project".to_string()],
+            symlink_policy: LiveSymlinkPolicy::DescriptorRootedNoEscape,
+        },
+        environment: EnvironmentAuthority::ProjectOverlay {
+            project_authority_id: authority_id,
+            source_identity: format!("dotenv:{}", project_path.join(".env").display()),
+            include_operator_vault: true,
+            name_authority: EnvironmentNameAuthority::DeclaredRequired,
+        },
+        capability_ceiling: Vec::new(),
+        child_policy: ChildProjectAuthorityPolicy::Inherit,
+    };
+    authority
+        .validate()
+        .expect("synthetic test live authority must be valid");
+    authority
 }
 
 fn validate_environment_policy(
@@ -275,15 +480,15 @@ fn validate_environment_policy(
     };
     match environment {
         ExecutionEnvironmentPolicy::None => Ok(()),
-        ExecutionEnvironmentPolicy::ProjectOverlay { allowed_names, .. } => {
+        ExecutionEnvironmentPolicy::ProjectOverlay { name_policy, .. } => {
             if !project_backed {
                 anyhow::bail!("project environment overlay requires project authority");
             }
-            validate_names(allowed_names)
+            validate_environment_name_policy(name_policy, &validate_names)
         }
         ExecutionEnvironmentPolicy::Vault {
             namespace,
-            allowed_names,
+            name_policy,
         } => {
             validate_identity("vault namespace", namespace)?;
             if namespace != "operator" {
@@ -291,20 +496,30 @@ fn validate_environment_policy(
                     "vault namespace {namespace:?} is not installed on this node; only `operator` is available"
                 );
             }
-            validate_names(allowed_names)
+            validate_environment_name_policy(name_policy, &validate_names)
         }
         ExecutionEnvironmentPolicy::Delegated {
             provider,
             grant_id,
-            allowed_names,
+            name_policy,
         } => {
             validate_identity("delegated environment provider", provider)?;
             validate_identity("delegated environment grant", grant_id)?;
-            validate_names(allowed_names)?;
+            validate_environment_name_policy(name_policy, &validate_names)?;
             anyhow::bail!(
                 "delegated environment provider {provider:?} is not installed on this node"
             )
         }
+    }
+}
+
+fn validate_environment_name_policy(
+    policy: &ExecutionEnvironmentNamePolicy,
+    validate_names: &impl Fn(&[String]) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match policy {
+        ExecutionEnvironmentNamePolicy::DeclaredRequired => Ok(()),
+        ExecutionEnvironmentNamePolicy::Exact { names } => validate_names(names),
     }
 }
 
@@ -320,4 +535,56 @@ fn validate_hash(label: &str, value: &str) -> anyhow::Result<()> {
         anyhow::bail!("{label} must be a 64-character hexadecimal digest");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    #[test]
+    fn live_async_is_daemon_owned_without_claiming_restart_recovery() {
+        let policy = ExecutionPolicy::local_live(ExecutionResponse::Accepted);
+        policy.validate().unwrap();
+        assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
+        assert_eq!(policy.recovery, ExecutionRecovery::None);
+        assert_eq!(policy.response, ExecutionResponse::Accepted);
+    }
+
+    #[test]
+    fn live_direct_cannot_claim_restart_recovery() {
+        let mut policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        policy.recovery = ExecutionRecovery::RestartRecoverable;
+        assert!(policy
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("select pinned project authority"));
+    }
+
+    #[test]
+    fn projectless_execution_can_be_restart_recoverable() {
+        let policy = ExecutionPolicy::projectless(ExecutionResponse::Accepted);
+        policy.validate().unwrap();
+        assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
+    }
+
+    #[test]
+    fn standard_live_authority_requires_project_write_and_resolves_both_halves() {
+        let project = tempfile::tempdir().unwrap();
+        let error =
+            resolve_standard_local_live_authority(project.path(), vec!["project.read".to_string()])
+                .unwrap_err();
+        assert!(error.to_string().contains("project.write"));
+
+        let authority =
+            resolve_standard_local_live_authority(project.path(), vec!["*".to_string()]).unwrap();
+        assert!(matches!(
+            authority.project,
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        ));
+        assert_eq!(
+            authority.lifecycle,
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE
+        );
+    }
 }

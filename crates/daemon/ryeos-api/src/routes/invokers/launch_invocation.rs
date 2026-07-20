@@ -7,8 +7,8 @@
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteInvocationContext, RouteInvocationContract,
-    RouteInvocationOutput, RouteInvocationResult,
+    authenticated_execution_origin, CompiledRouteInvocation, PrincipalPolicy,
+    RouteInvocationContext, RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
 
 pub struct CompiledLaunchInvocation;
@@ -77,6 +77,8 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             .as_ref()
             .map(|p| p.scopes.clone())
             .unwrap_or_default();
+        let execution_origin_site_id =
+            authenticated_execution_origin(ctx.principal.as_ref(), ctx.state.threads.site_id());
 
         // Parse and validate canonical ref.
         let item_ref =
@@ -91,12 +93,15 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        ryeos_app::execution_policy::authorize_standard_local_live_execution(&principal_scopes)
+            .map_err(|error| RouteDispatchError::Forbidden(error.to_string()))?;
         let mut project_ctx = ryeos_executor::execution::project_source::resolve_project_context(
             &ctx.state,
             &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
             project_path.as_path(),
             &principal_id,
             &format!("route-{thread_id}"),
+            ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
         )
         .map_err(|error| RouteDispatchError::BadRequest(format!("capture project: {error}")))?;
         let effective_project = crate::routes::abs_path::AbsolutePathBuf::try_from_str(
@@ -114,8 +119,9 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             &ref_bindings,
             &principal_id,
             &principal_scopes,
+            &execution_origin_site_id,
             None,
-            "inline",
+            "wait",
             false,
             None,
             None,
@@ -134,7 +140,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "threaded dispatch preflight returned no root admission".to_string(),
             )
         })?;
-        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
+        let mut launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
             effective_project.as_path(),
             ref_bindings,
@@ -155,10 +161,19 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             item_ref_kind = item_ref.kind(),
         );
 
+        let resolved_authority =
+            ryeos_app::execution_policy::resolve_standard_local_live_authority(
+                &project_ctx.effective_path,
+                principal_scopes.clone(),
+            )
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        launch_options.lifecycle_authority = resolved_authority.lifecycle;
         let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_ctx.effective_path.clone(),
             project_ctx.request_engine.clone(),
-        );
+            resolved_authority.project,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,

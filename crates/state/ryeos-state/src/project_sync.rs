@@ -284,6 +284,7 @@ pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
 /// enforced for every sync scope, and configuration may only ever *add* to it,
 /// never remove an entry. Shipping any of these would leak a credential.
 pub const NEVER_DEPLOY_SECRETS: &[&str] = &[
+    ".env",
     ".ai/node/identity",
     ".ai/node/auth",
     ".ai/node/vault",
@@ -299,6 +300,21 @@ pub const NODE_OWNED: &[&str] = &[
     ".ai/node/routes",
     ".ai/node/bundles",
 ];
+
+/// Central, non-bypassable live-execution control-plane floor. The same
+/// classification owns snapshot/deploy safety; live execution serializes this
+/// exact policy into its authority rather than duplicating path literals in an
+/// executor or adapter.
+pub fn live_execution_denied_control_paths() -> Vec<String> {
+    let mut paths = NEVER_DEPLOY_SECRETS
+        .iter()
+        .chain(NODE_OWNED.iter())
+        .map(|path| (*path).to_string())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+}
 
 /// Canonical identity of the non-bypassable project snapshot floor. Category
 /// prefixes keep otherwise identical path strings semantically distinct.
@@ -660,6 +676,7 @@ mod tests {
         // Secrets and node-owned runtime state must be rejected even under
         // full_project sync, which previously only checked path safety.
         for path in [
+            ".env",
             ".ai/node/identity/private_key.pem",
             ".ai/config/keys/signing/k.pem",
             ".ai/state/runtime.sqlite3",
@@ -689,6 +706,10 @@ mod tests {
 
     #[test]
     fn classifies_project_ai_paths() {
+        assert!(matches!(
+            classify_project_ai_path(".env", None),
+            ProjectAiPathClass::NeverDeploySecret { prefix: ".env" }
+        ));
         assert!(matches!(
             classify_project_ai_path(".ai/config/schedules/snap-track.yaml", None),
             ProjectAiPathClass::Deployable(ProjectAiSurface {
@@ -764,6 +785,7 @@ mod tests {
             Some(".ai/node/ingest/ignore.yaml")
         );
         let secrets = v["never_deploy_secrets"].as_sequence().unwrap();
+        assert!(secrets.iter().any(|x| x.as_str() == Some(".env")));
         assert!(secrets
             .iter()
             .any(|x| x.as_str() == Some(".ai/node/identity")));

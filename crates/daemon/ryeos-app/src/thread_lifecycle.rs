@@ -631,6 +631,9 @@ pub fn continuation_request_fingerprint(
     launch_mode: &str,
     previous_thread_id: &str,
     parameters: &Value,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+    lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    sealed_root_request: Option<&SealedRootExecutionRequest>,
 ) -> String {
     use sha2::{Digest, Sha256};
     let mut scopes_sorted: Vec<&str> = scopes.iter().map(String::as_str).collect();
@@ -644,6 +647,9 @@ pub fn continuation_request_fingerprint(
         "launch_mode": launch_mode,
         "previous_thread_id": previous_thread_id,
         "parameters": parameters,
+        "project_authority": project_authority,
+        "lifecycle_authority": lifecycle_authority,
+        "sealed_root_request": sealed_root_request,
     });
     let bytes = serde_json::to_vec(&canonical).expect("fingerprint input is serializable");
     let mut hasher = Sha256::new();
@@ -1210,6 +1216,20 @@ pub struct SealedRootExecutionRequest {
 
 impl SealedRootExecutionRequest {
     pub fn capture(request: &ResolvedExecutionRequest, runtime_ref: String) -> Result<Self> {
+        let resolution_output = request
+            .root_admission
+            .as_ref()
+            .ok_or_else(|| anyhow!("cannot seal a root execution request without root admission"))?
+            .resolution_output()
+            .clone();
+        Self::capture_with_resolution(request, runtime_ref, resolution_output)
+    }
+
+    pub fn capture_with_resolution(
+        request: &ResolvedExecutionRequest,
+        runtime_ref: String,
+        resolution_output: ryeos_engine::resolution::ResolutionOutput,
+    ) -> Result<Self> {
         let admission = request.root_admission.as_ref().ok_or_else(|| {
             anyhow!("cannot seal a root execution request without root admission")
         })?;
@@ -1222,6 +1242,13 @@ impl SealedRootExecutionRequest {
         CanonicalRef::parse(&runtime_ref)
             .map_err(|error| anyhow!("invalid sealed runtime ref `{runtime_ref}`: {error}"))?;
         let verified = &admission.verified_subject;
+        if resolution_output.root.raw_content_digest != verified.resolved.raw_content_digest {
+            bail!(
+                "sealed resolution root digest does not match admitted subject: resolution={}, admitted={}",
+                resolution_output.root.raw_content_digest,
+                verified.resolved.raw_content_digest
+            );
+        }
         Ok(Self {
             schema_version: SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION,
             kind: request.kind.clone(),
@@ -1241,7 +1268,7 @@ impl SealedRootExecutionRequest {
             verified_signer_fingerprint: verified.signer.as_ref().map(|value| value.0.clone()),
             verified_trust_class: verified.trust_class,
             verified_pinned_version: verified.pinned_version.clone(),
-            resolution_output: admission.resolution_output.clone(),
+            resolution_output,
             planning_principal: SealedPrincipal::from(&admission.plan_context.requested_by),
             project_context: admission.plan_context.project_context.clone(),
             execution_hints: admission.plan_context.execution_hints.values.clone(),
@@ -1261,6 +1288,67 @@ impl SealedRootExecutionRequest {
 
     pub fn item_ref(&self) -> &str {
         &self.item_ref
+    }
+
+    /// Stable program closure shared by continuation segments. Invocation
+    /// stimulus, principal envelope, and project realization are authorized
+    /// separately and may change at an explicit continuation boundary; item
+    /// bytes, resolution, bindings, runtime identity, and launch semantics may
+    /// not.
+    pub fn admitted_program_value(&self) -> Result<Value> {
+        let mut value = serde_json::to_value(self).context("serialize admitted program")?;
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("sealed execution request is not an object"))?;
+        for invocation_field in [
+            "parameters",
+            "requested_by",
+            "planning_principal",
+            "project_context",
+            "usage_subject",
+            "usage_subject_asserted_by",
+        ] {
+            object
+                .remove(invocation_field)
+                .ok_or_else(|| anyhow!("sealed execution request is missing {invocation_field}"))?;
+        }
+        Ok(value)
+    }
+
+    pub fn admitted_program_hash(&self) -> Result<String> {
+        let canonical = lillux::canonical_json(&self.admitted_program_value()?)?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    /// Rebind only the invocation envelope of an exact admitted program for a
+    /// continuation segment. Program bytes, composed resolution, runtime
+    /// identity, and trust facts remain byte-for-byte inherited.
+    pub fn for_continuation_invocation(
+        &self,
+        resume: &crate::launch_metadata::ResumeContext,
+    ) -> Result<Self> {
+        if self.kind != resume.kind
+            || self.item_ref != resume.item_ref
+            || self.ref_bindings != resume.ref_bindings
+            || self.launch_mode != resume.launch_mode
+            || self.current_site_id != resume.current_site_id
+            || self.origin_site_id != resume.origin_site_id
+            || resume.executor_ref.as_deref() != Some(self.executor_ref())
+            || resume.runtime_ref.as_deref() != Some(self.runtime_ref())
+            || self.execution_hints != resume.execution_hints.values
+        {
+            bail!(
+                "continuation invocation does not match admitted program identity for {}",
+                resume.item_ref
+            );
+        }
+        let mut successor = self.clone();
+        successor.parameters = resume.parameters.clone();
+        successor.requested_by = Some(resume.principal_identifier().to_string());
+        successor.planning_principal = SealedPrincipal::from(&resume.requested_by);
+        successor.project_context = resume.project_context.clone();
+        successor.execution_hints = resume.execution_hints.values.clone();
+        Ok(successor)
     }
 
     /// Exact captured policy carried by the synthetic storage fixture.
@@ -2106,12 +2194,10 @@ impl ThreadLifecycleService {
                  This is used to construct the site_id for thread isolation."
                 )
             })?;
-        if hostname.trim().is_empty() {
-            anyhow::bail!(
-                "HOSTNAME environment variable is set but empty. \
-                 Set it to a non-empty value identifying this node."
-            );
-        }
+        let current_site_id = format!("site:{hostname}");
+        crate::identity::validate_canonical_site_id(&current_site_id).with_context(|| {
+            format!("HOSTNAME `{hostname}` cannot form this node's canonical site identity")
+        })?;
 
         Ok(Self {
             state_store,
@@ -2119,7 +2205,7 @@ impl ThreadLifecycleService {
             kind_profiles,
             _events,
             event_hub,
-            current_site_id: format!("site:{hostname}"),
+            current_site_id,
             scheduler_db: std::sync::RwLock::new(None),
             scheduler_runtime_gate: std::sync::RwLock::new(None),
             app_root: std::sync::RwLock::new(None),
@@ -4793,6 +4879,19 @@ pub struct SpawnedItem {
 }
 
 impl SpawnedItem {
+    /// Permit the supervised target to exec only after its exact identity has
+    /// been durably attached to the thread row.
+    pub fn release_start_gate(&mut self) -> Result<()> {
+        let released = self
+            .spawned
+            .release_start_gate()
+            .map_err(|error| anyhow!("release item start gate: {error}"))?;
+        if !released {
+            bail!("durable item launch was created without the mandatory pre-exec start gate");
+        }
+        Ok(())
+    }
+
     /// Block until subprocess completes.
     pub fn wait(self) -> ExecutionCompletion {
         self.spawned.wait()
@@ -4805,6 +4904,83 @@ impl SpawnedItem {
 pub struct PreparedItemPlan {
     plan: ExecutionPlan,
     pub timeout_secs: u64,
+}
+
+impl PreparedItemPlan {
+    pub fn admitted_artifact_identity(
+        &self,
+        engine: &Engine,
+        resolved: &ResolvedExecutionRequest,
+        protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
+        let canonical_plan = lillux::canonical_json(&serde_json::to_value(&self.plan)?)?;
+        let execution_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+        let executable_identity = match self.plan.nodes.first() {
+            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec
+                .verified_command
+                .as_ref()
+                .map(
+                    |identity| ryeos_state::objects::DirectExecutableIdentity::VerifiedContent {
+                        content_hash: identity.content_hash.clone(),
+                    },
+                )
+                .unwrap_or(ryeos_state::objects::DirectExecutableIdentity::NodePolicy),
+            Some(ryeos_engine::contracts::PlanNode::Complete { .. }) | None => {
+                ryeos_state::objects::DirectExecutableIdentity::NodePolicy
+            }
+        };
+        let executor_bundle =
+            if resolved.resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Bundle {
+                let ai = resolved
+                    .resolved_item
+                    .source_path
+                    .ancestors()
+                    .find(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name == ryeos_engine::AI_DIR)
+                    })
+                    .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
+                let root = ai
+                    .parent()
+                    .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
+                Some(
+                    ryeos_engine::binary_resolver::verify_bundle_executor_manifest_identity(
+                        root,
+                        &engine.node_trust_store,
+                    )?
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "executor item bundle has no signed generation identity: {}",
+                            root.display()
+                        )
+                    })?,
+                )
+            } else {
+                None
+            };
+        let identity = ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executor_ref: resolved.executor_ref.clone(),
+            executor_item_content_hash: resolved.resolved_item.raw_content_digest.clone(),
+            executor_item_signer_fingerprint: resolved
+                .resolved_item
+                .signature_header
+                .as_ref()
+                .map(|header| header.signer_fingerprint.clone()),
+            executor_bundle_manifest_hash: executor_bundle
+                .as_ref()
+                .map(|bundle| bundle.manifest_hash.clone()),
+            executor_bundle_signer_fingerprint: executor_bundle
+                .as_ref()
+                .map(|bundle| bundle.signer_fingerprint.clone()),
+            protocol_ref: protocol.canonical_ref.clone(),
+            protocol_content_hash: protocol.raw_content_digest.clone(),
+            protocol_signer_fingerprint: protocol.signer_fingerprint.clone(),
+            execution_plan_hash,
+            executable_identity,
+        };
+        identity.validate()?;
+        Ok(identity)
+    }
 }
 
 pub fn prepare_item_plan(
@@ -4865,17 +5041,6 @@ pub struct SpawnItemParams<'a> {
     pub thread_state_dir: Option<&'a std::path::Path>,
     pub is_resume: bool,
     pub original_snapshot_hash: Option<&'a str>,
-    pub stable_project_identity: Option<&'a crate::launch_metadata::StableProjectIdentity>,
-    pub local_overlay_root: Option<&'a std::path::Path>,
-    /// Exact admitted project/environment/publication authority. This is the
-    /// source of truth for native-resume metadata; paths and snapshot hashes
-    /// above are derived launch mechanics and must never reconstruct policy.
-    pub project_authority: ryeos_state::objects::ExecutionProjectAuthority,
-    pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
-    /// Pushed-head identity of the spawn's root provenance (see
-    /// `launch_metadata::OriginalPushedHeadRef::from_provenance`).
-    /// `None` for live-fs spawns and borrowed children.
-    pub original_pushed_head_ref: Option<&'a crate::launch_metadata::OriginalPushedHeadRef>,
     /// The spawn's deliberate state-root override
     /// (`provenance.state_root_override()`), persisted on the resume
     /// context so a resumed run keeps the same state/callback anchor.
@@ -4908,12 +5073,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         isolation_daemon_socket_path,
         thread_state_dir,
         is_resume,
-        original_snapshot_hash,
-        stable_project_identity,
-        local_overlay_root,
-        project_authority,
-        lifecycle_authority,
-        original_pushed_head_ref,
+        original_snapshot_hash: _,
         state_root,
     } = params;
     let app_root = roots
@@ -4921,6 +5081,11 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         .as_deref()
         .map(std::path::PathBuf::from)
         .context("spawn roots missing RYEOS_APP_ROOT")?;
+    if !isolation.is_enforced() {
+        bail!(
+            "durable daemon-owned execution requires enforced isolation so attach-before-exec can be guaranteed"
+        );
+    }
     // vault_bindings: user-provided secret/capability env vars.
     // protocol_env_bindings: the verified terminator protocol's exact signed
     // env contract. Values are produced from daemon-owned launch facts by the
@@ -5085,7 +5250,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         launch_mode: if resolved.launch_mode == "detached" {
             LaunchMode::Detached
         } else {
-            LaunchMode::Inline
+            LaunchMode::Wait
         },
     };
 
@@ -5106,52 +5271,6 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         .unwrap_or_default();
     if let Some(ckpt) = allocated_checkpoint_dir {
         launch_metadata = launch_metadata.with_checkpoint_dir(ckpt);
-    }
-    // Capture resume context iff this thread declared native_resume.
-    // `reconcile.rs` reads it on daemon restart to re-spawn the thread
-    // under the same `thread_id` with `RYEOS_RESUME=1`.
-    //
-    // **Pinned-snapshot policy:** copy the full original
-    // `PlanContext.project_context` AND the runner-allocated
-    // `original_snapshot_hash` (if any). On resume, the reconciler
-    // prefers a `ProjectContext::SnapshotHash { hash }` form when
-    // `original_snapshot_hash` is `Some`, so resume runs against the
-    // exact project version captured at spawn time, not the current
-    // working-dir head. See `docs/future/native-resume-snapshot-pinning.md`.
-    if launch_metadata.native_resume.is_some() {
-        project_authority.validate()?;
-        launch_metadata =
-            launch_metadata.with_resume_context(crate::launch_metadata::ResumeContext {
-                kind: resolved.kind.clone(),
-                item_ref: resolved.item_ref.clone(),
-                ref_bindings: resolved.ref_bindings.clone(),
-                launch_mode: resolved.launch_mode.clone(),
-                parameters: resolved.parameters.clone(),
-                project_context: resolved.plan_context.project_context.clone(),
-                project_authority,
-                lifecycle_authority,
-                stable_project_identity: stable_project_identity.cloned(),
-                local_overlay_root: local_overlay_root.map(std::path::Path::to_path_buf),
-                original_snapshot_hash: original_snapshot_hash.map(str::to_string),
-                original_pushed_head_ref: original_pushed_head_ref.cloned(),
-                state_root: state_root.map(std::path::Path::to_path_buf),
-                current_site_id: resolved.plan_context.current_site_id.clone(),
-                origin_site_id: resolved.plan_context.origin_site_id.clone(),
-                requested_by: resolved.plan_context.requested_by.clone(),
-                execution_hints: resolved.plan_context.execution_hints.clone(),
-                // Subprocess (`spawn_item`) path: the executor identity is the
-                // tool's own `executor_ref`; there is no serving runtime, so
-                // `runtime_ref` stays `None`. (Runtime-registry launches capture
-                // both in `launch::run_claimed_thread_row`.)
-                executor_ref: Some(resolved.executor_ref.clone()),
-                runtime_ref: None,
-                // V5.5 P2: subprocess terminator has no permissions
-                // composition step, so resumed callbacks inherit the
-                // same deny-all posture the original spawn had. Native
-                // runtime spawns that DO have a permissions model go
-                // through `launch::build_and_launch`, not `spawn_item`.
-                effective_caps: Vec::new(),
-            });
     }
     let spawned = engine
         .spawn_plan(&engine_ctx, &plan)
@@ -5483,6 +5602,9 @@ mod tests {
                 successor_thread_id: None,
                 requested_by: None,
                 project_root: None,
+                project_authority: None,
+                lifecycle_authority: None,
+                admitted_launch_capsule_hash: None,
                 created_at: "t".to_string(),
                 updated_at: "t".to_string(),
             },

@@ -6095,7 +6095,7 @@ mod tests {
                     .payload(serde_json::json!({
                         "item_ref": "directive:apps/tv-tracker/ai_chat",
                         "executor_ref": "runtime:directive-runtime",
-                        "launch_mode": "inline",
+                        "launch_mode": "wait",
                         "usage_subject": {
                             "namespace": "tv-tracker",
                             "subject": "csm01"
