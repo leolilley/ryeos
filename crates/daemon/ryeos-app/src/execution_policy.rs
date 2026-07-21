@@ -399,6 +399,35 @@ pub fn resolve_standard_local_live_authority(
     })
 }
 
+/// Resolve the live-project authority for a foreground offline CLI process.
+///
+/// This boundary is deliberately request-scoped and non-recoverable: no daemon
+/// owns the child after the command exits. The local operator invocation keeps
+/// the historical mutable-project contract explicit through `project.write`,
+/// while filesystem confinement still follows the installed isolation mode.
+pub fn resolve_offline_local_live_project_authority(
+    project_path: &std::path::Path,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
+    let policy = ExecutionPolicy {
+        schema_version: EXECUTION_POLICY_SCHEMA_VERSION,
+        ownership: ExecutionOwnership::RequestScoped,
+        recovery: ExecutionRecovery::None,
+        response: ExecutionResponse::Wait,
+        target: ExecutionTarget::Here,
+        environment: ExecutionEnvironmentPolicy::None,
+        project: ProjectExecutionPolicy::LiveDirect {
+            access: LiveAccess::ReadWrite,
+            child_policy: ChildProjectPolicy::Inherit,
+        },
+    };
+    policy.resolve_live_project_authority(
+        project_path,
+        live_filesystem_confinement_for_isolation(isolation.mode()),
+        vec!["project.write".to_string()],
+    )
+}
+
 pub fn live_filesystem_confinement_for_isolation(
     mode: ryeos_engine::isolation::IsolationMode,
 ) -> ryeos_state::objects::LiveFilesystemConfinement {
@@ -625,6 +654,31 @@ mod policy_tests {
                 ryeos_engine::isolation::IsolationMode::Enforce
             ),
             ryeos_state::objects::LiveFilesystemConfinement::DescriptorRootedMasked { .. }
+        ));
+    }
+
+    #[test]
+    fn offline_live_authority_is_explicitly_request_scoped_project_write() {
+        let project = tempfile::tempdir().unwrap();
+        let authority = resolve_offline_local_live_project_authority(
+            project.path(),
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            authority,
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                live_access: ryeos_state::objects::LiveAccessAuthority {
+                    access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                    authorized_write_namespaces,
+                    confinement: ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost,
+                },
+                environment: ryeos_state::objects::EnvironmentAuthority::None,
+                capability_ceiling,
+                ..
+            } if authorized_write_namespaces == vec!["project".to_string()]
+                && capability_ceiling == vec!["project.write".to_string()]
         ));
     }
 }

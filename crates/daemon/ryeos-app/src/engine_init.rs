@@ -210,16 +210,18 @@ pub fn load_registered_isolation(
     load_registered_generation_under_lock(app_root).map(|generation| generation.0)
 }
 
-/// Standalone composition pins and verifies one generation while loading it.
-/// Each later verified-open-to-exec operation reacquires a short read lock via
-/// the generation lifeline; the returned runtime itself never holds
-/// `.bundles.lock`, so a long-lived TUI cannot block node boot or replacement.
+/// Standalone composition pins and verifies one generation under a bounded
+/// shared lock. Each later verified-open-to-exec operation reacquires a short
+/// read lock via the generation lifeline; the returned runtime itself never
+/// holds `.bundles.lock`, so a long-lived TUI cannot block node boot or
+/// replacement. Shared composition also permits a verified offline tool to
+/// compose its own read-only engine while its parent guards the launch.
 pub fn load_locked_registered_isolation(
     app_root: &std::path::Path,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
     let generation_lock =
-        crate::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
-            .context("acquire bundle-generation lock for isolation composition")?;
+        crate::bundle_transaction::BundleRegistryReadLock::acquire_for_composition(app_root)
+            .context("acquire bundle-generation read lock for isolation composition")?;
     let (runtime, node_trust, generation) = load_registered_generation_under_lock(app_root)?;
     let bundle_roots = generation.roots();
     let lifeline = Arc::new(RetainedRegisteredGeneration {
@@ -1054,19 +1056,21 @@ mod isolation_generation_tests {
     #[test]
     fn retained_generation_allows_nested_read_only_engine() {
         let app_root = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(app_root.path().join(".ai/bundles")).unwrap();
+        std::fs::create_dir_all(app_root.path().join(ryeos_engine::AI_DIR).join("bundles"))
+            .unwrap();
+        write_policy(
+            app_root.path(),
+            ryeos_engine::isolation::IsolationMode::Disabled,
+        );
         // Initialize the lock anchor the same way node setup does.
         drop(
             crate::bundle_transaction::BundleRegistryMutationLock::acquire(app_root.path())
                 .unwrap(),
         );
 
-        let retained_lock = Arc::new(
-            crate::bundle_transaction::BundleRegistryReadLock::acquire(app_root.path()).unwrap(),
-        );
         let lifeline = RetainedRegisteredGeneration {
             app_root: app_root.path().to_path_buf(),
-            _read_lock: Some(retained_lock),
+            _read_lock: None,
             verified_generation: Arc::new(VerifiedBundleGeneration {
                 records: Vec::new(),
                 bundles: Vec::new(),
@@ -1080,15 +1084,17 @@ mod isolation_generation_tests {
         let path = app_root.path().to_path_buf();
         let (tx, rx) = std::sync::mpsc::channel();
         let nested = std::thread::spawn(move || {
-            let result = crate::bundle_transaction::BundleRegistryReadLock::acquire(&path);
-            tx.send(result.is_ok()).unwrap();
+            let result = load_locked_registered_isolation(&path)
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}"));
+            tx.send(result).unwrap();
         });
-        let acquired = rx.recv_timeout(std::time::Duration::from_secs(1));
+        let composition = rx.recv_timeout(std::time::Duration::from_secs(1));
         drop(operation);
         drop(lifeline);
         nested.join().unwrap();
 
-        assert!(acquired.unwrap());
+        composition.unwrap().unwrap();
     }
 
     #[test]

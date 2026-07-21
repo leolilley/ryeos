@@ -84,7 +84,7 @@ pub struct BundleMutationTransaction<'a> {
 
 impl BundleRegistryMutationLock {
     pub fn acquire(app_root: &Path) -> Result<Self> {
-        let target = app_root.join(".ai/bundles");
+        let target = installed_bundles_directory(app_root);
         let lock = lillux::ExclusiveFileLock::acquire(&target)?;
         Ok(Self {
             app_root: app_root.to_path_buf(),
@@ -93,7 +93,7 @@ impl BundleRegistryMutationLock {
     }
 
     pub fn acquire_for_startup(app_root: &Path) -> Result<Self> {
-        let target = app_root.join(".ai/bundles");
+        let target = installed_bundles_directory(app_root);
         let lock = lillux::ExclusiveFileLock::acquire_with_timeout(
             &target,
             std::time::Duration::from_secs(3),
@@ -115,13 +115,22 @@ impl BundleRegistryMutationLock {
 
 impl BundleRegistryReadLock {
     pub fn acquire(app_root: &Path) -> Result<Self> {
-        let target = app_root.join(".ai/bundles");
+        let target = installed_bundles_directory(app_root);
         // The first read of an otherwise empty installed registry must establish
         // the same coordination anchor used by future writers. Requiring a
         // pre-existing anchor makes valid offline/disabled-isolation nodes fail
         // before they can observe the empty generation, while proceeding
         // unlocked would race the first bundle installation.
         let lock = lillux::SharedFileLock::acquire(&target)?;
+        Ok(Self { _lock: lock })
+    }
+
+    pub fn acquire_for_composition(app_root: &Path) -> Result<Self> {
+        let target = installed_bundles_directory(app_root);
+        let lock = lillux::SharedFileLock::acquire_with_timeout(
+            &target,
+            std::time::Duration::from_secs(3),
+        )?;
         Ok(Self { _lock: lock })
     }
 }
@@ -139,7 +148,7 @@ impl BundleTransaction {
         if !valid_bundle_name(name) {
             anyhow::bail!("invalid bundle transaction name: {name}");
         }
-        let target = app_root.join(".ai/bundles").join(name);
+        let target = installed_bundles_directory(app_root).join(name);
         let journal = journal_directory(app_root).join(format!("{name}.json"));
         let lock = lillux::ExclusiveFileLock::acquire(&target)?;
         Ok(Self {
@@ -348,9 +357,7 @@ impl BundleTransaction {
     }
 
     fn registration_path(&self) -> PathBuf {
-        self.app_root
-            .join(".ai/node/bundles")
-            .join(format!("{}.yaml", self.name))
+        bundle_registrations_directory(&self.app_root).join(format!("{}.yaml", self.name))
     }
 
     fn finish(&self) -> Result<()> {
@@ -416,24 +423,18 @@ fn validate_journal(app_root: &Path, name: &str, journal: &Journal) -> Result<()
     if journal.bundle_name != name || !valid_bundle_name(&journal.bundle_name) {
         anyhow::bail!("bundle transaction name mismatch");
     }
-    let transaction_target = app_root.join(".ai/bundles").join(name);
-    let registration = app_root
-        .join(".ai/node/bundles")
-        .join(format!("{name}.yaml"));
+    let transaction_target = installed_bundles_directory(app_root).join(name);
+    let registration = bundle_registrations_directory(app_root).join(format!("{name}.yaml"));
     if journal.target_path != transaction_target || journal.registration_path != registration {
         anyhow::bail!("bundle transaction contains non-derived paths");
     }
     let expected_staging = match journal.operation {
-        BundleOperation::Install | BundleOperation::Replace => Some(
-            app_root
-                .join(".ai/bundles")
-                .join(format!(".{name}.staging")),
-        ),
-        BundleOperation::RemoteInstall => Some(
-            app_root
-                .join(".ai/bundles")
-                .join(format!(".{name}.remote-staging")),
-        ),
+        BundleOperation::Install | BundleOperation::Replace => {
+            Some(installed_bundles_directory(app_root).join(format!(".{name}.staging")))
+        }
+        BundleOperation::RemoteInstall => {
+            Some(installed_bundles_directory(app_root).join(format!(".{name}.remote-staging")))
+        }
         BundleOperation::Remove => None,
     };
     if journal.staging_path != expected_staging {
@@ -503,7 +504,17 @@ fn hash_tree_entry(path: &Path, relative: &Path, hasher: &mut Sha256) -> Result<
 }
 
 fn journal_directory(app_root: &Path) -> PathBuf {
-    app_root.join(".ai/node/bundle-transactions")
+    app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/bundle-transactions")
+}
+
+fn installed_bundles_directory(app_root: &Path) -> PathBuf {
+    app_root.join(ryeos_engine::AI_DIR).join("bundles")
+}
+
+fn bundle_registrations_directory(app_root: &Path) -> PathBuf {
+    app_root.join(ryeos_engine::AI_DIR).join("node/bundles")
 }
 
 fn valid_bundle_name(name: &str) -> bool {

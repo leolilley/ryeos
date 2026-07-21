@@ -426,6 +426,46 @@ fn append_client_arg(args: &mut Vec<String>, flag: &str, value: &Value) {
 // Tool dispatch
 // ---------------------------------------------------------------------------
 
+struct OfflineProjectIsolationAuthority {
+    // Retain the durable policy result beside the compiled engine authority so
+    // this composition root cannot lose the source confinement facts.
+    _project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    project: ryeos_engine::isolation::IsolationProjectAuthority,
+    live_access: Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
+}
+
+fn resolve_offline_project_isolation_authority(
+    project_path: &Path,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+) -> Result<OfflineProjectIsolationAuthority, CliError> {
+    // A foreground offline subprocess is an explicit local-operator action.
+    // Preserve the historical mutable-project contract, but express it through
+    // the same closed policy resolver used by daemon execution rather than
+    // manufacturing `External` authority at the launch call site.
+    let project_authority =
+        ryeos_app::execution_policy::resolve_offline_local_live_project_authority(
+            project_path,
+            isolation,
+        )
+        .map_err(|error| CliError::Local {
+            detail: format!("resolve offline project authority: {error:#}"),
+        })?;
+    let project = ryeos_app::execution_provenance::isolation_project_authority_for_project(
+        &project_authority,
+    );
+    let live_access = ryeos_app::execution_provenance::isolation_live_access_authority_for_project(
+        &project_authority,
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("compile offline project confinement: {error:#}"),
+    })?;
+    Ok(OfflineProjectIsolationAuthority {
+        _project_authority: project_authority,
+        project,
+        live_access,
+    })
+}
+
 fn exec_tool(
     engine: &ryeos_engine::engine::Engine,
     item: &EffectiveItem,
@@ -461,6 +501,8 @@ fn exec_tool(
         })?;
     let project_path_owned = project_path_buf.to_string_lossy().into_owned();
     let project_path = project_path_owned.as_str();
+    let project_authority =
+        resolve_offline_project_isolation_authority(&project_path_buf, isolation)?;
 
     let config = item
         .composed_value
@@ -609,8 +651,8 @@ fn exec_tool(
             },
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: Path::new(project_path),
-                project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
-                live_access: None,
+                project_authority: project_authority.project,
+                live_access: project_authority.live_access.as_ref(),
                 state_root: None,
                 checkpoint_dir: None,
                 daemon_socket_path: None,
@@ -972,6 +1014,27 @@ mod tests {
             OfflineDispatchOutcome::Json(value) => value,
             OfflineDispatchOutcome::Silent => panic!("expected JSON offline dispatch outcome"),
         }
+    }
+
+    #[test]
+    fn disabled_offline_project_authority_is_explicitly_unconfined() {
+        let project = tempfile::tempdir().unwrap();
+        let authority = resolve_offline_project_isolation_authority(
+            project.path(),
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            authority.project,
+            ryeos_engine::isolation::IsolationProjectAuthority::External
+        );
+        assert!(matches!(
+            authority.live_access,
+            Some(ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
+                authorized_write_namespaces,
+            }) if authorized_write_namespaces == vec!["project".to_string()]
+        ));
     }
 
     struct Fixture {

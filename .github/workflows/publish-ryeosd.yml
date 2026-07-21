@@ -15,6 +15,11 @@ on:
         description: "Version (without `v` prefix), e.g. 0.5.0"
         required: true
         type: string
+      recovery_build_date:
+        description: "Existing RFC3339 build timestamp to preserve cache/provenance on retry"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -31,7 +36,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.release.outputs.version }}
-      build_date: ${{ steps.release.outputs.build_date }}
+      build_date: ${{ steps.source.outputs.build_date }}
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
       # On manual recovery, begin with the workflow revision selected by the
@@ -53,7 +58,6 @@ jobs:
           VERSION="$(scripts/release/resolve-version.sh \
             "$EVENT_NAME" "$REF_NAME" "$REQUESTED_VERSION")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
       - name: Check out immutable release tag
@@ -66,6 +70,7 @@ jobs:
         id: source
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          RECOVERY_BUILD_DATE: ${{ inputs.recovery_build_date }}
         run: |
           git fetch --force --tags
           SOURCE_SHA="$(git rev-parse HEAD)"
@@ -78,10 +83,21 @@ jobs:
             echo "::error::Release source mismatch: checked-out HEAD $SOURCE_SHA != $TAG $TAG_COMMIT"
             exit 1
           fi
+          if [[ -n "$RECOVERY_BUILD_DATE" ]]; then
+            if [[ ! "$RECOVERY_BUILD_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+              echo "::error::Recovery build date must be an RFC3339 UTC timestamp"
+              exit 1
+            fi
+            BUILD_DATE="$RECOVERY_BUILD_DATE"
+          else
+            BUILD_DATE="$(git show -s --format=%cI "$TAG_COMMIT")"
+          fi
 
           echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
           echo "Source SHA: $SOURCE_SHA"
           echo "Tag commit: $TAG_COMMIT"
+          echo "Build date: $BUILD_DATE"
 
   publish:
     name: Publish release artifacts
@@ -225,6 +241,9 @@ jobs:
             --file Dockerfile.release-bundles \
             --target artifact \
             --platform linux/amd64 \
+            --cache-from type=gha,scope=ryeos-release-image \
+            --cache-from type=gha,scope=ryeos-release-bundles \
+            --cache-to type=gha,scope=ryeos-release-bundles,mode=max \
             --output "type=local,dest=${ARTIFACT_DIR}" \
             --secret id=publisher-key,env=PUBLISHER_KEY \
             --build-arg "VERSION=${VERSION}" \
@@ -237,243 +256,56 @@ jobs:
             sha256sum -c "ryeos-bundles-${VERSION}-x86_64.tar.gz.sha256"
           )
 
-      - name: Build standard image for verification
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ./Dockerfile.standard
-          # linux/amd64 only for now — bundle bin/ trees only contain
-          # x86_64-unknown-linux-gnu binaries. Add arm64 once we ship arm64
-          # binaries in the bundles.
-          platforms: linux/amd64
-          load: true
-          push: false
-          pull: true
-          cache-from: type=gha,scope=ryeos-release-image
-          cache-to: type=gha,scope=ryeos-release-image,mode=max
-          # Injected into the binary at compile time (.git is dockerignored, so
-          # the in-container git fallback can't resolve the SHA) and onto the
-          # image as OCI labels via the Dockerfile ARGs.
-          build-args: |
-            VCS_REF=${{ needs.qualify.outputs.source_sha }}
-            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-          tags: |
-            ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
-          secrets: |
-            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
-
-      - name: Verify standard image provenance
+      # Publish the verified archive before image construction. If a later
+      # image step fails, the immutable archive becomes the canonical retry
+      # input and is downloaded instead of rebuilt.
+      - name: Publish immutable official bundle assets
         env:
-          EXPECTED: ${{ needs.qualify.outputs.source_sha }}
-        run: |
-          IMG="ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}"
-
-          ACTUAL="$(docker run --rm --entrypoint /usr/local/bin/ryeosd "$IMG" build-info --revision)"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::stale ryeosd binary: binary=$ACTUAL expected=$EXPECTED"
-            exit 1
-          fi
-
-          LABEL_REV="$(docker image inspect "$IMG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
-          if [ "$LABEL_REV" != "$EXPECTED" ]; then
-            echo "::error::image revision label mismatch: label=$LABEL_REV expected=$EXPECTED"
-            exit 1
-          fi
-
-      - name: Cryptographically preflight reused bundle archive
-        if: steps.bundle-assets.outputs.archive_exists == 'true'
-        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.qualify.outputs.version }}
+          ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
+          CHECKSUM_EXISTS: ${{ steps.bundle-assets.outputs.checksum_exists }}
         run: |
+          TAG="v${VERSION}"
           ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
           ARCHIVE="$ARTIFACT_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
-          EXTRACTED="$RUNNER_TEMP/reused-bundle-preflight"
-          [[ ! -e "$EXTRACTED" ]]
+          CHECKSUM="${ARCHIVE}.sha256"
+          test -s "$ARCHIVE"
+          test -s "$CHECKSUM"
           scripts/release/verify-bundle-artifact.sh \
             --version "$VERSION" \
-            --archive "$ARCHIVE"
-          mkdir "$EXTRACTED"
-          tar --no-same-owner --no-same-permissions \
-            -xzf "$ARCHIVE" -C "$EXTRACTED"
-          docker run --rm \
-            --entrypoint /usr/local/bin/ryeos \
-            -v "$EXTRACTED/ryeos-bundles-${VERSION}-x86_64:/source:ro" \
-            "ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}" \
-            init --app-root /tmp/retry-bundle-app --source /source
-
-      # ── central-host image: standard + central-auth + web ──
-      # Base for app-hosting nodes (e.g. tv-tracker) that host their own
-      # central-auth realm and use rye/web/search. Same build/verify/push/sign
-      # flow as the standard image above.
-      - name: Build central-host image for verification
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ./Dockerfile.central-host
-          # linux/amd64 only for now — bundle bin/ trees only contain
-          # x86_64-unknown-linux-gnu binaries. Add arm64 once we ship arm64
-          # binaries in the bundles.
-          platforms: linux/amd64
-          load: true
-          push: false
-          pull: true
-          cache-from: type=gha,scope=ryeos-release-image
-          cache-to: type=gha,scope=ryeos-release-image,mode=max
-          build-args: |
-            VCS_REF=${{ needs.qualify.outputs.source_sha }}
-            BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-          tags: |
-            ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}
-          secrets: |
-            "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
-
-      - name: Verify central-host image provenance
-        env:
-          EXPECTED: ${{ needs.qualify.outputs.source_sha }}
-        run: |
-          IMG="ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}"
-
-          ACTUAL="$(docker run --rm --entrypoint /usr/local/bin/ryeosd "$IMG" build-info --revision)"
-          if [ "$ACTUAL" != "$EXPECTED" ]; then
-            echo "::error::stale ryeosd binary: binary=$ACTUAL expected=$EXPECTED"
-            exit 1
+            --archive "$ARCHIVE" \
+            --checksum "$CHECKSUM"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --verify-tag \
+              --title "RyeOS ${VERSION}" \
+              --generate-notes
+          fi
+          # Archive first makes an interrupted upload safely resumable: the
+          # missing checksum can be derived from the already-canonical bytes.
+          # No --clobber is ever used.
+          if [[ "$ARCHIVE_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$ARCHIVE"
+          fi
+          if [[ "$CHECKSUM_EXISTS" != true ]]; then
+            gh release upload "$TAG" "$CHECKSUM"
           fi
 
-          LABEL_REV="$(docker image inspect "$IMG" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')"
-          if [ "$LABEL_REV" != "$EXPECTED" ]; then
-            echo "::error::image revision label mismatch: label=$LABEL_REV expected=$EXPECTED"
-            exit 1
-          fi
+          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-bundle"
+          [[ ! -e "$PUBLISHED_DIR" ]]
+          mkdir "$PUBLISHED_DIR"
+          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
+            --pattern "$(basename "$ARCHIVE")" \
+            --pattern "$(basename "$CHECKSUM")"
+          scripts/release/verify-bundle-artifact.sh \
+            --version "$VERSION" \
+            --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
+            --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 
-      - name: Smoke standard image default-disabled profile
-        env:
-          IMG: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
-        run: |
-          VOLUME="ryeos-release-disabled-${{ github.run_id }}"
-          CONTAINER="ryeos-release-disabled-${{ github.run_id }}"
-          cleanup() {
-            docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-            docker volume rm "$VOLUME" >/dev/null 2>&1 || true
-          }
-          reports_running() {
-            LIFECYCLE_STATUS_JSON="$1" python3 - <<'PY'
-          import json
-          import os
-
-          report = json.loads(os.environ["LIFECYCLE_STATUS_JSON"])
-          running = report.get("Running")
-          if not isinstance(running, dict) or not isinstance(running.get("metadata"), dict):
-              raise SystemExit(f"node is not Running: {report!r}")
-          PY
-          }
-          wait_ready() {
-            local report
-            for attempt in $(seq 1 60); do
-              if report="$(docker exec "$CONTAINER" ryeos node status --json 2>/dev/null)" && \
-                 reports_running "$report" && \
-                 docker exec "$CONTAINER" ryeos daemon status >/dev/null 2>&1; then
-                return 0
-              fi
-              if [ "$attempt" -eq 60 ]; then
-                docker logs "$CONTAINER"
-                return 1
-              fi
-              sleep 1
-            done
-          }
-          assert_isolation_mode() {
-            local expected="$1"
-            local daemon_report doctor_report
-            daemon_report="$(docker exec "$CONTAINER" ryeos daemon status)"
-            DAEMON_STATUS_JSON="$daemon_report" EXPECTED_ISOLATION_MODE="$expected" python3 - <<'PY'
-          import json
-          import os
-          import re
-
-          report = json.loads(os.environ["DAEMON_STATUS_JSON"])
-          isolation = report.get("isolation") or {}
-          expected = os.environ["EXPECTED_ISOLATION_MODE"]
-          if isolation.get("version") != 1 or isolation.get("mode") != expected:
-              raise SystemExit(
-                  f"running daemon isolation mismatch: expected version=1 mode={expected!r}, isolation={isolation!r}"
-              )
-          if isolation.get("source") != "/data/app/.ai/node/isolation.yaml":
-              raise SystemExit(f"running daemon reported the wrong isolation source: {isolation!r}")
-          if not re.fullmatch(r"sha256:[0-9a-f]{64}", isolation.get("policy_digest") or ""):
-              raise SystemExit(f"running daemon did not report a policy digest: {isolation!r}")
-          backend = isolation.get("backend") or {}
-          if backend.get("selection") is not None:
-              raise SystemExit(f"disabled daemon unexpectedly selected an isolation backend: {backend!r}")
-          if any(backend.get(field) for field in (
-              "bundle_manifest_digest", "signer_fingerprint", "adapter_build",
-              "effective_capabilities", "artifacts",
-          )):
-              raise SystemExit(f"disabled daemon unexpectedly loaded an isolation backend: {backend!r}")
-          PY
-            doctor_report="$(docker exec "$CONTAINER" ryeos node doctor --json --no-bundles)"
-            ISOLATION_DOCTOR_JSON="$doctor_report" EXPECTED_ISOLATION_MODE="$expected" python3 - <<'PY'
-          import json
-          import os
-
-          report = json.loads(os.environ["ISOLATION_DOCTOR_JSON"])
-          matches = [row for row in report.get("checks", []) if row.get("name") == "isolation"]
-          if len(matches) != 1:
-              raise SystemExit(f"expected one isolation doctor row, got {matches!r}")
-          detail = matches[0].get("detail") or {}
-          expected = os.environ["EXPECTED_ISOLATION_MODE"]
-          if detail.get("version") != 1 or detail.get("mode") != expected:
-              raise SystemExit(
-                  f"isolation doctor mismatch: expected version=1 mode={expected!r}, detail={detail!r}"
-              )
-          expected_backend = "disabled"
-          if detail.get("backend_status") != expected_backend:
-              raise SystemExit(
-                  f"isolation backend status mismatch: expected {expected_backend!r}, detail={detail!r}"
-              )
-          readable = (detail.get("filesystem") or {}).get("readable") or []
-          if "{node_public_identity}" not in readable:
-              raise SystemExit(f"node public identity binding missing: detail={detail!r}")
-          PY
-          }
-          trap cleanup EXIT
-          docker volume create "$VOLUME"
-          docker run -d --name "$CONTAINER" \
-            -v "$VOLUME:/data" \
-            "$IMG"
-          wait_ready
-          assert_isolation_mode disabled
-          docker exec --workdir /tmp "$CONTAINER" \
-            ryeos execute tool:ryeos/core/identity/public_key
-          docker restart "$CONTAINER"
-          wait_ready
-          assert_isolation_mode disabled
-
-      - name: Scan standard image for known vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ghcr.io/leolilley/ryeos-standard:verify-${{ github.run_id }}
-          format: table
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          # Keep the gate actionable: fixed findings fail; distro findings with
-          # no available remediation remain reported without blocking release.
-          ignore-unfixed: true
-          exit-code: 1
-
-      - name: Scan central-host image for known vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: ghcr.io/leolilley/ryeos-central-host:verify-${{ github.run_id }}
-          format: table
-          vuln-type: os,library
-          severity: CRITICAL,HIGH
-          # Keep the gate actionable: fixed findings fail; distro findings with
-          # no available remediation remain reported without blocking release.
-          ignore-unfixed: true
-          exit-code: 1
-
-      # Registry credentials are deliberately unavailable until every release
-      # image has been built and its embedded provenance has been verified.
+      # Registry credentials are unavailable until the signed bundle archive
+      # has been built and verified. Image provenance and signatures are
+      # checked against the immutable pushed digests below.
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -515,9 +347,8 @@ jobs:
           resolve_image ryeos-standard standard
           resolve_image ryeos-central-host central
 
-      # The pre-login images above exist only for local qualification. Build
-      # only missing immutable tags; an existing tag remains canonical after
-      # its resolved digest passes the same checks below.
+      # Build only missing immutable tags; an existing tag remains canonical
+      # after its resolved digest passes the same checks below.
       - name: Build and push attested immutable standard version
         id: push-standard
         if: steps.resolve-images.outputs.standard_exists != 'true'
@@ -679,50 +510,6 @@ jobs:
               exit 1
             }
           done
-
-      - name: Publish immutable official bundle assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ needs.qualify.outputs.version }}
-          ARCHIVE_EXISTS: ${{ steps.bundle-assets.outputs.archive_exists }}
-          CHECKSUM_EXISTS: ${{ steps.bundle-assets.outputs.checksum_exists }}
-        run: |
-          TAG="v${VERSION}"
-          ARTIFACT_DIR="$RUNNER_TEMP/ryeos-release-artifacts"
-          ARCHIVE="$ARTIFACT_DIR/ryeos-bundles-${VERSION}-x86_64.tar.gz"
-          CHECKSUM="${ARCHIVE}.sha256"
-          test -s "$ARCHIVE"
-          test -s "$CHECKSUM"
-          scripts/release/verify-bundle-artifact.sh \
-            --version "$VERSION" \
-            --archive "$ARCHIVE" \
-            --checksum "$CHECKSUM"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --verify-tag \
-              --title "RyeOS ${VERSION}" \
-              --generate-notes
-          fi
-          # Archive first makes an interrupted upload safely resumable: the
-          # missing checksum can be derived from the already-canonical bytes.
-          # No --clobber is ever used.
-          if [[ "$ARCHIVE_EXISTS" != true ]]; then
-            gh release upload "$TAG" "$ARCHIVE"
-          fi
-          if [[ "$CHECKSUM_EXISTS" != true ]]; then
-            gh release upload "$TAG" "$CHECKSUM"
-          fi
-
-          PUBLISHED_DIR="$RUNNER_TEMP/verified-published-bundle"
-          [[ ! -e "$PUBLISHED_DIR" ]]
-          mkdir "$PUBLISHED_DIR"
-          gh release download "$TAG" --dir "$PUBLISHED_DIR" \
-            --pattern "$(basename "$ARCHIVE")" \
-            --pattern "$(basename "$CHECKSUM")"
-          scripts/release/verify-bundle-artifact.sh \
-            --version "$VERSION" \
-            --archive "$PUBLISHED_DIR/$(basename "$ARCHIVE")" \
-            --checksum "$PUBLISHED_DIR/$(basename "$CHECKSUM")"
 
       # Mutable image tags move only after both immutable images and the native
       # bundle artifact have passed verification and publication.
