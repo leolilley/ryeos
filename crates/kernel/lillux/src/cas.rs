@@ -1,6 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -359,6 +359,30 @@ pub struct CasPutOutcome {
     pub created: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamedBlobOutcome {
+    pub hash: String,
+    pub size: u64,
+    pub normalized_mode: u32,
+    pub created: bool,
+}
+
+/// Exact outcome of pruning interrupted streaming blob captures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlobCapturePruneReport {
+    pub files: usize,
+    pub bytes: u64,
+}
+
+const BLOB_CAPTURE_STAGING_DIRECTORY: &str = ".staging";
+
+/// Whether one CAS namespace child is structural metadata rather than a hash
+/// shard. The CAS layer owns this layout contract; callers must not duplicate
+/// its private directory names.
+pub fn is_reserved_namespace_entry(namespace: &str, entry: &str) -> bool {
+    namespace == "blobs" && entry == BLOB_CAPTURE_STAGING_DIRECTORY
+}
+
 impl CasStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -379,6 +403,64 @@ impl CasStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Reclaim exact interrupted streaming-capture files.
+    ///
+    /// The caller must exclude concurrent CAS mutation for the full call. An
+    /// unknown entry fails closed rather than being treated as disposable.
+    /// Dry-run opens and validates the existing namespace without creating or
+    /// deleting anything.
+    pub fn prune_abandoned_blob_captures(&self, dry_run: bool) -> Result<BlobCapturePruneReport> {
+        let root = match self.pinned_root.as_ref() {
+            Some(root) => root.try_clone()?,
+            None => match crate::secure_fs::PinnedDirectory::open(&self.root)? {
+                Some(root) => root,
+                None => return Ok(BlobCapturePruneReport::default()),
+            },
+        };
+        let Some(blobs) = root.open_child_directory(OsStr::new("blobs"))? else {
+            return Ok(BlobCapturePruneReport::default());
+        };
+        let staging_name = OsStr::new(BLOB_CAPTURE_STAGING_DIRECTORY);
+        let Some(staging) = blobs.open_child_directory(staging_name)? else {
+            return Ok(BlobCapturePruneReport::default());
+        };
+
+        let mut report = BlobCapturePruneReport::default();
+        for name in staging.entry_names()? {
+            let text = name.to_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "non-UTF8 CAS blob capture staging entry under {}",
+                    staging.path().display()
+                )
+            })?;
+            if !is_blob_capture_staging_name(text) {
+                anyhow::bail!(
+                    "unexpected CAS blob capture staging entry: {}",
+                    staging.path().join(&name).display()
+                );
+            }
+            let file = staging.open_regular(&name, false)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CAS blob capture staging entry is not a regular file: {}",
+                    staging.path().join(&name).display()
+                )
+            })?;
+            let size = file.metadata()?.len();
+            if !dry_run {
+                staging.remove_if_same(&name, &file)?;
+            }
+            report.files += 1;
+            report.bytes = report.bytes.saturating_add(size);
+        }
+        if !dry_run && !blobs.remove_empty_child_if_same(staging_name, &staging)? {
+            anyhow::bail!(
+                "CAS blob capture staging directory changed during cleanup: {}",
+                staging.path().display()
+            );
+        }
+        Ok(report)
     }
 
     /// Return whether a verified blob exists. A malformed hash is absent;
@@ -412,6 +494,52 @@ impl CasStore {
             return Ok(None);
         };
         Ok(Some(read_verified_entry(file, hash, &path)?))
+    }
+
+    /// Open one descriptor-pinned CAS blob for bounded streaming protocols.
+    /// The CAS publication path already verified the content address; callers
+    /// must verify the complete digest while consuming the stream before they
+    /// make it authoritative in another store.
+    pub fn open_blob(&self, hash: &str) -> Result<Option<(fs::File, u64)>> {
+        if !canonical_cas_hash(hash) {
+            return Ok(None);
+        }
+        let Some((file, _path)) =
+            open_existing_entry(&self.root, self.pinned_root.as_ref(), "blobs", hash, "")?
+        else {
+            return Ok(None);
+        };
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!("CAS blob {hash} is not a regular file");
+        }
+        Ok(Some((file, metadata.len())))
+    }
+
+    /// Open one descriptor-pinned CAS object without allocating its body.
+    ///
+    /// This is the bounded-transport counterpart to [`Self::get_object`]. The
+    /// caller must read no more than its protocol limit and must verify the
+    /// content address and canonical JSON encoding before trusting the value.
+    pub fn open_object(&self, hash: &str) -> Result<Option<(fs::File, u64)>> {
+        if !canonical_cas_hash(hash) {
+            return Ok(None);
+        }
+        let Some((file, _path)) = open_existing_entry(
+            &self.root,
+            self.pinned_root.as_ref(),
+            "objects",
+            hash,
+            ".json",
+        )?
+        else {
+            return Ok(None);
+        };
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!("CAS object {hash} is not a regular file");
+        }
+        Ok(Some((file, metadata.len())))
     }
 
     pub fn get_object(&self, hash: &str) -> Result<Option<serde_json::Value>> {
@@ -460,6 +588,213 @@ impl CasStore {
         Ok(CasPutOutcome { hash, created })
     }
 
+    /// Stream one already-open regular file into CAS without buffering the
+    /// payload in memory. The source inode is compared before and after the
+    /// read, so concurrent mutation fails rather than publishing torn bytes.
+    pub fn put_blob_from_open_regular(
+        &self,
+        mut source: fs::File,
+        display_path: &Path,
+    ) -> Result<StreamedBlobOutcome> {
+        #[cfg(not(unix))]
+        {
+            let _ = (&mut source, display_path);
+            anyhow::bail!("streaming regular-file CAS ingestion is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+            let before = source.metadata()?;
+            if !before.file_type().is_file() {
+                anyhow::bail!(
+                    "streaming CAS source is not a regular file: {}",
+                    display_path.display()
+                );
+            }
+            let normalized_mode = if before.permissions().mode() & 0o111 == 0 {
+                0o644
+            } else {
+                0o755
+            };
+
+            let root = match self.pinned_root.as_ref() {
+                Some(root) => root.try_clone()?,
+                None => crate::secure_fs::PinnedDirectory::open_or_create(&self.root)?,
+            };
+            let blobs = root.open_or_create_child(OsStr::new("blobs"), 0o777)?;
+            let staging =
+                blobs.open_or_create_child(OsStr::new(BLOB_CAPTURE_STAGING_DIRECTORY), 0o700)?;
+            let staging_name = OsString::from(format!(
+                "capture.{}.{}.tmp",
+                std::process::id(),
+                crate::atomic_fs::next_temp_sequence()
+            ));
+            let mut staged = staging.open_regular_create(&staging_name, true, true, 0o600)?;
+
+            let result = (|| {
+                let mut digest = Sha256::new();
+                let mut size = 0_u64;
+                let mut buffer = vec![0_u8; 1024 * 1024];
+                loop {
+                    let read = source.read(&mut buffer).with_context(|| {
+                        format!("stream project file {} into CAS", display_path.display())
+                    })?;
+                    if read == 0 {
+                        break;
+                    }
+                    digest.update(&buffer[..read]);
+                    staged.write_all(&buffer[..read])?;
+                    size = size
+                        .checked_add(read as u64)
+                        .ok_or_else(|| anyhow::anyhow!("project file size overflow"))?;
+                }
+                staged.sync_all()?;
+
+                let after = source.metadata()?;
+                let unchanged = before.dev() == after.dev()
+                    && before.ino() == after.ino()
+                    && before.size() == after.size()
+                    && before.mtime() == after.mtime()
+                    && before.mtime_nsec() == after.mtime_nsec()
+                    && before.ctime() == after.ctime()
+                    && before.ctime_nsec() == after.ctime_nsec()
+                    && before.mode() == after.mode()
+                    && size == after.size();
+                if !unchanged {
+                    anyhow::bail!(
+                        "project file changed while being captured: {}",
+                        display_path.display()
+                    );
+                }
+
+                let hash = format!("{:x}", digest.finalize());
+                let (target_parent, target_name, target_path) = open_or_create_entry_parent(
+                    &self.root,
+                    self.pinned_root.as_ref(),
+                    "blobs",
+                    &hash,
+                    "",
+                )?;
+                let created =
+                    if let Some(existing) = target_parent.open_regular(&target_name, false)? {
+                        verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
+                        false
+                    } else if target_parent.publish_regular_link_from(
+                        &target_name,
+                        &staging,
+                        &staging_name,
+                        &staged,
+                    )? {
+                        true
+                    } else {
+                        let existing = target_parent
+                            .open_regular(&target_name, false)?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "CAS publication winner disappeared: {}",
+                                    target_path.display()
+                                )
+                            })?;
+                        verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
+                        false
+                    };
+                if !created {
+                    let _ = staging.remove_if_same(&staging_name, &staged);
+                }
+                Ok(StreamedBlobOutcome {
+                    hash,
+                    size,
+                    normalized_mode,
+                    created,
+                })
+            })();
+            if result.is_err() {
+                let _ = staging.remove_if_same(&staging_name, &staged);
+            }
+            result
+        }
+    }
+
+    /// Stream a verified CAS blob into a create-new regular destination.
+    /// Neither the CAS entry nor the destination's path components may be
+    /// symlinks. Partial destinations are removed before returning an error.
+    pub fn materialize_blob_to_new_file(
+        &self,
+        hash: &str,
+        target: &Path,
+        normalized_mode: u32,
+    ) -> Result<u64> {
+        let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
+        let parent = crate::secure_fs::PinnedDirectory::open_or_create(parent_path)?;
+        let name = target
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("materialization target has no file name"))?;
+        self.materialize_blob_to_new_regular(hash, &parent, name, normalized_mode)
+    }
+
+    /// Stream a verified CAS blob into one create-new child of an exact pinned
+    /// directory. This is the authority-preserving form for callers that
+    /// already hold the destination inode and must not convert it back into a
+    /// `/proc/self/fd` pathname for a second traversal.
+    pub fn materialize_blob_to_new_regular(
+        &self,
+        hash: &str,
+        parent: &crate::secure_fs::PinnedDirectory,
+        name: &OsStr,
+        normalized_mode: u32,
+    ) -> Result<u64> {
+        if !matches!(normalized_mode, 0o644 | 0o755) {
+            anyhow::bail!("unsupported materialized project mode {normalized_mode:#o}");
+        }
+        if !canonical_cas_hash(hash) {
+            anyhow::bail!("invalid CAS blob hash {hash}");
+        }
+        let (mut source, source_path) =
+            open_existing_entry(&self.root, self.pinned_root.as_ref(), "blobs", hash, "")?
+                .ok_or_else(|| anyhow::anyhow!("CAS blob {hash} is missing"))?;
+        let mut destination = parent.open_regular_create(name, true, true, normalized_mode)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            destination.set_permissions(fs::Permissions::from_mode(normalized_mode))?;
+        }
+        let result = (|| {
+            let mut digest = Sha256::new();
+            let mut size = 0_u64;
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            loop {
+                let read = source
+                    .read(&mut buffer)
+                    .with_context(|| format!("read verified CAS blob {}", source_path.display()))?;
+                if read == 0 {
+                    break;
+                }
+                digest.update(&buffer[..read]);
+                destination.write_all(&buffer[..read])?;
+                size = size
+                    .checked_add(read as u64)
+                    .ok_or_else(|| anyhow::anyhow!("CAS blob size overflow"))?;
+            }
+            destination.sync_all()?;
+            parent.sync()?;
+            let actual = format!("{:x}", digest.finalize());
+            if actual != hash {
+                anyhow::bail!(
+                    "CAS corruption: entry at {} hashes to {}, expected {}",
+                    source_path.display(),
+                    actual,
+                    hash
+                );
+            }
+            Ok(size)
+        })();
+        if result.is_err() {
+            let _ = parent.remove_if_same(name, &destination);
+        }
+        result
+    }
+
     pub fn store_object(&self, value: &serde_json::Value) -> Result<String> {
         Ok(self.put_object(value)?.hash)
     }
@@ -477,6 +812,57 @@ impl CasStore {
         )?;
         Ok(CasPutOutcome { hash, created })
     }
+}
+
+fn is_blob_capture_staging_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("capture.") else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix(".tmp") else {
+        return false;
+    };
+    let Some((pid, sequence)) = rest.split_once('.') else {
+        return false;
+    };
+    !pid.is_empty()
+        && !sequence.is_empty()
+        && !sequence.contains('.')
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn verify_existing_streamed_entry(
+    mut file: fs::File,
+    expected_hash: &str,
+    expected_size: u64,
+    path: &Path,
+) -> Result<()> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() || metadata.len() != expected_size {
+        anyhow::bail!(
+            "CAS collision: existing entry has wrong type or size: {}",
+            path.display()
+        );
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let actual = format!("{:x}", digest.finalize());
+    if actual != expected_hash {
+        anyhow::bail!(
+            "CAS collision: existing entry at {} hashes to {}, expected {}",
+            path.display(),
+            actual,
+            expected_hash
+        );
+    }
+    Ok(())
 }
 
 fn canonical_cas_hash(hash: &str) -> bool {

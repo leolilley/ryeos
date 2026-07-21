@@ -475,13 +475,23 @@ where
             &staging,
             registration,
         )?;
-        lillux::rename_path_durable(&staging, target).with_context(|| {
-            format!(
-                "activate staged bundle {} at {}",
-                staging.display(),
-                target.display()
-            )
-        })?;
+        if let Err(error) = lillux::rename_path_durable(&staging, target) {
+            if error.namespace_committed() {
+                tracing::warn!(
+                    %error,
+                    target = %target.display(),
+                    "bundle install is visible but its parent durability barrier failed"
+                );
+            } else {
+                return Err(error).with_context(|| {
+                    format!(
+                        "activate staged bundle {} at {}",
+                        staging.display(),
+                        target.display()
+                    )
+                });
+            }
+        }
         transaction.mark_activated()
     })()
 }
@@ -576,13 +586,23 @@ where
             &staging,
             registration,
         )?;
-        lillux::atomic_exchange_paths(target, &staging).with_context(|| {
-            format!(
-                "atomically exchange installed bundle {} with {}",
-                target.display(),
-                staging.display()
-            )
-        })?;
+        if let Err(error) = lillux::atomic_exchange_paths(target, &staging) {
+            if error.namespace_committed() {
+                tracing::warn!(
+                    %error,
+                    target = %target.display(),
+                    "bundle replacement is visible but its parent durability barrier failed"
+                );
+            } else {
+                return Err(error).with_context(|| {
+                    format!(
+                        "atomically exchange installed bundle {} with {}",
+                        target.display(),
+                        staging.display()
+                    )
+                });
+            }
+        }
         transaction.mark_activated()?;
         if let Err(error) = lillux::remove_dir_all_durable(&staging) {
             tracing::warn!(

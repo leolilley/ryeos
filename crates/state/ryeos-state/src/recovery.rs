@@ -8,7 +8,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -32,6 +33,7 @@ const PENDING_SCHEMA: u32 = 1;
 const GENERATION_SCHEMA: u32 = 1;
 const STAGED_ROOTS_SCHEMA: u32 = 1;
 const DURABLE_UPLOAD_SCHEMA: u32 = 1;
+const REMOTE_PULL_JOURNAL_KEY: &str = "remote-pull-journal.key";
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
@@ -167,6 +169,20 @@ pub struct RecoveryStore {
     directory: std::sync::Arc<lillux::PinnedDirectory>,
 }
 
+fn read_remote_pull_journal_key(file: &mut File) -> Result<[u8; 32]> {
+    let mut bytes = Vec::with_capacity(33);
+    file.take(33).read_to_end(&mut bytes)?;
+    if bytes.len() != 32 {
+        anyhow::bail!(
+            "node-owned remote pull journal key has invalid length {}",
+            bytes.len()
+        );
+    }
+    bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("remote pull journal key length changed during validation"))
+}
+
 const THREAD_HISTORY_DISCARD_MARKER: &str = "thread-history-discard.json";
 const THREAD_HISTORY_DISCARD_MARKER_BYTES: &[u8] =
     br#"{"kind":"thread_history_discard","schema":1}"#;
@@ -252,6 +268,21 @@ pub struct StagedCasRootLease {
     lock_file: Option<File>,
 }
 
+/// Descriptor-owned temporary bytes associated with one staged-root lease.
+/// Crash cleanup is keyed by the lease ID, so partial remote reads cannot
+/// accumulate outside recovery's authoritative abandoned-lease scan.
+pub struct StagedBlobPart {
+    directory: lillux::PinnedDirectory,
+    name: std::ffi::OsString,
+    file: File,
+}
+
+impl StagedBlobPart {
+    pub fn file_mut(&mut self) -> &mut File {
+        &mut self.file
+    }
+}
+
 /// Re-openable, principal-bound GC roots for a multi-request CAS publication.
 /// Each handle owns only the per-stage filesystem lock for one synchronous
 /// operation; dropping it keeps the durable roots live until explicit consume
@@ -326,6 +357,110 @@ impl DurableCasUploadStage {
         Ok(stored)
     }
 
+    /// Append one bounded chunk to a principal-bound durable blob upload.
+    /// Chunks are sequential and retry-idempotent. The completed temporary
+    /// file is streamed into CAS and its full digest is checked before the
+    /// blob becomes a protected publication root.
+    pub fn store_blob_chunk(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        cas: &lillux::cas::CasStore,
+        expected_hash: &str,
+        total_size: u64,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<bool> {
+        self.ensure_active()?;
+        validate_hash("durable staged blob", expected_hash)?;
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        if let Some((mut existing, size)) = cas.open_blob(expected_hash)? {
+            if size != total_size {
+                anyhow::bail!(
+                    "existing CAS blob {expected_hash} has size {size}, expected {total_size}"
+                );
+            }
+            let mut digest = Sha256::new();
+            let mut observed = 0_u64;
+            let mut buffer = [0_u8; 128 * 1024];
+            loop {
+                let read = existing.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                observed = observed
+                    .checked_add(u64::try_from(read)?)
+                    .ok_or_else(|| anyhow::anyhow!("existing CAS blob size overflow"))?;
+                digest.update(&buffer[..read]);
+            }
+            let actual = format!("{:x}", digest.finalize());
+            if observed != total_size || actual != expected_hash {
+                anyhow::bail!("existing CAS blob {expected_hash} failed full content verification");
+            }
+            self.protect_blob_hash_admitted(expected_hash)?;
+            return Ok(true);
+        }
+        if bytes.is_empty() || offset > total_size {
+            anyhow::bail!("durable blob chunk has an invalid empty/range boundary");
+        }
+        let chunk_size = u64::try_from(bytes.len()).context("blob chunk size overflow")?;
+        let chunk_end = offset
+            .checked_add(chunk_size)
+            .ok_or_else(|| anyhow::anyhow!("blob chunk range overflow"))?;
+        if chunk_end > total_size {
+            anyhow::bail!("durable blob chunk extends beyond declared total size");
+        }
+
+        let parts_root = self
+            .recovery
+            .open_or_create_child_directory("durable-cas-upload-parts")?;
+        let parts = parts_root
+            .open_or_create_child(std::ffi::OsStr::new(&self.record.staging_id), 0o700)?;
+        let mut part =
+            parts.open_regular_create(std::ffi::OsStr::new(expected_hash), true, false, 0o600)?;
+        let current = part.metadata()?.len();
+        if current > offset {
+            if current < chunk_end {
+                anyhow::bail!("durable blob retry overlaps an incomplete prior chunk");
+            }
+            part.seek(std::io::SeekFrom::Start(offset))?;
+            let mut prior = vec![0_u8; bytes.len()];
+            part.read_exact(&mut prior)?;
+            if prior != bytes {
+                anyhow::bail!("durable blob retry bytes differ from the committed chunk");
+            }
+        } else if current == offset {
+            part.seek(std::io::SeekFrom::End(0))?;
+            part.write_all(bytes)?;
+            part.sync_data()?;
+            if current == 0 {
+                // The first acknowledged chunk must include the newly-created
+                // directory entry, not only its file data.
+                parts.sync()?;
+            }
+        } else {
+            anyhow::bail!(
+                "durable blob chunk is out of order: expected offset {current}, got {offset}"
+            );
+        }
+
+        if part.metadata()?.len() != total_size {
+            return Ok(false);
+        }
+        part.seek(std::io::SeekFrom::Start(0))?;
+        let completed_part = part.try_clone()?;
+        let outcome = cas.put_blob_from_open_regular(part, &parts.path().join(expected_hash))?;
+        if outcome.hash != expected_hash || outcome.size != total_size {
+            anyhow::bail!(
+                "durable staged blob mismatch: expected {expected_hash}/{total_size}, got {}/{}",
+                outcome.hash,
+                outcome.size
+            );
+        }
+        self.protect_blob_hash_admitted(expected_hash)?;
+        parts.remove_if_same(std::ffi::OsStr::new(expected_hash), &completed_part)?;
+        Ok(true)
+    }
+
     pub fn ensure_protects_object(&self, hash: &str) -> Result<()> {
         self.ensure_active()?;
         if !self.record.object_hashes.contains(hash) {
@@ -385,6 +520,16 @@ impl DurableCasUploadStage {
         self.record.blob_hashes.clear();
         self.recovery
             .write_durable_upload(&self.directory, &self.record)?;
+        if let Err(error) = self
+            .recovery
+            .retire_durable_blob_parts(&self.record.staging_id)
+        {
+            tracing::warn!(
+                staging_id = %self.record.staging_id,
+                %error,
+                "admitted upload retained empty blob-part staging for maintenance cleanup"
+            );
+        }
         drop(self.lock_file.take());
         Ok(())
     }
@@ -424,6 +569,48 @@ impl Drop for DurableCasUploadStage {
 }
 
 impl StagedCasRootLease {
+    pub fn open_blob_part(&self, expected_hash: &str) -> Result<StagedBlobPart> {
+        validate_hash("staged blob part", expected_hash)?;
+        let root = self
+            .recovery
+            .open_or_create_child_directory("staged-cas-root-parts")?;
+        let directory =
+            root.open_or_create_child(std::ffi::OsStr::new(&self.record.lease_id), 0o700)?;
+        let name = std::ffi::OsString::from(expected_hash);
+        let file = directory.open_regular_create(&name, true, true, 0o600)?;
+        Ok(StagedBlobPart {
+            directory,
+            name,
+            file,
+        })
+    }
+
+    pub fn publish_blob_part_admitted(
+        &mut self,
+        cas_mutation_guard: &CasMutationGuard,
+        cas: &lillux::cas::CasStore,
+        mut part: StagedBlobPart,
+        expected_hash: &str,
+        expected_size: u64,
+    ) -> Result<()> {
+        self.recovery.ensure_guard(cas_mutation_guard)?;
+        part.file.sync_all()?;
+        part.file.seek(std::io::SeekFrom::Start(0))?;
+        let opened = part.file.try_clone()?;
+        let outcome =
+            cas.put_blob_from_open_regular(part.file, &part.directory.path().join(&part.name))?;
+        if outcome.hash != expected_hash || outcome.size != expected_size {
+            anyhow::bail!(
+                "staged blob mismatch: expected {expected_hash}/{expected_size}, got {}/{}",
+                outcome.hash,
+                outcome.size
+            );
+        }
+        self.protect_blob_hash_admitted(cas_mutation_guard, expected_hash)?;
+        part.directory.remove_if_same(&part.name, &opened)?;
+        Ok(())
+    }
+
     pub fn store_object_admitted(
         &mut self,
         cas_mutation_guard: &CasMutationGuard,
@@ -547,6 +734,8 @@ impl StagedCasRootLease {
         if self.lock_file.is_none() {
             return Ok(());
         }
+        self.recovery
+            .retire_staged_blob_parts(&self.record.lease_id)?;
         let record_name = format!("{}.json", self.record.lease_id);
         if let Some(record_file) = self
             .directory
@@ -1116,6 +1305,34 @@ impl RecoveryStore {
         &self.root
     }
 
+    /// Node-owned authentication key for workspace recovery journals. The
+    /// journal itself lives beside the workspace bytes it describes so it can
+    /// survive a daemon crash, but it is never trusted unless its canonical
+    /// body authenticates under this key held outside project space.
+    pub fn remote_pull_journal_auth_key(&self) -> Result<[u8; 32]> {
+        use rand::RngCore as _;
+
+        let name = std::ffi::OsStr::new(REMOTE_PULL_JOURNAL_KEY);
+        if let Some(mut file) = self.directory.open_regular(name, false)? {
+            return read_remote_pull_journal_key(&mut file);
+        }
+
+        let mut generated = [0_u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut generated);
+        if let Some(created) = self
+            .directory
+            .atomic_create_regular(name, &generated, 0o600)?
+        {
+            created.sync_all()?;
+            self.directory.try_clone_descriptor()?.sync_all()?;
+            return Ok(generated);
+        }
+        let mut existing = self.directory.open_regular(name, false)?.ok_or_else(|| {
+            anyhow::anyhow!("remote pull journal key creation raced with removal")
+        })?;
+        read_remote_pull_journal_key(&mut existing)
+    }
+
     pub(crate) fn runtime_directory(&self) -> &lillux::PinnedDirectory {
         self.runtime_directory.as_ref()
     }
@@ -1436,6 +1653,7 @@ impl RecoveryStore {
                 );
                 continue;
             }
+            self.retire_durable_blob_parts(&record.staging_id)?;
             directory
                 .remove_if_same(&record_entry.name, &record_entry.file)
                 .context("retire durable CAS upload record")?;
@@ -1448,6 +1666,34 @@ impl RecoveryStore {
             anyhow::bail!("orphan durable CAS upload lock: {}", orphan.path.display());
         }
         Ok(retired)
+    }
+
+    fn retire_durable_blob_parts(&self, staging_id: &str) -> Result<()> {
+        let Some(parts_root) = self.open_child_directory("durable-cas-upload-parts")? else {
+            return Ok(());
+        };
+        let Some(parts) = parts_root.open_child_directory(std::ffi::OsStr::new(staging_id))? else {
+            return Ok(());
+        };
+        parts.remove_contents_recursive()?;
+        if !parts_root.remove_empty_child_if_same(std::ffi::OsStr::new(staging_id), &parts)? {
+            anyhow::bail!("durable blob-parts directory changed during retirement");
+        }
+        Ok(())
+    }
+
+    fn retire_staged_blob_parts(&self, lease_id: &str) -> Result<()> {
+        let Some(parts_root) = self.open_child_directory("staged-cas-root-parts")? else {
+            return Ok(());
+        };
+        let Some(parts) = parts_root.open_child_directory(std::ffi::OsStr::new(lease_id))? else {
+            return Ok(());
+        };
+        parts.remove_contents_recursive()?;
+        if !parts_root.remove_empty_child_if_same(std::ffi::OsStr::new(lease_id), &parts)? {
+            anyhow::bail!("staged blob-parts directory changed during retirement");
+        }
+        Ok(())
     }
 
     /// Enumerate active async staging roots and reclaim records whose owner
@@ -1500,6 +1746,7 @@ impl RecoveryStore {
             #[cfg(not(unix))]
             anyhow::bail!("staged CAS root locking is unavailable on this platform");
             if !active {
+                self.retire_staged_blob_parts(lease_id)?;
                 directory
                     .remove_if_same(&record_entry.name, &record_entry.file)
                     .context("remove abandoned staged CAS roots")?;

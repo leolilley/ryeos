@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-16T03:44:58Z:aad8812583cfb4a0eae2fcf8618e57a22c296f3701e8999c967fc94a6654bd9d:AL5niHgNktQhkLKkSRo+qhWxeUsxfocPw+oo1LGMFbqpVgApl6RMPRKevn+FN+5wmm+DCTkEnDFnZqfqiBvvCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T00:24:29Z:54e02f447648fa25b24d6f00b1f88a41e93877da9739968f91eca327b6e3cb77:yxkfBOgUnPhIv1XKovx2NL9NnLY6lGBA+sQNJJ4Od76b+wVTEhBIp1jk3k05Kj27VhDteXLTdGkPjNSffVEbBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/daemon
 tags: [daemon, startup, shutdown, lifecycle, state-lock, uds]
-version: "2.3.0"
+version: "2.4.0"
 description: >
   Daemon process lifecycle: strict startup ordering, local lifecycle status,
   exact signal control, daemon.json metadata, and shutdown cleanup.
@@ -92,6 +92,16 @@ node-owned bound, removes metadata/socket files best-effort, and exits. A forced
 wire-task abort does not abort an admitted request's execution owner; the closed
 attachment gate and exact-identity drain still own any process it can spawn. A
 clean lifecycle marker is written only when every required drain step completes.
+
+Every daemon-owned subprocess crosses the same attachment-before-execution
+boundary. Lillux creates the exact target while it is held, the daemon persists
+that target and its process-group birth identity under the current launch
+owner, and the daemon rechecks terminal, stop, and shutdown state before
+release. A stop serialized before release aborts the held target; a stop after
+release addresses the already-persisted exact identity. This applies equally
+to synchronous and detached roots, callbacks, follow/fanout children,
+continuation successors, and recovery launches. See
+[Attachment Before Execution](../execution/attachment-before-execution.md).
 
 `ryeos stop --force` may escalate to pidfd `SIGKILL` after its timeout. That
 terminates the daemon immediately and therefore cannot promise graceful drain;

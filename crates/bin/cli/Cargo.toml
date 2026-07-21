@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-cli"
-version = "0.5.44"
+version = "0.5.45"
 edition = "2021"
 license.workspace = true
 description = "CLI for Rye OS"
@@ -13,7 +13,9 @@ path = "src/main.rs"
 anyhow      = { workspace = true }
 base64      = { workspace = true }
 clap        = { workspace = true }
+crossterm   = { workspace = true }
 dirs        = { workspace = true }
+futures-util = { workspace = true }
 hex         = { workspace = true }
 libc        = { workspace = true }
 rand        = { workspace = true }
@@ -22,10 +24,11 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }
 thiserror   = { workspace = true }
-tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "io-util", "net"] }
+tokio       = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time", "io-util", "net"] }
 tracing     = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 unicode-width = { workspace = true }
+zeroize     = { workspace = true }
 
 lillux         = { workspace = true }
 ryeos-app      = { workspace = true }
@@ -35,6 +38,7 @@ ryeos-node     = { workspace = true }
 ryeos-runtime  = { workspace = true }
 ryeos-state    = { workspace = true }
 ryeos-core-tools    = { workspace = true }
+ryeos-directive-core = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

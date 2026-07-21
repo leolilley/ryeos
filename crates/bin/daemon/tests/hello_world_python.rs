@@ -272,6 +272,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_live_access_authority: None,
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
         isolation_daemon_socket_path: None,
@@ -295,7 +296,7 @@ fn daemon_executes_python_hello_world_end_to_end() {
         project_context: ProjectContext::LocalPath {
             path: project_dir.clone(),
         },
-        launch_mode: LaunchMode::Inline,
+        launch_mode: LaunchMode::Wait,
     };
 
     let completion = engine
@@ -388,6 +389,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_live_access_authority: None,
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
         isolation_daemon_socket_path: None,
@@ -411,7 +413,7 @@ fn python_script_runtime_supports_bundle_local_imports_without_pythonpath() {
         project_context: ProjectContext::LocalPath {
             path: project_dir.clone(),
         },
-        launch_mode: LaunchMode::Inline,
+        launch_mode: LaunchMode::Wait,
     };
 
     let completion = engine
@@ -494,6 +496,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_live_access_authority: None,
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
         isolation_daemon_socket_path: None,
@@ -517,7 +520,7 @@ fn python_function_runtime_supports_bundle_local_imports_without_pythonpath() {
         project_context: ProjectContext::LocalPath {
             path: project_dir.clone(),
         },
-        launch_mode: LaunchMode::Inline,
+        launch_mode: LaunchMode::Wait,
     };
 
     let completion = engine

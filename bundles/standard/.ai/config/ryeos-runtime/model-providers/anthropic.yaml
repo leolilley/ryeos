@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:2e8e11bcd7623bb1091882483d7f6d721743edc3f3f4d4d7d9da4377ef47d14a:cRwn68el96+hnPhLZSlXcG+fJHvZY7I3a8lRvead5kcEihxYD/s3AtJfGKsEuoTeAB1aG8ZgOgNdvs1vLSnGBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:52:25Z:beedbb19abd31f2b1704a6f32f1c1688fac7f45f9ccb422aac0d451d7f6a7c0f:47jB4WVr8hHxZcFIYs/Z0w3CfpGGGbfV+Sz2GexsFAvwvWeDyzTexc2Z5nZ5RVz7ZtFL4cpq1loyizGcg8mwBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: anthropic_messages
 base_url: "https://api.anthropic.com/v1/messages"
@@ -54,3 +54,13 @@ pricing:
     claude-opus-4-1-20250805:   {input_per_million: 15.00, output_per_million: 75.00}
 extra:
   stream_url: ""
+  setup:
+    display_name: Anthropic
+    priority: 30
+    credential: {label: API key, secret_name: ANTHROPIC_API_KEY, input: secret}
+    help_url: https://console.anthropic.com/settings/keys
+    validation: {ref: "service:model-providers/validate", url: "https://api.anthropic.com/v1/models", timeout_seconds: 15}
+    models:
+      - {name: claude-haiku-4-5-20251001, display_name: Claude Haiku 4.5, context_window: 200000}
+      - {name: claude-sonnet-4-5-20250929, display_name: Claude Sonnet 4.5, context_window: 200000, recommended: true}
+      - {name: claude-opus-4-1-20250805, display_name: Claude Opus 4.1, context_window: 200000}

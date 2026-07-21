@@ -1,4 +1,14 @@
-# Advanced resolution pipeline
+<!-- ryeos:signed:2026-07-21T00:24:56Z:30cfeb2bc7699c5cae58b38a2a175215c3e319fc1c79d3a5afd2991cb82fdc63:AYSb5QONtT9VmXmIXKtl4ELJJ8B3k3vY3ubDc9Jdfuq9zyonMycyfP+NLDwrT2GkkD1KQWAfLt2oVSJHIrIGCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/future
+name: resolution-pipeline-advanced
+title: Advanced Resolution Pipeline
+description: Deferred criteria for extending the closed resolution-stage registry
+entry_type: design
+version: "1.0.0"
+```
+
+# Advanced Resolution Pipeline
 
 ## Status
 

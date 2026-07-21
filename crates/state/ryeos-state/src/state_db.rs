@@ -1775,6 +1775,19 @@ pub struct PinnedStateAuthority {
 }
 
 impl PinnedStateAuthority {
+    /// Duplicate the already-pinned authority without resolving any mutable
+    /// pathname. Long-lived staged publications use this to retain the exact
+    /// runtime/CAS/ref generation beyond one synchronous capture phase.
+    pub fn try_clone(&self) -> anyhow::Result<Self> {
+        Ok(Self {
+            runtime_directory: self.runtime_directory.try_clone()?,
+            cas_directory: self.cas_directory.try_clone()?,
+            refs_directory: self.refs_directory.try_clone()?,
+            recovery: self.recovery.clone(),
+            trust_store: Arc::clone(&self.trust_store),
+        })
+    }
+
     pub(crate) fn from_pinned_runtime(
         runtime_directory: lillux::PinnedDirectory,
         trust_store: Arc<TrustStore>,
@@ -3070,6 +3083,54 @@ impl StateDb {
     /// Refs root (`runtime_state_dir/refs`).
     pub fn refs_root(&self) -> &Path {
         &self.refs_root
+    }
+
+    /// Explicit offline schema-cutover operation for every project-snapshot
+    /// HEAD, including principal-scoped working heads and deployed-project
+    /// heads. This is intentionally not part of ordinary GC: immutable project
+    /// history is durable authority and may only be retired by an operator who
+    /// has also retired every thread that could reference it.
+    pub fn discard_all_project_heads_admitted(
+        &self,
+        guard: &crate::recovery::CasMutationGuard,
+        dry_run: bool,
+    ) -> anyhow::Result<usize> {
+        self.ensure_cas_mutation_guard(guard)?;
+        if !guard.is_exclusive() {
+            anyhow::bail!("project HEAD discard requires an exclusive CAS mutation guard");
+        }
+        let principal_heads = crate::refs::list_verified_project_head_refs(
+            &self.refs_root,
+            self.trust_store.as_ref(),
+        )?;
+        let deployed_heads = crate::refs::list_verified_deployed_project_refs(
+            &self.refs_root,
+            self.trust_store.as_ref(),
+        )?;
+        let head_count = principal_heads
+            .len()
+            .checked_add(deployed_heads.len())
+            .ok_or_else(|| anyhow::anyhow!("project HEAD count overflow"))?;
+        if dry_run || head_count == 0 {
+            return Ok(head_count);
+        }
+        if let Some(projects) = self
+            ._refs_directory
+            .open_child_directory(std::ffi::OsStr::new("projects"))?
+        {
+            projects.remove_contents_recursive()?;
+        }
+        if let Some(deployed) = self
+            ._refs_directory
+            .open_child_directory(std::ffi::OsStr::new("deployed"))?
+        {
+            if let Some(projects) =
+                deployed.open_child_directory(std::ffi::OsStr::new("projects"))?
+            {
+                projects.remove_contents_recursive()?;
+            }
+        }
+        Ok(head_count)
     }
 
     /// Retain this store's exact runtime/CAS/refs/trust authority for a
@@ -5223,6 +5284,54 @@ mod tests {
     }
 
     #[test]
+    fn explicit_project_cutover_retires_principal_and_deployed_heads() {
+        let signer = TestSigner::default();
+        let (_dir, db) = open_temp_trusted(&signer);
+        let authority = db.pinned_authority().unwrap();
+        let guard = authority.acquire_exclusive_guard(true).unwrap();
+        let principal_id = format!("fp:{}", signer.fingerprint());
+        let principal_key = crate::refs::principal_storage_key(&principal_id).unwrap();
+        let principal_project_hash = "a".repeat(64);
+        let deployed_project_hash = "b".repeat(64);
+        let principal_snapshot_hash = "c".repeat(64);
+        let deployed_snapshot_hash = "d".repeat(64);
+
+        db.write_project_head_ref(
+            principal_key,
+            &principal_project_hash,
+            &principal_snapshot_hash,
+            &signer,
+            &guard,
+        )
+        .unwrap();
+        db.write_deployed_project_ref(
+            &deployed_project_hash,
+            &deployed_snapshot_hash,
+            &signer,
+            &guard,
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.discard_all_project_heads_admitted(&guard, true).unwrap(),
+            2
+        );
+        assert_eq!(
+            db.discard_all_project_heads_admitted(&guard, false)
+                .unwrap(),
+            2
+        );
+        assert!(db
+            .read_project_head(principal_key, &principal_project_hash)
+            .unwrap()
+            .is_none());
+        assert!(db
+            .read_deployed_project_ref(&deployed_project_hash)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn thread_history_discard_preflight_refuses_a_foreign_fixed_projection() {
         let signer = TestSigner::default();
         let (dir, db) = open_temp_trusted(&signer);
@@ -5986,7 +6095,7 @@ mod tests {
                     .payload(serde_json::json!({
                         "item_ref": "directive:apps/tv-tracker/ai_chat",
                         "executor_ref": "runtime:directive-runtime",
-                        "launch_mode": "inline",
+                        "launch_mode": "wait",
                         "usage_subject": {
                             "namespace": "tv-tracker",
                             "subject": "csm01"

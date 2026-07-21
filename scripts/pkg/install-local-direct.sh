@@ -761,7 +761,7 @@ if [[ $run_init -eq 1 ]]; then
             die "could not collect selected source publisher documents"
         trust_args=("${SELECTED_SOURCE_TRUST_ARGS[@]}")
     fi
-    init_args=(init --source "$share_dir")
+    init_args=(init --non-interactive --source "$share_dir")
     if [[ -n "$init_app_root" ]]; then
         init_args+=(--app-root "$init_app_root")
     fi

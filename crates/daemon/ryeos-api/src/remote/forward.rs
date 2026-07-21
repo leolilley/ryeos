@@ -24,7 +24,7 @@ use serde_json::Value;
 use crate::remote::client::RemoteClient;
 use crate::remote::config::ResolvedRemote;
 use crate::remote::pull::{extract_snapshot_hash, pull_results, PullResultsError};
-use crate::remote::push::{push_project, PushResult};
+use crate::remote::push::{push_project, push_snapshot_generation, PushResult};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
 use ryeos_state::{
@@ -47,10 +47,16 @@ pub struct RemoteForwardRequest<'a> {
     pub ref_bindings: &'a BTreeMap<String, String>,
     /// Local project root path. `None` for --no-project mode.
     pub local_project_path: Option<&'a Path>,
+    /// Exact already-admitted local generation to upload. When absent, the
+    /// explicit remote-execute workflow captures `local_project_path` now.
+    pub source_snapshot_hash: Option<&'a str>,
     /// Remote project path used in push-head ref and /execute body.
     pub remote_project_path: &'a str,
     /// Parameters for the item.
     pub parameters: Value,
+    /// Exact execution contract to present to the destination node. Routing
+    /// fields have already been projected into destination-local terms.
+    pub execution_policy: &'a ryeos_app::execution_policy::ExecutionPolicy,
     /// Acting principal (caller identity).
     pub acting_principal: &'a str,
     /// Ignore rules for project ingest.
@@ -67,15 +73,15 @@ pub struct RemoteForwardResult {
     /// Push summary.
     pub push_summary: PushSummary,
     /// Snapshot hash of the remote execution result.
-    pub result_snapshot_hash: String,
+    pub result_snapshot_hash: Option<String>,
     /// Pull summary.
-    pub pull_summary: PullSummary,
+    pub pull_summary: Option<PullSummary>,
 }
 
 /// Push-phase summary for the response envelope.
 pub struct PushSummary {
     pub pushed_snapshot_hash: String,
-    pub manifest_entries: usize,
+    pub tree_entries: usize,
     pub blobs_uploaded: usize,
     pub blobs_skipped: usize,
 }
@@ -86,8 +92,21 @@ pub struct PullSummary {
     pub cas_objects_fetched: usize,
     pub files_updated: usize,
     pub files_deleted: usize,
-    pub user_files_updated: usize,
-    pub user_files_deleted: usize,
+}
+
+fn requests_terminal_project_generation(
+    policy: &ryeos_app::execution_policy::ExecutionPolicy,
+) -> bool {
+    matches!(
+        &policy.project,
+        ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
+            realization: ryeos_app::execution_policy::PinnedRealization::Cow {
+                terminal_publication: ryeos_app::execution_policy::TerminalPublication::RetainResult
+                    | ryeos_app::execution_policy::TerminalPublication::AdvanceHead { .. },
+            },
+            ..
+        }
+    )
 }
 
 /// Errors from the unary forward pipeline.
@@ -194,8 +213,37 @@ pub async fn execute_unary_forward(
     )?;
 
     // 1. Push project (or no-project user-space-only push).
-    let push_result = match req.local_project_path {
-        Some(proj_path) => push_project(
+    let push_result = match (req.source_snapshot_hash, req.local_project_path) {
+        (Some(snapshot_hash), _) => {
+            push_snapshot_generation(client, &authority, snapshot_hash, req.remote_project_path)
+                .await
+                .map_err(|e| {
+                    let message = format!("{e:#}");
+                    let _ = finish_sync_job_attempt_and_update_job(
+                        state,
+                        &attempt_id,
+                        FinishSyncJobAttempt {
+                            state: SyncJobAttemptState::Failed,
+                            phase: "push_failed".to_string(),
+                            error: Some(message.clone()),
+                            result: None,
+                        },
+                        &job_id,
+                        SyncJobUpdate {
+                            state: SyncJobState::Failed,
+                            phase: "push_failed".to_string(),
+                            roots: None,
+                            heads: None,
+                            uploaded_hashes: Vec::new(),
+                            fetched_hashes: Vec::new(),
+                            last_error: Some(message.clone()),
+                            result: None,
+                        },
+                    );
+                    RemoteForwardError::PushFailed(message)
+                })?
+        }
+        (None, Some(proj_path)) => push_project(
             client,
             state,
             &authority,
@@ -229,7 +277,7 @@ pub async fn execute_unary_forward(
             );
             RemoteForwardError::PushFailed(message)
         })?,
-        None => {
+        (None, None) => {
             // --no-project mode: push user space only.
             match push_no_project(&authority, client, req.remote_project_path).await {
                 Ok(value) => value,
@@ -281,10 +329,14 @@ pub async fn execute_unary_forward(
         .execute_with_options(
             req.item_ref,
             req.ref_bindings,
-            req.remote_project_path,
+            (!matches!(
+                &req.execution_policy.project,
+                ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
+            ))
+            .then_some(req.remote_project_path),
             &req.parameters,
-            "pushed_head",
             req.call,
+            req.execution_policy,
         )
         .await
     {
@@ -316,7 +368,49 @@ pub async fn execute_unary_forward(
         }
     };
 
-    // 3. Extract result snapshot hash.
+    // Read-only and discard executions intentionally produce no terminal
+    // project generation. Their remote result is already complete; requiring
+    // a synthetic snapshot here would silently strengthen the selected
+    // publication contract.
+    if !requests_terminal_project_generation(req.execution_policy) {
+        let completed_result = serde_json::json!({
+            "project_generation": "not_requested",
+        });
+        finish_sync_job_attempt_and_update_job(
+            state,
+            &attempt_id,
+            FinishSyncJobAttempt {
+                state: SyncJobAttemptState::Completed,
+                phase: "completed_without_pull".to_string(),
+                error: None,
+                result: Some(completed_result.clone()),
+            },
+            &job_id,
+            SyncJobUpdate {
+                state: SyncJobState::Completed,
+                phase: "completed_without_pull".to_string(),
+                roots: None,
+                heads: None,
+                uploaded_hashes: vec![push_result.snapshot_hash.clone()],
+                fetched_hashes: Vec::new(),
+                last_error: None,
+                result: Some(completed_result),
+            },
+        )?;
+        return Ok(RemoteForwardResult {
+            remote_result,
+            push_summary: PushSummary {
+                pushed_snapshot_hash: push_result.snapshot_hash,
+                tree_entries: push_result.tree_entries,
+                blobs_uploaded: push_result.blobs_uploaded,
+                blobs_skipped: push_result.blobs_skipped,
+            },
+            result_snapshot_hash: None,
+            pull_summary: None,
+        });
+    }
+
+    // 3. Extract the explicitly requested result snapshot hash.
     let Some(result_snapshot_hash) = extract_snapshot_hash(&remote_result) else {
         finish_sync_job_attempt_and_update_job(
             state,
@@ -363,8 +457,7 @@ pub async fn execute_unary_forward(
         &push_result.snapshot_hash,
         &result_snapshot_hash,
         req.local_project_path,
-        &push_result.manifest,
-        push_result.user_manifest.as_ref(),
+        &push_result.tree,
     )
     .await
     .map_err(|e| {
@@ -376,6 +469,10 @@ pub async fn execute_unary_forward(
             }
             PullResultsError::UnrelatedSnapshot { pushed, result } => {
                 RemoteForwardError::PullUnrelatedSnapshot { pushed, result }
+            }
+            PullResultsError::RecoveryRequired(message)
+            | PullResultsError::RollbackIncomplete(message) => {
+                RemoteForwardError::PullFailed(message)
             }
             PullResultsError::Other(e) => RemoteForwardError::PullFailed(format!("{e:#}")),
         };
@@ -408,8 +505,6 @@ pub async fn execute_unary_forward(
         "cas_objects_fetched": pull_result.cas_objects_fetched,
         "files_updated": pull_result.files_updated,
         "files_deleted": pull_result.files_deleted,
-        "user_files_updated": pull_result.user_files_updated,
-        "user_files_deleted": pull_result.user_files_deleted,
     });
     finish_sync_job_attempt_and_update_job(
         state,
@@ -437,19 +532,17 @@ pub async fn execute_unary_forward(
         remote_result,
         push_summary: PushSummary {
             pushed_snapshot_hash: push_result.snapshot_hash,
-            manifest_entries: push_result.manifest_entries,
+            tree_entries: push_result.tree_entries,
             blobs_uploaded: push_result.blobs_uploaded,
             blobs_skipped: push_result.blobs_skipped,
         },
-        result_snapshot_hash,
-        pull_summary: PullSummary {
+        result_snapshot_hash: Some(result_snapshot_hash),
+        pull_summary: Some(PullSummary {
             snapshot_hash: pull_result.snapshot_hash,
             cas_objects_fetched: pull_result.cas_objects_fetched,
             files_updated: pull_result.files_updated,
             files_deleted: pull_result.files_deleted,
-            user_files_updated: pull_result.user_files_updated,
-            user_files_deleted: pull_result.user_files_deleted,
-        },
+        }),
     })
 }
 
@@ -504,13 +597,15 @@ fn update_sync_job(
 /// --no-project mode: push user space only (no project ingest).
 ///
 /// This is extracted from the inline push logic in `remote_execute.rs`.
-/// It creates an empty manifest, ingests user space, and uploads.
+/// It creates an empty project tree and uploads it.
 async fn push_no_project(
     authority: &PinnedStateAuthority,
     client: &RemoteClient,
     remote_project_path: &str,
 ) -> Result<PushResult, RemoteForwardError> {
-    use crate::remote::push::{collect_snapshot_hashes, finish_staged_roots, upload_missing};
+    use crate::remote::push::{
+        collect_snapshot_upload_hashes, finish_staged_roots, upload_missing,
+    };
 
     let local_cas = authority
         .cas_store()
@@ -528,12 +623,12 @@ async fn push_no_project(
     };
 
     let operation: anyhow::Result<PushResult> = async {
-        let empty_manifest = ryeos_state::objects::SourceManifest {
-            item_source_hashes: std::collections::HashMap::new(),
+        let empty_tree = ryeos_state::objects::ProjectTree {
+            files: std::collections::BTreeMap::new(),
         };
-        let manifest_hash = {
+        let tree_hash = {
             let guard = authority.acquire_shared_guard()?;
-            staged_roots.store_object_admitted(&guard, &local_cas, &empty_manifest.to_value())?
+            staged_roots.store_object_admitted(&guard, &local_cas, &empty_tree.to_value())?
         };
 
         let upload_session = client
@@ -541,10 +636,21 @@ async fn push_no_project(
             .await?;
 
         let snapshot = ryeos_state::objects::ProjectSnapshot {
-            project_manifest_hash: manifest_hash.clone(),
-            user_manifest_hash: None,
+            project_tree_hash: tree_hash.clone(),
+            effective_policy_hash: {
+                let matcher = ryeos_state::ignore::IgnoreMatcher::from_config(
+                    &ryeos_state::ignore::IgnoreConfig {
+                        patterns: Vec::new(),
+                    },
+                )?;
+                let policy = ryeos_state::objects::ProjectSnapshotPolicy::from_matcher(
+                    ryeos_state::project_sync::ProjectSyncScope::FullProject,
+                    &matcher,
+                )?;
+                let guard = authority.acquire_shared_guard()?;
+                staged_roots.store_object_admitted(&guard, &local_cas, &policy.to_value())?
+            },
             message: None,
-            project_sync_scope: ryeos_state::project_sync::ProjectSyncScope::FullProject,
             parent_hashes: upload_session
                 .expected_previous_hash
                 .iter()
@@ -557,13 +663,10 @@ async fn push_no_project(
             let guard = authority.acquire_shared_guard()?;
             let snapshot_hash =
                 staged_roots.store_object_admitted(&guard, &local_cas, &snapshot.to_value())?;
-            let upload_closure = collect_snapshot_hashes(
+            let upload_closure = collect_snapshot_upload_hashes(
                 &local_cas,
-                &empty_manifest,
-                None,
-                None,
-                &manifest_hash,
                 &snapshot_hash,
+                upload_session.expected_previous_hash.as_deref(),
             )?;
             staged_roots.protect_cas_closure_admitted(
                 &guard,
@@ -593,13 +696,11 @@ async fn push_no_project(
 
         Ok(PushResult {
             snapshot_hash,
-            manifest_hash,
-            manifest: empty_manifest,
-            manifest_entries: 0,
+            tree_hash,
+            tree: empty_tree,
+            tree_entries: 0,
             blobs_uploaded: upload.uploaded,
             blobs_skipped: upload.skipped,
-            user_manifest_hash: None,
-            user_manifest: None,
         })
     }
     .await;
@@ -676,12 +777,12 @@ mod tests {
     fn push_summary_fields() {
         let s = PushSummary {
             pushed_snapshot_hash: "snap".into(),
-            manifest_entries: 3,
+            tree_entries: 3,
             blobs_uploaded: 2,
             blobs_skipped: 1,
         };
         assert_eq!(s.pushed_snapshot_hash, "snap");
-        assert_eq!(s.manifest_entries, 3);
+        assert_eq!(s.tree_entries, 3);
         assert_eq!(s.blobs_uploaded, 2);
         assert_eq!(s.blobs_skipped, 1);
     }
@@ -693,14 +794,10 @@ mod tests {
             cas_objects_fetched: 5,
             files_updated: 3,
             files_deleted: 1,
-            user_files_updated: 2,
-            user_files_deleted: 0,
         };
         assert_eq!(s.snapshot_hash, "snap");
         assert_eq!(s.cas_objects_fetched, 5);
         assert_eq!(s.files_updated, 3);
         assert_eq!(s.files_deleted, 1);
-        assert_eq!(s.user_files_updated, 2);
-        assert_eq!(s.user_files_deleted, 0);
     }
 }

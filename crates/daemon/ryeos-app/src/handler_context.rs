@@ -34,6 +34,10 @@ pub struct HandlerContext {
     /// `true` only for signed-request auth (ryeos_signed, hmac).
     /// `false` for anonymous routes and synthetic principals.
     pub verified: bool,
+    /// Site identity bound by the authenticated remote-node grant. Request
+    /// payloads never populate this field. `None` denotes a local or
+    /// non-RyeOS caller.
+    pub authenticated_origin_site_id: Option<String>,
 }
 
 impl HandlerContext {
@@ -43,7 +47,31 @@ impl HandlerContext {
             fingerprint,
             scopes,
             verified,
+            authenticated_origin_site_id: None,
         }
+    }
+
+    pub fn new_with_origin(
+        fingerprint: String,
+        scopes: Vec<String>,
+        verified: bool,
+        authenticated_origin_site_id: Option<String>,
+    ) -> Self {
+        Self {
+            fingerprint,
+            scopes,
+            verified,
+            authenticated_origin_site_id,
+        }
+    }
+
+    /// Resolve execution origin from authenticated handler authority only.
+    pub fn execution_origin(&self, current_site_id: &str) -> String {
+        self.authenticated_origin_site_id
+            .as_ref()
+            .filter(|_| self.verified)
+            .cloned()
+            .unwrap_or_else(|| current_site_id.to_string())
     }
 
     /// Anonymous context — no identity, no scopes, not verified.
@@ -96,5 +124,32 @@ impl HandlerContext {
         } else {
             Err(HandlerError::NotFound)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_remote_origin_is_authoritative() {
+        let context = HandlerContext::new_with_origin(
+            "fp:remote".to_string(),
+            Vec::new(),
+            true,
+            Some("site:remote".to_string()),
+        );
+        assert_eq!(context.execution_origin("site:local"), "site:remote");
+    }
+
+    #[test]
+    fn unverified_origin_claim_is_ignored() {
+        let context = HandlerContext::new_with_origin(
+            "fp:synthetic".to_string(),
+            Vec::new(),
+            false,
+            Some("site:spoofed".to_string()),
+        );
+        assert_eq!(context.execution_origin("site:local"), "site:local");
     }
 }

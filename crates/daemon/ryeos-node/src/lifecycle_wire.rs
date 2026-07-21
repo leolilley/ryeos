@@ -312,7 +312,12 @@ impl LifecycleResponse {
         mut startup: StartupSnapshot,
     ) -> Self {
         let failed_at = failed_at.into();
+        // Human-readable causes (notably TOML/serde diagnostics) commonly
+        // carry a trailing newline. The wire invariant is trimmed text, so
+        // normalize only its outer whitespace while preserving the complete
+        // multiline diagnostic body.
         let error = error.into();
+        let error = error.trim().to_owned();
         startup.sequence = startup.sequence.saturating_add(1);
         startup.phase = StartupPhase::Failed;
         startup.phase_started_at = failed_at.clone();
@@ -422,6 +427,21 @@ mod tests {
             StartupSnapshot::bootstrapping("2026-07-14T00:00:00Z"),
         );
         assert!(response.validate().is_err());
+    }
+
+    #[test]
+    fn failed_normalizes_outer_diagnostic_whitespace() {
+        let response = LifecycleResponse::failed(
+            identity(),
+            "2026-07-14T00:00:01Z",
+            "  top-level failure\n\ncaused by: detail\n  ",
+            StartupSnapshot::bootstrapping("2026-07-14T00:00:00Z"),
+        );
+        assert_eq!(
+            response.error.as_deref(),
+            Some("top-level failure\n\ncaused by: detail")
+        );
+        assert_eq!(response.validate(), Ok(()));
     }
 
     #[test]

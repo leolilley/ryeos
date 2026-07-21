@@ -142,6 +142,33 @@ impl ExclusiveFileLock {
             .map(|_guard| Self { _guard })
     }
 
+    /// Acquire with a bounded wait and diagnostic owner evidence. This is for
+    /// availability-critical startup boundaries where parking indefinitely is
+    /// worse than refusing with the kernel-reported holder PID.
+    pub fn acquire_with_timeout(target: &Path, timeout: std::time::Duration) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
+            let parent = open_directory_no_follow(parent_path, true)?;
+            let file_name = target
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("lock target has no file name"))?;
+            FileLockGuard::acquire_with_parent_timeout(
+                parent,
+                file_name,
+                true,
+                FileLockMode::Exclusive,
+                timeout,
+            )
+            .map(|_guard| Self { _guard })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (target, timeout);
+            anyhow::bail!("interprocess file locking is unavailable on this platform")
+        }
+    }
+
     /// Acquire an already-established lock anchor without creating any
     /// directory or file. Read-only/dry-run callers use this to obtain the
     /// same consistent snapshot as writers without mutating the filesystem.
@@ -159,6 +186,32 @@ impl ExclusiveFileLock {
     ) -> Result<Self> {
         FileLockGuard::acquire_in_inner(parent, target_name, true, FileLockMode::Exclusive)
             .map(|_guard| Self { _guard })
+    }
+
+    /// Acquire a lock anchor relative to one exact pinned parent, with a
+    /// bounded wait and kernel holder diagnostics. The anchor name is the
+    /// normal `.{target_name}.lock` used by the other file-lock constructors.
+    pub fn acquire_in_with_timeout(
+        parent: &crate::secure_fs::PinnedDirectory,
+        target_name: &OsStr,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            FileLockGuard::acquire_with_parent_timeout(
+                parent.try_clone_descriptor()?,
+                target_name,
+                true,
+                FileLockMode::Exclusive,
+                timeout,
+            )
+            .map(|_guard| Self { _guard })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (parent, target_name, timeout);
+            anyhow::bail!("interprocess file locking is unavailable on this platform")
+        }
     }
 
     /// Acquire an already-established lock anchor relative to one exact pinned
@@ -314,6 +367,80 @@ impl FileLockGuard {
         })
     }
 
+    #[cfg(unix)]
+    fn acquire_with_parent_timeout(
+        parent: fs::File,
+        target_name: &OsStr,
+        create_missing: bool,
+        mode: FileLockMode,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let target_bytes = target_name.as_bytes();
+        if target_bytes.is_empty()
+            || target_bytes.contains(&b'/')
+            || target_bytes == b"."
+            || target_bytes == b".."
+        {
+            anyhow::bail!("lock target must be one safe child name");
+        }
+        let target_name_c = CString::new(target_bytes)?;
+        let lock_name =
+            CString::new([b".".as_slice(), target_bytes, b".lock".as_slice()].concat())?;
+        let create_flag = if create_missing { libc::O_CREAT } else { 0 };
+        let access_flag = match mode {
+            FileLockMode::Shared => libc::O_RDONLY,
+            FileLockMode::Exclusive => libc::O_RDWR,
+        };
+        let descriptor = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                lock_name.as_ptr(),
+                access_flag | create_flag | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0o600,
+            )
+        };
+        if descriptor < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let file = unsafe { fs::File::from_raw_fd(descriptor) };
+        if !file.metadata()?.file_type().is_file() {
+            anyhow::bail!("lock anchor is not a regular file");
+        }
+        let operation = match mode {
+            FileLockMode::Shared => libc::LOCK_SH,
+            FileLockMode::Exclusive => libc::LOCK_EX,
+        } | libc::LOCK_NB;
+        let started = std::time::Instant::now();
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(error.into());
+            }
+            if started.elapsed() >= timeout {
+                let holder = linux_flock_holder_pid(&file)
+                    .map(|pid| pid.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                anyhow::bail!(
+                    "timed out after {:.1}s waiting for lock {} (holder pid: {holder})",
+                    timeout.as_secs_f64(),
+                    String::from_utf8_lossy(target_bytes)
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Ok(Self {
+            _file: file,
+            parent,
+            target_name: target_name_c,
+        })
+    }
+
     /// Open the locked target without following a final-component symlink.
     fn open_target_read(&self) -> Result<fs::File> {
         #[cfg(unix)]
@@ -424,6 +551,27 @@ impl FileLockGuard {
             anyhow::bail!("atomic locked replacement is unavailable on this platform")
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_flock_holder_pid(file: &fs::File) -> Option<i64> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = file.metadata().ok()?;
+    let major = libc::major(metadata.dev());
+    let minor = libc::minor(metadata.dev());
+    let needle = format!("{major:02x}:{minor:02x}:{}", metadata.ino());
+    let locks = fs::read_to_string("/proc/locks").ok()?;
+    locks.lines().find_map(|line| {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        (fields.len() >= 6 && fields[1] == "FLOCK" && fields[5] == needle)
+            .then(|| fields[4].parse::<i64>().ok())
+            .flatten()
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn linux_flock_holder_pid(_file: &fs::File) -> Option<i64> {
+    None
 }
 
 #[cfg(test)]

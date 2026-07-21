@@ -427,7 +427,7 @@ impl EngineCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     /// Build a minimal `Arc<Engine>` suitable for cache tests — no
     /// bundles, no kinds, no parsers. Just enough to satisfy the type.
@@ -1021,7 +1021,9 @@ mod tests {
         let provenance = crate::execution_provenance::ExecutionProvenance::root_live_fs(
             PathBuf::from("/borrowed"),
             engine.clone(),
-        );
+            crate::execution_policy::synthetic_test_live_project_authority(Path::new("/borrowed")),
+        )
+        .unwrap();
         drop(engine);
 
         cache.insert_for_test(dummy_key("pressure"), minimal_engine(), None);
@@ -1043,7 +1045,9 @@ mod tests {
         let provenance = crate::execution_provenance::ExecutionProvenance::root_live_fs(
             PathBuf::from("/borrowed"),
             engine.clone(),
-        );
+            crate::execution_policy::synthetic_test_live_project_authority(Path::new("/borrowed")),
+        )
+        .unwrap();
         drop(provenance);
         drop(engine);
 
@@ -1064,7 +1068,9 @@ mod tests {
         let provenance = crate::execution_provenance::ExecutionProvenance::root_live_fs(
             PathBuf::from("/borrowed"),
             old_engine.clone(),
-        );
+            crate::execution_policy::synthetic_test_live_project_authority(Path::new("/borrowed")),
+        )
+        .unwrap();
         drop(old_engine);
 
         let generation = cache.bump_system_install_generation();

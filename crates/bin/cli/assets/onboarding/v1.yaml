@@ -1,0 +1,55 @@
+schema: ryeos/onboarding/v1
+pages:
+  - id: welcome
+    kind: introduction
+    art: prism-wide
+    title: Welcome to RyeOS
+    body: >-
+      RyeOS is one operating intelligence expressed through many concurrent
+      threads. It carries verified work between machines without surrendering
+      the operator's authority.
+    action: continue
+    next: identity-explainer
+  - id: identity-explainer
+    kind: document
+    title: Identities and trust
+    body: |-
+      operator identity   signs what you author and request
+      node identity       identifies this RyeOS node
+      vault identity      encrypts secrets held by this node
+      publisher trust     decides which installed bundles may execute
+    action: continue
+    next: operator-profile
+  - id: operator-profile
+    kind: form
+    title: Operator identity
+    body: >-
+      Add optional semantic identity. Your entropy contribution is not a
+      password or recovery phrase, is never stored verbatim, and never replaces
+      operating-system randomness.
+    fields: [display-name, identity-statement, entropy-contribution]
+    action: initialize-operator
+    next: core-initialization
+  - id: core-initialization
+    kind: progress
+    title: Initialize RyeOS
+    body: Prepare identities, trust, verified bundles, and the local vault.
+    action: initialize-core
+    next: identity-reveal
+  - id: identity-reveal
+    kind: document
+    title: Identity reveal
+    body: The operator, node, and vault identities are distinct and now linked by local trust.
+    action: continue
+    next: provider-setup
+  - id: provider-setup
+    kind: choice
+    title: Connect a model provider
+    body: Select a verified provider, or skip and reopen this later with ryeos setup.
+    action: configure-provider
+    next: completion
+  - id: completion
+    kind: completion
+    title: RyeOS initialized
+    body: The node is ready. Provider setup remains optional.
+    action: finish

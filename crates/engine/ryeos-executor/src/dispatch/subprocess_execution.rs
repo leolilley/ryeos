@@ -325,6 +325,7 @@ async fn dispatch_managed_subprocess(
     // Minting here (pre-composition) would miss that narrowing.
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
+        lifecycle_authority: request.lifecycle_authority,
         // The serving runtime's canonical ref, captured so a continuation
         // successor reattaches the same runtime identity (not just the kind's
         // current default).
@@ -621,9 +622,12 @@ async fn dispatch_streaming_subprocess(
     // leaving a process absent from the daemon's exact-identity drain. Give
     // every invocation the same durable lifecycle/process owner as the other
     // inline terminators before any process can be spawned.
-    let _launch_claim =
+    let launch_claim =
         crate::execution::launch_claim::ThreadLaunchClaim::acquire_fresh(state, &thread_id)
             .map_err(DispatchError::Internal)?;
+    let launch_owner = launch_claim
+        .canonical_owner()
+        .map_err(DispatchError::Internal)?;
     let created = if let Some(parent) = request.parent_execution_context.as_ref() {
         let durable_parent = state
             .threads
@@ -635,6 +639,12 @@ async fn dispatch_streaming_subprocess(
                     parent.parent_thread_id
                 ))
             })?;
+        let project_authority = request
+            .provenance
+            .project_authority()
+            .clone()
+            .for_child()
+            .map_err(DispatchError::Internal)?;
         state
             .threads
             .create_thread(&ryeos_app::thread_lifecycle::ThreadCreateParams {
@@ -646,9 +656,15 @@ async fn dispatch_streaming_subprocess(
                 launch_mode: request.launch_mode.to_string(),
                 current_site_id: ctx.plan_ctx.current_site_id.clone(),
                 origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-                upstream_thread_id: Some(durable_parent.thread_id),
+                upstream_thread_id: Some(durable_parent.thread_id.clone()),
                 requested_by: Some(request.acting_principal.to_string()),
-                project_root: Some(project_path.clone()),
+                project_root: project_authority
+                    .project_root_projection()
+                    .map(std::path::Path::to_path_buf),
+                base_project_snapshot_hash: project_authority
+                    .base_snapshot_projection()
+                    .map(str::to_owned),
+                project_authority,
                 usage_subject: request.usage_subject.clone(),
                 usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
                 captured_history_policy: None,
@@ -694,9 +710,11 @@ async fn dispatch_streaming_subprocess(
                 Vec::new(),
             )
         } else {
-            state
-                .threads
-                .create_root_thread_with_id(&thread_id, &resolved_stream)
+            state.threads.create_root_thread_with_id(
+                &thread_id,
+                &resolved_stream,
+                request.provenance.project_authority().clone(),
+            )
         }
     };
     created.map_err(|error| {
@@ -716,32 +734,19 @@ async fn dispatch_streaming_subprocess(
             Ok(inherited_stop) => inherited_stop,
             Err(link_error) => {
                 let link_error_message = link_error.to_string();
-                let cleanup = crate::dispatch::finalize_child_link_failure_if_current(
+                let cleanup = crate::dispatch::finalize_method_thread_if_needed(
                     state,
                     &thread_id,
-                    json!({
+                    &launch_owner,
+                    "failed",
+                    Some(json!({
                         "code": "child_link_failed",
                         "reason": link_error_message.clone(),
-                    }),
+                    })),
                 );
                 match cleanup {
-                    Ok(
-                        ryeos_app::thread_lifecycle::FinalizeCreatedUnattachedOutcome::NotCurrent {
-                            ref thread,
-                            process_attached,
-                            launch_claimed,
-                        },
-                    ) => {
-                        lifecycle_owner.disarm();
-                        tracing::warn!(
-                            thread_id,
-                            status = %thread.status,
-                            process_attached,
-                            launch_claimed,
-                            "streaming child advanced while failed lineage cleanup was attempted"
-                        );
-                    }
-                    Ok(_) => lifecycle_owner.disarm(),
+                    Ok(outcome) if outcome.is_settled() => lifecycle_owner.disarm(),
+                    Ok(_) => {}
                     Err(cleanup_error) => {
                         return Err(DispatchError::Internal(anyhow::anyhow!(
                             "record streaming child lineage for {} failed: {}; conditional cleanup also failed: {:#}",
@@ -794,13 +799,18 @@ async fn dispatch_streaming_subprocess(
             inherited_fds: Vec::new(),
             supervised_status: None,
         };
+        let live_access = request
+            .provenance
+            .isolation_live_access_authority()
+            .map_err(DispatchError::Internal)?;
         let applied = state
             .isolation
-            .apply_with_provenance(
+            .apply_awaiting_attachment_with_provenance(
                 subprocess_request,
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: request.project_path,
                     project_authority: request.provenance.isolation_project_authority(),
+                    live_access: live_access.as_ref(),
                     state_root: request.provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: None,
@@ -820,10 +830,12 @@ async fn dispatch_streaming_subprocess(
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = thread_id.clone();
+        let process_launch_owner = launch_owner.clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::execution::process_attachment::run_lillux_attached(
                 &process_state,
                 &process_thread_id,
+                &process_launch_owner,
                 subprocess_request,
                 workspace_lifeline,
             )
@@ -865,6 +877,7 @@ async fn dispatch_streaming_subprocess(
         Ok((frames, frame_count, framed_stdout_bytes)) => finalize_streaming_success(
             state,
             &thread_id,
+            &launch_owner,
             frames,
             frame_count,
             framed_stdout_bytes,
@@ -873,6 +886,7 @@ async fn dispatch_streaming_subprocess(
         Err(error) => Err(finalize_streaming_failure(
             state,
             &thread_id,
+            &launch_owner,
             error,
             &mut lifecycle_owner,
         )),
@@ -882,6 +896,7 @@ async fn dispatch_streaming_subprocess(
 fn finalize_streaming_success(
     state: &AppState,
     thread_id: &str,
+    launch_owner: &str,
     frames: Value,
     frame_count: usize,
     framed_stdout_bytes: usize,
@@ -890,6 +905,7 @@ fn finalize_streaming_success(
     let outcome = crate::dispatch::finalize_method_thread_if_needed(
         state,
         thread_id,
+        launch_owner,
         "completed",
         Some(json!({
             "streaming": {
@@ -927,6 +943,7 @@ fn finalize_streaming_success(
 fn finalize_streaming_failure(
     state: &AppState,
     thread_id: &str,
+    launch_owner: &str,
     execution_error: DispatchError,
     lifecycle_owner: &mut crate::execution::process_attachment::LifecycleOwnerGuard,
 ) -> DispatchError {
@@ -935,6 +952,7 @@ fn finalize_streaming_failure(
     match crate::dispatch::finalize_method_thread_if_needed(
         state,
         thread_id,
+        launch_owner,
         "failed",
         Some(json!({
             "code": error_code,
@@ -1115,6 +1133,7 @@ async fn dispatch_tool_subprocess(
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         effective_caps,
         provenance: request.provenance.clone(),
+        lifecycle_authority: request.lifecycle_authority,
         // Fresh dispatch: no captured runtime ref. The thread's runtime identity
         // is captured in launch metadata; resume reads it back from there.
         runtime_ref: None,
@@ -1125,7 +1144,7 @@ async fn dispatch_tool_subprocess(
     };
 
     if request.launch_mode == "detached" {
-        // `run_detached` and `run_inline` are independent, large lifecycle
+        // `run_detached` and `run_and_wait` are independent, large lifecycle
         // futures. Boxing the selected leaf prevents this tool router from
         // carrying both state machines inline on every poll.
         let result = Box::pin(crate::execution::runner::run_detached(
@@ -1143,7 +1162,7 @@ async fn dispatch_tool_subprocess(
             "detached": true,
         }))
     } else {
-        let result = Box::pin(crate::execution::runner::run_inline(
+        let result = Box::pin(crate::execution::runner::run_and_wait(
             state.clone(),
             params,
             launch_handoff,

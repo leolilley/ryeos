@@ -140,7 +140,7 @@ pub enum DispatchError {
     /// root tools.
     #[error("root executor missing for '{item_ref}': {detail}")]
     RootExecutorMissing { item_ref: String, detail: String },
-    /// Subprocess run failed — the inline or detached run encountered
+    /// Subprocess run failed — the waited or detached run encountered
     /// an error after resolution succeeded.
     #[error("subprocess run failed for '{item_ref}': {detail}")]
     SubprocessRunFailed { item_ref: String, detail: String },
@@ -506,7 +506,7 @@ mod tests {
             errors: vec![ContractViolationEntry {
                 path: "launch.mode".to_string(),
                 code: "enum_mismatch".to_string(),
-                expected: "\"inline\" | \"detached\"".to_string(),
+                expected: "\"wait\" | \"detached\"".to_string(),
                 found: "\"bogus\"".to_string(),
             }],
             warnings: vec![],
@@ -610,7 +610,7 @@ mod tests {
             errors: vec![InstanceViolation {
                 path: "launch.mode".to_string(),
                 code: InstanceViolationCode::EnumMismatch,
-                expected: "\"inline\"".to_string(),
+                expected: "\"wait\"".to_string(),
                 found: "\"detached\"".to_string(),
             }],
             warnings: vec![InstanceViolation {

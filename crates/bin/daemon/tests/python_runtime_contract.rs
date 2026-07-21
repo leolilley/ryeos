@@ -155,6 +155,7 @@ fn run_tool_with_hints(
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_live_access_authority: None,
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
         isolation_daemon_socket_path: None,
@@ -178,7 +179,7 @@ fn run_tool_with_hints(
         project_context: ProjectContext::LocalPath {
             path: project_dir.to_path_buf(),
         },
-        launch_mode: LaunchMode::Inline,
+        launch_mode: LaunchMode::Wait,
     };
 
     engine

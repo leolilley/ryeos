@@ -1156,9 +1156,8 @@ fn verified_repair_closure_inner(
                     }
                 }
                 Some("thread_snapshot") => {
-                    let snapshot: ThreadSnapshot = serde_json::from_value(value)
-                        .with_context(|| format!("decode thread_snapshot {hash}"))?;
-                    snapshot.validate()?;
+                    let snapshot = ThreadSnapshot::from_current_value(value)
+                        .with_context(|| format!("decode current thread_snapshot {hash}"))?;
                     if snapshot.chain_root_id != chain_root_id {
                         anyhow::bail!(
                             "thread_snapshot {hash} root mismatch: expected {chain_root_id}, got {}",
@@ -1600,11 +1599,8 @@ fn load_thread_snapshot(cas: &lillux::CasStore, hash: &str) -> Result<ThreadSnap
     let value = cas
         .get_object(hash)?
         .ok_or_else(|| anyhow::anyhow!("thread_snapshot {hash} is absent"))?;
-    let snapshot: ThreadSnapshot = serde_json::from_value(value)
-        .with_context(|| format!("failed to parse thread_snapshot {hash}"))?;
-    snapshot
-        .validate()
-        .with_context(|| format!("invalid thread_snapshot {hash}"))?;
+    let snapshot = ThreadSnapshot::from_current_value(value)
+        .with_context(|| format!("failed to parse current thread_snapshot {hash}"))?;
     let canonical = lillux::canonical_json(&snapshot.to_value())
         .with_context(|| format!("failed to canonicalize thread_snapshot {hash}"))?;
     let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
@@ -2000,7 +1996,7 @@ mod tests {
             "kind_name": "directive",
             "item_ref": "directive:test/item",
             "executor_ref": "test/executor",
-            "launch_mode": "inline",
+            "launch_mode": "wait",
             "current_site_id": "site:test",
             "origin_site_id": "site:test",
             "base_project_snapshot_hash": null,
@@ -2021,6 +2017,7 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
+            "project_authority": { "kind": "projectless" },
             "captured_history_policy": null,
         });
         if thread_id == chain_root_id {

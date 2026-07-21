@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-17T00:21:56Z:cd0dac091108dfe72cb8ec0593707fb677508a9235617c2e8bb0965923be5814:RtcRChqrys7/pxWIwbR49ryHwpM/ySZgq+auCFJXTuy1ispox64wRhS/QrYqKe9cQ/4DleGyq/jmS4TXVDWgBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T00:24:30Z:40786b51cb025dba7737ce3514144169592f9afe4b026579e69a2a1f325f8b4e:dkalhxICPSMF27cZu1xzUnt4ENsXkd275VCjFkM1jexRIsc2HSzkBzX7YyxB4ZniTmoOzXPn0rOfQMsfH/BrDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/engine
 tags: [architecture, isolation, hermetic, env, security, subprocess]
-version: "2.2.0"
+version: "2.3.0"
 description: >
   Hermetic execution and optional OS isolation — env_clear, explicit env
   injection, node-owned policy, signed backend bundles, per-route semaphores,
@@ -40,6 +40,21 @@ environment plaintext has been redacted.
 
 See [Execution Isolation](../node/execution-isolation.md) for the complete node-owner
 schema, pickup behavior, diagnostics, and security limits.
+
+## Attachment is not isolation
+
+Daemon-owned process durability does not depend on isolation being enabled.
+The executor requests an attachment-prepared launch, Lillux obtains the exact
+target identity while that target is unable to execute, RyeOS persists the
+identity, and only then is execution released. Disabled isolation uses the
+native direct hold; enforced isolation uses the selected backend's target hold.
+The lifecycle transition is otherwise identical.
+
+This separation is deliberate: isolation controls what a process may access,
+while attachment controls whether RyeOS durably owns the process before it can
+run. No backend, bundle, helper binary, item kind, launch mode, or filesystem
+layout is hardcoded into the lifecycle contract. See
+[Attachment Before Execution](../execution/attachment-before-execution.md).
 
 ## Hermetic Handler Execution
 

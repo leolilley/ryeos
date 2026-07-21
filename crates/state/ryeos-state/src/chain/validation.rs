@@ -531,16 +531,16 @@ fn validate_new_thread_project_snapshots(
         anyhow::bail!("new created snapshot cannot carry a result project snapshot hash");
     }
     if snapshot.base_project_snapshot_hash.is_some() {
-        let source = continuation_source.ok_or_else(|| {
-            anyhow::anyhow!(
-                "new created snapshot may carry a base project snapshot hash only for a continuation successor"
-            )
-        })?;
-        if snapshot.upstream_thread_id.as_deref() != Some(source) {
-            anyhow::bail!(
-                "continuation successor upstream {:?} does not match continuation source {source}",
-                snapshot.upstream_thread_id
-            );
+        // Project-bearing roots are born against an exact immutable generation.
+        // A continuation additionally has to prove that its upstream link is the
+        // transition source; a fresh admitted root has no continuation source.
+        if let Some(source) = continuation_source {
+            if snapshot.upstream_thread_id.as_deref() != Some(source) {
+                anyhow::bail!(
+                    "continuation successor upstream {:?} does not match continuation source {source}",
+                    snapshot.upstream_thread_id
+                );
+            }
         }
     }
     Ok(())
@@ -762,7 +762,7 @@ fn load_hashed_snapshot(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Th
         .get_object(hash)
         .with_context(|| format!("read authoritative snapshot object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
-    let snapshot: ThreadSnapshot = serde_json::from_value(value)
+    let snapshot = ThreadSnapshot::from_current_value(value)
         .with_context(|| format!("decode authoritative snapshot object {hash}"))?;
     let canonical = lillux::canonical_json(&snapshot.to_value())
         .with_context(|| format!("canonicalize authoritative snapshot {hash}"))?;
@@ -981,22 +981,16 @@ pub(super) fn validate_snapshot_transition_identity(
     immutable!(upstream_thread_id);
     immutable!(requested_by);
     immutable!(project_root);
+    immutable!(project_authority);
     immutable!(captured_history_policy);
     immutable!(created_at);
 
     validate_status_transition(previous.status, next.status)?;
 
-    match (
-        previous.base_project_snapshot_hash.as_ref(),
-        next.base_project_snapshot_hash.as_ref(),
-    ) {
-        (left, right) if left == right => {}
-        (None, Some(_))
-            if previous.status == ThreadStatus::Created
-                && next.status == ThreadStatus::Running => {}
-        _ => anyhow::bail!(
-            "base_project_snapshot_hash may only be established by created -> running and is immutable afterwards"
-        ),
+    if previous.base_project_snapshot_hash != next.base_project_snapshot_hash {
+        anyhow::bail!(
+            "base_project_snapshot_hash is a project-authority projection and is immutable"
+        );
     }
 
     match (
@@ -1211,6 +1205,19 @@ mod tests {
         snapshot
     }
 
+    fn pin(snapshot: &mut ThreadSnapshot, hash: &str) {
+        snapshot.project_authority = crate::objects::ExecutionProjectAuthority::pinned(
+            format!("snapshot:{hash}"),
+            None,
+            hash.to_string(),
+            crate::objects::PinnedProjectRealization::ReadOnly,
+            crate::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        snapshot.base_project_snapshot_hash = Some(hash.to_string());
+    }
+
     fn root() -> ThreadSnapshot {
         let hash = "11".repeat(32);
         ThreadSnapshotBuilder::new(
@@ -1382,14 +1389,21 @@ mod tests {
     }
 
     #[test]
-    fn base_snapshot_is_set_once_only_on_created_to_running() {
-        let previous = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
-        let mut running = child(ThreadStatus::Running, "2026-01-01T00:00:01Z");
-        running.base_project_snapshot_hash = Some("11".repeat(32));
+    fn base_snapshot_is_admitted_once_and_immutable_while_running() {
+        let hash = "11".repeat(32);
+        let mut previous = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
+        pin(&mut previous, &hash);
+        let mut running = previous.clone();
+        running.status = ThreadStatus::Running;
+        running.updated_at = "2026-01-01T00:00:01Z".into();
+        running.started_at = Some("2026-01-01T00:00:01Z".into());
         validate_snapshot_transition_identity(&previous, &running).unwrap();
 
-        let mut terminal = child(ThreadStatus::Completed, "2026-01-01T00:00:02Z");
-        terminal.started_at = running.started_at.clone();
+        let mut terminal = running.clone();
+        terminal.status = ThreadStatus::Completed;
+        terminal.updated_at = "2026-01-01T00:00:02Z".into();
+        terminal.finished_at = Some("2026-01-01T00:00:02Z".into());
+        terminal.base_project_snapshot_hash = None;
         assert!(validate_snapshot_transition_identity(&running, &terminal).is_err());
         terminal.base_project_snapshot_hash = running.base_project_snapshot_hash.clone();
         validate_snapshot_transition_identity(&running, &terminal).unwrap();
@@ -1399,7 +1413,7 @@ mod tests {
     fn created_continuation_may_inherit_base_snapshot() {
         let mut continuation = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
         continuation.upstream_thread_id = Some("T-root".into());
-        continuation.base_project_snapshot_hash = Some("11".repeat(32));
+        pin(&mut continuation, &"11".repeat(32));
 
         normalize_and_validate_new_thread(
             &mut continuation,
@@ -1417,17 +1431,35 @@ mod tests {
     }
 
     #[test]
-    fn created_non_continuation_cannot_carry_project_snapshot_hashes() {
+    fn created_roots_and_continuations_may_carry_only_base_project_snapshots() {
         let mut fresh = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
-        fresh.base_project_snapshot_hash = Some("11".repeat(32));
-        let error =
-            normalize_and_validate_new_thread(&mut fresh, "T-root", "2026-01-01T00:00:00Z", None)
-                .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("only for a continuation successor"));
+        pin(&mut fresh, &"11".repeat(32));
+        normalize_and_validate_new_thread(&mut fresh, "T-root", "2026-01-01T00:00:00Z", None)
+            .unwrap();
 
         let mut continuation = child(ThreadStatus::Created, "2026-01-01T00:00:00Z");
+        continuation.upstream_thread_id = Some("T-root".into());
+        pin(&mut continuation, &"11".repeat(32));
+        normalize_and_validate_new_thread(
+            &mut continuation,
+            "T-root",
+            "2026-01-01T00:00:00Z",
+            Some("T-root"),
+        )
+        .unwrap();
+
+        continuation.upstream_thread_id = Some("T-other".into());
+        let error = normalize_and_validate_new_thread(
+            &mut continuation,
+            "T-root",
+            "2026-01-01T00:00:00Z",
+            Some("T-root"),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not match continuation source"));
+
         continuation.upstream_thread_id = Some("T-root".into());
         continuation.result_project_snapshot_hash = Some("22".repeat(32));
         let error = normalize_and_validate_new_thread(

@@ -64,7 +64,7 @@ COPY --from=builder /build/bundles/web       /opt/ryeos/web
 COPY --from=builder /build/bundles/ryeos-ui   /opt/ryeos/ryeos-ui
 COPY --from=builder /build/bundles/hosted-node /opt/ryeos/hosted-node
 
-# Entrypoint runs ryeos init every boot (idempotent) then starts daemon.
+# Entrypoint runs ryeos init --non-interactive every boot (idempotent) then starts daemon.
 # /data/app persists across redeploys.
 COPY deploy/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

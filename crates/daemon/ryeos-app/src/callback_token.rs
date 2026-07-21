@@ -16,6 +16,9 @@ pub struct CallbackCapability {
     pub token: String,
     pub invocation_id: String,
     pub thread_id: String,
+    /// Exact durable launch owner allowed to use this token. Production
+    /// managed launches bind it before the token is exposed to a runtime.
+    pub launch_owner: Option<String>,
     /// Chain root of the minting thread. Carried so the daemon can key
     /// cross-chain wiring from a callback without re-deriving it. It is NOT an
     /// authority source by itself — callers that act on it MUST confirm it
@@ -136,6 +139,7 @@ impl CallbackCapabilityStore {
             token: token.clone(),
             invocation_id,
             thread_id: thread_id.to_string(),
+            launch_owner: None,
             // Defaults to root (chain_root == thread_id). The managed launch
             // path overrides this via `set_chain_root` with the thread's
             // authoritative chain root from state.
@@ -163,6 +167,16 @@ impl CallbackCapabilityStore {
         match self.capabilities.lock().unwrap().get_mut(token) {
             Some(cap) => {
                 cap.chain_root_id = chain_root_id.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn set_launch_owner(&self, token: &str, launch_owner: String) -> bool {
+        match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.launch_owner = Some(launch_owner);
                 true
             }
             None => false,
@@ -426,7 +440,9 @@ mod tests {
     }
 
     fn provenance(path: PathBuf) -> TestProvenance {
-        ExecutionProvenance::root_live_fs(path, minimal_engine())
+        let authority =
+            crate::execution_policy::synthetic_test_live_project_authority(path.as_path());
+        ExecutionProvenance::root_live_fs(path, minimal_engine(), authority).unwrap()
     }
 
     #[test]
@@ -679,13 +695,27 @@ mod tests {
         let engine = minimal_engine();
         let tmp = tempfile::tempdir().unwrap();
         let lifeline = Arc::new(TempDirGuard::new(tmp.path().to_path_buf()));
+        let snapshot_hash = "a".repeat(64);
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "site:test:/original".to_string(),
+            Some(PathBuf::from("/original")),
+            snapshot_hash.clone(),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::RetainResult,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
         let provenance = ExecutionProvenance::root_pushed_head(
             tmp.path().to_path_buf(),
             PathBuf::from("/original"),
             engine.clone(),
             lifeline.clone(),
-            "snap".to_string(),
-        );
+            snapshot_hash,
+            project_authority,
+        )
+        .unwrap();
 
         let cap = store.generate(
             "T-test",
@@ -708,10 +738,10 @@ mod tests {
         );
         assert_eq!(validated.provenance.effective_path(), tmp.path());
         match &validated.provenance {
-            ExecutionProvenance::RootPushedHead {
+            ExecutionProvenance::RootPinnedGeneration {
                 workspace_lifeline, ..
             } => assert!(Arc::ptr_eq(workspace_lifeline, &lifeline)),
-            other => panic!("expected RootPushedHead, got {other:?}"),
+            other => panic!("expected RootPinnedGeneration, got {other:?}"),
         }
     }
 
@@ -722,6 +752,7 @@ mod tests {
             token: "cbt-test".to_string(),
             invocation_id: "inv-test".to_string(),
             thread_id: "T-test".to_string(),
+            launch_owner: None,
             chain_root_id: "T-test".to_string(),
             project_path: PathBuf::from("/project"),
             expires_at: Instant::now() + Duration::from_secs(300),
@@ -729,7 +760,11 @@ mod tests {
             provenance: ExecutionProvenance::root_live_fs(
                 PathBuf::from("/project"),
                 engine.clone(),
-            ),
+                crate::execution_policy::synthetic_test_live_project_authority(Path::new(
+                    "/project",
+                )),
+            )
+            .unwrap(),
             effective_bundle_id: None,
             item_ref: None,
             root_content_digest: "0".repeat(64),

@@ -141,7 +141,7 @@ wait_thread_active() {
 }
 
 ryeos_term_info "initializing isolated node"
-init_args=(init --source "$BUNDLE_SOURCE")
+init_args=(init --non-interactive --source "$BUNDLE_SOURCE")
 if [[ -n "$TRUST_FILE" ]]; then
   [[ -f "$TRUST_FILE" ]] || {
     ryeos_term_fail "RYEOS_SMOKE_TRUST_FILE does not exist: $TRUST_FILE"

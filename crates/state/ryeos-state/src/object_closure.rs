@@ -10,6 +10,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 const DEFAULT_MAX_OBJECTS: usize = 10_000;
 const DEFAULT_MAX_BLOBS: usize = 10_000;
@@ -260,6 +261,20 @@ impl Default for ObjectClosureLimits {
 }
 
 impl ObjectClosureLimits {
+    /// Full-project generations may legitimately contain model weights and
+    /// datasets larger than the generic control-plane defaults. Counts remain
+    /// bounded; byte totals are accounted while transport streams each blob.
+    pub fn for_project_snapshot_transport() -> Self {
+        Self {
+            max_objects: 100_000,
+            max_blobs: 100_000,
+            max_object_bytes: 32 * 1024 * 1024,
+            max_blob_bytes: 16 * 1024 * 1024 * 1024,
+            max_total_blob_bytes: 64 * 1024 * 1024 * 1024,
+            max_links_per_object: 100_000,
+        }
+    }
+
     pub fn unbounded_for_local_maintenance() -> Self {
         Self {
             max_objects: usize::MAX,
@@ -427,36 +442,87 @@ enum ClosureCas<'a> {
 }
 
 impl ClosureCas<'_> {
-    fn read(
-        self,
-        namespace: &str,
-        hash: &str,
-        extension: &str,
-        max_bytes: u64,
-    ) -> anyhow::Result<Option<Vec<u8>>> {
+    fn read_object(self, hash: &str, max_bytes: u64) -> anyhow::Result<Option<Vec<u8>>> {
         match self {
-            Self::Path(root) => {
-                read_cas_file_no_follow(root, namespace, hash, extension, max_bytes)
-            }
+            Self::Path(root) => read_cas_file_no_follow(root, "objects", hash, ".json", max_bytes),
             Self::Pinned(cas) => {
-                let bytes = match namespace {
-                    "objects" => cas
-                        .get_object(hash)?
-                        .map(|value| lillux::canonical_json(&value).map(String::into_bytes))
-                        .transpose()
-                        .with_context(|| format!("failed to canonicalize CAS object {hash}"))?,
-                    "blobs" => cas.get_blob(hash)?,
-                    _ => anyhow::bail!("unsupported CAS namespace {namespace}"),
+                let Some((file, size)) = cas.open_object(hash)? else {
+                    return Ok(None);
                 };
-                if bytes
-                    .as_ref()
-                    .is_some_and(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes)
-                {
-                    anyhow::bail!("CAS entry {hash} exceeds byte limit {max_bytes}");
+                if size > max_bytes {
+                    anyhow::bail!("CAS object {hash} exceeds byte limit {max_bytes}");
                 }
-                Ok(bytes)
+                let mut bytes = Vec::with_capacity(usize::try_from(size)?);
+                file.take(max_bytes.saturating_add(1))
+                    .read_to_end(&mut bytes)?;
+                if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+                    anyhow::bail!("CAS object {hash} exceeded byte limit while reading");
+                }
+                Ok(Some(bytes))
             }
         }
+    }
+
+    fn inspect_blob(self, hash: &str, max_bytes: u64) -> anyhow::Result<Option<(u64, String)>> {
+        let (mut file, size) = match self {
+            Self::Path(root) => {
+                let path = lillux::shard_path(root, "blobs", hash, "");
+                let relative = path
+                    .strip_prefix(root)
+                    .context("blob path escaped CAS root")?;
+                let components = relative
+                    .components()
+                    .map(|component| match component {
+                        std::path::Component::Normal(value) => Ok(value.to_os_string()),
+                        _ => anyhow::bail!("CAS blob path has unsafe component"),
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()?;
+                let Some(mut directory) = lillux::PinnedDirectory::open(root)? else {
+                    return Ok(None);
+                };
+                for component in &components[..components.len().saturating_sub(1)] {
+                    let Some(child) = directory.open_child_directory(component)? else {
+                        return Ok(None);
+                    };
+                    directory = child;
+                }
+                let Some(name) = components.last() else {
+                    anyhow::bail!("CAS blob path is empty");
+                };
+                let Some(file) = directory.open_regular(name, false)? else {
+                    return Ok(None);
+                };
+                let size = file.metadata()?.len();
+                (file, size)
+            }
+            Self::Pinned(cas) => {
+                let Some(opened) = cas.open_blob(hash)? else {
+                    return Ok(None);
+                };
+                opened
+            }
+        };
+        if size > max_bytes {
+            anyhow::bail!("CAS blob {hash} exceeds byte limit {max_bytes}");
+        }
+        let mut digest = Sha256::new();
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 128 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            total = total.saturating_add(u64::try_from(read)?);
+            if total > max_bytes {
+                anyhow::bail!("CAS blob {hash} exceeded byte limit while reading");
+            }
+            digest.update(&buffer[..read]);
+        }
+        if total != size {
+            anyhow::bail!("CAS blob {hash} changed size while being verified");
+        }
+        Ok(Some((total, format!("{:x}", digest.finalize()))))
     }
 }
 
@@ -508,7 +574,7 @@ fn collect_object_closure_from_source(
             );
         }
 
-        let content = match cas.read("objects", &hash, ".json", limits.max_object_bytes)? {
+        let content = match cas.read_object(&hash, limits.max_object_bytes)? {
             Some(content) => content,
             None => {
                 report.missing_objects.push(MissingDependency {
@@ -631,18 +697,38 @@ fn collect_object_closure_from_source(
             }
             queue.push_back((edge.hash, Some(hash.clone()), edge.expected));
         }
+        let project_file_size = if identity.kind == "project_file" {
+            Some(
+                crate::objects::ProjectFile::from_value(&value)
+                    .map_err(|error| anyhow::anyhow!(error))?
+                    .size,
+            )
+        } else {
+            None
+        };
         for blob in links.blob_hashes {
             check()?;
             if is_canonical_hash(&blob) {
                 match cas
-                    .read("blobs", &blob, "", limits.max_blob_bytes)
+                    .inspect_blob(&blob, limits.max_blob_bytes)
                     .with_context(|| {
                         format!(
                             "enforce max_blob_bytes={} for referenced blob {blob}",
                             limits.max_blob_bytes
                         )
                     })? {
-                    Some(bytes) => {
+                    Some((actual_size, actual_hash)) => {
+                        if let Some(expected_size) = project_file_size {
+                            if actual_size != expected_size {
+                                report.malformed_objects.push(MalformedObject {
+                                    hash: hash.clone(),
+                                    reason: format!(
+                                        "project_file declares size {expected_size}, but blob {blob} has size {actual_size}"
+                                    ),
+                                });
+                                continue;
+                            }
+                        }
                         if !report.blob_hashes.contains(&blob) {
                             if report.blob_hashes.len() + 1 > limits.max_blobs {
                                 anyhow::bail!(
@@ -651,8 +737,7 @@ fn collect_object_closure_from_source(
                                     limits.max_blobs
                                 );
                             }
-                            total_blob_bytes = total_blob_bytes
-                                .saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                            total_blob_bytes = total_blob_bytes.saturating_add(actual_size);
                             if total_blob_bytes > limits.max_total_blob_bytes {
                                 anyhow::bail!(
                                     "object closure exceeds max_total_blob_bytes: {} > {}",
@@ -661,7 +746,6 @@ fn collect_object_closure_from_source(
                                 );
                             }
                         }
-                        let actual_hash = lillux::sha256_hex(&bytes);
                         if actual_hash != blob {
                             report.malformed_objects.push(MalformedObject {
                                 hash: hash.clone(),
@@ -820,6 +904,30 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                 None,
                 &mut edges,
             )?;
+            push_optional_object_edge(
+                value,
+                "admitted_launch_capsule_hash",
+                ExpectedObject::Kind("admitted_launch_capsule"),
+                None,
+                &mut edges,
+            )?;
+        }
+        "admitted_launch_capsule" => {
+            let project_authority = value
+                .get("project_authority")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "admitted_launch_capsule missing project_authority object".to_string()
+                })?;
+            if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
+                push_required_object_edge(
+                    &Value::Object(project_authority.clone()),
+                    "snapshot_hash",
+                    ExpectedObject::Kind("project_snapshot"),
+                    None,
+                    &mut edges,
+                )?;
+            }
         }
         "thread_event" => {
             push_optional_object_edge(
@@ -847,15 +955,15 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
         "project_snapshot" => {
             push_required_object_edge(
                 value,
-                "project_manifest_hash",
-                ExpectedObject::Kind("source_manifest"),
+                "project_tree_hash",
+                ExpectedObject::Kind("project_tree"),
                 None,
                 &mut edges,
             )?;
-            push_optional_object_edge(
+            push_required_object_edge(
                 value,
-                "user_manifest_hash",
-                ExpectedObject::Kind("source_manifest"),
+                "effective_policy_hash",
+                ExpectedObject::Kind("project_snapshot_policy"),
                 None,
                 &mut edges,
             )?;
@@ -894,6 +1002,19 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                 )?;
             }
         }
+        "project_tree" => {
+            let hashes = value
+                .get("files")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "project_tree missing files object".to_string())?;
+            for hash in hashes.values() {
+                let hash = hash
+                    .as_str()
+                    .ok_or_else(|| "project_tree files contains non-string".to_string())?;
+                push_typed_hash(hash, ExpectedObject::Kind("project_file"), None, &mut edges)?;
+            }
+        }
+        "project_file" | "project_snapshot_policy" => {}
         "item_source" => {}
         _ => return Ok(Vec::new()),
     }
@@ -973,10 +1094,13 @@ fn validate_current_object(value: &Value) -> Result<(), String> {
         "chain_state" => serde_json::from_value::<crate::objects::ChainState>(value.clone())
             .context("deserialize chain_state")
             .and_then(|object| object.validate()),
-        "thread_snapshot" => {
-            serde_json::from_value::<crate::objects::ThreadSnapshot>(value.clone())
-                .context("deserialize thread_snapshot")
-                .and_then(|object| object.validate())
+        "thread_snapshot" => crate::objects::ThreadSnapshot::from_current_value(value.clone())
+            .context("deserialize current thread_snapshot")
+            .map(|_| ()),
+        "admitted_launch_capsule" => {
+            crate::objects::AdmittedLaunchCapsule::from_current_value(value.clone())
+                .context("deserialize current admitted_launch_capsule")
+                .map(|_| ())
         }
         "thread_event" => serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
             .context("deserialize thread_event")
@@ -987,6 +1111,11 @@ fn validate_current_object(value: &Value) -> Result<(), String> {
                 .and_then(|object| object.validate())
         }
         "project_snapshot" => crate::objects::ProjectSnapshot::from_value(value).map(|_| ()),
+        "project_tree" => crate::objects::ProjectTree::from_value(value).map(|_| ()),
+        "project_file" => crate::objects::ProjectFile::from_value(value).map(|_| ()),
+        "project_snapshot_policy" => {
+            crate::objects::ProjectSnapshotPolicy::from_value(value).map(|_| ())
+        }
         "source_manifest" => crate::objects::SourceManifest::from_value(value).map(|_| ()),
         "item_source" => crate::objects::ItemSource::from_value(value).map(|_| ()),
         _ => return Ok(()),
@@ -1028,6 +1157,26 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
                 &mut links.object_hashes,
             )?;
             push_optional_hash(value, "last_event_hash", &mut links.object_hashes)?;
+            push_optional_hash(
+                value,
+                "admitted_launch_capsule_hash",
+                &mut links.object_hashes,
+            )?;
+        }
+        "admitted_launch_capsule" => {
+            let project_authority = value
+                .get("project_authority")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "admitted_launch_capsule missing project_authority object".to_string()
+                })?;
+            if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
+                push_required_hash(
+                    &Value::Object(project_authority.clone()),
+                    "snapshot_hash",
+                    &mut links.object_hashes,
+                )?;
+            }
         }
         "thread_event" => {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
@@ -1050,8 +1199,8 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
             }
         }
         "project_snapshot" => {
-            push_required_hash(value, "project_manifest_hash", &mut links.object_hashes)?;
-            push_optional_hash(value, "user_manifest_hash", &mut links.object_hashes)?;
+            push_required_hash(value, "project_tree_hash", &mut links.object_hashes)?;
+            push_required_hash(value, "effective_policy_hash", &mut links.object_hashes)?;
             let parents = value
                 .get("parent_hashes")
                 .and_then(|v| v.as_array())
@@ -1077,6 +1226,20 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
                 push_hash(hash, &mut links.object_hashes)?;
             }
         }
+        "project_tree" => {
+            let hashes = value
+                .get("files")
+                .and_then(Value::as_object)
+                .ok_or_else(|| "project_tree missing files object".to_string())?;
+            for hash_value in hashes.values() {
+                let Some(hash) = hash_value.as_str() else {
+                    return Err("project_tree files contains non-string".to_string());
+                };
+                push_hash(hash, &mut links.object_hashes)?;
+            }
+        }
+        "project_file" => push_required_hash(value, "blob_hash", &mut links.blob_hashes)?,
+        "project_snapshot_policy" => {}
         "item_source" => push_required_hash(value, "content_blob_hash", &mut links.blob_hashes)?,
         other => links.unsupported_kind = Some(other.to_string()),
     }
@@ -1159,33 +1322,41 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
         let blob_hash = write_blob(&cas_root, b"hello closure");
-        let item = write_object(
+        let file = write_object(
             &cas_root,
-            &json!({
-                "kind": "item_source",
-                "item_ref": ".ai/directives/test/example.md",
-                "content_blob_hash": blob_hash,
-                "integrity": "none",
-                "signature_info": null,
-                "mode": null
-            }),
+            &crate::objects::ProjectFile {
+                blob_hash: blob_hash.clone(),
+                size: b"hello closure".len() as u64,
+                normalized_mode: 0o644,
+            }
+            .to_value(),
         );
-        let manifest = write_object(
+        let tree = write_object(
             &cas_root,
-            &json!({
-                "kind": "source_manifest",
-                "item_source_hashes": { ".ai/directives/test/example.md": item }
-            }),
+            &crate::objects::ProjectTree {
+                files: BTreeMap::from([(".ai/directives/test/example.md".to_string(), file)]),
+            }
+            .to_value(),
+        );
+        let policy = write_object(
+            &cas_root,
+            &crate::objects::ProjectSnapshotPolicy::new(
+                crate::project_sync::ProjectSyncScope::FullProject,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+            .to_value(),
         );
         let snapshot = write_object(
             &cas_root,
             &json!({
                 "kind": "project_snapshot",
                 "schema": crate::objects::ProjectSnapshot::SCHEMA,
-                "project_manifest_hash": manifest,
-                "user_manifest_hash": null,
+                "project_tree_hash": tree,
+                "effective_policy_hash": policy,
                 "message": null,
-                "project_sync_scope": "full_project",
                 "parent_hashes": [],
                 "created_at": "2026-05-29T00:00:00Z",
                 "source": "test"
@@ -1194,7 +1365,7 @@ mod tests {
 
         let report = collect_object_closure(&cas_root, [snapshot]).unwrap();
         assert!(report.is_complete());
-        assert_eq!(report.object_hashes.len(), 3);
+        assert_eq!(report.object_hashes.len(), 4);
         assert!(report.blob_hashes.contains(&blob_hash));
     }
 
@@ -1325,14 +1496,15 @@ mod tests {
         for value in [
             json!({"kind": "attestation", "schema": 0}),
             json!({"kind": "chain_state", "schema": 1}),
-            json!({"kind": "thread_snapshot", "schema": 2}),
+            json!({"kind": "thread_snapshot", "schema": 4}),
             json!({"kind": "thread_event", "schema": 1}),
             json!({"kind": "bundle_event", "schema": 1}),
             json!({
                 "kind": "project_snapshot",
                 "schema": crate::objects::ProjectSnapshot::SCHEMA - 1,
-                "project_manifest_hash": h("11"),
-                "project_sync_scope": "full_project",
+                "project_tree_hash": h("11"),
+                "effective_policy_hash": h("12"),
+                "message": null,
                 "parent_hashes": [],
                 "created_at": "2026-07-14T00:00:00Z",
                 "source": "manual_push"
@@ -1407,33 +1579,41 @@ mod tests {
     fn traversal_stops_when_max_objects_exceeded() {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("objects");
-        let item = write_object(
+        let file = write_object(
             &cas_root,
-            &json!({
-                "kind": "item_source",
-                "item_ref": ".ai/directives/test/example.md",
-                "content_blob_hash": h("cd"),
-                "integrity": "none",
-                "signature_info": null,
-                "mode": null
-            }),
+            &crate::objects::ProjectFile {
+                blob_hash: h("cd"),
+                size: 1,
+                normalized_mode: 0o644,
+            }
+            .to_value(),
         );
-        let manifest = write_object(
+        let tree = write_object(
             &cas_root,
-            &json!({
-                "kind": "source_manifest",
-                "item_source_hashes": { ".ai/directives/test/example.md": item }
-            }),
+            &crate::objects::ProjectTree {
+                files: BTreeMap::from([(".ai/directives/test/example.md".to_string(), file)]),
+            }
+            .to_value(),
+        );
+        let policy = write_object(
+            &cas_root,
+            &crate::objects::ProjectSnapshotPolicy::new(
+                crate::project_sync::ProjectSyncScope::FullProject,
+                Vec::new(),
+                Vec::new(),
+                BTreeMap::new(),
+            )
+            .unwrap()
+            .to_value(),
         );
         let snapshot = write_object(
             &cas_root,
             &json!({
                 "kind": "project_snapshot",
                 "schema": crate::objects::ProjectSnapshot::SCHEMA,
-                "project_manifest_hash": manifest,
-                "user_manifest_hash": null,
+                "project_tree_hash": tree,
+                "effective_policy_hash": policy,
                 "message": null,
-                "project_sync_scope": "full_project",
                 "parent_hashes": [],
                 "created_at": "2026-05-29T00:00:00Z",
                 "source": "test"

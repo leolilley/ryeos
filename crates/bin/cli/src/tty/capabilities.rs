@@ -58,6 +58,16 @@ impl TerminalCapabilities {
     pub fn tty(self) -> bool {
         self.mode == HumanOutputMode::Tty
     }
+
+    /// Whether a foreground command may safely take over terminal input.
+    /// Presentation overrides never turn pipes or `/dev/null` into an
+    /// interactive input source.
+    pub fn interactive(self) -> bool {
+        self.tty()
+            && io::stdin().is_terminal()
+            && io::stdout().is_terminal()
+            && io::stderr().is_terminal()
+    }
 }
 
 fn terminal_width() -> usize {

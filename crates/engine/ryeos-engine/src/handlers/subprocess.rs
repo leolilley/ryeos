@@ -115,6 +115,7 @@ pub(crate) fn run_handler_subprocess(
         IsolationLaunchContext {
             project_path: &bundle_root,
             project_authority: IsolationProjectAuthority::ReadOnly,
+            live_access: None,
             state_root: None,
             checkpoint_dir: None,
             daemon_socket_path: None,

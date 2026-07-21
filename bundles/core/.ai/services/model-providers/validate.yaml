@@ -1,0 +1,8 @@
+# ryeos:signed:2026-07-21T00:52:18Z:2efa98623d2313408bd9a35b2555725b13a1db1193e0b090db67cf869f7f12d5:YePWMr8bQ6NojmcomDPy47ruwEkItAyY62ilE28O1eqn6YObZZPzDfKw3TYXv31n0qSXZVxZ90BT+s68MRx0Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: model-providers.validate
+required_caps: ["ryeos.execute.service.model-providers/validate"]
+schema:
+  provider_id: string
+  model: string?
+description: "Validate a configured model provider using its verified setup metadata"

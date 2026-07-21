@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-15T23:50:35Z:c3f327866b152bd1820414f9cd119684700dba1499b7afc65c14d5290aeb4bd5:LYzFX6eyT6Flr/LxUJgUqGXYN12rR+JwYSD9pRbt+d4o0v8o9bXN7J3qkx1b9AZSkWuwoL/+ECQWVPk+JqSTAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T01:43:57Z:16118306c1d6a2a198ad1d5c076abe69f5717342d5a25fd02672d3bbf40f4399:nBvt9+ZWKPg8l4BB5ZfWZ38uViEPqa38H7iGvLoFnstgRfMpEMux4A6sVKRV0x8PVbCi+MNAcDS5ev3aIBA6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
 tags: [service, maintenance, gc, cas, compact, sweep]
-version: "2.2.0"
+version: "2.3.0"
 description: >
   The two-phase garbage collector — compact (retention-based DAG
   pruning with topological rewrite) and sweep (mark-and-sweep of
@@ -33,7 +33,15 @@ Phase 2: SWEEP (always)
   - No signer needed
   - Mark: collect all reachable objects from signed heads
   - Sweep: delete unreachable objects + blobs from sharded dirs
+  - Reap exact abandoned CAS atomic-publication staging files
   - Clean empty shard directories bottom-up
+
+Deep runtime cleanup (opt-in, --deep flag)
+  - Evaluate captured terminal-chain retention policy
+  - Remove rebuildable runtime caches and truncate trace output
+  - Evict every inactive materialized project generation through its exact
+    construction lock and workspace lease
+  - Preserve generations with an active builder or workspace lease
 ```
 
 Compact runs before sweep because compaction orphans snapshots by
@@ -177,6 +185,29 @@ without extension):
 
 This prevents accumulation of empty directories from deleted objects.
 
+An interrupted atomic CAS publication may leave a private staging file beside
+its final hash. Streaming file capture may likewise leave an unpublished file
+in the CAS-owned blob-capture namespace. Sweep asks the CAS layer to validate
+and reclaim the latter, skips that declared structural namespace while walking
+hash shards, and recognizes only the exact filename grammar emitted by the
+current atomic writer for the former. Embedded hashes must belong in their
+canonical shard. Any other entry remains a hard error; GC does not broaden this
+into a wildcard temp-file fallback.
+
+## Deep Materialization Cleanup
+
+Materialized project generations under the runtime cache are immutable,
+rebuildable views of authoritative CAS snapshots. `--deep` asks the daemon GC
+coordinator to inspect all of them. It removes a generation only after acquiring
+the executor's exact construction lock and generation lease exclusively and
+non-blockingly. A live builder or execution therefore causes that generation to
+be reported and preserved, never waited on or guessed from a PID.
+
+The generic state-layer cache purge deliberately skips this directory because
+it does not own the executor's liveness contract. Dry-run performs the same
+lease inspection without creating lock anchors or deleting files and reports
+the generations and logical bytes that are reclaimable.
+
 ## Locking
 
 GC uses file-based locking to prevent concurrent runs:
@@ -204,6 +235,10 @@ per line, append-only:
   "reachable_blobs": 20,
   "deleted_objects": 10,
   "deleted_blobs": 5,
+  "deleted_cas_staging_files": 2,
+  "inspected_materialized_snapshots": 89,
+  "deleted_materialized_snapshots": 89,
+  "preserved_active_materialized_snapshots": 0,
   "freed_bytes": 4096,
   "snapshots_compacted": 15,
   "duration_ms": 150
@@ -221,4 +256,10 @@ ryeos maintenance gc --compact --policy '{"manual_pushes":10,"auto_snapshots":30
 
 # Sweep only (no snapshot pruning)
 ryeos maintenance gc
+
+# Sweep plus all inactive materialized generations and rebuildable runtime cache
+ryeos maintenance gc --deep
+
+# Preview the same deep cleanup without any filesystem mutation
+ryeos maintenance gc --deep --dry-run
 ```

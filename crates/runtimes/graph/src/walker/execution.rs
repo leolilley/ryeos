@@ -117,7 +117,7 @@ impl Walker {
         // caps at the callback boundary (enforce_callback_caps in
         // runtime_dispatch.rs). The walker is the executor only.
 
-        let rendered_action =
+        let mut rendered_action =
             match ExpressionScope::new(state, inputs, Some(&execution), Some(graph_run_id))
                 .render_action(action)
             {
@@ -135,6 +135,22 @@ impl Walker {
                     });
                 }
             };
+        if rendered_action.get("thread").and_then(Value::as_str) == Some("detached") {
+            let operation = lillux::canonical_json(&json!({
+                "graph_run_id": graph_run_id,
+                "node": current,
+                "step": step,
+                "kind": "detached_action"
+            }))
+            .expect("fixed detached operation identity is canonical JSON");
+            rendered_action
+                .as_object_mut()
+                .expect("rendered action is validated as an object")
+                .insert(
+                    "operation_id".to_string(),
+                    Value::String(lillux::sha256_hex(operation.as_bytes())),
+                );
+        }
 
         // Missing paths fail or are handled explicitly by `??`; authored
         // `null` is data and must survive dispatch unchanged.

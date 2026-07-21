@@ -1,4 +1,14 @@
-# Filesystem durability and platform guarantees
+<!-- ryeos:signed:2026-07-21T00:24:55Z:eb2e6afbc40e15c1eac4f022e98bea8f9aaa5c9253357473d50ea2dc526eb480:gxicErFlsYkcMJvI5fcHyqfPVUr0FNuokeKllN1qlImVR2+8iWIEw9NN4n045QDeKEyPJYoJHd33uLLWsNTtDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/development
+name: filesystem-durability
+title: Filesystem Durability and Platform Guarantees
+description: Exact atomicity, durability, and crash-recovery guarantees of RyeOS filesystem primitives
+entry_type: reference
+version: "1.0.0"
+```
+
+# Filesystem Durability and Platform Guarantees
 
 This document defines what RyeOS means when a filesystem mutation is called
 *atomic* or *durable*. It covers the primitives exported by `lillux` and their

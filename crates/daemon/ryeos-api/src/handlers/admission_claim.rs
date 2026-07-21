@@ -20,16 +20,23 @@ use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
 
 const CLAIM_MAX_AGE_SECS: u64 = 300;
+const ADMISSION_CLAIM_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
+    /// Exact admission claim protocol. Version 2 binds the claimant's site
+    /// identity into both the self-signature and the resulting node grant.
+    pub protocol_version: u32,
     /// Opaque one-time admission token delivered out-of-band by the
     /// target node operator or provider/provisioner.
     pub token: String,
     /// Ed25519 public key in `ed25519:<base64>` format. This is the key
     /// that future signed requests from the admitted node will use.
     pub public_key: String,
+    /// Site identity asserted by the admitted node and covered by its claim
+    /// signature. The destination re-signs this binding into the grant.
+    pub origin_site_id: String,
     /// Human-readable label for the resulting authorized-key grant.
     #[serde(default)]
     pub label: Option<String>,
@@ -69,9 +76,21 @@ pub struct Response {
     pub scopes: Vec<String>,
     pub granted_by: String,
     pub created_at: String,
+    pub origin_site_id: String,
 }
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> {
+    if req.protocol_version != ADMISSION_CLAIM_PROTOCOL_VERSION {
+        return Err(HandlerError::BadRequest(format!(
+            "admission claim protocol_version must be exactly {} (got {})",
+            ADMISSION_CLAIM_PROTOCOL_VERSION, req.protocol_version
+        )));
+    }
+    if ryeos_app::identity::validate_canonical_site_id(&req.origin_site_id).is_err() {
+        return Err(HandlerError::BadRequest(
+            "origin_site_id must use the canonical `site:<name>` form".to_string(),
+        ));
+    }
     let token_hash = token_hash(&req.token);
     let token_path = admission_token_path(&state.config.app_root, &token_hash);
     let token = read_token_file(&token_path)?;
@@ -128,7 +147,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
 
     let created_at = lillux::time::iso8601_now();
     let auth_dir = state.config.authorized_keys_dir.clone();
-    ryeos_app::identity::write_authorized_key_toml(
+    ryeos_app::identity::write_authorized_remote_node_key_toml(
         &auth_dir,
         &fingerprint,
         &key_b64,
@@ -139,8 +158,8 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             token_hash.chars().take(12).collect::<String>()
         ),
         &created_at,
+        &req.origin_site_id,
         state.identity.signing_key(),
-        ryeos_app::identity::WildcardPolicy::Reject,
     )
     .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
@@ -154,6 +173,7 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> HandlerResult<Value> 
             token_hash.chars().take(12).collect::<String>()
         ),
         created_at,
+        origin_site_id: req.origin_site_id,
     };
     serde_json::to_value(response).map_err(|e| HandlerError::Internal(e.to_string()))
 }
@@ -310,6 +330,7 @@ fn verify_claim_signature(
         &state.identity.principal_id(),
         token_hash,
         &req.public_key,
+        &req.origin_site_id,
         scopes,
         req.signed_at,
         &req.nonce,
@@ -329,15 +350,17 @@ fn claim_string(
     audience: &str,
     token_hash: &str,
     public_key: &str,
+    origin_site_id: &str,
     scopes: &[String],
     signed_at: u64,
     nonce: &str,
 ) -> String {
     format!(
-        "ryeos-admission-claim-v1\n{}\n{}\n{}\n{}\n{}\n{}",
+        "ryeos-admission-claim-v2\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
         audience,
         token_hash,
         public_key,
+        origin_site_id,
         scopes.join(","),
         signed_at,
         nonce,

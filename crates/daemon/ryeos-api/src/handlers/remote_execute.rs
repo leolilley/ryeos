@@ -46,6 +46,9 @@ pub struct Request {
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
+    /// Explicit execution semantics for the destination. The handler changes
+    /// only routing-local fields after pushing the requested project state.
+    pub execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
     /// Optional method call `{ method, args }` forwarded to the remote
     /// for method-dispatch kinds (knowledge query/graph/validate, …).
     /// Absent for terminator/delegate kinds.
@@ -181,6 +184,7 @@ pub async fn handle(
     };
 
     // Delegate to the shared unary forward helper.
+    let execution_policy = destination_execution_policy(&req.execution_policy)?;
     let forward_result = forward::execute_unary_forward(
         &state,
         &client,
@@ -189,8 +193,10 @@ pub async fn handle(
             item_ref: &req.item_ref,
             ref_bindings: &req.ref_bindings,
             local_project_path: abs_project_path.as_deref(),
+            source_snapshot_hash: None,
             remote_project_path: &project_path_for_ref,
             parameters: req.parameters.clone(),
+            execution_policy: &execution_policy,
             acting_principal: &ctx.fingerprint,
             remote_ignore: &remote_ignore,
             call: req.call.as_ref(),
@@ -200,10 +206,18 @@ pub async fn handle(
     .map_err(remote_forward_error_to_handler_error)?;
 
     // Return composite response matching the existing shape.
+    let pull = forward_result.pull_summary.as_ref().map(|summary| {
+        serde_json::json!({
+            "snapshot_hash": summary.snapshot_hash,
+            "cas_objects_fetched": summary.cas_objects_fetched,
+            "files_updated": summary.files_updated,
+            "files_deleted": summary.files_deleted,
+        })
+    });
     Ok(serde_json::json!({
         "push": {
             "snapshot_hash": forward_result.push_summary.pushed_snapshot_hash,
-            "manifest_entries": forward_result.push_summary.manifest_entries,
+            "tree_entries": forward_result.push_summary.tree_entries,
             "blobs_uploaded": forward_result.push_summary.blobs_uploaded,
             "blobs_skipped": forward_result.push_summary.blobs_skipped,
         },
@@ -211,15 +225,59 @@ pub async fn handle(
             "snapshot_hash": forward_result.result_snapshot_hash,
             "result": forward_result.remote_result,
         },
-        "pull": {
-            "snapshot_hash": forward_result.pull_summary.snapshot_hash,
-            "cas_objects_fetched": forward_result.pull_summary.cas_objects_fetched,
-            "files_updated": forward_result.pull_summary.files_updated,
-            "files_deleted": forward_result.pull_summary.files_deleted,
-            "user_files_updated": forward_result.pull_summary.user_files_updated,
-            "user_files_deleted": forward_result.pull_summary.user_files_deleted,
-        },
+        "pull": pull,
     }))
+}
+
+fn destination_execution_policy(
+    requested: &ryeos_app::execution_policy::ExecutionPolicy,
+) -> HandlerResult<ryeos_app::execution_policy::ExecutionPolicy> {
+    use ryeos_app::execution_policy::{ExecutionTarget, PinnedSource, ProjectExecutionPolicy};
+
+    requested
+        .validate()
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if requested.target != ExecutionTarget::Here {
+        return Err(HandlerError::BadRequest(
+            "remote execute receives a destination-local policy; target must be `here`".to_string(),
+        ));
+    }
+    if matches!(
+        &requested.project,
+        ProjectExecutionPolicy::Pinned {
+            realization: ryeos_app::execution_policy::PinnedRealization::Cow {
+                terminal_publication:
+                    ryeos_app::execution_policy::TerminalPublication::AdvanceHead { .. },
+            },
+            ..
+        }
+    ) {
+        return Err(HandlerError::BadRequest(
+            "remote advance-head publication requires destination-scoped delegated authority and is not supported in v1; use retain-result"
+                .to_string(),
+        ));
+    }
+    match &requested.project {
+        ProjectExecutionPolicy::Projectless
+        | ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive { .. },
+            ..
+        } => {}
+        _ => {
+            return Err(HandlerError::BadRequest(
+                "remote execute accepts projectless execution or an explicit pinned capture_live project policy"
+                    .to_string(),
+            ));
+        }
+    }
+    let mut policy = requested.clone();
+    if let ProjectExecutionPolicy::Pinned { source, .. } = &mut policy.project {
+        *source = PinnedSource::CurrentHead;
+    }
+    policy
+        .validate()
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    Ok(policy)
 }
 
 fn authorize_execution_refs(

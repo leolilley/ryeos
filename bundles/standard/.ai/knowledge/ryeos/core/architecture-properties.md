@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-17T00:38:07Z:e0d1800d74209ad73df002eada1523a4d0d6cf9568075c9fc2ff7de33f7baa34:DFQVrBf6GL4YDGLZmgUu2dQL++RzMpQYd8nqTciH7HCAsuPOPYydMv8eN5NsYepP4hcVSDAiBodvNMBsU/oUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T00:24:29Z:3876a0d8d5ecb50f5008baa8b32c3a4c0a6d2412b9406859197203f53837fb1d:xGA8DxZiOr4X/a4SIFX/tVcNHyG/bilerGorlaQD7ZhW3ziWngUxccGJEC3P/0uOen254FbkX0hYxRNVA7LwCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [architecture, properties, emergent, design, reference]
-version: "1.1.0"
+version: "1.2.0"
 description: >
   A catalogue of the architectural properties that emerge from Rye OS's
   foundation of content-addressed, signed, capability-gated execution.
@@ -157,6 +157,16 @@ indexes. Foreign files produce a specific error with recovery
 instructions.
 
 → [CAS Architecture](state/cas-architecture.md)
+
+### 16. Attachment Before Execution
+
+Every daemon-owned target is born unable to execute. RyeOS first captures and
+persists its exact process identity, rechecks stop and shutdown authority, and
+only then releases it. Direct execution uses Lillux's native hold; an enforced
+isolation backend holds its actual target. Durable ownership therefore does not
+depend on Bubblewrap or any other isolation provider.
+
+→ [Attachment Before Execution](execution/attachment-before-execution.md)
 
 ## The Meta-Observation
 

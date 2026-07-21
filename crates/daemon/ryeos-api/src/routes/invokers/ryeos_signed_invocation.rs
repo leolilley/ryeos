@@ -51,6 +51,7 @@ impl CompiledRouteInvocation for CompiledRyeosSignedVerifier {
             scopes: principal.scopes,
             verifier_key: "ryeos_signed",
             verified: true,
+            authenticated_origin_site_id: principal.authenticated_site_id,
             metadata: BTreeMap::new(),
         }))
     }

@@ -434,6 +434,7 @@ fn import_one(
         IsolationLaunchContext {
             project_path,
             project_authority: IsolationProjectAuthority::External,
+            live_access: None,
             state_root: None,
             checkpoint_dir: None,
             daemon_socket_path: None,

@@ -153,6 +153,12 @@ pub async fn run(
     // sealed root-admission boundary as every other executable root; the
     // generic `create_thread` child boundary correctly refuses root rows.
     let child_thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+    let launch_claim =
+        crate::execution::launch_claim::ThreadLaunchClaim::acquire_fresh(state, &child_thread_id)
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
+    let launch_owner = launch_claim
+        .canonical_owner()
+        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     // RuntimeRegistry is built exclusively from verified bundle roots. Resolve
     // the admission subject without the caller's project overlay, then bind it
     // back to the registry entry's exact bundle and signature-stripped bytes.
@@ -198,11 +204,19 @@ pub async fn run(
     )
     .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     let admitted_request = root_admission
-        .execution_request(executor_ref.clone(), "inline".to_string(), Value::Null)
+        .execution_request(executor_ref.clone(), "wait".to_string(), Value::Null)
         .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
     state
         .threads
-        .create_root_thread_with_id(&child_thread_id, &admitted_request)
+        .create_root_thread_with_id(
+            &child_thread_id,
+            &admitted_request,
+            provenance
+                .project_authority()
+                .clone()
+                .for_child()
+                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
+        )
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &child_thread_id);
@@ -226,6 +240,14 @@ pub async fn run(
         serde_json::Value::Null,
         0,
     );
+    if !state
+        .callback_tokens
+        .set_launch_owner(&cap.token, launch_owner.clone())
+    {
+        return Err(LaunchAugmentationError::Threads(
+            "augmentation callback capability disappeared before launch-owner binding".into(),
+        ));
+    }
     lifecycle_owner.track_callback_token(cap.token.clone());
 
     // 8. Mint thread-auth authority only when the verified protocol requests
@@ -443,13 +465,17 @@ pub async fn run(
             inherited_fds: Vec::new(),
             supervised_status: None,
         };
+        let live_access = provenance
+            .isolation_live_access_authority()
+            .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
         let applied = state
             .isolation
-            .apply_with_provenance(
+            .apply_awaiting_attachment_with_provenance(
                 subprocess_request,
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path,
                     project_authority: provenance.isolation_project_authority(),
+                    live_access: live_access.as_ref(),
                     state_root: provenance.state_root_override(),
                     checkpoint_dir: None,
                     daemon_socket_path: callback_ipc_requested
@@ -474,10 +500,12 @@ pub async fn run(
         let workspace_lifeline = provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = child_thread_id.clone();
+        let process_launch_owner = launch_owner.clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::execution::process_attachment::run_lillux_attached(
                 &process_state,
                 &process_thread_id,
+                &process_launch_owner,
                 subprocess_request,
                 workspace_lifeline,
             )
@@ -539,6 +567,7 @@ pub async fn run(
             match crate::dispatch::finalize_method_thread_if_needed(
                 state,
                 &child_thread_id,
+                &launch_owner,
                 "failed",
                 None,
             ) {
@@ -581,6 +610,7 @@ pub async fn run(
         match crate::dispatch::finalize_method_thread_if_needed(
             state,
             &child_thread_id,
+            &launch_owner,
             "failed",
             None,
         ) {
@@ -600,6 +630,7 @@ pub async fn run(
     let finalization = crate::dispatch::finalize_method_thread_if_needed(
         state,
         &child_thread_id,
+        &launch_owner,
         "completed",
         batch_result.output,
     )

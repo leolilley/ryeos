@@ -59,10 +59,10 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // before Clap's local parsers so every command shares the semantic model.
     if let Some(help_idx) = cli.rest.iter().position(|t| t == "--help" || t == "-h") {
         let command_tokens = &cli.rest[..help_idx];
-        let snapshot = crate::node_descriptors::load_verified_snapshot(&app_root);
         if command_tokens.is_empty() {
-            crate::help::print_help(console, &app_root, &snapshot)?;
+            crate::help::print_quick_help(console)?;
         } else {
+            let snapshot = crate::node_descriptors::load_verified_snapshot(&app_root);
             crate::help::print_command_help(
                 console,
                 command_tokens,
@@ -75,9 +75,60 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         return Ok(());
     }
 
+    // Explicit `ryeos help` is the bounded interactive command browser. Its
+    // plain and redirected forms preserve deterministic one-shot output.
+    if cli.rest.first().is_some_and(|token| token == "help") {
+        let force_plain = cli.rest.iter().any(|token| token == "--plain");
+        let exhaustive = cli.rest.iter().any(|token| token == "--all");
+        let help_tokens = cli.rest[1..]
+            .iter()
+            .filter(|token| !matches!(token.as_str(), "--plain" | "--all"))
+            .cloned()
+            .collect::<Vec<_>>();
+        if exhaustive {
+            if !help_tokens.is_empty() {
+                return Err(CliError::Local {
+                    detail: "`ryeos help --all` cannot be combined with command tokens"
+                        .to_string(),
+                });
+            }
+            let snapshot = crate::node_descriptors::load_verified_snapshot(&app_root);
+            crate::help::print_help(console, &app_root, &snapshot)?;
+            return Ok(());
+        }
+        if !force_plain
+            && console.capabilities().interactive()
+            && crate::tty::help_flow::supported_geometry()
+        {
+            crate::tty::help_flow::run(
+                console,
+                &app_root,
+                body_project_path.as_deref().unwrap_or("."),
+                (!help_tokens.is_empty()).then_some(help_tokens.as_slice()),
+            )
+            .await?;
+        } else {
+            let snapshot = crate::node_descriptors::load_verified_snapshot(&app_root);
+            if help_tokens.is_empty() {
+                crate::help::print_help(console, &app_root, &snapshot)?;
+            } else {
+                crate::help::print_command_help(
+                    console,
+                    &help_tokens,
+                    &app_root,
+                    body_project_path.as_deref().unwrap_or("."),
+                    &snapshot,
+                )
+                .await?;
+            }
+        }
+        return Ok(());
+    }
+
     // 3. Hardcoded lifecycle/bootstrap commands (must work before daemon exists):
     //      ryeos identity                   — print local node identity
     //      ryeos init                       — bootstrap operator state
+    //      ryeos setup                      — configure provider/model state
     //      ryeos start/stop                 — manage the local daemon
     //      ryeos node status                — inspect lifecycle state
     if lifecycle_commands::try_dispatch(&cli.rest, console).await? {
@@ -111,8 +162,9 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         return Ok(());
     }
 
-    // `ryeos help --all` / `ryeos commands` → exhaustive command reference.
-    if cli.rest == ["help", "--all"] || cli.rest == ["commands"] {
+    // `ryeos commands` → exhaustive command reference. `help --all` was
+    // normalized with the other help forms before lifecycle dispatch.
+    if cli.rest == ["commands"] {
         crate::help::print_help(console, &app_root, &snapshot)?;
         return Ok(());
     }
@@ -191,10 +243,11 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         "item_ref": resolved.item_ref,
         "ref_bindings": resolved.ref_bindings,
         "parameters": resolved.parameters,
+        "execution_policy": execution_policy_value(
+            resolved.project_path.is_some(),
+            resolved.async_launch,
+        ),
     });
-    if resolved.async_launch {
-        body["launch_mode"] = Value::String("accepted".to_string());
-    }
     if let Some(project_path) = &resolved.project_path {
         body["project_path"] = Value::String(
             project_path
@@ -294,8 +347,37 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     Ok(())
 }
 
+fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
+    let project = if project_backed {
+        serde_json::json!({
+            "kind": "live_direct",
+            "access": "read_write",
+            "child_policy": { "kind": "inherit" },
+        })
+    } else {
+        serde_json::json!({ "kind": "projectless" })
+    };
+    serde_json::json!({
+        "schema_version": 2,
+        "ownership": "daemon_owned",
+        "recovery": if project_backed { "none" } else { "restart_recoverable" },
+        "response": if accepted { "accepted" } else { "wait" },
+        "target": { "kind": "here" },
+        "environment": if project_backed {
+            serde_json::json!({
+                "kind": "project_overlay",
+                "include_operator_vault": true,
+                "name_policy": { "kind": "declared_required" },
+            })
+        } else {
+            serde_json::json!({ "kind": "none" })
+        },
+        "project": project,
+    })
+}
+
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
-    stdout_is_tty && (rest.is_empty() || rest == ["help"] || rest == ["--help"] || rest == ["-h"])
+    stdout_is_tty && rest.is_empty()
 }
 
 fn rest_with_global_no_project(rest: &[String], no_project: bool) -> Vec<String> {
@@ -1697,6 +1779,24 @@ mod tests {
             source_file: PathBuf::new(),
             provenance: ryeos_runtime::CommandProvenance::default(),
         }
+    }
+
+    #[test]
+    fn live_project_execute_is_daemon_owned_but_not_restart_recoverable() {
+        let policy = execution_policy_value(true, true);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "none");
+        assert_eq!(policy["response"], "accepted");
+        assert_eq!(policy["project"]["kind"], "live_direct");
+    }
+
+    #[test]
+    fn projectless_execute_can_be_restart_recoverable() {
+        let policy = execution_policy_value(false, false);
+        assert_eq!(policy["ownership"], "daemon_owned");
+        assert_eq!(policy["recovery"], "restart_recoverable");
+        assert_eq!(policy["response"], "wait");
+        assert_eq!(policy["project"]["kind"], "projectless");
     }
 
     #[test]

@@ -130,7 +130,7 @@ pub(super) fn prepare_managed_launch(
         kind: subject.thread_profile.clone(),
         item_ref: subject.item_ref.clone(),
         executor_ref: executor_ref.clone(),
-        launch_mode: "inline".to_string(),
+        launch_mode: "wait".to_string(),
         current_site_id: ctx.plan_ctx.current_site_id.clone(),
         origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
         target_site_id: None,

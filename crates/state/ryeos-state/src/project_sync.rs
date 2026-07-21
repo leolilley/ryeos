@@ -2,9 +2,10 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::ignore::IgnoreMatcher;
-use crate::objects::SourceManifest;
+use crate::objects::{ProjectSnapshotPolicy, ProjectTree, SourceManifest};
 
 /// Scope declared by a project snapshot.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -19,6 +20,174 @@ pub enum ProjectSyncScope {
     AiOnly,
     /// Full project snapshot used by existing push/execute flows.
     FullProject,
+}
+
+pub const PROJECT_SNAPSHOT_CONFIG_RELATIVE: &str = ".ai/config/execution/project-snapshot.yaml";
+
+/// Content identity used when a project deliberately has no authored snapshot
+/// policy. Absence is part of the captured policy, not an omitted fact.
+pub fn absent_project_snapshot_config_hash() -> String {
+    hex_sha256(br#"{"state":"absent"}"#)
+}
+
+/// Complete source identity for a synthetic capture that deliberately has no
+/// authored project policy. Synthetic/no-project snapshots still bind both
+/// policy inputs; absence must never be represented by an omitted map entry.
+pub fn absent_project_snapshot_source_hashes(
+    node_matcher: &IgnoreMatcher,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut source_hashes = std::collections::BTreeMap::new();
+    source_hashes.insert(
+        "project_config".to_string(),
+        absent_project_snapshot_config_hash(),
+    );
+    let node_patterns = node_matcher.canonical_patterns().to_vec();
+    let node_identity = lillux::canonical_json(&serde_json::json!({
+        "schema": 1,
+        "patterns": node_patterns,
+    }))?;
+    source_hashes.insert(
+        "node_additions".to_string(),
+        hex_sha256(node_identity.as_bytes()),
+    );
+    Ok(source_hashes)
+}
+
+/// Bind a captured tree to the policy-source presence/content fact recorded in
+/// its immutable policy. This treats absence as an explicit identity and
+/// closes both missing→created and created→missing capture races.
+pub fn validate_captured_policy_source(
+    cas: &lillux::CasStore,
+    tree: &ProjectTree,
+    policy: &ProjectSnapshotPolicy,
+) -> Result<()> {
+    let expected = policy
+        .source_hashes
+        .get("project_config")
+        .ok_or_else(|| anyhow::anyhow!("project snapshot policy omitted project-config state"))?;
+    let captured = tree.files.get(PROJECT_SNAPSHOT_CONFIG_RELATIVE);
+    if expected == &absent_project_snapshot_config_hash() {
+        anyhow::ensure!(
+            captured.is_none(),
+            "project snapshot policy source appeared during project capture"
+        );
+        return Ok(());
+    }
+    let object_hash = captured.ok_or_else(|| {
+        anyhow::anyhow!("project snapshot policy source disappeared during capture")
+    })?;
+    let object = cas
+        .get_object(object_hash)?
+        .ok_or_else(|| anyhow::anyhow!("captured policy ProjectFile is absent"))?;
+    let file = crate::objects::ProjectFile::from_value(&object)?;
+    anyhow::ensure!(
+        &file.blob_hash == expected,
+        "project snapshot policy changed during capture (policy={}, tree={})",
+        expected,
+        file.blob_hash
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectSnapshotConfig {
+    pub schema: u32,
+    #[serde(default)]
+    pub exclusions: Vec<String>,
+}
+
+impl ProjectSnapshotConfig {
+    pub const SCHEMA: u32 = 1;
+
+    fn empty() -> Self {
+        Self {
+            schema: Self::SCHEMA,
+            exclusions: Vec::new(),
+        }
+    }
+}
+
+/// Build the immutable policy for one capture. The committed project source is
+/// optional; the node matcher remains additive and cannot loosen code floors.
+pub fn capture_snapshot_policy(
+    project_root: &std::path::Path,
+    node_matcher: &IgnoreMatcher,
+    scope: ProjectSyncScope,
+) -> Result<ProjectSnapshotPolicy> {
+    let pinned = lillux::PinnedDirectory::open(project_root)?.ok_or_else(|| {
+        anyhow::anyhow!("project root does not exist: {}", project_root.display())
+    })?;
+    let policy = capture_snapshot_policy_from_pinned(&pinned, node_matcher, scope)?;
+    pinned.ensure_path_binding()?;
+    Ok(policy)
+}
+
+pub fn capture_snapshot_policy_from_pinned(
+    project_root: &lillux::PinnedDirectory,
+    node_matcher: &IgnoreMatcher,
+    scope: ProjectSyncScope,
+) -> Result<ProjectSnapshotPolicy> {
+    let config_file = open_optional_pinned_relative(
+        project_root,
+        std::path::Path::new(PROJECT_SNAPSHOT_CONFIG_RELATIVE),
+    )?;
+    let (config, project_source_hash) = match config_file {
+        Some(mut file) => {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut bytes)?;
+            let config: ProjectSnapshotConfig = serde_yaml::from_slice(&bytes)
+                .map_err(|error| anyhow::anyhow!("invalid project snapshot policy: {error}"))?;
+            anyhow::ensure!(
+                config.schema == ProjectSnapshotConfig::SCHEMA,
+                "project snapshot policy schema mismatch: expected {}, got {}",
+                ProjectSnapshotConfig::SCHEMA,
+                config.schema
+            );
+            (config, Some(hex_sha256(&bytes)))
+        }
+        None => (ProjectSnapshotConfig::empty(), None),
+    };
+
+    let mut source_hashes = absent_project_snapshot_source_hashes(node_matcher)?;
+    if let Some(project_source_hash) = project_source_hash {
+        source_hashes.insert("project_config".to_string(), project_source_hash);
+    }
+
+    ProjectSnapshotPolicy::new(
+        scope,
+        config.exclusions,
+        node_matcher.canonical_patterns().to_vec(),
+        source_hashes,
+    )
+}
+
+fn open_optional_pinned_relative(
+    root: &lillux::PinnedDirectory,
+    relative: &std::path::Path,
+) -> Result<Option<std::fs::File>> {
+    use std::path::Component;
+
+    let mut directory = root.try_clone()?;
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let Component::Normal(name) = component else {
+            anyhow::bail!("pinned policy path is not normalized");
+        };
+        if components.peek().is_none() {
+            return directory.open_regular(name, false);
+        }
+        let Some(child) = directory.open_child_directory(name)? else {
+            return Ok(None);
+        };
+        directory = child;
+    }
+    Ok(None)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Kind of deployable project `.ai` surface.
@@ -115,6 +284,7 @@ pub const PROJECT_AI_SURFACES: &[ProjectAiSurface] = &[
 /// enforced for every sync scope, and configuration may only ever *add* to it,
 /// never remove an entry. Shipping any of these would leak a credential.
 pub const NEVER_DEPLOY_SECRETS: &[&str] = &[
+    ".env",
     ".ai/node/identity",
     ".ai/node/auth",
     ".ai/node/vault",
@@ -131,6 +301,39 @@ pub const NODE_OWNED: &[&str] = &[
     ".ai/node/bundles",
 ];
 
+/// Central, non-bypassable live-execution control-plane floor. The same
+/// classification owns snapshot/deploy safety; live execution serializes this
+/// exact policy into its authority rather than duplicating path literals in an
+/// executor or adapter.
+pub fn live_execution_denied_control_paths() -> Vec<String> {
+    let mut paths = NEVER_DEPLOY_SECRETS
+        .iter()
+        .chain(NODE_OWNED.iter())
+        .map(|path| (*path).to_string())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Canonical identity of the non-bypassable project snapshot floor. Category
+/// prefixes keep otherwise identical path strings semantically distinct.
+pub fn snapshot_floor_rules() -> Vec<String> {
+    let mut rules = NEVER_DEPLOY_SECRETS
+        .iter()
+        .map(|path| format!("never_deploy_secret:{path}"))
+        .chain(NODE_OWNED.iter().map(|path| format!("node_owned:{path}")))
+        .chain([
+            "transaction_artifact:.ryeos-pull-staging-*".to_string(),
+            "transaction_artifact:.ryeos-pull-backup-*".to_string(),
+            "transaction_artifact:.ryeos-quarantine.*".to_string(),
+            "transaction_artifact:.ryeos-pull.lock".to_string(),
+        ])
+        .collect::<Vec<_>>();
+    rules.sort();
+    rules
+}
+
 /// Match `rel_path` against a set of `.ai` prefixes on segment boundaries,
 /// returning the matched prefix. `foo` matches `foo` and `foo/bar`, never
 /// `foobar`.
@@ -139,6 +342,18 @@ fn matched_prefix(rel_path: &str, prefixes: &[&'static str]) -> Option<&'static 
         .iter()
         .copied()
         .find(|p| rel_path == *p || rel_path.starts_with(&format!("{p}/")))
+}
+
+pub fn is_project_snapshot_floor_excluded(rel_path: &str) -> bool {
+    let transaction_artifact = rel_path.split('/').any(|component| {
+        component.starts_with(".ryeos-pull-staging-")
+            || component.starts_with(".ryeos-pull-backup-")
+            || component.starts_with(".ryeos-quarantine.")
+            || component == ".ryeos-pull.lock"
+    });
+    matched_prefix(rel_path, NEVER_DEPLOY_SECRETS).is_some()
+        || matched_prefix(rel_path, NODE_OWNED).is_some()
+        || transaction_artifact
 }
 
 fn surface_kind_str(kind: ProjectAiSurfaceKind) -> &'static str {
@@ -227,6 +442,21 @@ pub fn validate_project_manifest_paths(
     Ok(())
 }
 
+/// Validate a complete project tree against the exact immutable policy stored
+/// beside its snapshot. Current node ignore configuration is intentionally not
+/// consulted here.
+pub fn validate_project_tree_paths(
+    tree: &ProjectTree,
+    policy: &ProjectSnapshotPolicy,
+) -> Result<()> {
+    policy.validate()?;
+    let matcher = policy.matcher()?;
+    for rel_path in tree.files.keys() {
+        validate_project_manifest_path(rel_path, policy.sync_scope, Some(&matcher))?;
+    }
+    Ok(())
+}
+
 /// Validate a single manifest path for the declared sync scope.
 pub fn validate_project_manifest_path(
     rel_path: &str,
@@ -250,6 +480,12 @@ pub fn validate_project_manifest_path(
             "manifest path '{}' is under node-owned runtime prefix '{}' and cannot be deployed",
             rel_path,
             prefix
+        );
+    }
+    if is_project_snapshot_floor_excluded(rel_path) {
+        anyhow::bail!(
+            "manifest path '{}' is a RyeOS transaction artifact and cannot be deployed",
+            rel_path
         );
     }
 
@@ -440,10 +676,13 @@ mod tests {
         // Secrets and node-owned runtime state must be rejected even under
         // full_project sync, which previously only checked path safety.
         for path in [
+            ".env",
             ".ai/node/identity/private_key.pem",
             ".ai/config/keys/signing/k.pem",
             ".ai/state/runtime.sqlite3",
             ".ai/node/routes/apply.yaml",
+            "src/.ryeos-quarantine.1.2",
+            "nested/.ryeos-pull-backup-1.2/journal.json",
         ] {
             validate_project_manifest_paths(
                 &manifest(&[path]),
@@ -467,6 +706,10 @@ mod tests {
 
     #[test]
     fn classifies_project_ai_paths() {
+        assert!(matches!(
+            classify_project_ai_path(".env", None),
+            ProjectAiPathClass::NeverDeploySecret { prefix: ".env" }
+        ));
         assert!(matches!(
             classify_project_ai_path(".ai/config/schedules/snap-track.yaml", None),
             ProjectAiPathClass::Deployable(ProjectAiSurface {
@@ -542,6 +785,7 @@ mod tests {
             Some(".ai/node/ingest/ignore.yaml")
         );
         let secrets = v["never_deploy_secrets"].as_sequence().unwrap();
+        assert!(secrets.iter().any(|x| x.as_str() == Some(".env")));
         assert!(secrets
             .iter()
             .any(|x| x.as_str() == Some(".ai/node/identity")));

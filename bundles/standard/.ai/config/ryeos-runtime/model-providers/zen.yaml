@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:45fd53591f81e9bf204a7b120077e000a2257b58b5c417307e1c8d8c157393dd:A6cTSydzXvrruZq38LY79/M47UpUhBzPz7YkZJEwPscUJ8rNi1aY7Kx2BfrBsHTmUeqNBC2wFXY6OpL9+Fa2Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:52:25Z:8312ce8d2ae556fb530c2bcb797335ac429faba51c7a3ad794a65d3a272dea0c:7vr9dVuR7rivHhTmr+S1AyGONrtR04g2ECyTXqKecWvnsofO0bxwLEwvD1+CO6Ag9qREO9M8jBGHUkUFocHQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://opencode.ai/zen/v1"
@@ -212,6 +212,17 @@ profiles:
 
 extra:
   stream_url: "/chat/completions"
+  setup:
+    display_name: OpenCode Zen
+    priority: 15
+    recommended: true
+    credential: {label: API key, secret_name: ZEN_API_KEY, input: secret}
+    help_url: https://opencode.ai/auth
+    validation: {ref: "service:model-providers/validate", url: "https://opencode.ai/zen/v1/models", timeout_seconds: 15}
+    models:
+      - {name: claude-haiku-4-5, display_name: Claude Haiku 4.5, context_window: 200000}
+      - {name: claude-sonnet-4-6, display_name: Claude Sonnet 4.6, context_window: 200000, recommended: true}
+      - {name: gpt-5.4, display_name: GPT-5.4, context_window: 200000}
   available_models:
     claude: [claude-opus-4-7, claude-opus-4-6, claude-opus-4-5, claude-opus-4-1,
              claude-sonnet-4-6, claude-sonnet-4-5, claude-sonnet-4, claude-haiku-4-5]

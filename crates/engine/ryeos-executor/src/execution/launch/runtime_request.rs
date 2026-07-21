@@ -18,12 +18,14 @@ pub(super) struct SpawnRuntimeParams<'a> {
     pub binary: &'a str,
     pub project_path: &'a Path,
     pub project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
+    pub live_access: Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub workspace_lifeline: Option<std::sync::Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
     pub envelope: &'a LaunchEnvelope,
     pub timeout_secs: u64,
     pub callback: &'a EnvelopeCallback,
     pub thread_id: &'a str,
+    pub launch_owner: &'a str,
     pub vault_bindings: &'a [(String, String)],
     pub thread_auth_token: &'a str,
     pub roots: ryeos_app::env_contract::DaemonRootEnv,
@@ -69,6 +71,7 @@ impl SpawnedRuntime {
 struct AttachedProcessGuard {
     state: ryeos_app::state::AppState,
     thread_id: String,
+    launch_owner: String,
     identity: ryeos_app::process::ExecutionProcessIdentity,
 }
 
@@ -77,8 +80,11 @@ impl Drop for AttachedProcessGuard {
         match self
             .state
             .state_store
-            .clear_thread_process_if_matches(&self.thread_id, &self.identity)
-        {
+            .clear_thread_process_if_matches_owned(
+                &self.thread_id,
+                &self.identity,
+                &self.launch_owner,
+            ) {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
                 thread_id = self.thread_id,
@@ -107,12 +113,14 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         binary,
         project_path,
         project_authority,
+        live_access,
         state_root,
         workspace_lifeline,
         envelope,
         timeout_secs,
         callback,
         thread_id,
+        launch_owner,
         vault_bindings,
         thread_auth_token,
         roots,
@@ -217,11 +225,12 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
     let request = super::super::lillux_bridge::to_lillux_request(&spec)?;
     let isolation_item_ref = item_ref.to_string();
     let applied = isolation
-        .apply_with_provenance(
+        .apply_awaiting_attachment_with_provenance(
             request,
             ryeos_engine::isolation::IsolationLaunchContext {
                 project_path: &spec.project_path,
                 project_authority,
+                live_access: live_access.as_ref(),
                 state_root,
                 checkpoint_dir,
                 daemon_socket_path: isolation_daemon_socket_path,
@@ -238,7 +247,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
         .seed_isolation_provenance(thread_id, applied.provenance)
         .context("persist managed-runtime isolation provenance")?;
     let request = applied.request;
-    let spawned = match lillux::spawn(request) {
+    let spawned = match request.spawn() {
         Ok(spawned) => spawned,
         Err(result) => {
             return Ok(SpawnedRuntime {
@@ -253,45 +262,92 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
             });
         }
     };
-    let process_identity =
-        match crate::execution::process_attachment::capture_or_adopt_owned_identity(
-            state,
-            thread_id,
-            spawned.pid as i64,
-            spawned.pgid,
-        ) {
-            Ok(identity) => identity,
-            Err(error) => {
-                spawned.abort();
-                drop(workspace_lifeline);
-                return Err(error.context("capture managed runtime process identity"));
+    #[cfg(target_os = "linux")]
+    let process_identity_result =
+        ryeos_app::process::capture_execution_process_identity_from_pidfd(
+            spawned.pid() as i64,
+            Some(spawned.pgid()),
+            spawned.pidfd(),
+        )
+        .context("capture held managed-runtime identity from Lillux pidfd");
+    #[cfg(not(target_os = "linux"))]
+    let process_identity_result = ryeos_app::process::capture_execution_process_identity(
+        spawned.pid() as i64,
+        Some(spawned.pgid()),
+    )
+    .context("capture held managed-runtime identity");
+    let process_identity = match process_identity_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            let cleanup = spawned.abort_and_reap().err();
+            drop(workspace_lifeline);
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    error.context(format!("pending-process cleanup failed: {cleanup}"))
+                }
+                None => error,
+            });
+        }
+    };
+    // The runtime cannot self-attach before release. An existing identity at
+    // this boundary is therefore an invariant violation, not an adoption race.
+    if let Err(error) = state.threads.attach_new_process_owned(
+        &ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
+            thread_id: thread_id.to_string(),
+            pid: spawned.pid() as i64,
+            pgid: spawned.pgid(),
+            process_identity: Some(process_identity.clone()),
+            metadata: None,
+            // Spawn metadata was seeded before launch. An empty self-attach
+            // preserves it while establishing the immutable process identity.
+            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+        },
+        launch_owner,
+    ) {
+        let cleanup = spawned.abort_and_reap().err();
+        drop(workspace_lifeline);
+        let error = error.context("attach held managed runtime process identity");
+        return match cleanup {
+            Some(cleanup) => {
+                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
             }
+            None => Err(error),
         };
-    // Install compare-clear ownership before the in-process attach. The runtime
-    // can win the UDS self-attach race, then stop/finalize before this call.
+    }
     let attached_process = AttachedProcessGuard {
         state: state.clone(),
         thread_id: thread_id.to_string(),
+        launch_owner: launch_owner.to_string(),
         identity: process_identity.clone(),
     };
     if let Err(error) =
         state
             .threads
-            .attach_process(&ryeos_app::thread_lifecycle::ThreadAttachProcessParams {
-                thread_id: thread_id.to_string(),
-                pid: spawned.pid as i64,
-                pgid: spawned.pgid,
-                process_identity: Some(process_identity.clone()),
-                metadata: None,
-                // Spawn metadata was seeded before launch. An empty self-attach
-                // preserves it while establishing the immutable process identity.
-                launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
-            })
+            .authorize_process_release_owned(thread_id, &process_identity, launch_owner)
     {
-        spawned.abort();
+        let cleanup = spawned.abort_and_reap().err();
+        let stop_settlement =
+            super::super::process_attachment::finalize_requested_stop_if_present(state, thread_id);
         drop(workspace_lifeline);
-        return Err(error.context("attach managed runtime process identity"));
+        let error = match stop_settlement {
+            Ok(true) => {
+                anyhow::anyhow!("managed runtime stopped before attachment release: {error}")
+            }
+            Ok(false) => error.context("authorize managed runtime release after durable attachment"),
+            Err(stop_error) => error.context(format!(
+                "authorize managed runtime release after durable attachment; stop settlement also failed: {stop_error:#}"
+            )),
+        };
+        return match cleanup {
+            Some(cleanup) => {
+                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
+            }
+            None => Err(error),
+        };
     }
+    let spawned = spawned
+        .release_after_attachment()
+        .context("release managed runtime after durable process attachment")?;
     Ok(SpawnedRuntime {
         process: Some(spawned),
         attached_process: Some(attached_process),

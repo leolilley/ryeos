@@ -21,6 +21,10 @@ pub struct OfflineThreadHistoryGcOptions {
     pub app_root: Option<PathBuf>,
     pub dry_run: bool,
     pub sweep_cas: bool,
+    /// Explicit immutable project-schema cutover for principal and deployed
+    /// project HEADs. This is accepted only with the all-thread-history discard
+    /// because live history may reference either namespace.
+    pub discard_project_heads: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -30,6 +34,7 @@ pub enum OfflineThreadHistoryGcPhase {
     InspectingHistory,
     PublishingIntent,
     RetiringChainHeads,
+    RetiringProjectHeads,
     RebuildingProjection,
     ClearingRuntime,
     ClearingScheduler,
@@ -45,6 +50,7 @@ impl OfflineThreadHistoryGcPhase {
             Self::InspectingHistory => "inspecting_history",
             Self::PublishingIntent => "publishing_intent",
             Self::RetiringChainHeads => "retiring_chain_heads",
+            Self::RetiringProjectHeads => "retiring_project_heads",
             Self::RebuildingProjection => "rebuilding_projection",
             Self::ClearingRuntime => "clearing_runtime",
             Self::ClearingScheduler => "clearing_scheduler",
@@ -77,6 +83,7 @@ pub struct OfflineThreadHistoryGcReport {
     pub app_root: PathBuf,
     pub dry_run: bool,
     pub chain_heads: usize,
+    pub project_heads: usize,
     pub chain_ref_artifacts: usize,
     pub pending_transitions: usize,
     pub runtime_rows: RuntimeThreadHistoryDiscardReport,
@@ -177,7 +184,7 @@ fn run_offline_thread_history_gc_inner(
         .acquire_exclusive_guard(!options.dry_run)
         .context("acquire exclusive CAS/head mutation guard for offline GC")?;
 
-    let runtime_db = open_runtime_db(
+    let mut runtime_db = open_runtime_db(
         &config,
         &runtime_directory,
         &runtime_directory_lock,
@@ -197,9 +204,22 @@ fn run_offline_thread_history_gc_inner(
     let authoritative_preview = state_db
         .discard_authoritative_thread_history_admitted(&cas_guard, true)
         .context("inspect authoritative thread history")?;
-    let runtime_preview = runtime_db
-        .discard_all_thread_history(true)
-        .context("inspect daemon runtime thread rows")?;
+    let project_heads_preview = if options.discard_project_heads {
+        state_db
+            .discard_all_project_heads_admitted(&cas_guard, true)
+            .context("inspect principal and deployed project HEADs")?
+    } else {
+        0
+    };
+    let runtime_preview = if runtime_db.requires_explicit_history_reset() {
+        // Strict no-backcompat means an incompatible layout is never decoded
+        // merely to estimate destructive counts.
+        Default::default()
+    } else {
+        runtime_db
+            .discard_all_thread_history(true)
+            .context("inspect daemon runtime thread rows")?
+    };
     let thread_runtime_preview = crate::state_store::discard_all_thread_runtime_files(
         &config.app_root,
         &runtime_directory,
@@ -216,11 +236,19 @@ fn run_offline_thread_history_gc_inner(
     };
 
     let operational_roots = if options.sweep_cas {
-        Some(inspect_operational_gc_roots(
+        let mut roots = inspect_operational_gc_roots(
             &runtime_directory,
             &runtime_directory_lock,
             options.dry_run,
-        )?)
+        )?;
+        roots.object_hashes.extend(
+            runtime_db
+                .handoff_cas_object_roots()
+                .context("collect durable handoff CAS roots before offline CAS sweep")?,
+        );
+        roots.object_hashes.sort();
+        roots.object_hashes.dedup();
+        Some(roots)
     } else {
         None
     };
@@ -231,6 +259,7 @@ fn run_offline_thread_history_gc_inner(
             app_root: config.app_root,
             dry_run: true,
             chain_heads: authoritative_preview.chain_heads,
+            project_heads: project_heads_preview,
             chain_ref_artifacts: authoritative_preview.chain_ref_artifacts,
             pending_transitions: authoritative_preview.pending_transitions,
             runtime_rows: runtime_preview,
@@ -253,6 +282,9 @@ fn run_offline_thread_history_gc_inner(
     state_db
         .begin_thread_history_discard_admitted(&cas_guard)
         .context("publish offline thread-history discard intent")?;
+    runtime_db
+        .apply_explicit_history_reset(&config.db_path)
+        .context("apply runtime schema cutover after durable discard intent")?;
 
     let authoritative = {
         let mut authoritative_progress = |progress| match progress {
@@ -279,6 +311,19 @@ fn run_offline_thread_history_gc_inner(
                 &mut authoritative_progress,
             )
             .context("discard authoritative thread history")?
+    };
+
+    let project_heads = if options.discard_project_heads {
+        publish_progress(
+            &mut observer,
+            OfflineThreadHistoryGcPhase::RetiringProjectHeads,
+            None,
+        );
+        state_db
+            .discard_all_project_heads_admitted(&cas_guard, false)
+            .context("discard principal and deployed project HEADs for schema cutover")?
+    } else {
+        0
     };
 
     publish_progress(
@@ -347,6 +392,7 @@ fn run_offline_thread_history_gc_inner(
         app_root: config.app_root,
         dry_run: false,
         chain_heads: authoritative.chain_heads,
+        project_heads,
         chain_ref_artifacts: authoritative.chain_ref_artifacts,
         pending_transitions: authoritative.pending_transitions,
         runtime_rows,
@@ -405,7 +451,7 @@ fn open_runtime_db(
                 runtime_directory_lock.clone(),
             )
         } else {
-            RuntimeDb::open_with_namespace_authority(
+            RuntimeDb::open_for_explicit_history_reset_with_namespace_authority(
                 &config.db_path,
                 parent,
                 runtime_directory_lock.clone(),
@@ -414,7 +460,7 @@ fn open_runtime_db(
     } else if dry_run {
         RuntimeDb::open_existing_current(&config.db_path)
     } else {
-        RuntimeDb::open(&config.db_path)
+        RuntimeDb::open_for_explicit_history_reset(&config.db_path)
     }
     .with_context(|| format!("open runtime database {}", config.db_path.display()))
 }

@@ -31,6 +31,7 @@ ryeos-runtime = { workspace = true }
 ryeos-scheduler = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-bundle = { workspace = true }
+ryeos-directive-core = { workspace = true }
 ryeos-tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,14 +39,15 @@ serde_yaml = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time", "process"] }
 uuid = { workspace = true }
+zeroize = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 ryeos-app = { workspace = true, features = ["test-support"] }
 ryeos-engine = { workspace = true, features = ["test-support"] }

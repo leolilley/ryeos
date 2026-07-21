@@ -1,9 +1,8 @@
 //! Shared ownership for subprocesses that can call back into the daemon.
 //!
-//! A callback runtime may self-attach over UDS before the in-process launcher
-//! records the same identity. Attachment is immutable and exact repeats are
-//! idempotent, so both paths converge on one durable identity. The local owner
-//! always compare-clears that exact identity after its owned wait.
+//! Attachment-required subprocesses are held before user/runtime code can run.
+//! The local owner captures and persists the exact held identity, releases the
+//! process, and compare-clears that same identity after its owned wait.
 
 use std::sync::Arc;
 
@@ -15,7 +14,7 @@ use ryeos_app::state_store::{is_terminal_status, StopIntent};
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{ThreadAttachProcessParams, ThreadFinalizeParams};
 
-/// RAII ownership for any inline lifecycle row whose async request may be
+/// RAII ownership for any waiting lifecycle row whose async request may be
 /// cancelled after creation. Explicit terminal/preserve paths disarm it; an
 /// unplanned future drop delegates to the same exact-identity tree stop used by
 /// the unified runner.
@@ -77,12 +76,12 @@ impl Drop for LifecycleOwnerGuard {
             Ok(super::runner::OwnerDropStopOutcome::Settled) => {}
             Ok(super::runner::OwnerDropStopOutcome::PreservedForShutdown) => tracing::info!(
                 thread_id = %self.thread_id,
-                "inline lifecycle owner preserved row for shutdown coordinator"
+                "waiting lifecycle owner preserved row for shutdown coordinator"
             ),
             Err(error) => tracing::error!(
                 thread_id = %self.thread_id,
                 error = %error,
-                "inline lifecycle owner could not fully stop and settle execution tree"
+                "waiting lifecycle owner could not fully stop and settle execution tree"
             ),
         }
     }
@@ -91,6 +90,7 @@ impl Drop for LifecycleOwnerGuard {
 struct AttachedProcessGuard<'a> {
     state: &'a AppState,
     thread_id: &'a str,
+    launch_owner: &'a str,
     identity: ryeos_app::process::ExecutionProcessIdentity,
 }
 
@@ -99,8 +99,11 @@ impl Drop for AttachedProcessGuard<'_> {
         match self
             .state
             .state_store
-            .clear_thread_process_if_matches(self.thread_id, &self.identity)
-        {
+            .clear_thread_process_if_matches_owned(
+                self.thread_id,
+                &self.identity,
+                self.launch_owner,
+            ) {
             Ok(true) => {}
             Ok(false) => tracing::warn!(
                 thread_id = self.thread_id,
@@ -165,80 +168,109 @@ pub(crate) fn finalize_requested_stop_if_present(
     }
 }
 
-/// Capture the live owned identity, or adopt the exact identity a fast runtime
-/// already established through its authenticated UDS self-attach.
-///
-/// The adoption path matters when the runtime exits before the in-process owner
-/// reaches procfs capture: the UDS boundary pinned the live peer earlier, and
-/// the owner still retains the Lillux handle needed to reap it.
-pub(crate) fn capture_or_adopt_owned_identity(
-    state: &AppState,
-    thread_id: &str,
-    pid: i64,
-    pgid: i64,
-) -> Result<ryeos_app::process::ExecutionProcessIdentity> {
-    match ryeos_app::process::capture_execution_process_identity(pid, Some(pgid)) {
-        Ok(identity) => Ok(identity),
-        Err(
-            capture_error @ ryeos_app::process::ExecutionProcessIdentityCaptureError::TargetAlreadyDeadOrStale,
-        ) => {
-            let existing = state.threads.get_thread(thread_id)?.and_then(|thread| {
-                (thread.runtime.pid == Some(pid) && thread.runtime.pgid == Some(pgid))
-                    .then_some(thread.runtime.process_identity)
-                    .flatten()
-            });
-            existing.ok_or_else(|| {
-                anyhow::Error::new(capture_error).context(
-                    "capture owned process identity and no exact authenticated self-attach exists",
-                )
-            })
-        }
-        Err(error) => Err(error).context("capture owned process identity"),
-    }
-}
-
 /// Spawn, durably attach, wait, and compare-clear one callback-capable
 /// subprocess inside a single blocking owner.
 pub(crate) fn run_lillux_attached(
     state: &AppState,
     thread_id: &str,
-    request: lillux::SubprocessRequest,
+    launch_owner: &str,
+    request: ryeos_engine::isolation::IsolationRequestAwaitingAttachment,
     workspace_lifeline: Option<Arc<TempDirGuard>>,
 ) -> Result<lillux::SubprocessResult> {
     let _workspace_lifeline = workspace_lifeline;
-    let spawned = match lillux::spawn(request) {
+    let spawned = match request.spawn() {
         Ok(spawned) => spawned,
         Err(result) => return Ok(result),
     };
-    let identity =
-        match capture_or_adopt_owned_identity(state, thread_id, spawned.pid as i64, spawned.pgid) {
-            Ok(identity) => identity,
-            Err(error) => {
-                spawned.abort();
-                return Err(error).context("capture callback subprocess identity");
-            }
+
+    #[cfg(target_os = "linux")]
+    let identity_result = ryeos_app::process::capture_execution_process_identity_from_pidfd(
+        spawned.pid() as i64,
+        Some(spawned.pgid()),
+        spawned.pidfd(),
+    )
+    .context("capture held callback subprocess identity from Lillux pidfd");
+    #[cfg(not(target_os = "linux"))]
+    let identity_result = ryeos_app::process::capture_execution_process_identity(
+        spawned.pid() as i64,
+        Some(spawned.pgid()),
+    )
+    .context("capture held callback subprocess identity");
+    let identity = match identity_result {
+        Ok(identity) => identity,
+        Err(error) => {
+            let cleanup = spawned.abort_and_reap().err();
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    error.context(format!("pending-process cleanup failed: {cleanup}"))
+                }
+                None => error,
+            });
+        }
+    };
+
+    if let Err(error) = state.threads.attach_new_process_owned(
+        &ThreadAttachProcessParams {
+            thread_id: thread_id.to_string(),
+            pid: spawned.pid() as i64,
+            pgid: spawned.pgid(),
+            process_identity: Some(identity.clone()),
+            metadata: None,
+            launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+        },
+        launch_owner,
+    ) {
+        let cleanup = spawned.abort_and_reap().err();
+        let stop_settlement = finalize_requested_stop_if_present(state, thread_id);
+        let error = match stop_settlement {
+            Ok(true) => error.context(
+                "callback subprocess attachment refused after durable stop request",
+            ),
+            Ok(false) => error.context("attach held callback subprocess identity"),
+            Err(stop_error) => error.context(format!(
+                "attach held callback subprocess identity; stop settlement also failed: {stop_error:#}"
+            )),
         };
-    // Install compare-clear ownership before the in-process attach. A fast
-    // runtime may already have self-attached over UDS; any later refusal must
-    // still clear that exact authenticated identity after abort/reap.
+        return match cleanup {
+            Some(cleanup) => {
+                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
+            }
+            None => Err(error),
+        };
+    }
     let _attachment = AttachedProcessGuard {
         state,
         thread_id,
+        launch_owner,
         identity: identity.clone(),
     };
-    if let Err(error) = state.threads.attach_process(&ThreadAttachProcessParams {
-        thread_id: thread_id.to_string(),
-        pid: spawned.pid as i64,
-        pgid: spawned.pgid,
-        process_identity: Some(identity.clone()),
-        metadata: None,
-        launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
-    }) {
-        spawned.abort();
-        if finalize_requested_stop_if_present(state, thread_id)? {
-            anyhow::bail!("callback subprocess attachment refused after durable stop request");
-        }
-        return Err(error).context("attach callback subprocess identity");
+    if let Err(error) =
+        state
+            .threads
+            .authorize_process_release_owned(thread_id, &identity, launch_owner)
+    {
+        let cleanup = spawned.abort_and_reap().err();
+        let stop_settlement = finalize_requested_stop_if_present(state, thread_id);
+        let error = match stop_settlement {
+            Ok(true) => {
+                anyhow::anyhow!("callback subprocess stopped before attachment release: {error}")
+            }
+            Ok(false) => {
+                error.context("authorize callback subprocess release after durable attachment")
+            }
+            Err(stop_error) => error.context(format!(
+                "authorize callback subprocess release after durable attachment; stop settlement also failed: {stop_error:#}"
+            )),
+        };
+        return match cleanup {
+            Some(cleanup) => {
+                Err(error.context(format!("pending-process cleanup failed: {cleanup}")))
+            }
+            None => Err(error),
+        };
     }
+    let spawned = spawned
+        .release_after_attachment()
+        .context("release callback subprocess after durable attachment")?;
     Ok(spawned.wait())
 }

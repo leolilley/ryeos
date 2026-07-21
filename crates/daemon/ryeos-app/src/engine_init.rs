@@ -204,37 +204,34 @@ impl ryeos_engine::isolation::IsolationGenerationLifeline for RetainedRegistered
 pub fn load_registered_isolation(
     app_root: &std::path::Path,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
-    let _generation_lock = crate::bundle_transaction::BundleRegistryMutationLock::acquire(app_root)
-        .context("acquire bundle-generation lock for isolation composition")?;
+    let _generation_lock =
+        crate::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
+            .context("acquire bundle-generation lock for isolation composition")?;
     load_registered_generation_under_lock(app_root).map(|generation| generation.0)
 }
 
-/// Standalone composition retains a shared node-wide generation lock for as
-/// long as the returned runtime (and any engine holding it) remains alive.
-///
-/// A retained reader prevents bundle install/replace/remove from changing the
-/// verified generation, while remaining compatible with nested read-only
-/// engines launched by parser, composer, and inspection handlers. Retaining
-/// the exclusive mutation lock here would deadlock such a child against its
-/// parent before it could resolve anything.
+/// Standalone composition pins and verifies one generation while loading it.
+/// Each later verified-open-to-exec operation reacquires a short read lock via
+/// the generation lifeline; the returned runtime itself never holds
+/// `.bundles.lock`, so a long-lived TUI cannot block node boot or replacement.
 pub fn load_locked_registered_isolation(
     app_root: &std::path::Path,
 ) -> Result<Arc<ryeos_engine::isolation::IsolationRuntime>> {
-    let generation_lock = Arc::new(
-        crate::bundle_transaction::BundleRegistryReadLock::acquire(app_root)
-            .context("acquire retained bundle-generation read lock for isolation composition")?,
-    );
+    let generation_lock =
+        crate::bundle_transaction::BundleRegistryMutationLock::acquire_for_startup(app_root)
+            .context("acquire bundle-generation lock for isolation composition")?;
     let (runtime, node_trust, generation) = load_registered_generation_under_lock(app_root)?;
     let bundle_roots = generation.roots();
     let lifeline = Arc::new(RetainedRegisteredGeneration {
         app_root: app_root.to_path_buf(),
-        _read_lock: Some(generation_lock),
+        _read_lock: None,
         verified_generation: generation,
         node_trust_store: node_trust.clone(),
     });
     let runtime = Arc::try_unwrap(runtime)
         .map_err(|_| anyhow::anyhow!("new isolation runtime unexpectedly has shared ownership"))?
         .retain_registered_generation(lifeline, node_trust, bundle_roots);
+    drop(generation_lock);
     Ok(Arc::new(runtime))
 }
 
@@ -391,7 +388,7 @@ fn resolve_verified_isolation_backend(
     if !declaration.targets.contains(&target) {
         anyhow::bail!("{diagnostic_prefix}isolation implementation omits the host target");
     }
-    let adapter = ryeos_engine::binary_resolver::capture_bundle_executable(
+    let adapter = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
         &declaration.adapter,
         root,
         node_trust_store,
@@ -406,7 +403,7 @@ fn resolve_verified_isolation_backend(
     let mut artifact_handles = std::collections::BTreeMap::new();
     let mut artifact_digests = std::collections::BTreeMap::new();
     for (role, executable) in &declaration.artifacts {
-        let artifact = ryeos_engine::binary_resolver::capture_bundle_executable(
+        let artifact = ryeos_engine::binary_resolver::capture_bundle_binary_ref(
             executable,
             root,
             node_trust_store,
@@ -545,7 +542,7 @@ fn inspect_isolation_backend(
         let mut response: AdapterInspectionResponse =
             ryeos_isolation_protocol::from_json_str_strict(&result.stdout)
                 .context("parse strict isolation adapter inspection response")?;
-        if response.protocol != IsolationAdapterProtocolVersion::V1 {
+        if response.protocol != declaration.protocol {
             anyhow::bail!("isolation adapter returned a different protocol version");
         }
         response
@@ -785,6 +782,7 @@ fn build_engine_for_roots_with_isolation(
     } = build_node_bundle_admission(&bundle_roots, &node_trust_store, isolation.clone())?;
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
+        .with_operator_ai_root(config.app_root.join(ryeos_engine::AI_DIR))
         .with_isolation_generation(Arc::clone(&isolation))
         .with_trust_store(trust_store)
         .with_node_trust_store(node_trust_store)

@@ -133,6 +133,7 @@ crates/bin/daemon/Cargo.lock
 ## E2E test generated knowledge (ephemeral)
 tests/e2e/.ai/knowledge/
 target/
+/target
 tests/e2e/.ai/knowledge/agent/threads/
 
 ## Local binary scratch dir (source installables live in crates/bin/)

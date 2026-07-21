@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:1f307af85004089dcad4ac0e162f9d0567b2508f93a46e68e1f6ce70fc849360:EKWIE8r+yN0n1/2r6dBaHQVx5T6mVI78Dw9G04OV8j13b54c97Hroe/ARykgx/4zM4fLTVGh3JRDeLviAvn1Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:52:25Z:198c604d5523e8516f1b3c4c53cf85b2fce650fa14d38342c99688f762d54c93:PDXDFmovnpyL563UoJV6SIPAGajYBTBOK5K1X5TDfZ9wjO/41D9w/A3rx1ZFQO5iYjGpWregW9YfMwrOK6gVBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://openrouter.ai/api/v1"
@@ -108,6 +108,18 @@ pricing:
     nvidia/nemotron-3-super-120b-a12b:     {input_per_million: 0.09, output_per_million: 0.45}
 extra:
   stream_url: "/chat/completions"
+  setup:
+    display_name: OpenRouter
+    priority: 10
+    recommended: true
+    credential: {label: API key, secret_name: OPENROUTER_API_KEY, input: secret}
+    help_url: https://openrouter.ai/keys
+    validation: {ref: "service:model-providers/validate", url: "https://openrouter.ai/api/v1/models", timeout_seconds: 15}
+    models:
+      - {name: anthropic/claude-haiku-4-5, display_name: Claude Haiku 4.5, context_window: 200000}
+      - {name: anthropic/claude-sonnet-4-6, display_name: Claude Sonnet 4.6, context_window: 200000, recommended: true}
+      - {name: openai/gpt-5-4, display_name: GPT-5.4, context_window: 200000}
+      - {name: google/gemini-3-1-pro-preview, display_name: Gemini 3.1 Pro, context_window: 1000000}
   available_models:
     anthropic: [anthropic/claude-opus-4-7, anthropic/claude-opus-4-6, anthropic/claude-opus-4-5,
                 anthropic/claude-opus-4-1, anthropic/claude-sonnet-4-6, anthropic/claude-sonnet-4-5,

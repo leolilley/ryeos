@@ -5,6 +5,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_engine::engine::Engine;
@@ -47,20 +48,6 @@ impl From<ryeos_app::engine_cache::BuildWaitError> for ProjectSourceError {
     }
 }
 
-fn load_live_bundle_roots(state: &AppState) -> Result<Vec<PathBuf>, ProjectSourceError> {
-    let daemon_engine = &state.engine;
-    let loader = ryeos_app::node_config::loader::BootstrapLoader {
-        app_root: state.config.app_root.as_path(),
-        trust_store: &daemon_engine.node_trust_store,
-    };
-    let records = loader.load_bundle_section().map_err(|e| {
-        ProjectSourceError::Other(format!(
-            "failed to load live bundle registry for per-request engine rebuild: {e}"
-        ))
-    })?;
-    Ok(records.into_iter().map(|r| r.path).collect())
-}
-
 /// How the project root is determined for execution.
 ///
 /// Tagged enum — callers specify `{ "kind": "live_fs" }` or
@@ -76,6 +63,35 @@ pub enum ProjectSource {
     /// Resolve the acting principal's HEAD ref for the project
     /// and checkout from CAS.
     PushedHead,
+    /// Execute from one explicitly selected immutable project snapshot.
+    Snapshot { hash: String },
+    /// Explicitly capture the complete live project at admission, then execute
+    /// from that pinned generation. This is never selected implicitly.
+    CaptureLiveFullProject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedContextRealization {
+    ReadOnly,
+    Cow,
+}
+
+pub fn pinned_context_realization(
+    authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> Result<PinnedContextRealization, ProjectSourceError> {
+    match authority {
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ..
+        } => Ok(PinnedContextRealization::ReadOnly),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+            ..
+        } => Ok(PinnedContextRealization::Cow),
+        _ => Err(ProjectSourceError::Other(
+            "pinned realization requested for non-pinned project authority".to_string(),
+        )),
+    }
 }
 
 /// Request-scoped project execution context.
@@ -86,7 +102,6 @@ pub enum ProjectSource {
 ///
 /// Ownership of `temp_dir` is transferred to `ExecutionGuard` in the
 /// runner for lifecycle management.
-#[derive(Debug)]
 pub struct ResolvedProjectContext {
     /// The path to resolve and execute against (may be a CAS checkout dir).
     pub effective_path: PathBuf,
@@ -113,6 +128,9 @@ pub struct ResolvedProjectContext {
     /// lookups MUST go through this field (or the `engine` on the
     /// `ExecutionContext` / `ExecutionParams` that it flows into).
     pub request_engine: Arc<Engine>,
+    /// Keeps the captured CAS closure rooted until the authoritative launch
+    /// birth is visible. Pushed-head contexts are already rooted by HEAD.
+    captured_generation: Option<super::CapturedProjectGeneration>,
 }
 
 impl ResolvedProjectContext {
@@ -138,7 +156,14 @@ impl ResolvedProjectContext {
             snapshot_hash: None,
             temp_dir: None,
             request_engine,
+            captured_generation: None,
         })
+    }
+
+    /// Move the staged CAS reachability lease into the launch task. Only live
+    /// captures carry one; pushed HEAD generations are already durable roots.
+    pub fn take_captured_generation(&mut self) -> Option<super::CapturedProjectGeneration> {
+        self.captured_generation.take()
     }
 }
 
@@ -161,21 +186,28 @@ pub fn resolve_project_context(
     project_path: &std::path::Path,
     principal_id: &str,
     checkout_id: &str,
+    pinned_realization: PinnedContextRealization,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
     let original_path = project_path.to_path_buf();
 
     let ctx = match source {
-        ProjectSource::LiveFs => ResolvedProjectContext {
-            effective_path: original_path.clone(),
-            original_path,
-            source: source.clone(),
-            snapshot_hash: None,
-            temp_dir: None,
-            // LiveFs uses the daemon's startup engine directly — no
-            // per-request overlay needed because the daemon's own
-            // app root is what resolves anyway.
-            request_engine: Arc::clone(&state.engine),
-        },
+        ProjectSource::LiveFs => {
+            if !original_path.is_dir() {
+                return Err(ProjectSourceError::Other(format!(
+                    "live project root is not an accessible directory: {}",
+                    original_path.display()
+                )));
+            }
+            ResolvedProjectContext {
+                effective_path: original_path.clone(),
+                original_path,
+                source: ProjectSource::LiveFs,
+                snapshot_hash: None,
+                temp_dir: None,
+                request_engine: Arc::clone(&state.engine),
+                captured_generation: None,
+            }
+        }
         ProjectSource::PushedHead => {
             let authority = crate::execution::pinned_state_authority(state)?;
             let cas_mutation_guard = authority.acquire_shared_guard()?;
@@ -202,14 +234,54 @@ pub fn resolve_project_context(
                     project_path: project_str.to_string(),
                 })?;
 
-            resolve_pinned_snapshot_context_admitted(
+            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
                 state,
-                &authority,
-                &cas_mutation_guard,
-                &snap_hash,
+                authority: &authority,
+                cas_mutation_guard: &cas_mutation_guard,
+                snapshot_hash: &snap_hash,
                 original_path,
                 checkout_id,
-            )?
+                source: ProjectSource::PushedHead,
+                captured_generation: None,
+                realization: pinned_realization,
+            })?
+        }
+        ProjectSource::Snapshot { hash } => {
+            let authority = crate::execution::pinned_state_authority(state)?;
+            let cas_mutation_guard = authority.acquire_shared_guard()?;
+            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
+                state,
+                authority: &authority,
+                cas_mutation_guard: &cas_mutation_guard,
+                snapshot_hash: hash,
+                original_path,
+                checkout_id,
+                source: source.clone(),
+                captured_generation: None,
+                realization: pinned_realization,
+            })?
+        }
+        ProjectSource::CaptureLiveFullProject => {
+            let captured = crate::execution::capture_live_project_snapshot(
+                state,
+                &original_path,
+                state.threads.site_id(),
+                "explicit-execution-policy-capture",
+            )?;
+            let snapshot_hash = captured.snapshot_hash().to_string();
+            let authority = crate::execution::pinned_state_authority(state)?;
+            let cas_mutation_guard = authority.acquire_shared_guard()?;
+            resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
+                state,
+                authority: &authority,
+                cas_mutation_guard: &cas_mutation_guard,
+                snapshot_hash: &snapshot_hash,
+                original_path,
+                checkout_id,
+                source: source.clone(),
+                captured_generation: Some(captured),
+                realization: pinned_realization,
+            })?
         }
     };
 
@@ -238,28 +310,50 @@ pub fn resolve_pinned_snapshot_context(
     snapshot_hash: &str,
     original_path: PathBuf,
     checkout_id: &str,
+    realization: PinnedContextRealization,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
     let authority = crate::execution::pinned_state_authority(state)?;
     let cas_mutation_guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&cas_mutation_guard)?;
-    resolve_pinned_snapshot_context_admitted(
+    resolve_pinned_snapshot_context_admitted(PinnedSnapshotContextParams {
         state,
-        &authority,
-        &cas_mutation_guard,
+        authority: &authority,
+        cas_mutation_guard: &cas_mutation_guard,
         snapshot_hash,
         original_path,
         checkout_id,
-    )
+        source: ProjectSource::PushedHead,
+        captured_generation: None,
+        realization,
+    })
+}
+
+struct PinnedSnapshotContextParams<'a> {
+    state: &'a AppState,
+    authority: &'a ryeos_state::PinnedStateAuthority,
+    cas_mutation_guard: &'a ryeos_state::CasMutationGuard,
+    snapshot_hash: &'a str,
+    original_path: PathBuf,
+    checkout_id: &'a str,
+    source: ProjectSource,
+    captured_generation: Option<super::CapturedProjectGeneration>,
+    realization: PinnedContextRealization,
 }
 
 fn resolve_pinned_snapshot_context_admitted(
-    state: &AppState,
-    authority: &ryeos_state::PinnedStateAuthority,
-    cas_mutation_guard: &ryeos_state::CasMutationGuard,
-    snapshot_hash: &str,
-    original_path: PathBuf,
-    checkout_id: &str,
+    params: PinnedSnapshotContextParams<'_>,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
+    let PinnedSnapshotContextParams {
+        state,
+        authority,
+        cas_mutation_guard,
+        snapshot_hash,
+        original_path,
+        checkout_id,
+        source,
+        captured_generation,
+        realization,
+    } = params;
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
 
@@ -272,46 +366,85 @@ fn resolve_pinned_snapshot_context_admitted(
                 snapshot_hash
             ))
         })?;
-    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
+    ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
-    if snapshot.user_manifest_hash.is_some() {
-        return Err(ProjectSourceError::CheckoutFailed(
-            "snapshots with user_manifest_hash are not supported; re-push the project".to_string(),
-        ));
-    }
-
-    // ── 1. Always materialise the project checkout (request-owned) ──
-    let manifest_hash = &snapshot.project_manifest_hash;
+    // ── 1. Realize the selected immutable filesystem contract ───────
     let runtime_cache = state.config.runtime_root().cache();
-    let execution_root = runtime_cache.join("executions");
-    std::fs::create_dir_all(&execution_root)
-        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    }
-    let exec_dir = execution_root.join(checkout_id);
-    std::fs::create_dir(&exec_dir)
-        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    let project_guard = Arc::new(TempDirGuard::new(exec_dir.clone()));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&exec_dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
-    }
     let materialization_cache =
         crate::execution::cache::MaterializationCache::new(runtime_cache.join("snapshots"));
-    crate::execution::checkout_project(
+    let (target_path, project_guard) = match realization {
+        PinnedContextRealization::ReadOnly => (None, None),
+        PinnedContextRealization::Cow => {
+            let execution_root = runtime_cache.join("executions");
+            std::fs::create_dir_all(&execution_root)
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&execution_root, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            }
+            let workspace_root = execution_root.join(checkout_id);
+            state
+                .state_store
+                .reserve_execution_workspace(
+                    checkout_id,
+                    snapshot_hash,
+                    workspace_root.to_str().ok_or_else(|| {
+                        ProjectSourceError::CheckoutFailed(
+                            "execution workspace path is not valid UTF-8".to_string(),
+                        )
+                    })?,
+                )
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            let workspace =
+                crate::execution::workspace::WorkspaceLayout::create(&execution_root, checkout_id)
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            let reserved = state
+                .state_store
+                .execution_workspace(checkout_id)
+                .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?
+                .ok_or_else(|| {
+                    ProjectSourceError::CheckoutFailed(
+                        "workspace reservation disappeared".to_string(),
+                    )
+                })?;
+            if reserved.state == WorkspaceState::Reserved {
+                state
+                    .state_store
+                    .transition_execution_workspace(
+                        checkout_id,
+                        &[WorkspaceState::Reserved],
+                        WorkspaceState::Constructing,
+                        None,
+                    )
+                    .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?;
+            } else if reserved.state != WorkspaceState::Constructing {
+                return Err(ProjectSourceError::CheckoutFailed(format!(
+                    "workspace {checkout_id} cannot be adopted from state {}",
+                    reserved.state
+                )));
+            }
+            let lower = workspace.lower;
+            (
+                Some(lower),
+                Some(Arc::new(TempDirGuard::new_workspace(workspace.root))),
+            )
+        }
+    };
+    let (effective_path, generation_lease) = crate::execution::checkout_project_lower(
         authority,
         cas_mutation_guard,
-        manifest_hash,
-        &exec_dir,
-        Some(&materialization_cache),
+        snapshot_hash,
+        target_path.as_deref(),
+        &materialization_cache,
     )
     .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+    let project_guard = match project_guard {
+        Some(guard) => guard,
+        None => Arc::new(TempDirGuard::new_borrowed_cache(effective_path.clone())),
+    };
+    project_guard.retain_lease(generation_lease);
 
     // ── 2. Check cache for a previously-built engine ──
     let cache_key = ryeos_app::engine_cache::CacheKey {
@@ -319,39 +452,38 @@ fn resolve_pinned_snapshot_context_admitted(
         snapshot_hash: snapshot_hash.to_string(),
     };
 
+    let immutable_project_root = materialization_cache.cache_dir(snapshot_hash);
     let request_engine = state.engine_cache.get_or_insert_with(
         cache_key,
         || -> Result<(Arc<Engine>, Option<Arc<TempDirGuard>>), ProjectSourceError> {
-            // Re-read live bundle roots from the same signed
-            // registry used by daemon startup. Only runs on cache
-            // miss (generation bump invalidates the key), so the
-            // read cost is bounded.
-            let bundle_roots = load_live_bundle_roots(state)?;
-            let built = ryeos_app::engine_init::build_engine_for_roots(
-                &state.config,
-                &bundle_roots,
-                Some(exec_dir.as_path()),
-                None,
-                Arc::clone(&state.isolation),
-            )
-            .map_err(|e| {
-                ProjectSourceError::CheckoutFailed(format!("per-request engine build failed: {e}"))
-            })?;
+            // Installed executor registries are admitted once at the daemon
+            // generation boundary. Derive only the project trust view here;
+            // rebuilding the node engine would duplicate admission and could
+            // observe a different ambient registry generation.
+            let built = state
+                .engine
+                .for_project_root(immutable_project_root.as_path(), None)
+                .map_err(|e| {
+                    ProjectSourceError::CheckoutFailed(format!(
+                        "per-request project trust derivation failed: {e}"
+                    ))
+                })?;
 
             Ok((Arc::new(built), None))
         },
     )?;
 
     Ok(ResolvedProjectContext {
-        effective_path: exec_dir,
+        effective_path,
         original_path,
-        source: ProjectSource::PushedHead,
+        source,
         snapshot_hash: Some(snapshot_hash.to_string()),
         // Request-owned: wrapped in Arc<TempDirGuard> so the
         // runner and cache can both hold references. The project
         // checkout is cleaned up when the last Arc drops.
         temp_dir: Some(project_guard),
         request_engine,
+        captured_generation,
     })
 }
 
@@ -548,12 +680,14 @@ mod canonical_project_ref_tests {
     fn borrowed_constructor_errors_when_dir_missing() {
         let missing =
             std::env::temp_dir().join(format!("ryeos-missing-borrowed-{}", rand::random::<u64>()));
-        let err = ResolvedProjectContext::borrowed(
+        let err = match ResolvedProjectContext::borrowed(
             missing.clone(),
             PathBuf::from("/original"),
             minimal_engine(),
-        )
-        .unwrap_err();
+        ) {
+            Ok(_) => panic!("missing borrowed directory was accepted"),
+            Err(error) => error,
+        };
         let msg = err.to_string();
         assert!(msg.contains("borrowed working dir"));
         assert!(msg.contains(missing.to_str().unwrap()));

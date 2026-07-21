@@ -1,4 +1,14 @@
-# MCP server request authentication
+<!-- ryeos:signed:2026-07-21T00:24:56Z:8bced16b9d4477cbf0822209de20a1b1ceef0c32719c36b456fe45cda326383d:JulDRetCje752n3yOY3xtuDvuXSDayfexS+M9lD3ut/SSDqOw+1mr48gbvZarltQIqtVmDX+w+0RtAmmh2i6CA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/future
+name: mcp-server-auth
+title: MCP Server Request Authentication
+description: Deferred authentication boundary for any non-local MCP transport
+entry_type: design
+version: "1.0.0"
+```
+
+# MCP Server Request Authentication
 
 ## Status
 

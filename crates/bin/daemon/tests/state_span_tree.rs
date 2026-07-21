@@ -69,12 +69,14 @@ fn make_thread(thread_id: &str, chain_root_id: &str) -> NewThreadRecord {
         kind: "directive".to_string(),
         item_ref: "directive:test/directive".to_string(),
         executor_ref: "test/executor".to_string(),
-        launch_mode: "inline".to_string(),
+        launch_mode: "wait".to_string(),
         current_site_id: "site:test".to_string(),
         origin_site_id: "site:test".to_string(),
         upstream_thread_id: None,
         requested_by: Some("user:test".to_string()),
         project_root: None,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+        base_project_snapshot_hash: None,
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: (thread_id == chain_root_id).then(captured_policy),
@@ -108,6 +110,7 @@ fn state_store_write_path_emits_state_spans() {
                     group_leader_start_time_ticks: 20,
                 },
                 &RuntimeLaunchMetadata::default(),
+                None,
             )
             .expect("attach_thread_process");
         store
@@ -121,6 +124,7 @@ fn state_store_write_path_emits_state_spans() {
                     artifacts: vec![],
                     final_cost: None,
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                 },
             )
             .expect("finalize_thread");

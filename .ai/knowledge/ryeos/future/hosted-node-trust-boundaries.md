@@ -1,15 +1,15 @@
-<!-- ryeos:signed:2026-07-17T00:28:22Z:2bc2cedc00914f2c5f4e821ab182824c1462333680f58a553895ec8ef34fc3ba:+iZ2zdarNlQDYyD1ht7JqRqCninoV7eVwuE520AfS6GJCbOtOQMJdHXLKH3FIJtoDvloeyMZo9RnLfaABualCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-21T00:24:56Z:c00d32003d343ebc3a0bba941fb8adf111f90cc342aabbfbb5ce8be389180da5:dQelDZ9sMbg8KtrJwSv+0rkl3rH2LaBnHk5Xar4PBKYFcc2JQe1RvAP7AyPfDOmr9egFGlBX9wAFVbDaY/PCBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: hosted-node-trust-boundaries
 title: Hosted-Node Trust Boundaries
 entry_type: implementation_guide
-version: "0.5.1"
+version: "0.6.0"
 description: The remaining trust boundaries for hosting other principals, including deployment-grade isolation around typed signed backends.
 tags:
   - hosted-node
   - federation
-  - isolationing
+  - isolation
   - security
 ```
 
@@ -35,11 +35,16 @@ claimed; and transitive imports, libraries, and assets remain live read-only
 views rather than content-pinned artifacts. A deployment that runs hostile
 workloads must still add cgroups plus a VM, microVM, or dedicated outer worker.
 
-Durable process attachment closes PID-reuse races after publication, but not
-the crash window between kernel process creation and that publication. A daemon
-`SIGKILL` in the window can leave an untracked local group. The future outer
-worker/cgroup must own launch placement and whole-workload teardown so recovery
-does not depend on a row the daemon may never have committed.
+Attachment-before-execution now closes the local creation-to-publication crash
+window. Direct targets remain held until their exact identity is durable and
+die with the daemon if it exits before attachment; isolated targets use the
+same lifecycle transition at the backend's actual target boundary. After
+attachment, startup reconciliation owns the exact persisted identity.
+
+The future outer worker/cgroup remains necessary for a different reason: it
+must own quotas and whole-workload teardown across descendants that escape the
+local process group, hostile same-UID behavior, and worker/kernel failure. It is
+not a substitute for the local durable attachment boundary.
 
 The complete hosted-node boundary remains deployment-shaped:
 principal-specific identity and isolation, authenticated network peers,

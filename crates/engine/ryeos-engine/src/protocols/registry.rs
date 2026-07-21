@@ -19,6 +19,9 @@ use crate::AI_DIR;
 #[derive(Debug, Clone)]
 pub struct VerifiedProtocol {
     pub canonical_ref: String,
+    /// Signature-verified digest of the descriptor body.
+    pub raw_content_digest: String,
+    pub signer_fingerprint: String,
     pub descriptor: ProtocolDescriptor,
     pub trust_class: TrustClass,
     pub bundle_root: PathBuf,
@@ -258,6 +261,8 @@ fn load_and_verify_protocol(
     Ok((
         VerifiedProtocol {
             canonical_ref,
+            raw_content_digest: actual_hash.clone(),
+            signer_fingerprint: sig_header.signer_fingerprint.clone(),
             descriptor,
             trust_class: root_trust,
             bundle_root: bundle_root.to_owned(),

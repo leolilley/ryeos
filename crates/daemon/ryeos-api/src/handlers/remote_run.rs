@@ -27,6 +27,8 @@ pub struct Request {
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
+    /// Explicit execution semantics for the destination project.
+    pub execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
 }
 
 fn default_remote() -> String {
@@ -48,13 +50,30 @@ pub async fn handle(
     let remote_cfg = loaded_remote.config;
 
     let client = RemoteClient::from_remote_cfg(&state, &remote_cfg);
+    req.execution_policy
+        .validate()
+        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
+    if req.execution_policy.target != ryeos_app::execution_policy::ExecutionTarget::Here {
+        return Err(HandlerError::BadRequest(
+            "remote run receives a destination-local policy; target must be `here`".to_string(),
+        ));
+    }
+    if !matches!(
+        req.execution_policy.project,
+        ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }
+    ) {
+        return Err(HandlerError::BadRequest(
+            "remote run executes the configured deployed project and requires live_direct project authority"
+                .to_string(),
+        ));
+    }
     let remote_result = client
         .execute(
             &req.item_ref,
             &req.ref_bindings,
-            &binding.remote_project_path,
+            Some(&binding.remote_project_path),
             &req.parameters,
-            "live_fs",
+            &req.execution_policy,
         )
         .await
         .map_err(|e| HandlerError::Internal(format!("remote run failed: {e:#}")))?;

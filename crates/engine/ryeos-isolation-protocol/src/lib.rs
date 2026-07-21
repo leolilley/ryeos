@@ -11,12 +11,14 @@ use serde_json::Value;
 pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v1";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
 pub const MAX_AUTHORITIES: usize = 4096;
 pub const MAX_MOUNTS: usize = 4096;
 pub const MAX_ENVIRONMENT_ENTRIES: usize = 4096;
 pub const MAX_ARGUMENTS: usize = 4096;
 pub const MAX_STRING_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_DETAILS: usize = 128;
+pub const MAX_WORKSPACE_MUTATIONS: usize = 100_000;
 pub const MAX_JSON_DEPTH: usize = 64;
 
 /// Decode an isolation protocol document while rejecting duplicate object
@@ -192,6 +194,10 @@ pub enum IsolationCapability {
     FilesystemFdWritable,
     #[serde(rename = "filesystem.ordered_overlays")]
     FilesystemOrderedOverlays,
+    #[serde(rename = "filesystem.project_workspace_cow")]
+    FilesystemProjectWorkspaceCow,
+    #[serde(rename = "filesystem.workspace_delta")]
+    FilesystemWorkspaceDelta,
     #[serde(rename = "filesystem.private_tmp")]
     FilesystemPrivateTmp,
     #[serde(rename = "devices.minimal")]
@@ -334,13 +340,16 @@ impl IsolationBackendDeclaration {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationAuthorityPurpose {
     ReadOnlyMount,
     WritableMount,
     Executable,
     RuntimeLibraryDirectory,
+    WorkspaceLower,
+    WorkspaceUpper,
+    WorkspaceWork,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +374,19 @@ pub struct IsolationMount {
     pub destination: IsolationPath,
     pub access: IsolationMountAccess,
     pub layer: u32,
+}
+
+/// One verified writable project view. The lower is immutable and the upper
+/// and work authorities are launch-private. The adapter must compose these at
+/// `destination`; ordinary writable mounts may not target the same path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IsolationProjectWorkspace {
+    pub workspace_id: String,
+    pub lower: IsolationAuthorityId,
+    pub upper: IsolationAuthorityId,
+    pub work: IsolationAuthorityId,
+    pub destination: IsolationPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -400,6 +422,8 @@ pub struct IsolationTarget {
 pub struct IsolationPlan {
     pub target: IsolationTarget,
     pub mounts: Vec<IsolationMount>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_workspace: Option<IsolationProjectWorkspace>,
     pub environment: IsolationEnvironment,
     pub network: IsolationNetwork,
     pub devices: IsolationDeviceSurface,
@@ -504,6 +528,30 @@ impl IsolationPlan {
             }
             previous_layer = Some(mount.layer);
         }
+        if let Some(workspace) = &self.project_workspace {
+            validate_identifier("workspace id", &workspace.workspace_id)?;
+            for (authority, expected) in [
+                (&workspace.lower, IsolationAuthorityPurpose::WorkspaceLower),
+                (&workspace.upper, IsolationAuthorityPurpose::WorkspaceUpper),
+                (&workspace.work, IsolationAuthorityPurpose::WorkspaceWork),
+            ] {
+                if authority_ids.get(authority) != Some(&expected) {
+                    return Err(ProtocolValidationError::new(
+                        "workspace authority is missing or has the wrong purpose",
+                    ));
+                }
+                used_authorities.insert(authority.clone());
+            }
+            if self
+                .mounts
+                .iter()
+                .any(|mount| mount.destination == workspace.destination)
+            {
+                return Err(ProtocolValidationError::new(
+                    "project workspace destination conflicts with an ordinary mount",
+                ));
+            }
+        }
         if target_mounts != 1 {
             return Err(ProtocolValidationError::new(
                 "target executable authority must have exactly one mount",
@@ -539,6 +587,10 @@ impl IsolationPlan {
             .any(|mount| mount.access == IsolationMountAccess::Writable)
         {
             capabilities.insert(IsolationCapability::FilesystemFdWritable);
+        }
+        if self.project_workspace.is_some() {
+            capabilities.insert(IsolationCapability::FilesystemProjectWorkspaceCow);
+            capabilities.insert(IsolationCapability::FilesystemWorkspaceDelta);
         }
         if self.private_tmp {
             capabilities.insert(IsolationCapability::FilesystemPrivateTmp);
@@ -637,6 +689,233 @@ pub struct AdapterLaunchRequest {
     pub authorities: Vec<IsolationAuthority>,
     pub artifacts: BTreeMap<IsolationArtifactRole, u32>,
     pub status_fd: u32,
+    pub lifecycle: AdapterLaunchLifecycle,
+}
+
+/// Exact target lifecycle requested from an isolation adapter.
+///
+/// A normal launch carries no attachment descriptors and must let the target
+/// run as soon as the backend is ready. An attachment launch reports its target
+/// while that target is held at the final backend boundary. The distinct wire
+/// variants deliberately make the two contracts impossible to infer from
+/// optional fields or descriptor presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdapterLaunchLifecycle {
+    Run,
+    AwaitAttachment {
+        /// Read end of the daemon-owned one-shot release boundary. The backend
+        /// must consume it immediately before target exec.
+        release_fd: u32,
+        /// Child-owned duplicate of the release writer. This prevents parent
+        /// death from becoming EOF on a backend whose boundary treats EOF as a
+        /// completed wait.
+        release_keepalive_fd: u32,
+    },
+}
+
+/// Adapter-owned lifecycle operations for one durable project workspace.
+/// The descriptor authorities are the only filesystem inputs: host paths are
+/// deliberately absent from this contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceLifecycleOperation {
+    Create,
+    FreezeAndDiff,
+    Destroy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterWorkspaceRequest {
+    pub protocol: IsolationAdapterProtocolVersion,
+    pub operation: WorkspaceLifecycleOperation,
+    pub workspace_id: String,
+    /// Canonical JSON form of the RyeOS LaunchOwner. The adapter treats it as
+    /// an opaque fencing identity and echoes it in the response.
+    pub launch_owner: String,
+    pub lower_snapshot: String,
+    pub authorities: Vec<IsolationAuthority>,
+}
+
+impl AdapterWorkspaceRequest {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_identifier("workspace id", &self.workspace_id)?;
+        validate_string("launch owner", &self.launch_owner)?;
+        validate_sha256("lower snapshot", &self.lower_snapshot)?;
+        if self.authorities.len() != 3 {
+            return Err(ProtocolValidationError::new(
+                "workspace lifecycle requires exactly lower, upper, and work authorities",
+            ));
+        }
+        let mut purposes = BTreeSet::new();
+        let mut descriptors = BTreeSet::new();
+        for authority in &self.authorities {
+            if authority.inherited_fd <= 2 || !descriptors.insert(authority.inherited_fd) {
+                return Err(ProtocolValidationError::new(
+                    "workspace authority descriptors must be unique and must not overlap stdio",
+                ));
+            }
+            if !matches!(
+                authority.purpose,
+                IsolationAuthorityPurpose::WorkspaceLower
+                    | IsolationAuthorityPurpose::WorkspaceUpper
+                    | IsolationAuthorityPurpose::WorkspaceWork
+            ) || !purposes.insert(authority.purpose)
+            {
+                return Err(ProtocolValidationError::new(
+                    "workspace lifecycle authority purposes must be exactly lower, upper, and work",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceMutationKind {
+    UpsertRegular,
+    DeletePath,
+    EnsureDirectory,
+    OpaqueDirectory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceMutation {
+    pub path: String,
+    pub kind: WorkspaceMutationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_mode: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+}
+
+impl WorkspaceMutation {
+    pub fn validate(&self) -> Result<(), ProtocolValidationError> {
+        validate_relative_path("workspace mutation path", &self.path)?;
+        match self.kind {
+            WorkspaceMutationKind::UpsertRegular => {
+                if !matches!(self.normalized_mode, Some(0o644 | 0o755))
+                    || self.size.is_none()
+                    || self
+                        .content_hash
+                        .as_deref()
+                        .is_none_or(|hash| validate_sha256("workspace content hash", hash).is_err())
+                {
+                    return Err(ProtocolValidationError::new(
+                        "regular workspace mutation requires mode, size, and content hash",
+                    ));
+                }
+                Ok(())
+            }
+            _ if self.normalized_mode.is_none()
+                && self.size.is_none()
+                && self.content_hash.is_none() =>
+            {
+                Ok(())
+            }
+            _ => Err(ProtocolValidationError::new(
+                "non-regular workspace mutation cannot carry file metadata",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterWorkspaceResponse {
+    pub protocol: IsolationAdapterProtocolVersion,
+    pub operation: WorkspaceLifecycleOperation,
+    pub workspace_id: String,
+    pub launch_owner: String,
+    pub backend_id: String,
+    pub backend_version: String,
+    pub pinned_root_identities: BTreeMap<String, String>,
+    pub mount_identity: String,
+    pub mutations: Vec<WorkspaceMutation>,
+    pub destroyed: bool,
+}
+
+impl AdapterWorkspaceResponse {
+    pub fn validate_for(
+        &self,
+        request: &AdapterWorkspaceRequest,
+    ) -> Result<(), ProtocolValidationError> {
+        if self.protocol != request.protocol
+            || self.operation != request.operation
+            || self.workspace_id != request.workspace_id
+            || self.launch_owner != request.launch_owner
+        {
+            return Err(ProtocolValidationError::new(
+                "workspace lifecycle response does not match its request",
+            ));
+        }
+        validate_identifier("workspace backend id", &self.backend_id)?;
+        validate_string("workspace backend version", &self.backend_version)?;
+        validate_string("workspace mount identity", &self.mount_identity)?;
+        if self.pinned_root_identities.len() != 3
+            || !["lower", "upper", "work"]
+                .iter()
+                .all(|name| self.pinned_root_identities.contains_key(*name))
+        {
+            return Err(ProtocolValidationError::new(
+                "workspace lifecycle response must identify lower, upper, and work roots",
+            ));
+        }
+        if self.mutations.len() > MAX_WORKSPACE_MUTATIONS {
+            return Err(ProtocolValidationError::new(
+                "workspace mutation count exceeds protocol limit",
+            ));
+        }
+        let mut previous_path: Option<&str> = None;
+        let mut non_directory_paths = BTreeSet::new();
+        for mutation in &self.mutations {
+            mutation.validate()?;
+            if previous_path.is_some_and(|previous| previous >= mutation.path.as_str()) {
+                return Err(ProtocolValidationError::new(
+                    "workspace mutations must be unique and canonically path-sorted",
+                ));
+            }
+            let components = mutation.path.split('/').collect::<Vec<_>>();
+            for end in 1..components.len() {
+                let ancestor = components[..end].join("/");
+                if non_directory_paths.contains(&ancestor) {
+                    return Err(ProtocolValidationError::new(
+                        "workspace mutation descends through a non-directory mutation",
+                    ));
+                }
+            }
+            if matches!(
+                mutation.kind,
+                WorkspaceMutationKind::UpsertRegular | WorkspaceMutationKind::DeletePath
+            ) {
+                non_directory_paths.insert(mutation.path.clone());
+            }
+            previous_path = Some(&mutation.path);
+        }
+        match self.operation {
+            WorkspaceLifecycleOperation::Create if self.destroyed || !self.mutations.is_empty() => {
+                Err(ProtocolValidationError::new(
+                    "workspace create response has an invalid result shape",
+                ))
+            }
+            WorkspaceLifecycleOperation::FreezeAndDiff if self.destroyed => Err(
+                ProtocolValidationError::new("workspace diff cannot report destruction"),
+            ),
+            WorkspaceLifecycleOperation::Destroy
+                if !self.destroyed || !self.mutations.is_empty() =>
+            {
+                Err(ProtocolValidationError::new(
+                    "workspace destroy response has an invalid result shape",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl AdapterLaunchRequest {
@@ -648,6 +927,22 @@ impl AdapterLaunchRequest {
             ));
         }
         let mut descriptors = validate_artifact_descriptors(&self.artifacts, Some(self.status_fd))?;
+        if let AdapterLaunchLifecycle::AwaitAttachment {
+            release_fd,
+            release_keepalive_fd,
+        } = self.lifecycle
+        {
+            if release_fd <= 2 || !descriptors.insert(release_fd) {
+                return Err(ProtocolValidationError::new(
+                    "attachment release descriptor overlaps stdio or another isolation protocol role",
+                ));
+            }
+            if release_keepalive_fd <= 2 || !descriptors.insert(release_keepalive_fd) {
+                return Err(ProtocolValidationError::new(
+                    "attachment release keepalive descriptor overlaps stdio or another isolation protocol role",
+                ));
+            }
+        }
         for authority in &self.authorities {
             if !descriptors.insert(authority.inherited_fd) {
                 return Err(ProtocolValidationError::new(
@@ -756,6 +1051,35 @@ fn validate_identifier(kind: &str, value: &str) -> Result<(), ProtocolValidation
     Ok(())
 }
 
+fn validate_sha256(kind: &str, value: &str) -> Result<(), ProtocolValidationError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(ProtocolValidationError::new(format!(
+            "{kind} must be a lowercase SHA-256 digest"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_relative_path(kind: &str, value: &str) -> Result<(), ProtocolValidationError> {
+    validate_string(kind, value)?;
+    if value.starts_with('/')
+        || value.ends_with('/')
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | ".."))
+        || value.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(ProtocolValidationError::new(format!(
+            "{kind} is not a canonical relative path"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_executable_name(kind: &str, value: &str) -> Result<(), ProtocolValidationError> {
     validate_identifier(kind, value)?;
     if value == "." || value == ".." {
@@ -849,6 +1173,7 @@ mod tests {
                         layer: 2,
                     },
                 ],
+                project_workspace: None,
                 environment: IsolationEnvironment {
                     values: BTreeMap::from([("PATH".to_string(), "/bin".to_string())]),
                 },
@@ -1063,14 +1388,54 @@ mod tests {
             protocol: IsolationAdapterProtocolVersion::V1,
             plan,
             authorities,
-            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 5)]),
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
             status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 7,
+                release_keepalive_fd: 8,
+            },
         };
-        assert!(request
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("reused across"));
+        assert!(request.validate().unwrap_err().to_string().contains(
+            "attachment release descriptor overlaps stdio or another isolation protocol role"
+        ));
+    }
+
+    #[test]
+    fn launch_lifecycle_wire_shape_is_exact() {
+        let (plan, authorities) = complete_plan();
+        let run = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::V1,
+            plan: plan.clone(),
+            authorities: authorities.clone(),
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::Run,
+        };
+        let value = serde_json::to_value(&run).unwrap();
+        assert_eq!(value["lifecycle"], serde_json::json!({ "kind": "run" }));
+        run.validate().unwrap();
+
+        let awaiting = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::V1,
+            plan,
+            authorities,
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 8,
+                release_keepalive_fd: 9,
+            },
+        };
+        let value = serde_json::to_value(&awaiting).unwrap();
+        assert_eq!(
+            value["lifecycle"],
+            serde_json::json!({
+                "kind": "await_attachment",
+                "release_fd": 8,
+                "release_keepalive_fd": 9
+            })
+        );
+        awaiting.validate().unwrap();
     }
 
     #[test]

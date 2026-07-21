@@ -11,6 +11,26 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinnedEntryType {
+    Directory,
+    Regular,
+    Symlink,
+    CharacterDevice,
+    BlockDevice,
+    Fifo,
+    Socket,
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinnedDirectoryEntryMetadata {
+    pub name: OsString,
+    pub entry_type: PinnedEntryType,
+    pub mode: u32,
+    pub device_id: u64,
+}
+
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
@@ -379,6 +399,59 @@ impl PinnedDirectoryLock {
 }
 
 impl PinnedDirectory {
+    /// Remove every entry below this exact pinned directory without following
+    /// symlinks or crossing a mounted filesystem boundary. The directory
+    /// itself remains open and is not removed.
+    pub fn remove_contents_recursive(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("descriptor-relative recursive removal is unavailable")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let root_device = self.directory.metadata()?.dev();
+            self.remove_contents_on_device(root_device)?;
+            self.directory.sync_all()?;
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    fn remove_contents_on_device(&self, root_device: u64) -> Result<()> {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::MetadataExt as _;
+
+        for entry in self.entries_no_follow()? {
+            let name_c = std::ffi::CString::new(entry.name.as_bytes())?;
+            if entry.entry_type == PinnedEntryType::Directory {
+                let child = self
+                    .open_child_directory(&entry.name)?
+                    .ok_or_else(|| anyhow::anyhow!("directory disappeared during removal"))?;
+                if child.directory.metadata()?.dev() != root_device {
+                    anyhow::bail!(
+                        "refusing to cross mounted filesystem while removing {}",
+                        child.path.display()
+                    );
+                }
+                child.remove_contents_on_device(root_device)?;
+                if !self.remove_empty_child_if_same(&entry.name, &child)? {
+                    anyhow::bail!("directory remained non-empty: {}", child.path.display());
+                }
+            } else if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0
+            {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!(
+                        "remove pinned entry {}",
+                        self.path.join(&entry.name).display()
+                    )
+                });
+            }
+        }
+        self.directory.sync_all()?;
+        Ok(())
+    }
+
     pub fn open(path: &Path) -> Result<Option<Self>> {
         #[cfg(not(unix))]
         {
@@ -413,6 +486,20 @@ impl PinnedDirectory {
         &self.path
     }
 
+    /// Return the concrete filesystem identity pinned by this descriptor.
+    /// Callers use this to compare a durable authority fence with the object
+    /// they will actually traverse, without reopening the pathname.
+    pub fn device_inode(&self) -> Result<(u64, u64)> {
+        #[cfg(not(unix))]
+        anyhow::bail!("secure directory identity is unavailable on this platform");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            let metadata = self.directory.metadata()?;
+            Ok((metadata.dev(), metadata.ino()))
+        }
+    }
+
     /// Linux descriptor-rooted child pathname for APIs (notably SQLite) that
     /// cannot accept an already-open directory handle. The child remains bound
     /// to this directory inode even if its ordinary pathname is replaced.
@@ -426,6 +513,23 @@ impl PinnedDirectory {
         {
             validate_child_name(name)?;
             Ok(PathBuf::from(format!("/proc/self/fd/{}", self.directory.as_raw_fd())).join(name))
+        }
+    }
+
+    /// Linux descriptor-rooted pathname for APIs that must walk this exact
+    /// already-open directory rather than resolving its ambient path again.
+    pub fn descriptor_path(&self) -> Result<PathBuf> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!("descriptor-rooted paths are unavailable on this platform");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::fd::AsRawFd as _;
+            Ok(PathBuf::from(format!(
+                "/proc/self/fd/{}",
+                self.directory.as_raw_fd()
+            )))
         }
     }
 
@@ -444,6 +548,132 @@ impl PinnedDirectory {
         self.directory
             .try_clone()
             .with_context(|| format!("duplicate pinned directory {}", self.path.display()))
+    }
+
+    /// Prove that this pinned inode is still selected by the pathname through
+    /// which it was opened. Callers use this immediately before publishing
+    /// facts that attribute descriptor-read content to that stable path.
+    pub fn ensure_path_binding(&self) -> Result<()> {
+        let current = Self::open(&self.path)?.ok_or_else(|| {
+            anyhow::anyhow!("pinned directory path disappeared: {}", self.path.display())
+        })?;
+        if !self.is_same_directory(&current)? {
+            anyhow::bail!(
+                "pinned directory path was rebound during the operation: {}",
+                self.path.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// Walk regular files beneath this exact pinned root. Every child is
+    /// opened descriptor-relative without following links; `prune` receives
+    /// canonical relative components and may skip a file or whole directory.
+    pub fn visit_regular_files<P, V>(&self, mut prune: P, mut visit: V) -> Result<()>
+    where
+        P: FnMut(&Path, bool) -> Result<bool>,
+        V: FnMut(&Path, File) -> Result<()>,
+    {
+        #[cfg(not(unix))]
+        {
+            let _ = (&mut prune, &mut visit);
+            anyhow::bail!("descriptor-relative traversal is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        visit_from_open_directory(
+            &self.path,
+            Path::new(""),
+            &self.directory,
+            &mut prune,
+            &mut visit,
+        )
+    }
+
+    /// Enumerate immediate children from the pinned directory descriptor and
+    /// classify each entry without following links.
+    #[cfg(unix)]
+    pub fn entries_no_follow(&self) -> Result<Vec<PinnedDirectoryEntryMetadata>> {
+        let mut entries = Vec::new();
+        for name in directory_names_bounded(&self.directory, None)? {
+            let c_name = std::ffi::CString::new(name.as_bytes())?;
+            let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe {
+                libc::fstatat(
+                    self.directory.as_raw_fd(),
+                    c_name.as_ptr(),
+                    &mut stat,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error()).with_context(|| {
+                    format!(
+                        "inspect pinned directory entry {}",
+                        self.path.join(&name).display()
+                    )
+                });
+            }
+            let entry_type = match stat.st_mode & libc::S_IFMT {
+                libc::S_IFDIR => PinnedEntryType::Directory,
+                libc::S_IFREG => PinnedEntryType::Regular,
+                libc::S_IFLNK => PinnedEntryType::Symlink,
+                libc::S_IFCHR => PinnedEntryType::CharacterDevice,
+                libc::S_IFBLK => PinnedEntryType::BlockDevice,
+                libc::S_IFIFO => PinnedEntryType::Fifo,
+                libc::S_IFSOCK => PinnedEntryType::Socket,
+                _ => PinnedEntryType::Other,
+            };
+            entries.push(PinnedDirectoryEntryMetadata {
+                name,
+                entry_type,
+                mode: stat.st_mode,
+                device_id: stat.st_rdev,
+            });
+        }
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(entries)
+    }
+
+    /// Read a bounded extended-attribute value from the pinned directory.
+    #[cfg(target_os = "linux")]
+    pub fn xattr(&self, name: &std::ffi::CStr, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        let size = unsafe {
+            libc::fgetxattr(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if size < 0 {
+            let error = std::io::Error::last_os_error();
+            if error
+                .raw_os_error()
+                .is_some_and(|code| code == libc::ENODATA || code == libc::ENOTSUP)
+            {
+                return Ok(None);
+            }
+            return Err(error).context("read pinned directory extended attribute size");
+        }
+        let size = usize::try_from(size).context("extended attribute size overflow")?;
+        if size > max_bytes {
+            anyhow::bail!("extended attribute exceeds {max_bytes} bytes");
+        }
+        let mut value = vec![0_u8; size];
+        let read = unsafe {
+            libc::fgetxattr(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                value.as_mut_ptr().cast(),
+                value.len(),
+            )
+        };
+        if read < 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("read pinned directory extended attribute");
+        }
+        value.truncate(usize::try_from(read).context("extended attribute length overflow")?);
+        Ok(Some(value))
     }
 
     /// Set permissions on this exact open directory inode.
@@ -829,6 +1059,558 @@ impl PinnedDirectory {
         }
     }
 
+    /// Publish an already-open regular file from another pinned directory as a
+    /// create-only hard link. This is used to promote a fully written CAS
+    /// staging file after its content address is known. `false` means the
+    /// target name already exists and must be verified by the caller.
+    pub fn publish_regular_link_from(
+        &self,
+        target_name: &OsStr,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> Result<bool> {
+        #[cfg(not(unix))]
+        {
+            let _ = (target_name, source_directory, source_name, expected_source);
+            anyhow::bail!("secure linked publication is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+
+            validate_child_name(target_name)?;
+            validate_child_name(source_name)?;
+            let source_name_c = std::ffi::CString::new(source_name.as_bytes())?;
+            let target_name_c = std::ffi::CString::new(target_name.as_bytes())?;
+            ensure_entry_matches(
+                &source_directory.directory,
+                &source_name_c,
+                Some(expected_source),
+                &source_directory.path.join(source_name),
+            )?;
+            if unsafe {
+                libc::linkat(
+                    source_directory.directory.as_raw_fd(),
+                    source_name_c.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    target_name_c.as_ptr(),
+                    0,
+                )
+            } != 0
+            {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Ok(false);
+                }
+                return Err(error).with_context(|| {
+                    format!(
+                        "publish secure staged file {} as {}",
+                        source_directory.path.join(source_name).display(),
+                        self.path.join(target_name).display()
+                    )
+                });
+            }
+            self.directory.sync_all()?;
+            source_directory.remove_if_same(source_name, expected_source)?;
+            Ok(true)
+        }
+    }
+
+    /// Create a hard link from one exact named regular file in a pinned source
+    /// directory under one validated child name of this exact directory inode.
+    /// Both directory descriptors and the expected source file stay pinned for
+    /// the entire operation, so neither side can be rebound by replacing an
+    /// ambient pathname.
+    ///
+    /// An existing destination is accepted only when it is the same regular
+    /// inode as `source`.
+    pub fn link_regular_from(
+        &self,
+        target_name: &OsStr,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (target_name, source_directory, source_name, expected_source);
+            anyhow::bail!("secure hard linking is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            validate_child_name(target_name)?;
+            validate_child_name(source_name)?;
+            let source_name_c = std::ffi::CString::new(source_name.as_bytes())?;
+            let target_name_c = std::ffi::CString::new(target_name.as_bytes())?;
+            ensure_entry_matches(
+                &source_directory.directory,
+                &source_name_c,
+                Some(expected_source),
+                &source_directory.path.join(source_name),
+            )?;
+            if unsafe {
+                libc::linkat(
+                    source_directory.directory.as_raw_fd(),
+                    source_name_c.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    target_name_c.as_ptr(),
+                    0,
+                )
+            } != 0
+            {
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "link secure regular file {} into {}",
+                            source_directory.path.join(source_name).display(),
+                            self.path.join(target_name).display()
+                        )
+                    });
+                }
+                let existing = self.open_regular(target_name, false)?.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "existing hard-link destination is not a regular file: {}",
+                        self.path.join(target_name).display()
+                    )
+                })?;
+                use std::os::unix::fs::MetadataExt as _;
+                let source_metadata = expected_source.metadata()?;
+                let existing_metadata = existing.metadata()?;
+                if !existing_metadata.file_type().is_file()
+                    || source_metadata.dev() != existing_metadata.dev()
+                    || source_metadata.ino() != existing_metadata.ino()
+                {
+                    anyhow::bail!(
+                        "destination conflicts with pinned source inode: {}",
+                        self.path.join(target_name).display()
+                    );
+                }
+            }
+            self.directory.sync_all()?;
+            Ok(())
+        }
+    }
+
+    /// Publish one exact pinned child directory under another name in this
+    /// same parent without replacing an existing entry. The parent descriptor
+    /// and expected source inode are retained across the whole operation.
+    pub fn rename_child_directory_noreplace(
+        &self,
+        source_name: &OsStr,
+        target_name: &OsStr,
+        expected_source: &Self,
+    ) -> crate::atomic_fs::AtomicMutationResult<()> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (source_name, target_name, expected_source);
+            return Err(crate::atomic_fs::AtomicMutationError::before(
+                anyhow::anyhow!(
+                    "descriptor-relative no-replace rename is unavailable on this platform"
+                ),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            validate_child_name(source_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            validate_child_name(target_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let source_name_c = std::ffi::CString::new(source_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let target_name_c = std::ffi::CString::new(target_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let current = self
+                .open_child_directory(source_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?
+                .ok_or_else(|| anyhow::anyhow!("rename source directory disappeared"))
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let current_metadata = current
+                .directory
+                .metadata()
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let expected_metadata = expected_source
+                .directory
+                .metadata()
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            if current_metadata.dev() != expected_metadata.dev()
+                || current_metadata.ino() != expected_metadata.ino()
+            {
+                return Err(crate::atomic_fs::AtomicMutationError::before(
+                    anyhow::anyhow!(
+                        "rename source directory changed before publication: {}",
+                        self.path.join(source_name).display()
+                    ),
+                ));
+            }
+            if unsafe {
+                libc::renameat2(
+                    self.directory.as_raw_fd(),
+                    source_name_c.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    target_name_c.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            } != 0
+            {
+                return Err(crate::atomic_fs::AtomicMutationError::before(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
+                        "publish pinned directory {} as {}",
+                        self.path.join(source_name).display(),
+                        self.path.join(target_name).display()
+                    )),
+                ));
+            }
+            self.directory
+                .sync_all()
+                .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+            Ok(())
+        }
+    }
+
+    /// Move one exact pinned regular child to a new name in the same directory
+    /// without replacing any existing entry. Namespace publication is atomic;
+    /// callers can therefore recover a crash by observing either source or
+    /// destination, never a link-then-unlink intermediate state.
+    pub fn rename_regular_child_noreplace_atomic(
+        &self,
+        source_name: &OsStr,
+        target_name: &OsStr,
+        expected_source: &File,
+    ) -> crate::atomic_fs::AtomicMutationResult<()> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (source_name, target_name, expected_source);
+            return Err(crate::atomic_fs::AtomicMutationError::before(
+                anyhow::anyhow!(
+                    "descriptor-relative no-replace regular rename is unavailable on this platform"
+                ),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            validate_child_name(source_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            validate_child_name(target_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let source_name_c = std::ffi::CString::new(source_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let target_name_c = std::ffi::CString::new(target_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            ensure_entry_matches(
+                &self.directory,
+                &source_name_c,
+                Some(expected_source),
+                &self.path.join(source_name),
+            )
+            .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            if unsafe {
+                libc::renameat2(
+                    self.directory.as_raw_fd(),
+                    source_name_c.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    target_name_c.as_ptr(),
+                    libc::RENAME_NOREPLACE,
+                )
+            } != 0
+            {
+                return Err(crate::atomic_fs::AtomicMutationError::before(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
+                        "preserve pinned regular file {} as {}",
+                        self.path.join(source_name).display(),
+                        self.path.join(target_name).display()
+                    )),
+                ));
+            }
+            self.directory
+                .sync_all()
+                .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+            Ok(())
+        }
+    }
+
+    /// Move one exact regular entry from `source_directory` into this pinned
+    /// directory, atomically replacing an existing regular target. Both parent
+    /// descriptors and the source inode remain pinned through the mutation.
+    pub fn rename_regular_from(
+        &self,
+        target_name: &OsStr,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> Result<()> {
+        self.rename_regular_from_atomic(target_name, source_directory, source_name, expected_source)
+            .map_err(Into::into)
+    }
+
+    /// Commit-aware form of [`Self::rename_regular_from`].
+    pub fn rename_regular_from_atomic(
+        &self,
+        target_name: &OsStr,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> crate::atomic_fs::AtomicMutationResult<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (target_name, source_directory, source_name, expected_source);
+            return Err(crate::atomic_fs::AtomicMutationError::before(
+                anyhow::anyhow!(
+                    "descriptor-relative regular rename is unavailable on this platform"
+                ),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            validate_child_name(target_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            validate_child_name(source_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let source_name_c = std::ffi::CString::new(source_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let target_name_c = std::ffi::CString::new(target_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            ensure_entry_matches(
+                &source_directory.directory,
+                &source_name_c,
+                Some(expected_source),
+                &source_directory.path.join(source_name),
+            )
+            .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            if matches!(
+                self.open_entry(target_name, false)
+                    .map_err(crate::atomic_fs::AtomicMutationError::before)?,
+                Some(PinnedDirectoryEntry::Directory(_))
+            ) {
+                return Err(crate::atomic_fs::AtomicMutationError::before(
+                    anyhow::anyhow!(
+                        "regular rename target is a directory: {}",
+                        self.path.join(target_name).display()
+                    ),
+                ));
+            }
+            if unsafe {
+                libc::renameat(
+                    source_directory.directory.as_raw_fd(),
+                    source_name_c.as_ptr(),
+                    self.directory.as_raw_fd(),
+                    target_name_c.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(crate::atomic_fs::AtomicMutationError::before(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
+                        "move pinned regular file {} to {}",
+                        source_directory.path.join(source_name).display(),
+                        self.path.join(target_name).display()
+                    )),
+                ));
+            }
+            source_directory
+                .directory
+                .sync_all()
+                .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+            if !self
+                .is_same_directory(source_directory)
+                .map_err(crate::atomic_fs::AtomicMutationError::durability)?
+            {
+                self.directory
+                    .sync_all()
+                    .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Replace an expected regular target, or create an expected-absent
+    /// target, without ever overwriting an unexpected namespace entry.
+    /// Existing targets are first moved to a private quarantine name and
+    /// verified by inode before the source is published with NOREPLACE.
+    pub fn replace_regular_from_if_matches_atomic<V>(
+        &self,
+        target_name: &OsStr,
+        expected_target: Option<&File>,
+        validate_expected_target: V,
+        source_directory: &PinnedDirectory,
+        source_name: &OsStr,
+        expected_source: &File,
+    ) -> crate::atomic_fs::AtomicMutationResult<()>
+    where
+        V: FnOnce(&File) -> Result<()>,
+    {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (
+                target_name,
+                expected_target,
+                validate_expected_target,
+                source_directory,
+                source_name,
+                expected_source,
+            );
+            return Err(crate::atomic_fs::AtomicMutationError::before(
+                anyhow::anyhow!("conditional regular replacement requires Linux renameat2"),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        {
+            validate_child_name(target_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            validate_child_name(source_name)
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let target_name_c = std::ffi::CString::new(target_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let source_name_c = std::ffi::CString::new(source_name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            ensure_entry_matches(
+                &source_directory.directory,
+                &source_name_c,
+                Some(expected_source),
+                &source_directory.path.join(source_name),
+            )
+            .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+
+            let Some(expected_target) = expected_target else {
+                rename_noreplace_between(
+                    &source_directory.directory,
+                    &source_name_c,
+                    &self.directory,
+                    &target_name_c,
+                )
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+                source_directory
+                    .directory
+                    .sync_all()
+                    .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+                if !self
+                    .is_same_directory(source_directory)
+                    .map_err(crate::atomic_fs::AtomicMutationError::durability)?
+                {
+                    self.directory
+                        .sync_all()
+                        .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+                }
+                return Ok(());
+            };
+
+            let (quarantine_name, quarantine_name_c) =
+                self.move_regular_to_unique_quarantine(&target_name_c)?;
+            let identity_check = ensure_entry_matches(
+                &self.directory,
+                &quarantine_name_c,
+                Some(expected_target),
+                &self.path.join(&quarantine_name),
+            );
+            if let Err(error) = identity_check {
+                return match restore_quarantined_regular(
+                    &self.directory,
+                    &quarantine_name_c,
+                    &target_name_c,
+                ) {
+                    Ok(()) => Err(crate::atomic_fs::AtomicMutationError::before(
+                        error.context("conditional replace target changed before commit"),
+                    )),
+                    Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
+                        anyhow::anyhow!(
+                            "conditional replace refused an unexpected target; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                        ),
+                    )),
+                };
+            }
+            if let Err(error) = validate_expected_target(expected_target) {
+                return match restore_quarantined_regular(
+                    &self.directory,
+                    &quarantine_name_c,
+                    &target_name_c,
+                ) {
+                    Ok(()) => Err(crate::atomic_fs::AtomicMutationError::before(
+                        error.context("conditional replace target content changed before commit"),
+                    )),
+                    Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
+                        anyhow::anyhow!(
+                            "conditional replace refused changed target content; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                        ),
+                    )),
+                };
+            }
+
+            if let Err(error) = rename_noreplace_between(
+                &source_directory.directory,
+                &source_name_c,
+                &self.directory,
+                &target_name_c,
+            ) {
+                return match restore_quarantined_regular(
+                    &self.directory,
+                    &quarantine_name_c,
+                    &target_name_c,
+                ) {
+                    Ok(()) => Err(crate::atomic_fs::AtomicMutationError::before(
+                        anyhow::Error::new(error)
+                            .context("conditional replace target was occupied before publication"),
+                    )),
+                    Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
+                        anyhow::anyhow!(
+                            "conditional replace did not publish; the verified prior target remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                        ),
+                    )),
+                };
+            }
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), quarantine_name_c.as_ptr(), 0) }
+                != 0
+            {
+                return Err(crate::atomic_fs::AtomicMutationError::durability(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
+                        "remove replaced target quarantine {}",
+                        self.path.join(quarantine_name).display()
+                    )),
+                ));
+            }
+            source_directory
+                .directory
+                .sync_all()
+                .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+            if !self
+                .is_same_directory(source_directory)
+                .map_err(crate::atomic_fs::AtomicMutationError::durability)?
+            {
+                self.directory
+                    .sync_all()
+                    .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+            }
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn move_regular_to_unique_quarantine(
+        &self,
+        source_name: &std::ffi::CStr,
+    ) -> crate::atomic_fs::AtomicMutationResult<(OsString, std::ffi::CString)> {
+        for _ in 0..16 {
+            let name = OsString::from(format!(
+                ".ryeos-quarantine.{}.{}",
+                std::process::id(),
+                crate::atomic_fs::next_temp_sequence()
+            ));
+            let name_c = std::ffi::CString::new(name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            match rename_noreplace_between(&self.directory, source_name, &self.directory, &name_c) {
+                Ok(()) => return Ok((name, name_c)),
+                Err(error) if error.raw_os_error() == Some(libc::EEXIST) => continue,
+                Err(error) => {
+                    return Err(crate::atomic_fs::AtomicMutationError::before(error));
+                }
+            }
+        }
+        Err(crate::atomic_fs::AtomicMutationError::before(
+            anyhow::anyhow!("could not reserve a unique regular-file quarantine name"),
+        ))
+    }
+
     /// Enumerate a strict flat namespace and return open handles for every
     /// regular entry. Directories, links, sockets, and devices are errors.
     pub fn regular_files(&self) -> Result<Vec<PinnedRegularFile>> {
@@ -1009,28 +1791,123 @@ impl PinnedDirectory {
 
     /// Remove an exact previously-opened regular child and sync its directory.
     pub fn remove_if_same(&self, name: &OsStr, expected: &File) -> Result<()> {
+        self.remove_if_same_atomic(name, expected)
+            .map_err(Into::into)
+    }
+
+    /// Commit-aware form of [`Self::remove_if_same`].
+    pub fn remove_if_same_atomic(
+        &self,
+        name: &OsStr,
+        expected: &File,
+    ) -> crate::atomic_fs::AtomicMutationResult<()> {
+        self.remove_if_same_validated_atomic(name, expected, |_| Ok(()))
+    }
+
+    /// Conditionally remove an inode after a caller-supplied content/policy
+    /// check at the quarantine linearization boundary.
+    pub fn remove_if_same_validated_atomic<V>(
+        &self,
+        name: &OsStr,
+        expected: &File,
+        validate_expected: V,
+    ) -> crate::atomic_fs::AtomicMutationResult<()>
+    where
+        V: FnOnce(&File) -> Result<()>,
+    {
         #[cfg(not(unix))]
         {
             let _ = (name, expected);
-            anyhow::bail!("secure file removal is unavailable on this platform");
+            return Err(crate::atomic_fs::AtomicMutationError::before(
+                anyhow::anyhow!("secure file removal is unavailable on this platform"),
+            ));
+        }
+        #[cfg(unix)]
+        {
+            validate_child_name(name).map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            let name_c = std::ffi::CString::new(name.as_bytes())
+                .map_err(crate::atomic_fs::AtomicMutationError::before)?;
+            #[cfg(not(target_os = "linux"))]
+            return Err(crate::atomic_fs::AtomicMutationError::before(
+                anyhow::anyhow!("conditional regular removal requires Linux renameat2"),
+            ));
+            #[cfg(target_os = "linux")]
+            let (quarantine_name, quarantine_name_c) =
+                self.move_regular_to_unique_quarantine(&name_c)?;
+            #[cfg(target_os = "linux")]
+            if let Err(error) = ensure_entry_matches(
+                &self.directory,
+                &quarantine_name_c,
+                Some(expected),
+                &self.path.join(&quarantine_name),
+            ) {
+                return match restore_quarantined_regular(
+                    &self.directory,
+                    &quarantine_name_c,
+                    &name_c,
+                ) {
+                    Ok(()) => Err(crate::atomic_fs::AtomicMutationError::before(
+                        error.context("conditional remove target changed before commit"),
+                    )),
+                    Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
+                        anyhow::anyhow!(
+                            "conditional remove refused an unexpected target; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                        ),
+                    )),
+                };
+            }
+            #[cfg(target_os = "linux")]
+            if let Err(error) = validate_expected(expected) {
+                return match restore_quarantined_regular(
+                    &self.directory,
+                    &quarantine_name_c,
+                    &name_c,
+                ) {
+                    Ok(()) => Err(crate::atomic_fs::AtomicMutationError::before(
+                        error.context("conditional remove target content changed before commit"),
+                    )),
+                    Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
+                        anyhow::anyhow!(
+                            "conditional remove refused changed target content; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                        ),
+                    )),
+                };
+            }
+            #[cfg(target_os = "linux")]
+            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), quarantine_name_c.as_ptr(), 0) }
+                != 0
+            {
+                return Err(crate::atomic_fs::AtomicMutationError::durability(
+                    anyhow::Error::new(std::io::Error::last_os_error()).context(format!(
+                        "remove secure file quarantine {}",
+                        self.path.join(quarantine_name).display()
+                    )),
+                ));
+            }
+            self.directory
+                .sync_all()
+                .map_err(crate::atomic_fs::AtomicMutationError::durability)?;
+            Ok(())
+        }
+    }
+
+    /// Revalidate an expected regular child identity (or expected absence)
+    /// immediately before a later descriptor-relative mutation.
+    pub fn ensure_regular_entry_matches(
+        &self,
+        name: &OsStr,
+        expected: Option<&File>,
+    ) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            let _ = (name, expected);
+            anyhow::bail!("secure regular identity validation is unavailable on this platform")
         }
         #[cfg(unix)]
         {
             validate_child_name(name)?;
             let name_c = std::ffi::CString::new(name.as_bytes())?;
-            ensure_entry_matches(
-                &self.directory,
-                &name_c,
-                Some(expected),
-                &self.path.join(name),
-            )?;
-            if unsafe { libc::unlinkat(self.directory.as_raw_fd(), name_c.as_ptr(), 0) } != 0 {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!("remove secure file {}", self.path.join(name).display())
-                });
-            }
-            self.directory.sync_all()?;
-            Ok(())
+            ensure_entry_matches(&self.directory, &name_c, expected, &self.path.join(name))
         }
     }
 
@@ -1089,6 +1966,18 @@ impl PinnedDirectory {
     pub fn sync(&self) -> Result<()> {
         self.directory.sync_all()?;
         Ok(())
+    }
+
+    /// Durably sync every regular file and directory beneath this exact pinned
+    /// root. Traversal remains descriptor-relative throughout; symlinks,
+    /// special files, and disappearing entries fail closed.
+    pub fn sync_tree(&self) -> Result<()> {
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!("descriptor-relative tree sync is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        sync_open_directory_tree(&self.path, &self.directory)
     }
 }
 
@@ -1265,6 +2154,42 @@ pub fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
+/// Open an existing regular file without following links and refuse to read
+/// more than `max_bytes`. The limit is enforced against both metadata and the
+/// bytes actually read from the pinned descriptor.
+pub fn read_regular_file_bounded_no_follow(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    #[cfg(not(unix))]
+    {
+        let _ = (path, max_bytes);
+        anyhow::bail!("secure bounded no-follow file reading is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let directory = open_directory_no_follow(parent)?.ok_or_else(|| {
+            anyhow::anyhow!("secure file parent does not exist: {}", parent.display())
+        })?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("secure file path has no filename"))?;
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let mut file = open_regular_at(&directory, &name, path)?
+            .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))?;
+        let metadata = file.metadata()?;
+        if metadata.len() > max_bytes {
+            anyhow::bail!("secure file exceeds {max_bytes} bytes: {}", path.display());
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+        std::io::Read::by_ref(&mut file)
+            .take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > max_bytes {
+            anyhow::bail!("secure file exceeds {max_bytes} bytes: {}", path.display());
+        }
+        Ok(bytes)
+    }
+}
+
 /// UTF-8 variant of [`read_regular_file_no_follow`].
 pub fn read_regular_file_to_string_no_follow(path: &Path) -> Result<String> {
     String::from_utf8(read_regular_file_no_follow(path)?)
@@ -1324,6 +2249,96 @@ pub fn collect_directory_tree_no_follow(root: &Path) -> Result<Option<NoFollowDi
     }
 }
 
+/// Visit every included regular file below an exact pinned root. `prune`
+/// receives a canonical relative path and whether the entry is a directory;
+/// returning true skips that entry (and a directory's complete subtree).
+/// Symlinks and special files fail closed.
+pub fn visit_regular_files_no_follow<P, V>(root: &Path, mut prune: P, mut visit: V) -> Result<bool>
+where
+    P: FnMut(&Path, bool) -> Result<bool>,
+    V: FnMut(&Path, File) -> Result<()>,
+{
+    #[cfg(not(unix))]
+    {
+        let _ = (root, &mut prune, &mut visit);
+        anyhow::bail!("secure no-follow directory walking is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        let Some(directory) = open_directory_no_follow(root)? else {
+            return Ok(false);
+        };
+        visit_from_open_directory(root, Path::new(""), &directory, &mut prune, &mut visit)?;
+        Ok(true)
+    }
+}
+
+#[cfg(unix)]
+fn visit_from_open_directory<P, V>(
+    root: &Path,
+    relative_directory: &Path,
+    directory: &File,
+    prune: &mut P,
+    visit: &mut V,
+) -> Result<()>
+where
+    P: FnMut(&Path, bool) -> Result<bool>,
+    V: FnMut(&Path, File) -> Result<()>,
+{
+    for name in directory_names(directory)? {
+        let relative = relative_directory.join(&name);
+        let display = root.join(&relative);
+        let name_c = std::ffi::CString::new(name.as_bytes())?;
+        if let Some(child_directory) = open_child_directory(directory, &name_c, &display)? {
+            if !prune(&relative, true)? {
+                visit_from_open_directory(root, &relative, &child_directory, prune, visit)?;
+            }
+            continue;
+        }
+        let file = open_regular_at(directory, &name_c, &display)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "secure project walk encountered a symlink, special file, or disappearing entry: {}",
+                display.display()
+            )
+        })?;
+        if prune(&relative, false)? {
+            continue;
+        }
+        visit(&relative, file)?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_open_directory_tree(path: &Path, directory: &File) -> Result<()> {
+    for name in directory_names(directory)? {
+        let child_path = path.join(&name);
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        if let Some(child_directory) = open_child_directory(directory, &name, &child_path)? {
+            sync_open_directory_tree(&child_path, &child_directory)?;
+            continue;
+        }
+        let file = open_regular_at(directory, &name, &child_path)
+            .with_context(|| {
+                format!(
+                    "secure tree sync rejected a symlink or non-regular entry: {}",
+                    child_path.display()
+                )
+            })?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "secure tree sync encountered a disappearing entry: {}",
+                    child_path.display()
+                )
+            })?;
+        file.sync_all()
+            .with_context(|| format!("sync secure regular file {}", child_path.display()))?;
+    }
+    directory
+        .sync_all()
+        .with_context(|| format!("sync secure directory {}", path.display()))
+}
+
 #[cfg(unix)]
 fn collect_from_open_directory(
     path: &Path,
@@ -1372,9 +2387,108 @@ fn collect_tree_from_open_directory(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+fn rename_noreplace_between(
+    source_directory: &File,
+    source_name: &std::ffi::CStr,
+    target_directory: &File,
+    target_name: &std::ffi::CStr,
+) -> std::io::Result<()> {
+    if unsafe {
+        libc::renameat2(
+            source_directory.as_raw_fd(),
+            source_name.as_ptr(),
+            target_directory.as_raw_fd(),
+            target_name.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn restore_quarantined_regular(
+    directory: &File,
+    quarantine_name: &std::ffi::CStr,
+    target_name: &std::ffi::CStr,
+) -> Result<()> {
+    rename_noreplace_between(directory, quarantine_name, directory, target_name)
+        .context("restore quarantined regular file")?;
+    directory.sync_all()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn conditional_regular_replace_preserves_a_racing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let destination_path = root.path().join("destination");
+        let source_path = root.path().join("source");
+        std::fs::create_dir(&destination_path).unwrap();
+        std::fs::create_dir(&source_path).unwrap();
+        std::fs::write(destination_path.join("value"), b"base").unwrap();
+        std::fs::write(source_path.join("staged"), b"remote").unwrap();
+        let destination = PinnedDirectory::open(&destination_path).unwrap().unwrap();
+        let source = PinnedDirectory::open(&source_path).unwrap().unwrap();
+        let expected = destination
+            .open_regular(OsStr::new("value"), false)
+            .unwrap()
+            .unwrap();
+        let staged = source
+            .open_regular(OsStr::new("staged"), false)
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(destination_path.join("value")).unwrap();
+        std::fs::write(destination_path.join("value"), b"local edit").unwrap();
+
+        assert!(destination
+            .replace_regular_from_if_matches_atomic(
+                OsStr::new("value"),
+                Some(&expected),
+                |_| Ok(()),
+                &source,
+                OsStr::new("staged"),
+                &staged,
+            )
+            .is_err());
+        assert_eq!(
+            std::fs::read(destination_path.join("value")).unwrap(),
+            b"local edit"
+        );
+        assert_eq!(
+            std::fs::read(source_path.join("staged")).unwrap(),
+            b"remote"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn conditional_regular_remove_preserves_a_racing_target() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("value"), b"base").unwrap();
+        let directory = PinnedDirectory::open(root.path()).unwrap().unwrap();
+        let expected = directory
+            .open_regular(OsStr::new("value"), false)
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(root.path().join("value")).unwrap();
+        std::fs::write(root.path().join("value"), b"local edit").unwrap();
+
+        assert!(directory
+            .remove_if_same_atomic(OsStr::new("value"), &expected)
+            .is_err());
+        assert_eq!(
+            std::fs::read(root.path().join("value")).unwrap(),
+            b"local edit"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -1511,6 +2625,89 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn pinned_link_is_create_only_and_accepts_only_the_same_inode() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("payload"), b"immutable").unwrap();
+        let source = PinnedDirectory::open(source.path()).unwrap().unwrap();
+        let destination = PinnedDirectory::open(destination.path()).unwrap().unwrap();
+        let payload = source
+            .open_regular(OsStr::new("payload"), false)
+            .unwrap()
+            .unwrap();
+
+        destination
+            .link_regular_from(
+                OsStr::new("linked"),
+                &source,
+                OsStr::new("payload"),
+                &payload,
+            )
+            .unwrap();
+        destination
+            .link_regular_from(
+                OsStr::new("linked"),
+                &source,
+                OsStr::new("payload"),
+                &payload,
+            )
+            .unwrap();
+        std::fs::write(destination.path().join("conflict"), b"different").unwrap();
+        assert!(destination
+            .link_regular_from(
+                OsStr::new("conflict"),
+                &source,
+                OsStr::new("payload"),
+                &payload,
+            )
+            .is_err());
+        assert_eq!(
+            std::fs::read(destination.path().join("linked")).unwrap(),
+            b"immutable"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn regular_noreplace_rename_moves_exact_inode_without_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("quarantine"), b"preserve").unwrap();
+        let directory = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let quarantine = directory
+            .open_regular(OsStr::new("quarantine"), false)
+            .unwrap()
+            .unwrap();
+
+        directory
+            .rename_regular_child_noreplace_atomic(
+                OsStr::new("quarantine"),
+                OsStr::new("recovered"),
+                &quarantine,
+            )
+            .unwrap();
+        assert!(!dir.path().join("quarantine").exists());
+        assert_eq!(
+            std::fs::read(dir.path().join("recovered")).unwrap(),
+            b"preserve"
+        );
+
+        std::fs::write(dir.path().join("next"), b"next").unwrap();
+        let next = directory
+            .open_regular(OsStr::new("next"), false)
+            .unwrap()
+            .unwrap();
+        assert!(directory
+            .rename_regular_child_noreplace_atomic(
+                OsStr::new("next"),
+                OsStr::new("recovered"),
+                &next,
+            )
+            .is_err());
+        assert_eq!(std::fs::read(dir.path().join("next")).unwrap(), b"next");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn bounded_entry_enumeration_never_materializes_more_than_the_limit() {
         let dir = tempfile::tempdir().unwrap();
         for index in 0..10 {
@@ -1541,6 +2738,46 @@ mod tests {
         assert_eq!(
             std::fs::read(dir.path().join("cas-entry")).unwrap(),
             b"complete bytes"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tree_sync_remains_bound_to_the_pinned_directory_after_namespace_replacement() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("generation");
+        let displaced = root.path().join("displaced");
+        std::fs::create_dir_all(original.join("nested")).unwrap();
+        std::fs::write(original.join("nested/value"), b"immutable").unwrap();
+        let pinned = PinnedDirectory::open(&original).unwrap().unwrap();
+
+        std::fs::rename(&original, &displaced).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        symlink("missing", original.join("replacement-link")).unwrap();
+
+        pinned.sync_tree().unwrap();
+        assert_eq!(
+            std::fs::read(displaced.join("nested/value")).unwrap(),
+            b"immutable"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tree_sync_rejects_symlink_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("value"), b"value").unwrap();
+        symlink("value", root.path().join("linked")).unwrap();
+        let pinned = PinnedDirectory::open(root.path()).unwrap().unwrap();
+
+        let error = pinned.sync_tree().unwrap_err().to_string();
+        assert!(
+            error.contains("rejected a symlink or non-regular entry"),
+            "unexpected error: {error}"
         );
     }
 }

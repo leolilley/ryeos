@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Result};
 use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
+use serde::Deserialize;
 
 use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
@@ -22,6 +23,7 @@ pub struct Principal {
     pub fingerprint: String,
     pub scopes: Vec<String>,
     pub owner: String,
+    pub authenticated_site_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -88,63 +90,22 @@ struct AuthorizedKey {
     public_key: VerifyingKey,
     scopes: Vec<String>,
     owner: String,
+    authenticated_site_id: Option<String>,
 }
 
-/// Parse a simple TOML body with key = "value" lines.
-/// Handles string values (quoted) and string arrays.
-fn parse_toml_value(body: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for line in body.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim().to_string();
-            let value = value.trim();
-            // Strip surrounding quotes
-            let value = if (value.starts_with('"') && value.ends_with('"'))
-                || (value.starts_with('\'') && value.ends_with('\''))
-            {
-                value[1..value.len() - 1].to_string()
-            } else {
-                value.to_string()
-            };
-            map.insert(key, value);
-        }
-    }
-    map
-}
-
-/// Parse a TOML array value like `["a", "b"]` into Vec<String>.
-fn parse_toml_string_array(body: &str, key: &str) -> Vec<String> {
-    for line in body.lines() {
-        let line = line.trim();
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() != key {
-                continue;
-            }
-            let v = v.trim();
-            if v.starts_with('[') && v.ends_with(']') {
-                let inner = &v[1..v.len() - 1];
-                return inner
-                    .split(',')
-                    .map(|s| {
-                        let s = s.trim();
-                        if (s.starts_with('"') && s.ends_with('"'))
-                            || (s.starts_with('\'') && s.ends_with('\''))
-                        {
-                            s[1..s.len() - 1].to_string()
-                        } else {
-                            s.to_string()
-                        }
-                    })
-                    .filter(|s| !s.is_empty())
-                    .collect();
-            }
-        }
-    }
-    Vec::new()
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthorizedKeyGrantBody {
+    schema_version: u32,
+    principal_class: String,
+    #[serde(default)]
+    origin_site_id: Option<String>,
+    fingerprint: String,
+    public_key: String,
+    scopes: Vec<String>,
+    label: String,
+    granted_by: String,
+    created_at: String,
 }
 
 fn load_authorized_key(
@@ -193,17 +154,44 @@ fn load_authorized_key(
     let signature = Signature::from_slice(&sig_bytes)?;
     node_identity.verify_hash(content_hash, &signature)?;
 
-    // Parse TOML body
-    let values = parse_toml_value(body);
+    let grant: AuthorizedKeyGrantBody = toml::from_str(body)
+        .map_err(|error| anyhow::anyhow!("invalid authorized-key grant body: {error}"))?;
+    if grant.schema_version != 2 {
+        bail!(
+            "authorized-key grant schema_version must be exactly 2 (got {})",
+            grant.schema_version
+        );
+    }
+    let authenticated_site_id = match grant.principal_class.as_str() {
+        "local_client" => {
+            if grant.origin_site_id.is_some() {
+                bail!("local_client authorized-key grant cannot carry origin_site_id");
+            }
+            None
+        }
+        "remote_node" => {
+            let site_id = grant.origin_site_id.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "remote_node authorized-key grant has no authenticated origin_site_id"
+                )
+            })?;
+            ryeos_app::identity::validate_canonical_site_id(site_id).map_err(|error| {
+                anyhow::anyhow!(
+                    "remote_node authorized-key grant origin_site_id is not canonical: {error}"
+                )
+            })?;
+            Some(site_id.to_string())
+        }
+        other => bail!("unknown authorized-key principal_class '{}'", other),
+    };
 
     // Verify fingerprint matches
-    let file_fp = values.get("fingerprint").map(|s| s.as_str()).unwrap_or("");
-    if file_fp != fingerprint {
+    if grant.fingerprint != fingerprint {
         bail!("fingerprint mismatch");
     }
 
     // Extract public key
-    let public_key_str = values.get("public_key").map(|s| s.as_str()).unwrap_or("");
+    let public_key_str = grant.public_key.as_str();
     if !public_key_str.starts_with("ed25519:") {
         bail!("invalid public key format");
     }
@@ -224,7 +212,7 @@ fn load_authorized_key(
         );
     }
 
-    let scopes = parse_toml_string_array(body, "scopes");
+    let scopes = grant.scopes;
 
     // Loud rejection of short-form / malformed scopes. A TOML on
     // disk with `scopes = ["bundle.install"]` would otherwise
@@ -246,13 +234,60 @@ fn load_authorized_key(
         }
     }
 
-    let owner = values.get("label").cloned().unwrap_or_default();
+    if grant.granted_by.trim().is_empty() || grant.created_at.trim().is_empty() {
+        bail!("authorized-key grant audit fields must not be empty");
+    }
+    let owner = grant.label;
 
     Ok(AuthorizedKey {
         public_key,
         scopes,
         owner,
+        authenticated_site_id,
     })
+}
+
+/// Validate the complete authorized-key namespace during daemon startup.
+/// Authentication is a boot invariant: accepting the node and discovering an
+/// unusable legacy grant only on the first request would leave an apparently
+/// healthy daemon that rejects its operator.
+pub fn validate_authorized_key_directory(
+    auth_dir: &Path,
+    node_identity: &NodeIdentity,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(auth_dir)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        bail!(
+            "authorized-key namespace is not a regular directory: {}",
+            auth_dir.display()
+        );
+    }
+    let mut entries = fs::read_dir(auth_dir)?.collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            bail!(
+                "authorized-key namespace contains a non-regular entry: {}",
+                path.display()
+            );
+        }
+        let fingerprint = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".toml"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "authorized-key namespace contains an unexpected entry: {}",
+                    path.display()
+                )
+            })?;
+        load_authorized_key(fingerprint, auth_dir, node_identity).map_err(|error| {
+            anyhow::anyhow!("invalid authorized-key grant {}: {error:#}", path.display())
+        })?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +418,7 @@ pub(crate) fn verify_request(
         fingerprint: fingerprint.to_string(),
         scopes: auth_key.scopes,
         owner: auth_key.owner,
+        authenticated_site_id: auth_key.authenticated_site_id,
     })
 }
 
@@ -425,7 +461,7 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(attacker_vk.as_bytes());
 
         let toml_body = format!(
-            "fingerprint = \"{real_fp}\"\npublic_key = \"ed25519:{attacker_key_b64}\"\nscopes = [\"*\"]\nlabel = \"evil\"\n"
+            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{real_fp}\"\npublic_key = \"ed25519:{attacker_key_b64}\"\nscopes = [\"*\"]\nlabel = \"evil\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
         );
 
         let signed = lillux::signature::sign_content_at(
@@ -446,6 +482,33 @@ mod tests {
             msg.contains("fingerprint"),
             "error message should mention 'fingerprint', got: {msg}"
         );
+    }
+
+    #[test]
+    fn load_authorized_key_rejects_unversioned_grant() {
+        let subject = SigningKey::from_bytes(&[4u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[5u8; 32]);
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        let vk = subject.verifying_key();
+        let fp = lillux::signature::compute_fingerprint(&vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
+        let body = format!(
+            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\nlabel = \"old\"\n"
+        );
+        let signed = lillux::signature::sign_content_at(
+            &body,
+            &node_signer,
+            "#",
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+        std::fs::write(auth_dir.join(format!("{fp}.toml")), signed).unwrap();
+
+        let error = load_authorized_key(&fp, &auth_dir, &node_identity).unwrap_err();
+        assert!(format!("{error:#}").contains("schema_version"));
     }
 
     /// Round-trip: write via canonical writer → load via auth loader → verify.
@@ -508,6 +571,65 @@ mod tests {
             .expect("real handler cap must be satisfied by loaded scopes");
     }
 
+    #[test]
+    fn remote_node_grant_round_trip_carries_authenticated_site() {
+        let client_key = SigningKey::from_bytes(&[43u8; 32]);
+        let node_signer = SigningKey::from_bytes(&[98u8; 32]);
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        let client_vk = client_key.verifying_key();
+        let client_fp = lillux::signature::compute_fingerprint(&client_vk);
+        let key_b64 = base64::engine::general_purpose::STANDARD.encode(client_vk.as_bytes());
+
+        ryeos_app::identity::write_authorized_remote_node_key_toml(
+            &auth_dir,
+            &client_fp,
+            &key_b64,
+            &["ryeos.execute.graph.arc/noop".to_string()],
+            "remote",
+            "admission:test",
+            "2026-01-01T00:00:00Z",
+            "site:origin",
+            &node_signer,
+        )
+        .unwrap();
+
+        let loaded = load_authorized_key(&client_fp, &auth_dir, &node_identity).unwrap();
+        assert_eq!(loaded.authenticated_site_id.as_deref(), Some("site:origin"));
+    }
+
+    #[test]
+    fn directory_validation_rejects_unexpected_entries() {
+        let node_signer = SigningKey::from_bytes(&[97u8; 32]);
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        std::fs::write(auth_dir.join("README"), "not a grant").unwrap();
+
+        let error = validate_authorized_key_directory(&auth_dir, &node_identity).unwrap_err();
+        assert!(error.to_string().contains("unexpected entry"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_validation_rejects_symlinked_grants() {
+        use std::os::unix::fs::symlink;
+
+        let node_signer = SigningKey::from_bytes(&[96u8; 32]);
+        let tmp = TempDir::new().unwrap();
+        let node_identity = make_node_identity(&node_signer, tmp.path());
+        let auth_dir = tmp.path().join("auth");
+        std::fs::create_dir_all(&auth_dir).unwrap();
+        let outside = tmp.path().join("outside.toml");
+        std::fs::write(&outside, "not trusted").unwrap();
+        symlink(&outside, auth_dir.join("fp:linked.toml")).unwrap();
+
+        let error = validate_authorized_key_directory(&auth_dir, &node_identity).unwrap_err();
+        assert!(error.to_string().contains("non-regular entry"));
+    }
+
     /// Regression: a legitimately node-signed TOML that uses
     /// short-form scopes (`bundle.install` instead of
     /// `ryeos.execute.service.bundle/install`) must be REJECTED at
@@ -533,7 +655,7 @@ mod tests {
         // Hand-craft a TOML with short-form scopes that bypass the
         // canonical writer (which would reject them at write time).
         let body = format!(
-            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"bundle.install\", \"remote.admin\"]\nlabel = \"old-short-form\"\n"
+            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"bundle.install\", \"remote.admin\"]\nlabel = \"old-short-form\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
         );
         let signed = lillux::signature::sign_content_at(
             &body,
@@ -577,7 +699,7 @@ mod tests {
         let key_b64 = base64::engine::general_purpose::STANDARD.encode(vk.as_bytes());
 
         let body = format!(
-            "fingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\nlabel = \"ok\"\n"
+            "schema_version = 2\nprincipal_class = \"local_client\"\nfingerprint = \"{fp}\"\npublic_key = \"ed25519:{key_b64}\"\nscopes = [\"ryeos.execute.service.vault/list\"]\nlabel = \"ok\"\ngranted_by = \"test\"\ncreated_at = \"2026-01-01T00:00:00Z\"\n"
         );
         let signed = lillux::signature::sign_content_at(
             &body,

@@ -442,7 +442,7 @@ fn attribution_for_callback(cap: &CallbackCapability) -> ryeos_state::BundleEven
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
     use crate::execution_provenance::ExecutionProvenance;
@@ -460,11 +460,19 @@ mod tests {
             token: "cbt-test".into(),
             invocation_id: "inv-test".into(),
             thread_id: "T-test".into(),
+            launch_owner: None,
             chain_root_id: "T-test".into(),
             project_path: PathBuf::from("/tmp/test"),
             expires_at: Instant::now() + Duration::from_secs(60),
             effective_caps,
-            provenance: ExecutionProvenance::root_live_fs(PathBuf::from("/tmp/test"), engine),
+            provenance: ExecutionProvenance::root_live_fs(
+                PathBuf::from("/tmp/test"),
+                engine,
+                crate::execution_policy::synthetic_test_live_project_authority(Path::new(
+                    "/tmp/test",
+                )),
+            )
+            .unwrap(),
             effective_bundle_id: effective_bundle_id.map(str::to_string),
             item_ref: Some("tool:example-bundle/send".into()),
             root_content_digest: "0".repeat(64),

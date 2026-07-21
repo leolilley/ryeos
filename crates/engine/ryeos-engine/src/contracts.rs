@@ -2961,7 +2961,7 @@ pub struct VerifiedItem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum LaunchMode {
-    Inline,
+    Wait,
     Detached,
 }
 
@@ -2970,7 +2970,7 @@ impl LaunchMode {
     /// with [`LaunchMode::from_wire`].
     pub fn as_str(&self) -> &'static str {
         match self {
-            LaunchMode::Inline => "inline",
+            LaunchMode::Wait => "wait",
             LaunchMode::Detached => "detached",
         }
     }
@@ -2980,7 +2980,7 @@ impl LaunchMode {
     /// that as "not this mode" (fail closed) rather than assuming a default.
     pub fn from_wire(s: &str) -> Option<Self> {
         match s {
-            "inline" => Some(LaunchMode::Inline),
+            "wait" => Some(LaunchMode::Wait),
             "detached" => Some(LaunchMode::Detached),
             _ => None,
         }

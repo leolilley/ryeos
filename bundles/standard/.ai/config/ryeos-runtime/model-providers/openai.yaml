@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:1b6cf6fc0175c73a06c38598f594102bd354c1bde8a882c19fd9273eb2efba4b:sQcAXQSHaiuMeyhJjobsFj17zRv44c4aE6vQJjwmvlvHBq/yeOMw2TmW3cB93h/b9zcRGvnhc0ZfQvE9wzsqDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:52:25Z:0a1546ad6a4afedc6bf25c587c755c8afb82df38424fd39fd488a786bbe292ec:sNb+TCRJ9i7DgT9zSAiGKkXZ+BchthlVTb+oLxWajf6iXsRApeWYn/yeRvqmNfQ1vaa/o7i5taF/ELITaeGrAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://api.openai.com/v1"
@@ -50,3 +50,13 @@ pricing:
     o3-mini:       {input_per_million: 1.10, output_per_million: 4.40}
 extra:
   stream_url: "/chat/completions"
+  setup:
+    display_name: OpenAI
+    priority: 20
+    credential: {label: API key, secret_name: OPENAI_API_KEY, input: secret}
+    help_url: https://platform.openai.com/api-keys
+    validation: {ref: "service:model-providers/validate", url: "https://api.openai.com/v1/models", timeout_seconds: 15}
+    models:
+      - {name: gpt-4o-mini, display_name: GPT-4o mini, context_window: 128000}
+      - {name: gpt-4o, display_name: GPT-4o, context_window: 128000, recommended: true}
+      - {name: o3-mini, display_name: o3-mini, context_window: 200000}

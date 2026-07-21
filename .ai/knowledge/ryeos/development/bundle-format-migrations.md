@@ -1,4 +1,14 @@
-# Bundle format and signed-data migration policy
+<!-- ryeos:signed:2026-07-21T00:24:55Z:9edfd8e49b3e987c84c1e7a7b6d860f2e0a1470ea9543da35936f801449037ef:IP8R3A14xI/QjSFY5X4/rcZ9ydqrl83P6W/I7LG+5NbKQ+Q+hT7TFXcafYmVyBTgO6AWioEK1m3+JoExfOHtBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/development
+name: bundle-format-migrations
+title: Bundle Format and Signed-Data Migration Policy
+description: Rules for exact signed bundle formats and coordinated clean-cut format changes
+entry_type: reference
+version: "1.0.0"
+```
+
+# Bundle Format and Signed-Data Migration Policy
 
 RyeOS accepts one bundle format at a time. The current formats are:
 

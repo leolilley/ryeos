@@ -32,6 +32,9 @@ pub fn project_thread_snapshot(
         .map(|value| lillux::canonical_json(&value))
         .transpose()
         .context("failed to canonicalize captured history policy")?;
+    let project_authority_json =
+        lillux::canonical_json(&serde_json::to_value(&snapshot.project_authority)?)
+            .context("failed to canonicalize project authority")?;
 
     db.connection()
         .execute(
@@ -39,9 +42,10 @@ pub fn project_thread_snapshot(
             thread_id, chain_root_id, kind, status,
             item_ref, executor_ref, launch_mode,
             current_site_id, origin_site_id, upstream_thread_id, requested_by, project_root,
+            project_authority_json, admitted_launch_capsule_hash,
             base_project_snapshot_hash, result_project_snapshot_hash,
             captured_history_policy_json, created_at, updated_at, started_at, finished_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             rusqlite::params![
                 &snapshot.thread_id,
                 chain_root_id,
@@ -55,6 +59,8 @@ pub fn project_thread_snapshot(
                 &snapshot.upstream_thread_id,
                 &snapshot.requested_by,
                 project_root,
+                project_authority_json,
+                &snapshot.admitted_launch_capsule_hash,
                 &snapshot.base_project_snapshot_hash,
                 &snapshot.result_project_snapshot_hash,
                 captured_history_policy_json,

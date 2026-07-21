@@ -17,6 +17,8 @@ isolation_backends:
       - filesystem.fd_read_only
       - filesystem.fd_writable
       - filesystem.ordered_overlays
+      - filesystem.project_workspace_cow
+      - filesystem.workspace_delta
       - filesystem.private_tmp
       - devices.minimal
       - environment.exact

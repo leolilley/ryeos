@@ -92,6 +92,18 @@ impl BundleRegistryMutationLock {
         })
     }
 
+    pub fn acquire_for_startup(app_root: &Path) -> Result<Self> {
+        let target = app_root.join(".ai/bundles");
+        let lock = lillux::ExclusiveFileLock::acquire_with_timeout(
+            &target,
+            std::time::Duration::from_secs(3),
+        )?;
+        Ok(Self {
+            app_root: app_root.to_path_buf(),
+            _lock: lock,
+        })
+    }
+
     /// Acquire a bundle's per-name transaction lock after the node-wide lock.
     pub fn acquire_bundle(&self, name: &str) -> Result<BundleMutationTransaction<'_>> {
         Ok(BundleMutationTransaction {

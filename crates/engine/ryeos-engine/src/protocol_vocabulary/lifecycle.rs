@@ -9,8 +9,8 @@ pub enum LifecycleMode {
     /// via the channel, daemon awaits final result.
     /// Runtime-style.
     Managed,
-    /// Caller may choose launch_mode: detached or inline. Daemon returns
-    /// immediately on detached, polls on inline.
+    /// Caller may choose launch_mode: detached or wait. Daemon returns
+    /// immediately on detached, waits on wait.
     DetachedOk,
 }
 

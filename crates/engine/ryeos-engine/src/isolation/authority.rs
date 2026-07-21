@@ -2,10 +2,40 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IsolationLiveAccessAuthority {
+    DescriptorRootedMasked {
+        root_device_id: u64,
+        root_inode: u64,
+        denied_control_paths: Vec<PathBuf>,
+        authorized_write_namespaces: Vec<String>,
+    },
+    UnconfinedHost {
+        authorized_write_namespaces: Vec<String>,
+    },
+}
+
+impl IsolationLiveAccessAuthority {
+    pub fn authorized_write_namespaces(&self) -> &[String] {
+        match self {
+            Self::DescriptorRootedMasked {
+                authorized_write_namespaces,
+                ..
+            }
+            | Self::UnconfinedHost {
+                authorized_write_namespaces,
+            } => authorized_write_namespaces,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IsolationProjectAuthority {
     External,
     RuntimeWorkspace,
+    /// Daemon-created, request-owned projectless scratch directory. This is
+    /// writable but has no snapshot/fold-back semantics.
+    EphemeralScratch,
     /// Pure node handler launch. The project path supplies a read-only cwd;
     /// no configured host writable mount is granted for this launch.
     ReadOnly,
@@ -24,6 +54,7 @@ pub struct IsolationVerifiedCode {
 pub struct IsolationLaunchContext<'a> {
     pub project_path: &'a Path,
     pub project_authority: IsolationProjectAuthority,
+    pub live_access: Option<&'a IsolationLiveAccessAuthority>,
     pub state_root: Option<&'a Path>,
     pub checkpoint_dir: Option<&'a Path>,
     pub daemon_socket_path: Option<&'a Path>,

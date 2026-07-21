@@ -1,9 +1,10 @@
-# ryeos:signed:2026-06-11T05:13:14Z:d821add7da0cb6130d4983d7a7ccb380ffba5780ab740f745e91f9b5f7e463c2:NzobaEchcA9KSYmOueYPOZjih+OL/sNiDWb3iFP7uUUraYxrnZReFkhNoRPq3H8U7hx5iyzO/6Xxl/b3LXI4DA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-18T18:19:26Z:82e2a4c1c482ed494ca2a4435cae621a0fce3578a1f61836e0c0f55e44ce605a:TuxUuJCrG7oE0qdHp0DPXGMgcMol79kVCADced/tRwWyjc0lXHaiFHMP9i7ZX4OW5ty5ecUpRRxl92sL0GFCDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: remote.pull
 required_caps: ["ryeos.execute.service.objects/get"]
 schema:
   remote: string?
-  hashes: string[]
-  output_dir: string?
-description: "Fetch arbitrary CAS objects from a remote node and store in local CAS"
+  object_hashes: string[]?
+  blob_hashes: string[]?
+  output_dir: string
+description: "Fetch typed remote CAS artifacts into an explicit local directory"

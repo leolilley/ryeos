@@ -3,7 +3,7 @@
 //! The terminal tool is only a callback client. It never loads the node key,
 //! invents a trust store, reads authoritative refs, or publishes HEAD itself.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
@@ -25,7 +25,7 @@ use crate::callback_token::{CallbackCapability, ThreadAuthState};
 use crate::state::AppState;
 use crate::state_store::NodeIdentitySigner;
 use ryeos_runtime::authorizer::AuthorizationPolicy;
-use ryeos_state::objects::{ItemSource, ProjectSnapshot, SourceManifest};
+use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::project_sync::ProjectSyncScope;
 
 #[derive(Debug, Deserialize)]
@@ -228,17 +228,13 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
         (params.time_budget_ms > 0).then(|| started + Duration::from_millis(params.time_budget_ms));
     let (head_hash, deployed_hash) = heads(ctx)?;
     let head_items = match head_hash.as_deref() {
-        Some(hash) => {
-            load_snapshot_and_manifest(&ctx.cas, hash)?
-                .1
-                .item_source_hashes
-        }
-        None => HashMap::new(),
+        Some(hash) => load_snapshot_and_manifest(&ctx.cas, hash)?.1.files,
+        None => BTreeMap::new(),
     };
     let head_state = manifest_state_map(&ctx.cas, &head_items)?;
     let mut worktree = BTreeMap::new();
-    // Status compares only snapshot-representable files. Symlinks are omitted
-    // consistently with snapshot creation and are never followed.
+    // Status compares only snapshot-representable files. Symlinks and special
+    // entries fail loudly and are never followed.
     let complete = walk_worktree(
         &ctx.project_path,
         &ctx.project_path,
@@ -274,7 +270,7 @@ fn status(ctx: &SnapshotContext<'_>, params: &ProjectParams) -> Result<Value> {
             changes.push(json!({
                 "path": path.clone(),
                 "status": status,
-                "head_item_source_hash": head_items.get(&path),
+                "head_project_file_hash": head_items.get(&path),
                 "worktree_integrity": work.map(|state| state.integrity.as_str()),
             }));
         }
@@ -303,7 +299,8 @@ fn log(ctx: &SnapshotContext<'_>, limit: usize) -> Result<Value> {
         pending.insert((0_usize, head.clone()));
     }
     let mut seen = HashSet::new();
-    let traversal_limits = ryeos_state::object_closure::ObjectClosureLimits::default();
+    let traversal_limits =
+        ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport();
     let mut entries = Vec::new();
     while entries.len() < limit {
         let Some((depth, hash)) = pending.pop_first() else {
@@ -329,7 +326,8 @@ fn log(ctx: &SnapshotContext<'_>, limit: usize) -> Result<Value> {
             "created_at": snapshot.created_at,
             "source": snapshot.source,
             "message": snapshot.message,
-            "project_manifest_hash": snapshot.project_manifest_hash,
+            "project_tree_hash": snapshot.project_tree_hash,
+            "effective_policy_hash": snapshot.effective_policy_hash,
             "parent_hashes": snapshot.parent_hashes,
         }));
     }
@@ -357,12 +355,34 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
         .as_deref()
         .map(|hash| load_snapshot(&ctx.cas, hash))
         .transpose()?;
-    let manifest = build_manifest(ctx)?;
-    let manifest_hash = ctx.cas.store_object(&manifest.to_value())?;
+    let project_root = lillux::PinnedDirectory::open(&ctx.project_path)?.ok_or_else(|| {
+        anyhow!(
+            "project root does not exist: {}",
+            ctx.project_path.display()
+        )
+    })?;
+    let policy = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+        &project_root,
+        ctx.ignore_matcher,
+        ProjectSyncScope::FullProject,
+    )?;
+    let policy_hash = ctx.cas.store_object(&policy.to_value())?;
+    let tree = build_project_tree(ctx, &project_root, &policy)?;
+    ryeos_state::project_sync::validate_captured_policy_source(&ctx.cas, &tree, &policy)?;
+    let policy_after = ryeos_state::project_sync::capture_snapshot_policy_from_pinned(
+        &project_root,
+        ctx.ignore_matcher,
+        ProjectSyncScope::FullProject,
+    )?;
+    if policy_after != policy {
+        bail!("project snapshot policy changed during capture");
+    }
+    project_root.ensure_path_binding()?;
+    let tree_hash = ctx.cas.store_object(&tree.to_value())?;
     if !allow_empty
-        && current
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.project_manifest_hash == manifest_hash)
+        && current.as_ref().is_some_and(|snapshot| {
+            snapshot.project_tree_hash == tree_hash && snapshot.effective_policy_hash == policy_hash
+        })
     {
         return Ok(json!({
             "kind": "snapshot_create",
@@ -372,20 +392,16 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
             "created": false,
             "reason": "clean",
             "head_snapshot_hash": initial_head,
-            "manifest_hash": manifest_hash,
-            "manifest_entries": manifest.item_source_hashes.len(),
+            "tree_hash": tree_hash,
+            "tree_entries": tree.files.len(),
             "message": message,
         }));
     }
     let parent_hashes = initial_head.iter().cloned().collect::<Vec<_>>();
     let snapshot = ProjectSnapshot {
-        project_manifest_hash: manifest_hash.clone(),
-        user_manifest_hash: None,
+        project_tree_hash: tree_hash.clone(),
+        effective_policy_hash: policy_hash.clone(),
         message: message.clone(),
-        project_sync_scope: current
-            .as_ref()
-            .map(|snapshot| snapshot.project_sync_scope)
-            .unwrap_or(ProjectSyncScope::FullProject),
         parent_hashes: parent_hashes.clone(),
         created_at: lillux::time::iso8601_now(),
         source: "snapshot_create".to_string(),
@@ -424,8 +440,9 @@ fn create(ctx: &SnapshotContext<'_>, message: Option<String>, allow_empty: bool)
         "snapshot_hash": snapshot_hash,
         "head_snapshot_hash": snapshot_hash,
         "parent_hashes": parent_hashes,
-        "manifest_hash": manifest_hash,
-        "manifest_entries": manifest.item_source_hashes.len(),
+        "tree_hash": tree_hash,
+        "effective_policy_hash": policy_hash,
+        "tree_entries": tree.files.len(),
         "message": message,
     }))
 }
@@ -439,17 +456,17 @@ fn show(ctx: &SnapshotContext<'_>, snapshot_hash: &str) -> Result<Value> {
     if !in_principal_history && !in_deployed_history {
         bail!("snapshot is not reachable from this project's verified heads");
     }
-    let (snapshot, manifest) = load_snapshot_and_manifest(&ctx.cas, snapshot_hash)?;
+    let (snapshot, tree) = load_snapshot_and_manifest(&ctx.cas, snapshot_hash)?;
     Ok(json!({
         "kind": "snapshot_show",
         "snapshot_hash": snapshot_hash,
         "created_at": snapshot.created_at,
         "source": snapshot.source,
         "message": snapshot.message,
-        "project_manifest_hash": snapshot.project_manifest_hash,
-        "project_sync_scope": snapshot.project_sync_scope,
+        "project_tree_hash": snapshot.project_tree_hash,
+        "effective_policy_hash": snapshot.effective_policy_hash,
         "parent_hashes": snapshot.parent_hashes,
-        "manifest_entries": manifest.item_source_hashes.len(),
+        "tree_entries": tree.files.len(),
         "is_principal_head": principal_head.as_deref() == Some(snapshot_hash),
         "is_deployed": deployed_head.as_deref() == Some(snapshot_hash),
     }))
@@ -491,40 +508,62 @@ fn history_contains(cas: &CasStore, head: Option<&str>, wanted: &str) -> Result<
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileState {
     integrity: String,
-    mode: Option<u32>,
+    mode: u32,
+    size: u64,
 }
 
 #[derive(Debug)]
 struct CapturedFile {
     state: FileState,
-    bytes: Vec<u8>,
 }
 
-fn build_manifest(ctx: &SnapshotContext<'_>) -> Result<SourceManifest> {
+fn build_project_tree(
+    ctx: &SnapshotContext<'_>,
+    project_root: &lillux::PinnedDirectory,
+    policy: &ProjectSnapshotPolicy,
+) -> Result<ProjectTree> {
+    let matcher = policy.matcher()?;
     let mut files = BTreeMap::new();
-    walk_worktree(
-        &ctx.project_path,
-        &ctx.project_path,
-        Path::new(""),
-        ctx.ignore_matcher,
-        None,
-        &mut files,
+    project_root.visit_regular_files(
+        |relative, _is_directory| {
+            let rel = canonical_relative_path(relative)?;
+            Ok(
+                ryeos_state::project_sync::is_project_snapshot_floor_excluded(&rel)
+                    || matcher.is_ignored(&rel),
+            )
+        },
+        |relative, file| {
+            let rel = canonical_relative_path(relative)?;
+            ryeos_state::project_sync::validate_project_manifest_path(
+                &rel,
+                policy.sync_scope,
+                Some(&matcher),
+            )?;
+            let blob = ctx
+                .cas
+                .put_blob_from_open_regular(file, &project_root.path().join(relative))?;
+            let project_file = ProjectFile {
+                blob_hash: blob.hash,
+                size: blob.size,
+                normalized_mode: blob.normalized_mode,
+            };
+            let file_hash = ctx.cas.store_object(&project_file.to_value())?;
+            files.insert(rel, file_hash);
+            Ok(())
+        },
     )?;
-    let mut items = HashMap::new();
-    for (path, captured) in files {
-        let blob_hash = ctx.cas.store_blob(&captured.bytes)?;
-        let item = ItemSource {
-            item_ref: path.clone(),
-            content_blob_hash: blob_hash,
-            integrity: captured.state.integrity,
-            signature_info: None,
-            mode: captured.state.mode,
-        };
-        items.insert(path, ctx.cas.store_object(&item.to_value())?);
-    }
-    Ok(SourceManifest {
-        item_source_hashes: items,
-    })
+    let tree = ProjectTree { files };
+    ryeos_state::project_sync::validate_project_tree_paths(&tree, policy)?;
+    Ok(tree)
+}
+
+fn canonical_relative_path(path: &Path) -> Result<String> {
+    let rel = path
+        .to_str()
+        .ok_or_else(|| anyhow!("project snapshot path is not valid UTF-8"))?
+        .replace('\\', "/");
+    ryeos_state::project_sync::validate_safe_relative_path(&rel)?;
+    Ok(rel)
 }
 
 #[cfg(unix)]
@@ -546,11 +585,10 @@ fn walk_worktree(
         }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
-            // A snapshot represents regular-file bytes, not filesystem link
-            // topology. Omitting links keeps virtualenvs and similar project
-            // tooling usable without ever following a path outside the
-            // project capability root.
-            continue;
+            bail!(
+                "project snapshots do not support symlinks: {}",
+                entry.path().display()
+            );
         }
         let path = entry.path();
         let name = entry
@@ -601,23 +639,17 @@ fn walk_worktree(
 
 fn manifest_state_map(
     cas: &CasStore,
-    items: &HashMap<String, String>,
+    items: &BTreeMap<String, String>,
 ) -> Result<BTreeMap<String, FileState>> {
     let mut states = BTreeMap::new();
     for (path, hash) in items {
-        let item = ItemSource::from_value(&load_verified_object(cas, hash)?)?;
-        if item.item_ref != *path {
-            anyhow::bail!(
-                "manifest path {:?} does not match embedded item_source path {:?}",
-                path,
-                item.item_ref
-            );
-        }
+        let item = ProjectFile::from_value(&load_verified_object(cas, hash)?)?;
         states.insert(
             path.clone(),
             FileState {
-                integrity: item.integrity,
-                mode: item.mode,
+                integrity: item.blob_hash,
+                mode: item.normalized_mode,
+                size: item.size,
             },
         );
     }
@@ -631,11 +663,16 @@ fn load_snapshot(cas: &CasStore, hash: &str) -> Result<ProjectSnapshot> {
 fn load_snapshot_and_manifest(
     cas: &CasStore,
     hash: &str,
-) -> Result<(ProjectSnapshot, SourceManifest)> {
+) -> Result<(ProjectSnapshot, ProjectTree)> {
     let snapshot = load_snapshot(cas, hash)?;
-    let manifest =
-        SourceManifest::from_value(&load_verified_object(cas, &snapshot.project_manifest_hash)?)?;
-    Ok((snapshot, manifest))
+    let tree = ProjectTree::from_value(&load_verified_object(cas, &snapshot.project_tree_hash)?)?;
+    let policy = ProjectSnapshotPolicy::from_value(&load_verified_object(
+        cas,
+        &snapshot.effective_policy_hash,
+    )?)?;
+    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_captured_policy_source(cas, &tree, &policy)?;
+    Ok((snapshot, tree))
 }
 
 fn load_verified_object(cas: &CasStore, hash: &str) -> Result<Value> {
@@ -702,13 +739,13 @@ fn capture_regular_file_no_follow(root: &Path, path: &Path) -> Result<Option<Cap
         );
     }
     let raw_mode = after.permissions().mode() & 0o7777;
-    let mode = (raw_mode & 0o111 != 0).then_some(raw_mode);
+    let mode = ProjectFile::normalize_mode(raw_mode);
     Ok(Some(CapturedFile {
         state: FileState {
             integrity: sha256_hex(&bytes),
             mode,
+            size: bytes.len() as u64,
         },
-        bytes,
     }))
 }
 

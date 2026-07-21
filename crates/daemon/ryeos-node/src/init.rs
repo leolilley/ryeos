@@ -44,16 +44,21 @@
 //! lack a `.ai/` subdirectory, are silently skipped. Hidden directories
 //! (starting with `.`) are also skipped.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine as _;
-use lillux::crypto::{DecodePrivateKey, EncodePrivateKey, SigningKey, VerifyingKey};
+use lillux::crypto::{
+    DecodePrivateKey, EncodePrivateKey, Signature, Signer, SigningKey, Verifier, VerifyingKey,
+};
+use rand::RngCore;
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
@@ -114,6 +119,28 @@ pub struct InitOptions {
     pub skip_preflight: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InitOperatorProfile {
+    pub display_name: Option<String>,
+    pub identity_statement: Option<String>,
+}
+
+pub struct InitOperatorCeremony {
+    pub profile: InitOperatorProfile,
+    pub entropy_contribution: Option<Zeroizing<Vec<u8>>>,
+}
+
+impl std::fmt::Debug for InitOperatorCeremony {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitOperatorCeremony")
+            .field("profile", &self.profile)
+            .field("entropy_contribution", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct InitReport {
     pub app_root: PathBuf,
@@ -128,6 +155,34 @@ pub struct InitReport {
     pub bundles_installed: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
+}
+
+const INIT_COMPLETION_SCHEMA: &str = "ryeos/init-completion/v1";
+const INIT_COMPLETION_MAX_BYTES: u64 = 256 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitCompletionBody {
+    schema: String,
+    operator_fingerprint: String,
+    node_fingerprint: String,
+    vault_fingerprint: String,
+    registration_digests: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InitCompletionDocument {
+    body: InitCompletionBody,
+    signature: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitCompletionReport {
+    pub operator_fingerprint: String,
+    pub node_fingerprint: String,
+    pub vault_fingerprint: String,
+    pub bundles_verified: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +223,22 @@ pub fn run_init(opts: &InitOptions) -> Result<InitReport> {
 
 pub fn run_init_with_progress(
     opts: &InitOptions,
+    mut observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    run_init_internal(opts, None, &mut observe)
+}
+
+pub fn run_init_with_operator_ceremony(
+    opts: &InitOptions,
+    ceremony: InitOperatorCeremony,
+    mut observe: impl FnMut(&InitProgress) -> Result<()>,
+) -> Result<InitReport> {
+    run_init_internal(opts, Some(ceremony), &mut observe)
+}
+
+fn run_init_internal(
+    opts: &InitOptions,
+    mut ceremony: Option<InitOperatorCeremony>,
     mut observe: impl FnMut(&InitProgress) -> Result<()>,
 ) -> Result<InitReport> {
     let mut progress = |phase, completed, total, detail: Option<String>| {
@@ -216,9 +287,24 @@ pub fn run_init_with_progress(
         .join("keys")
         .join("signing")
         .join("private_key.pem");
-    let user_key = load_or_create_key(&user_key_path, false)
+    if let Some(ceremony) = ceremony.as_ref() {
+        validate_operator_ceremony(ceremony)?;
+    }
+    let contribution = ceremony
+        .as_mut()
+        .and_then(|ceremony| ceremony.entropy_contribution.take());
+    let (user_key, user_key_created, contribution_digest) =
+        load_or_create_operator_key(&user_key_path, contribution)
         .with_context(|| format!("user key at {}", user_key_path.display()))?;
     let user_fp = compute_fingerprint(&user_key.verifying_key());
+    ensure_operator_genesis(
+        &opts.app_root,
+        &user_key,
+        &user_fp,
+        ceremony.as_ref().map(|ceremony| &ceremony.profile),
+        user_key_created,
+        contribution_digest.as_deref(),
+    )?;
 
     // ── 3. Node key ──
     let node_key_path = opts
@@ -555,17 +641,28 @@ pub fn run_init_with_progress(
     let vault_secret_path = vault_dir.join("private_key.pem");
     let vault_public_path = vault_dir.join("public_key.pem");
     let vault_sk = lillux::with_exclusive_file_lock(&vault_secret_path, || {
-        if vault_secret_path.exists() {
-            lillux::vault::read_secret_key(&vault_secret_path)
-                .with_context(|| format!("load vault key {}", vault_secret_path.display()))
-        } else {
-            let sk = lillux::vault::VaultSecretKey::generate();
-            lillux::vault::write_secret_key(&vault_secret_path, &sk)
-                .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
-            Ok(sk)
+        match fs::symlink_metadata(&vault_secret_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!("refusing unsafe vault key path {}", vault_secret_path.display())
+            }
+            Ok(_) => lillux::vault::read_secret_key(&vault_secret_path)
+                .with_context(|| format!("load vault key {}", vault_secret_path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let sk = lillux::vault::VaultSecretKey::generate();
+                lillux::vault::write_secret_key(&vault_secret_path, &sk)
+                    .with_context(|| format!("write vault key {}", vault_secret_path.display()))?;
+                Ok(sk)
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("inspect vault key {}", vault_secret_path.display())),
         }
     })
     .with_context(|| format!("initialize vault key {}", vault_secret_path.display()))?;
+    if let Ok(metadata) = fs::symlink_metadata(&vault_public_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!("refusing unsafe vault public key path {}", vault_public_path.display());
+        }
+    }
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
 
@@ -601,6 +698,14 @@ pub fn run_init_with_progress(
         );
     }
 
+    let vault_pubkey_fingerprint = vault_sk.public_key().fingerprint();
+    write_init_completion(
+        &opts.app_root,
+        &user_key,
+        &user_fp,
+        &node_fp,
+        &vault_pubkey_fingerprint,
+    )?;
     let next_steps = Vec::new();
 
     Ok(InitReport {
@@ -608,10 +713,150 @@ pub fn run_init_with_progress(
         user_key_fingerprint: user_fp,
         node_key_fingerprint: node_fp,
         official_publisher_pinned: OFFICIAL_PUBLISHER_FP.to_string(),
-        vault_pubkey_fingerprint: vault_sk.public_key().fingerprint(),
+        vault_pubkey_fingerprint,
         bundles_installed,
         next_steps,
     })
+}
+
+fn init_completion_path(app_root: &Path) -> PathBuf {
+    app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/onboarding/init-completion-v1.json")
+}
+
+fn registration_digests(app_root: &Path) -> Result<BTreeMap<String, String>> {
+    let directory = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/bundles");
+    let paths = lillux::collect_regular_files_no_follow(&directory, false)?
+        .ok_or_else(|| anyhow!("bundle registration directory is absent"))?;
+    let mut digests = BTreeMap::new();
+    for path in paths {
+        if !matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("yaml" | "yml")
+        ) {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("bundle registration filename is not UTF-8"))?
+            .to_string();
+        let bytes = lillux::read_regular_file_bounded_no_follow(&path, 1024 * 1024)?;
+        digests.insert(name, lillux::sha256_hex(&bytes));
+    }
+    if digests.is_empty() {
+        bail!("no bundle registrations are present");
+    }
+    Ok(digests)
+}
+
+fn write_init_completion(
+    app_root: &Path,
+    signing_key: &SigningKey,
+    operator_fingerprint: &str,
+    node_fingerprint: &str,
+    vault_fingerprint: &str,
+) -> Result<()> {
+    let body = InitCompletionBody {
+        schema: INIT_COMPLETION_SCHEMA.to_string(),
+        operator_fingerprint: operator_fingerprint.to_string(),
+        node_fingerprint: node_fingerprint.to_string(),
+        vault_fingerprint: vault_fingerprint.to_string(),
+        registration_digests: registration_digests(app_root)?,
+    };
+    let canonical = lillux::canonical_json(&serde_json::to_value(&body)?)?;
+    let signature = signing_key.sign(canonical.as_bytes());
+    let document = InitCompletionDocument {
+        body,
+        signature: format!(
+            "ed25519:{}",
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+        ),
+    };
+    let bytes = serde_json::to_vec_pretty(&document)?;
+    if bytes.len() as u64 > INIT_COMPLETION_MAX_BYTES {
+        bail!("init completion record exceeds its size limit");
+    }
+    let path = init_completion_path(app_root);
+    lillux::with_exclusive_file_lock(&path, || {
+        lillux::atomic_write(&path, &bytes)
+            .map_err(|error| anyhow!("write init completion {}: {error}", path.display()))
+    })
+}
+
+pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionReport>> {
+    let path = init_completion_path(app_root);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("unsafe init completion record at {}", path.display())
+        }
+        Ok(metadata) if metadata.len() > INIT_COMPLETION_MAX_BYTES => {
+            bail!("init completion record exceeds its size limit")
+        }
+        Ok(_) => {}
+    }
+    let bytes = lillux::read_regular_file_bounded_no_follow(&path, INIT_COMPLETION_MAX_BYTES)?;
+    let document: InitCompletionDocument = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse init completion {}", path.display()))?;
+    if document.body.schema != INIT_COMPLETION_SCHEMA {
+        bail!("unsupported init completion schema");
+    }
+    let operator_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config/keys/signing/private_key.pem");
+    let operator_pem = Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&operator_key_path, 32 * 1024)?,
+    )?);
+    let operator_key = SigningKey::from_pkcs8_pem(operator_pem.as_str())?;
+    let operator_fingerprint = compute_fingerprint(&operator_key.verifying_key());
+    if operator_fingerprint != document.body.operator_fingerprint {
+        bail!("init completion operator fingerprint does not match the current key");
+    }
+    let signature = document
+        .signature
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| anyhow!("init completion signature has an invalid encoding"))?;
+    let signature = Signature::from_slice(
+        &base64::engine::general_purpose::STANDARD.decode(signature)?,
+    )?;
+    let canonical = lillux::canonical_json(&serde_json::to_value(&document.body)?)?;
+    operator_key
+        .verifying_key()
+        .verify(canonical.as_bytes(), &signature)
+        .context("verify init completion signature")?;
+
+    let node_key_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/identity/private_key.pem");
+    let node_pem = Zeroizing::new(String::from_utf8(
+        lillux::read_regular_file_bounded_no_follow(&node_key_path, 32 * 1024)?,
+    )?);
+    let node_key = SigningKey::from_pkcs8_pem(node_pem.as_str())?;
+    if compute_fingerprint(&node_key.verifying_key()) != document.body.node_fingerprint {
+        bail!("init completion node fingerprint does not match the current key");
+    }
+    let vault_path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("node/vault/public_key.pem");
+    let vault_fingerprint = lillux::vault::read_public_key(&vault_path)?.fingerprint();
+    if vault_fingerprint != document.body.vault_fingerprint {
+        bail!("init completion vault fingerprint does not match the current key");
+    }
+    let registrations = registration_digests(app_root)?;
+    if registrations != document.body.registration_digests {
+        bail!("bundle registrations differ from the signed init completion record");
+    }
+    Ok(Some(InitCompletionReport {
+        operator_fingerprint,
+        node_fingerprint: document.body.node_fingerprint,
+        vault_fingerprint,
+        bundles_verified: registrations.len(),
+    }))
 }
 
 fn validate_selected_backend_staging(
@@ -1069,13 +1314,29 @@ fn create_layout(app_root: &Path) -> Result<()> {
 
 /// Load an existing key, or create one. Refuses to overwrite unless `force`.
 fn load_or_create_key(path: &Path, force: bool) -> Result<SigningKey> {
-    if force && path.exists() {
+    lillux::with_exclusive_file_lock(path, || load_or_create_key_locked(path, force))
+}
+
+fn load_or_create_key_locked(path: &Path, force: bool) -> Result<SigningKey> {
+    let existing = match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("refusing unsafe signing key path {}", path.display())
+        }
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect key {}", path.display()))
+        }
+    };
+    if force && existing {
         fs::remove_file(path).with_context(|| format!("remove old key {}", path.display()))?;
     }
-    if path.exists() {
-        let pem = fs::read_to_string(path)
-            .with_context(|| format!("read existing key {}", path.display()))?;
-        let key = SigningKey::from_pkcs8_pem(&pem)
+    if existing && !force {
+        let pem = Zeroizing::new(String::from_utf8(
+            lillux::read_regular_file_bounded_no_follow(path, 32 * 1024)
+                .with_context(|| format!("read existing key {}", path.display()))?,
+        )?);
+        let key = SigningKey::from_pkcs8_pem(pem.as_str())
             .with_context(|| format!("parse existing key {}", path.display()))?;
         return Ok(key);
     }
@@ -1087,9 +1348,246 @@ fn load_or_create_key(path: &Path, force: bool) -> Result<SigningKey> {
     let pem = signing_key
         .to_pkcs8_pem(Default::default())
         .map_err(|e| anyhow!("encode generated key: {e}"))?;
-    fs::write(path, pem.as_bytes())
-        .with_context(|| format!("write generated key {}", path.display()))?;
+    lillux::atomic_write_private(path, pem.as_bytes())
+        .map_err(|error| anyhow!("write generated key {}: {error}", path.display()))?;
     Ok(signing_key)
+}
+
+fn load_or_create_operator_key(
+    path: &Path,
+    contribution: Option<Zeroizing<Vec<u8>>>,
+) -> Result<(SigningKey, bool, Option<String>)> {
+    lillux::with_exclusive_file_lock(path, || {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                bail!("refusing unsafe operator key path {}", path.display())
+            }
+            Ok(_) => {
+                let pem = Zeroizing::new(String::from_utf8(
+                    lillux::read_regular_file_bounded_no_follow(path, 32 * 1024)
+                        .with_context(|| format!("read existing key {}", path.display()))?,
+                )?);
+                let key = SigningKey::from_pkcs8_pem(pem.as_str())
+                    .with_context(|| format!("parse existing key {}", path.display()))?;
+                return Ok((key, false, None));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect key {}", path.display()))
+            }
+        }
+        let mut os_random = Zeroizing::new([0_u8; 32]);
+        OsRng.fill_bytes(&mut *os_random);
+        let contribution_digest = contribution.as_ref().map(|contribution| {
+            let mut digest = Sha256::new();
+            digest.update(b"ryeos/operator-contribution/v1\0");
+            digest.update(contribution.as_slice());
+            digest.finalize()
+        });
+        let mut input = Zeroizing::new(Vec::with_capacity(64));
+        input.extend_from_slice(&*os_random);
+        if let Some(digest) = &contribution_digest {
+            input.extend_from_slice(digest.as_slice());
+        }
+        let hkdf = hkdf::Hkdf::<Sha256>::new(
+            Some(b"ryeos/operator-ed25519-seed/v1"),
+            input.as_slice(),
+        );
+        let mut seed = Zeroizing::new([0_u8; 32]);
+        hkdf.expand(b"ed25519 signing seed", &mut *seed)
+            .map_err(|_| anyhow!("derive operator signing seed"))?;
+        let signing_key = SigningKey::from_bytes(&*seed);
+        let pem = signing_key
+            .to_pkcs8_pem(Default::default())
+            .map_err(|error| anyhow!("encode generated operator key: {error}"))?;
+        lillux::atomic_write_private(path, pem.as_bytes())
+            .map_err(|error| anyhow!("write generated operator key {}: {error}", path.display()))?;
+        Ok((
+            signing_key,
+            true,
+            contribution_digest.map(hex::encode),
+        ))
+    })
+}
+
+fn ensure_operator_genesis(
+    app_root: &Path,
+    signing_key: &SigningKey,
+    operator_fingerprint: &str,
+    profile: Option<&InitOperatorProfile>,
+    key_created: bool,
+    contribution_digest: Option<&str>,
+) -> Result<()> {
+    let path = app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("config")
+        .join("identity")
+        .join("operator-genesis.json");
+    lillux::with_exclusive_file_lock(&path, || {
+        ensure_operator_genesis_locked(
+            &path,
+            signing_key,
+            operator_fingerprint,
+            profile,
+            key_created,
+            contribution_digest,
+        )
+    })
+}
+
+fn ensure_operator_genesis_locked(
+    path: &Path,
+    signing_key: &SigningKey,
+    operator_fingerprint: &str,
+    profile: Option<&InitOperatorProfile>,
+    key_created: bool,
+    contribution_digest: Option<&str>,
+) -> Result<()> {
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!("refusing unsafe operator genesis path {}", path.display())
+        }
+        Ok(_) => {
+            let source = String::from_utf8(lillux::read_regular_file_bounded_no_follow(
+                path,
+                64 * 1024,
+            )?)
+                .with_context(|| format!("read operator genesis {}", path.display()))?;
+            let mut value: serde_json::Value = serde_json::from_str(&source)
+                .with_context(|| format!("parse operator genesis {}", path.display()))?;
+            let object = value
+                .as_object()
+                .ok_or_else(|| anyhow!("operator genesis must be a JSON object"))?;
+            let allowed = [
+                "schema",
+                "operator_fingerprint",
+                "created_at",
+                "ceremony_version",
+                "display_name",
+                "identity_statement",
+                "contribution_digest",
+                "signature",
+            ];
+            if object.keys().any(|key| !allowed.contains(&key.as_str()))
+                || object.get("schema").and_then(serde_json::Value::as_str)
+                    != Some("ryeos/operator-genesis/v1")
+                || object
+                    .get("ceremony_version")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("1")
+                || object
+                    .get("created_at")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+            {
+                bail!("operator genesis has an invalid v1 schema");
+            }
+            if object.get("display_name").and_then(serde_json::Value::as_str).is_some_and(
+                |value| value.chars().count() > 80 || value.chars().any(char::is_control),
+            ) || object
+                .get("identity_statement")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| {
+                    value.chars().count() > 280 || value.chars().any(char::is_control)
+                })
+            {
+                bail!("operator genesis contains unsafe semantic identity fields");
+            }
+            let stored_fingerprint = value
+                .get("operator_fingerprint")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("operator genesis missing operator_fingerprint"))?;
+            if stored_fingerprint != operator_fingerprint {
+                bail!(
+                    "operator genesis fingerprint {} does not match operator key {}",
+                    stored_fingerprint,
+                    operator_fingerprint
+                );
+            }
+            let signature = value
+                .as_object_mut()
+                .and_then(|object| object.remove("signature"))
+                .and_then(|value| value.as_str().map(str::to_string))
+                .and_then(|value| value.strip_prefix("ed25519:").map(str::to_string))
+                .ok_or_else(|| anyhow!("operator genesis missing Ed25519 signature"))?;
+            let signature_bytes = base64::engine::general_purpose::STANDARD
+                .decode(signature)
+                .context("decode operator genesis signature")?;
+            let signature = Signature::from_slice(&signature_bytes)
+                .context("parse operator genesis signature")?;
+            let canonical = lillux::canonical_json(&value)
+                .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
+            signing_key
+                .verifying_key()
+                .verify(canonical.as_bytes(), &signature)
+                .context("verify operator genesis signature")?;
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect operator genesis {}", path.display()))
+        }
+    }
+
+    let profile = profile.cloned().unwrap_or_default();
+    let mut document = serde_json::json!({
+        "schema": "ryeos/operator-genesis/v1",
+        "operator_fingerprint": operator_fingerprint,
+        "created_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "ceremony_version": "1",
+    });
+    if let Some(display_name) = profile.display_name.filter(|value| !value.trim().is_empty()) {
+        document["display_name"] = serde_json::Value::String(display_name);
+    }
+    if let Some(statement) = profile
+        .identity_statement
+        .filter(|value| !value.trim().is_empty())
+    {
+        document["identity_statement"] = serde_json::Value::String(statement);
+    }
+    if key_created {
+        if let Some(digest) = contribution_digest {
+            document["contribution_digest"] = serde_json::Value::String(digest.to_string());
+        }
+    }
+    let canonical = lillux::canonical_json(&document)
+        .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
+    let signature = signing_key.sign(canonical.as_bytes());
+    document["signature"] = serde_json::Value::String(format!(
+        "ed25519:{}",
+        base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
+    ));
+    let bytes = serde_json::to_vec_pretty(&document)?;
+    lillux::atomic_write(&path, &bytes)
+        .map_err(|error| anyhow!("write operator genesis {}: {error}", path.display()))?;
+    Ok(())
+}
+
+fn validate_operator_ceremony(ceremony: &InitOperatorCeremony) -> Result<()> {
+    if ceremony.profile.display_name.as_deref().is_some_and(|value| {
+        value.chars().count() > 80 || value.chars().any(char::is_control)
+    }) {
+        bail!("operator display name exceeds 80 characters or contains control characters");
+    }
+    if ceremony
+        .profile
+        .identity_statement
+        .as_deref()
+        .is_some_and(|value| {
+            value.chars().count() > 280 || value.chars().any(char::is_control)
+        })
+    {
+        bail!("operator identity statement exceeds 280 characters or contains control characters");
+    }
+    if ceremony
+        .entropy_contribution
+        .as_ref()
+        .is_some_and(|value| value.len() > 4096)
+    {
+        bail!("operator entropy contribution exceeds 4096 bytes");
+    }
+    Ok(())
 }
 
 /// Sanity check helper exposed for tests.
@@ -1107,6 +1605,39 @@ pub fn official_publisher_pubkey_b64() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_creation_keeps_os_randomness_and_never_replaces_an_existing_key() {
+        let tmp = tempfile::tempdir().expect("temporary directory");
+        let first_path = tmp.path().join("first/private_key.pem");
+        let second_path = tmp.path().join("second/private_key.pem");
+        fs::create_dir_all(first_path.parent().expect("first parent")).expect("first key dir");
+        fs::create_dir_all(second_path.parent().expect("second parent")).expect("second key dir");
+        let contribution = || Zeroizing::new(b"same human contribution".to_vec());
+
+        let (first, first_created, first_digest) =
+            load_or_create_operator_key(&first_path, Some(contribution())).expect("first key");
+        let (second, second_created, second_digest) =
+            load_or_create_operator_key(&second_path, Some(contribution())).expect("second key");
+        assert!(first_created && second_created);
+        assert_eq!(first_digest, second_digest);
+        assert_ne!(
+            first.verifying_key().as_bytes(),
+            second.verifying_key().as_bytes(),
+            "equal human input must not reproduce an operator key"
+        );
+
+        let original = fs::read(&first_path).expect("read original key");
+        let (reloaded, created, digest) = load_or_create_operator_key(
+            &first_path,
+            Some(Zeroizing::new(b"different contribution".to_vec())),
+        )
+        .expect("reload key");
+        assert!(!created);
+        assert!(digest.is_none());
+        assert_eq!(first.verifying_key(), reloaded.verifying_key());
+        assert_eq!(original, fs::read(&first_path).expect("read preserved key"));
+    }
 
     #[test]
     fn official_publisher_fingerprint_matches_hardcoded_pubkey() {
@@ -1271,6 +1802,8 @@ mod tests {
         let user = tmp.path().join("home");
         let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
+        let genesis_path = state.join(".ai/config/identity/operator-genesis.json");
+        let genesis = fs::read(&genesis_path).expect("operator genesis #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(
             r1.vault_pubkey_fingerprint, r2.vault_pubkey_fingerprint,
@@ -1289,6 +1822,11 @@ mod tests {
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
         assert_eq!(r1.node_key_fingerprint, r2.node_key_fingerprint);
         assert_eq!(r1.bundles_installed, r2.bundles_installed);
+        assert_eq!(
+            genesis,
+            fs::read(genesis_path).expect("operator genesis #2"),
+            "reinitialization must not rewrite operator genesis"
+        );
     }
 
     #[test]
@@ -1760,6 +2298,7 @@ typo_field: oops
             "name: needy\nversion: '1.0'\nrequires_kinds:\n  - nonexistent-kind\n",
         )
         .unwrap();
+        materialize_test_manifest(&needy, "needy");
 
         let opts = InitOptions {
             app_root: state.clone(),

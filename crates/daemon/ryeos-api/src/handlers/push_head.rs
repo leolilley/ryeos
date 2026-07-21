@@ -101,7 +101,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     let closure = ryeos_state::object_closure::collect_object_closure_with_cas_and_limits(
         &cas,
         [req.snapshot_hash.clone()],
-        ryeos_state::object_closure::ObjectClosureLimits::default(),
+        ryeos_state::object_closure::ObjectClosureLimits::for_project_snapshot_transport(),
     )?;
     if !closure.is_complete() {
         return Err(anyhow!(
@@ -143,26 +143,21 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         Some(_) => {}
         None => {}
     }
-    let manifest_obj = cas
-        .get_object(&snapshot.project_manifest_hash)?
+    let tree_obj = cas
+        .get_object(&snapshot.project_tree_hash)?
+        .ok_or_else(|| anyhow!("project tree {} is missing", snapshot.project_tree_hash))?;
+    let tree = ryeos_state::objects::ProjectTree::from_value(&tree_obj)?;
+    let policy_obj = cas
+        .get_object(&snapshot.effective_policy_hash)?
         .ok_or_else(|| {
             anyhow!(
-                "project manifest {} is missing",
-                snapshot.project_manifest_hash
+                "project snapshot policy {} is missing",
+                snapshot.effective_policy_hash
             )
         })?;
-    let manifest = ryeos_state::objects::SourceManifest::from_value(&manifest_obj)?;
-    ryeos_state::project_sync::validate_project_manifest_paths(
-        &manifest,
-        snapshot.project_sync_scope,
-        Some(state.ignore_matcher.as_ref()),
-    )?;
-    if snapshot.user_manifest_hash.is_some() {
-        return Err(anyhow!(
-            "snapshot {} includes user_manifest_hash, but global user-space sync is not supported",
-            req.snapshot_hash
-        ));
-    }
+    let policy = ryeos_state::objects::ProjectSnapshotPolicy::from_value(&policy_obj)?;
+    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
+    ryeos_state::project_sync::validate_captured_policy_source(&cas, &tree, &policy)?;
 
     // If a HEAD already exists for this principal+project, advance it with CAS.
     // Otherwise, write a new ref.
@@ -204,7 +199,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         principal_key = %principal_key,
         project_hash = %project_hash,
         snapshot_hash = %req.snapshot_hash,
-        manifest_entries = manifest.item_source_hashes.len(),
+        tree_entries = tree.files.len(),
         "push-head: wrote project HEAD ref"
     );
 
@@ -212,7 +207,7 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
         "principal_key": principal_key,
         "project_hash": project_hash,
         "snapshot_hash": req.snapshot_hash,
-        "manifest_entries": manifest.item_source_hashes.len(),
+        "tree_entries": tree.files.len(),
     }))
 }
 

@@ -6,6 +6,7 @@
 //! daemon when no local descriptor help is available.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 
 use crate::error::CliError;
@@ -14,6 +15,268 @@ use ryeos_engine::engine::Engine;
 use serde_json::Value;
 
 use crate::node_descriptors::LoadedCommandDescriptor;
+
+const HELP_CACHE_SCHEMA: &str = "ryeos/help-descriptor-cache/v1";
+const HELP_CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+const HELP_CACHE_MAX_ROWS: usize = 10_000;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CachedHelpRow {
+    pub tokens: String,
+    pub description: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    pub category: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HelpDescriptorCache {
+    schema: String,
+    registration_identity: String,
+    rows: Vec<CachedHelpRow>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct DescriptorHelpRow {
+    pub tokens: String,
+    pub description: String,
+    pub aliases: Vec<String>,
+    pub category: String,
+    pub dispatch_kind: String,
+    pub target_ref: Option<String>,
+    pub availability: Option<ryeos_runtime::CommandAvailability>,
+    pub descriptor: LoadedCommandDescriptor,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ResolvedCommandHelp {
+    pub description: String,
+    pub required_caps: Vec<String>,
+    pub schema: BTreeMap<String, String>,
+    pub availability: Option<String>,
+    pub is_offline: bool,
+}
+
+/// Build the fast help index directly from verified command descriptors.
+///
+/// This path intentionally has no app/project arguments: it cannot construct
+/// an effective-item engine or resolve an execution target.
+pub(crate) fn descriptor_rows(snapshot: &NodeConfigSnapshot) -> Vec<DescriptorHelpRow> {
+    let mut rows = snapshot
+        .commands
+        .iter()
+        .filter(|command| !(command.tokens.len() == 1 && command.tokens[0].len() <= 1))
+        .map(|command| {
+            let descriptor = LoadedCommandDescriptor {
+                command: command.clone(),
+                tokens: command.tokens.clone(),
+                description: command.description.clone(),
+            };
+            let (dispatch_kind, target_ref, availability) = match &command.dispatch {
+                ryeos_runtime::CommandDispatch::Group => ("group", None, None),
+                ryeos_runtime::CommandDispatch::LocalHandler { handler, .. } => {
+                    ("local_handler", Some(handler.clone()), None)
+                }
+                ryeos_runtime::CommandDispatch::DirectExecuteItemRef { availability, .. } => {
+                    ("direct_execute_item_ref", None, Some(*availability))
+                }
+                ryeos_runtime::CommandDispatch::ExecuteRef {
+                    execute,
+                    availability,
+                } => ("execute_ref", Some(execute.clone()), Some(*availability)),
+            };
+            DescriptorHelpRow {
+                tokens: command.tokens.join(" "),
+                description: command.description.clone(),
+                aliases: command
+                    .aliases
+                    .iter()
+                    .map(|alias| alias.tokens.join(" "))
+                    .collect(),
+                category: command
+                    .tokens
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "command".to_string()),
+                dispatch_kind: dispatch_kind.to_string(),
+                target_ref,
+                availability,
+                descriptor,
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.tokens.cmp(&right.tokens));
+    rows
+}
+
+pub(crate) fn read_cached_descriptor_rows(app_root: &Path) -> Vec<CachedHelpRow> {
+    let path = help_cache_path(app_root);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink()
+                && metadata.len() <= HELP_CACHE_MAX_BYTES => metadata,
+        _ => return Vec::new(),
+    };
+    if metadata.len() == 0 {
+        return Vec::new();
+    }
+    let source = match lillux::read_regular_file_bounded_no_follow(&path, HELP_CACHE_MAX_BYTES)
+        .and_then(|bytes| String::from_utf8(bytes).map_err(anyhow::Error::from))
+    {
+        Ok(source) => source,
+        Err(_) => return Vec::new(),
+    };
+    let cache: HelpDescriptorCache = match serde_json::from_str(&source) {
+        Ok(cache) => cache,
+        Err(_) => return Vec::new(),
+    };
+    if cache.schema != HELP_CACHE_SCHEMA
+        || cache.registration_identity.len() != 64
+        || !cache
+            .registration_identity
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || cache.rows.len() > HELP_CACHE_MAX_ROWS
+    {
+        return Vec::new();
+    }
+    cache
+        .rows
+        .into_iter()
+        .filter(|row| {
+            valid_cache_field(&row.tokens)
+                && valid_cache_field(&row.description)
+                && valid_cache_field(&row.category)
+                && row.aliases.len() <= 64
+                && row.aliases.iter().all(|alias| valid_cache_field(alias))
+        })
+        .collect()
+}
+
+pub(crate) fn write_verified_descriptor_cache(
+    app_root: &Path,
+    snapshot: &NodeConfigSnapshot,
+    rows: &[DescriptorHelpRow],
+) -> anyhow::Result<()> {
+    let cache = HelpDescriptorCache {
+        schema: HELP_CACHE_SCHEMA.to_string(),
+        registration_identity: verified_registration_identity(snapshot)?,
+        rows: rows
+            .iter()
+            .map(|row| CachedHelpRow {
+                tokens: row.tokens.clone(),
+                description: row.description.clone(),
+                aliases: row.aliases.clone(),
+                category: row.category.clone(),
+            })
+            .collect(),
+    };
+    let bytes = serde_json::to_vec(&cache)?;
+    if bytes.len() as u64 > HELP_CACHE_MAX_BYTES {
+        anyhow::bail!("verified help descriptor cache exceeds size limit");
+    }
+    lillux::atomic_write(&help_cache_path(app_root), &bytes)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    Ok(())
+}
+
+fn help_cache_path(app_root: &Path) -> std::path::PathBuf {
+    app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state")
+        .join("cache")
+        .join("cli")
+        .join("help-descriptors-v1.json")
+}
+
+fn verified_registration_identity(snapshot: &NodeConfigSnapshot) -> anyhow::Result<String> {
+    let mut identity = Vec::new();
+    for bundle in &snapshot.bundles {
+        identity.extend_from_slice(bundle.name.as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(&fs::read(&bundle.source_file).map_err(|error| {
+            anyhow::anyhow!(
+                "read verified registration {}: {error}",
+                bundle.source_file.display()
+            )
+        })?);
+        identity.push(0xff);
+    }
+    identity.extend_from_slice(&serde_json::to_vec(&snapshot.commands)?);
+    Ok(lillux::cas::sha256_hex(&identity))
+}
+
+fn valid_cache_field(value: &str) -> bool {
+    value.len() <= 16 * 1024
+        && !value
+            .chars()
+            .any(|value| value.is_control() && !matches!(value, '\n' | '\t'))
+}
+
+/// Resolve effective metadata for one selected descriptor. Callers are
+/// expected to run this off the terminal event task.
+pub(crate) fn resolve_selected_command_help(
+    descriptor: &LoadedCommandDescriptor,
+    snapshot: &NodeConfigSnapshot,
+    app_root: &Path,
+    project_path: &str,
+) -> Result<ResolvedCommandHelp, String> {
+    let Some(execute_ref) = descriptor.execute_ref() else {
+        return Ok(ResolvedCommandHelp::default());
+    };
+    let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(snapshot);
+    let project_root = (project_path != ".").then(|| Path::new(project_path));
+    let engine = crate::effective_metadata::build_effective_item_engine(
+        app_root,
+        project_root,
+        &bundle_roots,
+    )
+    .map_err(|error| format!("{error:#}"))?;
+    let value = crate::effective_metadata::resolve_effective_composed_value(
+        &engine,
+        execute_ref,
+        project_root,
+    )
+    .map_err(|error| format!("{error:#}"))?
+    .ok_or_else(|| format!("effective target '{execute_ref}' was not found"))?;
+    let metadata = ItemHelpMetadata::from_composed(&value);
+    let is_offline = metadata.is_offline_dispatch();
+    Ok(ResolvedCommandHelp {
+        description: metadata.description,
+        required_caps: metadata.required_caps,
+        schema: metadata.schema,
+        availability: metadata.availability,
+        is_offline,
+    })
+}
+
+/// Immediate shell-native reference used by `ryeos --help` and `ryeos -h`.
+/// It deliberately avoids loading installed node state.
+pub fn print_quick_help(console: &crate::tty::Console) -> std::io::Result<()> {
+    let mut document = crate::tty::Document::titled("CLI FOR RYEOS");
+    document.sections.push(
+        crate::tty::Section::named("usage")
+            .row("ryeos <command> [args...]", "Run a RyeOS command")
+            .row("ryeos help", "Browse and search verified commands")
+            .row("ryeos commands", "Print the exhaustive command reference"),
+    );
+    let mut lifecycle = crate::tty::Section::named("lifecycle");
+    lifecycle.rows = crate::lifecycle_commands::local_command_descriptors()
+        .iter()
+        .filter(|descriptor| !matches!(descriptor.tokens, ["help"] | ["help", "--all"] | ["commands"]))
+        .map(|descriptor| {
+            crate::tty::Row::key_value(descriptor.tokens.join(" "), descriptor.summary)
+        })
+        .collect();
+    document.sections.push(lifecycle);
+    document.hints.push(crate::tty::Hint::new(
+        "Run `ryeos help` for interactive search or `ryeos help --plain` for deterministic text.",
+    ));
+    console.document(&document)
+}
 
 /// Print top-level help. Static lifecycle help always renders. Dynamic command
 /// discovery is included only after installed node config verifies; verification
@@ -54,6 +317,10 @@ fn build_top_level_help(
             "Offline checklist answering \"why won't it start\"",
         ),
         crate::tty::Row::key_value("node gc", "Run explicit offline node garbage collection"),
+        crate::tty::Row::key_value(
+            "node auth-reset",
+            "Reset authorized keys for a schema cutover",
+        ),
     ];
     document.sections.push(lifecycle);
     document.sections.push(
@@ -549,8 +816,13 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
     let (title, description, usage) = match command.as_str() {
         "init" => (
             "ryeos init",
-            "Bootstrap operator keys and core bundle",
-            "ryeos init [--json] [OPTIONS]",
+            "Run interactive first-contact onboarding, or bootstrap non-interactively",
+            "ryeos init [--non-interactive | --json] [OPTIONS]",
+        ),
+        "setup" => (
+            "ryeos setup",
+            "Configure a verified model provider and default model",
+            "ryeos setup [--app-root <DIR>]",
         ),
         "node status" => (
             "ryeos node status",
@@ -612,6 +884,11 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
     let rows: &[(&str, &str)] = match command.as_str() {
         "init" => &[
             (
+                "--non-interactive",
+                "Run initialization without onboarding prompts",
+            ),
+            ("--json", "Emit the structured non-interactive report"),
+            (
                 "--source <DIR>",
                 "Bundle source directory (default: /usr/share/ryeos)",
             ),
@@ -621,6 +898,7 @@ fn build_lifecycle_command_help(command_tokens: &[String]) -> crate::tty::Docume
             ),
             ("--app-root <DIR>", "Application root"),
         ],
+        "setup" => &[("--app-root <DIR>", "Application root")],
         "execute" => &[
             ("--async", "Launch in the background and return a thread ID"),
             (

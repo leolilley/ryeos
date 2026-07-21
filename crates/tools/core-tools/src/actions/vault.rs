@@ -336,6 +336,18 @@ fn handle_activation_failure(
                 reason: format!("{error:#}"),
             }
         }
+        lillux::AtomicMutationError::NamespaceChanged(error) => {
+            // Conditional namespace mutation did not publish its requested
+            // generation and could not restore the prior entry. Preserve the
+            // journal/backups and require locked recovery; never claim that
+            // either vault generation committed.
+            RewrapOutcome::CommitDurabilityUncertain {
+                report,
+                reason: format!(
+                    "vault namespace requires recovery before a generation can be selected: {error:#}"
+                ),
+            }
+        }
     }
 }
 

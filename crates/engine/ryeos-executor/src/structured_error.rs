@@ -226,7 +226,7 @@ mod tests {
             errors: vec![crate::dispatch_error::ContractViolationEntry {
                 path: "launch.mode".to_string(),
                 code: "enum_mismatch".to_string(),
-                expected: "\"inline\"".to_string(),
+                expected: "\"wait\"".to_string(),
                 found: "\"bogus\"".to_string(),
             }],
             warnings: vec![],

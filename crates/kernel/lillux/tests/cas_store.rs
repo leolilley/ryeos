@@ -185,6 +185,48 @@ fn get_blob_absent_returns_none() {
 }
 
 #[test]
+fn blob_capture_prune_is_exact_and_dry_run_is_mutation_free() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let staging = tmp.path().join("blobs/.staging");
+    fs::create_dir_all(&staging).expect("create staging");
+    fs::write(staging.join("capture.123.4.tmp"), b"first").expect("write first stage");
+    fs::write(staging.join("capture.567.8.tmp"), b"second").expect("write second stage");
+
+    let preview = store
+        .prune_abandoned_blob_captures(true)
+        .expect("preview capture prune");
+    assert_eq!(preview.files, 2);
+    assert_eq!(preview.bytes, 11);
+    assert!(staging.join("capture.123.4.tmp").is_file());
+    assert!(staging.join("capture.567.8.tmp").is_file());
+
+    let removed = store
+        .prune_abandoned_blob_captures(false)
+        .expect("prune captures");
+    assert_eq!(removed, preview);
+    assert!(!staging.exists());
+}
+
+#[test]
+fn blob_capture_prune_rejects_unknown_staging_entries() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let staging = tmp.path().join("blobs/.staging");
+    fs::create_dir_all(&staging).expect("create staging");
+    let unknown = staging.join("capture.not-a-pid.4.tmp");
+    fs::write(&unknown, b"unknown").expect("write unknown stage");
+
+    let error = store
+        .prune_abandoned_blob_captures(false)
+        .expect_err("unknown stage must fail closed");
+    assert!(error
+        .to_string()
+        .contains("unexpected CAS blob capture staging entry"));
+    assert!(unknown.is_file());
+}
+
+#[test]
 fn corrupt_existing_entry_is_an_error_and_is_never_replaced() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let store = CasStore::new(tmp.path().to_path_buf());

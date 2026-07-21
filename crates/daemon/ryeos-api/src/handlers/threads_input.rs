@@ -294,7 +294,7 @@ async fn await_operator_handoff(
 fn admit_fresh_launch(
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
     ref_bindings: &BTreeMap<String, String>,
-    project_path: &crate::routes::abs_path::AbsolutePathBuf,
+    project: &ryeos_executor::execution::project_source::ResolvedProjectContext,
     parameters: &Value,
     ctx: &HandlerContext,
     state: &AppState,
@@ -302,13 +302,14 @@ fn admit_fresh_launch(
     let preflight = crate::routes::launch::preflight_dispatch_launch(
         state,
         item_ref,
-        project_path,
+        project,
         parameters,
         ref_bindings,
         &ctx.fingerprint,
         &ctx.scopes,
+        state.threads.site_id(),
         None,
-        "inline",
+        "wait",
         false,
         None,
         None,
@@ -324,7 +325,7 @@ fn admit_fresh_launch(
     })?;
     crate::routes::launch::DispatchLaunchOptions::admitted(
         root_admission,
-        project_path.as_path(),
+        &project.effective_path,
         ref_bindings.clone(),
     )
     .map_err(|error| {
@@ -332,59 +333,6 @@ fn admit_fresh_launch(
             "validated fresh-launch contract rejected at dispatch boundary: {error:#}"
         ))
     })
-}
-
-fn admit_resume_launch(
-    resume: &ryeos_app::launch_metadata::ResumeContext,
-    state: &AppState,
-) -> Result<(), HandlerError> {
-    use ryeos_engine::contracts::EffectivePrincipal;
-
-    let params =
-        ryeos_executor::execution::runner::execution_params_from_resume_context(state, resume)
-            .map_err(|error| HandlerError::Internal(error.to_string()))?;
-    let engine = params.provenance.request_engine().clone();
-    let primary = engine
-        .verify(
-            &params.resolved.plan_context,
-            params.resolved.resolved_item.clone(),
-        )
-        .map_err(|error| HandlerError::BadRequest(format!("verification failed: {error}")))?
-        .resolved;
-    let caller_scopes = match &params.resolved.plan_context.requested_by {
-        EffectivePrincipal::Local(principal) => principal.scopes.clone(),
-        EffectivePrincipal::Delegated(principal) => principal.delegated_scopes.clone(),
-    };
-    let exec_ctx = ryeos_executor::executor::ExecutionContext {
-        principal_fingerprint: params.acting_principal.clone(),
-        caller_scopes,
-        engine,
-        plan_ctx: params.resolved.plan_context.clone(),
-        requested_call: None,
-    };
-    ryeos_executor::dispatch::preflight_root_dispatch(
-        &resume.item_ref,
-        primary.canonical_ref.kind.as_str(),
-        &resume.parameters,
-        &resume.ref_bindings,
-        None,
-        None,
-        &exec_ctx,
-        state,
-    )
-    .map_err(dispatch_error)?;
-    let applicability =
-        ryeos_executor::dispatch::launch_contract_applicability(&resume.item_ref, &exec_ctx)
-            .map_err(dispatch_error)?;
-    ryeos_executor::dispatch::admit_launch_contract(
-        &applicability,
-        &primary,
-        &resume.ref_bindings,
-        &params.provenance,
-        &exec_ctx,
-        state,
-    )
-    .map_err(dispatch_error)
 }
 
 pub async fn handle(
@@ -433,20 +381,45 @@ pub async fn handle(
             let parameters = json!({ "input": input });
             let parsed_ref = crate::routes::parsed_ref::ParsedItemRef::parse(&item_ref)
                 .map_err(|error| HandlerError::BadRequest(format!("item_ref: {error}")))?;
-            let launch_options = admit_fresh_launch(
+            let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
+                .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+            let mut project_ctx =
+                ryeos_executor::execution::project_source::resolve_project_context(
+                    &state,
+                    &ryeos_executor::execution::project_source::ProjectSource::LiveFs,
+                    project_path.as_path(),
+                    &ctx.fingerprint,
+                    &format!("thread-input-{thread_id}"),
+                    ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+                )
+                .map_err(|error| {
+                    HandlerError::BadRequest(format!("capture fresh thread project: {error}"))
+                })?;
+            let mut launch_options = admit_fresh_launch(
                 &parsed_ref,
                 &ref_bindings,
-                &project_path,
+                &project_ctx,
                 &parameters,
                 &ctx,
                 &state,
-            )?;
-            let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+            )?
+            .retain_captured_generation(project_ctx.take_captured_generation());
+            let resolved_authority =
+                ryeos_app::execution_policy::resolve_standard_local_live_authority(
+                    &project_ctx.effective_path,
+                    ctx.scopes.clone(),
+                    &state.isolation,
+                )
+                .map_err(|error| HandlerError::Internal(error.to_string()))?;
+            launch_options.lifecycle_authority = resolved_authority.lifecycle;
             let launch_provenance =
                 ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                    launch_options.project_path().to_path_buf(),
-                    state.engine.clone(),
-                );
+                    project_ctx.effective_path.clone(),
+                    project_ctx.request_engine.clone(),
+                    resolved_authority.project,
+                )
+                .map_err(|error| HandlerError::Internal(error.to_string()))?;
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_ref,
@@ -666,15 +639,16 @@ pub async fn handle(
         scopes: ctx.scopes.clone(),
     });
 
-    // Admission and the consumable authoritative pass both use the exact
-    // persisted identity and the exact pre-minted successor ID before its row
-    // exists.
-    admit_resume_launch(&resume_context, &state)?;
+    // The successor preparer restores the predecessor's sealed admitted
+    // program and reapplies current caller authorization before birth. Do not
+    // re-resolve mutable project bytes here: operator continuation changes the
+    // stimulus and principal authority, not the admitted program.
     let candidate_id = ryeos_app::thread_lifecycle::new_thread_id();
     let prepared = ryeos_executor::execution::launch::prepare_operator_successor_launch(
         &state,
         &candidate_id,
         &resume_context,
+        &previous.thread_id,
     )
     .await
     .map_err(build_and_launch_error)?;
@@ -694,6 +668,11 @@ pub async fn handle(
         upstream_thread_id: Some(previous.thread_id.clone()),
         requested_by: Some(ctx.fingerprint.clone()),
         project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
+        base_project_snapshot_hash: resume_context
+            .project_authority
+            .base_snapshot_projection()
+            .map(str::to_owned),
+        project_authority: resume_context.project_authority.clone(),
         usage_subject: None,
         usage_subject_asserted_by: None,
         captured_history_policy: None,
@@ -709,6 +688,9 @@ pub async fn handle(
         &resume_context.launch_mode,
         &previous.thread_id,
         &parameters,
+        &resume_context.project_authority,
+        resume_context.lifecycle_authority,
+        prepared.launch_metadata().sealed_root_request.as_ref(),
     );
 
     let outcome = state

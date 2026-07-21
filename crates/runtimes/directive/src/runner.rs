@@ -162,6 +162,14 @@ fn record_callback_warning(
     }
 }
 
+fn directive_outputs_artifact(thread_id: &str, outputs: &Value) -> Value {
+    json!({
+        "artifact_type": "directive_outputs",
+        "uri": format!("thread://{thread_id}/outputs"),
+        "metadata": outputs,
+    })
+}
+
 /// Where a turn's computed cost came from — lets the run loop flag untracked
 /// spend and one-time provider-default fallbacks (§2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1150,6 +1158,7 @@ impl Runner {
                                             thread_id: self.thread_id.clone(),
                                             project_path: self.callback.project_path().to_string(),
                                             action: ryeos_runtime::callback::ActionPayload {
+                                                operation_id: None,
                                                 item_id: dispatch_result.canonical_ref.clone(),
                                                 ref_bindings: std::collections::BTreeMap::new(),
                                                 params: dispatch_result.arguments.clone(),
@@ -1333,11 +1342,10 @@ impl Runner {
                                     &mut warnings,
                                     "publish_artifact(directive_outputs)",
                                     self.callback
-                                        .publish_artifact(json!({
-                                            "artifact_type": "directive_outputs",
-                                            "uri": format!("thread://{}/outputs", self.thread_id),
-                                            "content": &args,
-                                        }))
+                                        .publish_artifact(directive_outputs_artifact(
+                                            &self.thread_id,
+                                            &args,
+                                        ))
                                         .await,
                                 );
 
@@ -2159,6 +2167,17 @@ mod tests {
 
         assert!(runner.directive_outputs.is_some());
         assert_eq!(runner.directive_outputs.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn directive_outputs_artifact_uses_owned_artifact_schema() {
+        let outputs = json!({"answer": 42});
+        let artifact = directive_outputs_artifact("T-test", &outputs);
+
+        assert_eq!(artifact["artifact_type"], "directive_outputs");
+        assert_eq!(artifact["uri"], "thread://T-test/outputs");
+        assert_eq!(artifact["metadata"], outputs);
+        assert!(artifact.get("content").is_none());
     }
 
     #[test]

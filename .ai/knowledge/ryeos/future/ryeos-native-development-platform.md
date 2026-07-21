@@ -1,4 +1,14 @@
-# RyeOS-native development platform
+<!-- ryeos:signed:2026-07-21T00:24:56Z:ee87d9336abc4e439604daa5655aa2661e7892c15ff46750c82a1792ef87237a:oP5ogxrV87M5+l3/YUvIo90y8eayLI2z3nreGNlPQiONJ6puiYETu0CHtPNuaieNJH4RG6jCsdqJWHkUlGRFCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/future
+name: ryeos-native-development-platform
+title: RyeOS-Native Development Platform
+description: Deferred direction for project hosting, checks, review, release, and GitHub projection
+entry_type: design
+version: "1.0.0"
+```
+
+# RyeOS-Native Development Platform
 
 ## Status
 

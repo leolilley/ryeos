@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T02:18:48Z:476964b58c9cbcee3403c1d817c3e9ef5fce115245750ef348477d8b72a98dad:p8yIdW5jatpx2FpN9pZTTyRKluZ93EbxYpUJes+xTs4BeonqY1e59CxqrLR4hr+AlkmkgAUibHAYx3+K6a6PCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-18T18:35:26Z:8b54f0b2091f35998b15c471440af0de74fec66c9ffe51050c927d7c47134595:ICQsOkYHIaDlPFk+La4iEnPwAdB7T9OXFtf9OawQI1iLxJ8lPyFWhgUGH/BwkUHWaufrfaz0ilQ2/UsdbXFbCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [remote, operations, trust, security, networking]
@@ -222,7 +222,7 @@ The synchronous `remote execute` command:
 2. **Execute** — runs the specified item on the remote using the
    pushed content.
 3. **Pull** — fetches the resulting snapshot, diffs against the
-   pre-push manifest, and applies changes to the local workspace.
+   exact project tree that was pushed, and applies changes to the local workspace.
 
 ### Clean-Base Guarantee
 
@@ -268,7 +268,7 @@ authorize the new node key.
 
 `ryeos remote configure` caches the remote node's ingest-ignore rules
 in the local remotes config. Subsequent push/execute operations use
-these cached rules to build the push manifest.
+these cached rules to capture the pushed project snapshot policy and tree.
 
 If the remote changes its ignore rules, re-run `ryeos remote configure`.
 
@@ -296,12 +296,13 @@ release.
 
 ### Remote Pull
 
-Fetch CAS objects by hash from a remote node, store in local CAS,
-optionally materialize to a directory.
+Fetch typed CAS artifacts from a remote node and materialize them into
+one new explicit directory. Operator pulls do not create unrooted local CAS
+entries.
 
 ```bash
-ryeos remote pull --remote production --hashes abc123 def456
-ryeos remote pull --remote production --hashes abc123 --output-dir /tmp/objects
+ryeos remote pull --remote production --object-hashes abc123 --output-dir /tmp/objects
+ryeos remote pull --remote production --blob-hashes def456 --output-dir /tmp/blobs
 ```
 
 **Fail-closed**: aborts if any requested hash is missing. No partial fetches.
@@ -382,9 +383,8 @@ content rather than the remote operator's own local workspace.
 
 ### How it works
 
-1. The caller pushes a **project manifest** (project files). Legacy
-   snapshots carrying a `user_manifest_hash` are rejected — re-push the
-   project.
+1. The caller pushes one typed, full-project snapshot closure: snapshot,
+   policy, tree, file descriptors, and blobs.
 2. The remote daemon checks the **engine cache** keyed by
    `(system_install_generation, snapshot_hash)`. On a miss, it:
    - Reads the live signed bundle registry with
@@ -479,7 +479,7 @@ dispatcher (inline only).
 ## Pull-Back
 
 After remote execution, the pull phase applies changes to the local
-project: it diffs the pre-push manifest against the remote's result
+project: it diffs the exact pushed project tree against the remote's result
 snapshot and applies updated/deleted files to the local project
 directory.
 
@@ -493,10 +493,6 @@ The JSON response from `remote execute` reports the counts:
   }
 }
 ```
-
-The response also carries `user_files_updated` and `user_files_deleted`,
-retained in the wire contract as always-`0` in the single-app-root
-model — there is no user-space pull-back.
 
 ## Hybrid Binary Resolution
 

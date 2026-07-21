@@ -70,7 +70,7 @@ fn invocation_context_for_session(
 }
 
 struct PreparedInvocation {
-    effective_path: std::path::PathBuf,
+    project: ryeos_executor::execution::project_source::ResolvedProjectContext,
     exec_ctx: ryeos_executor::executor::ExecutionContext,
 }
 
@@ -179,6 +179,8 @@ fn prepare_item_ref(
     state: &AppState,
     project_path: &std::path::Path,
 ) -> Result<PreparedInvocation> {
+    ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
+        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
     let checkout_id = format!(
         "ui-{}-{:08x}",
@@ -191,6 +193,7 @@ fn prepare_item_ref(
         project_path,
         &ctx.fingerprint,
         &checkout_id,
+        ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
     )
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
 
@@ -219,7 +222,7 @@ fn prepare_item_ref(
     };
 
     Ok(PreparedInvocation {
-        effective_path: project_ctx.effective_path,
+        project: project_ctx,
         exec_ctx,
     })
 }
@@ -235,20 +238,29 @@ async fn execute_prepared_item_ref(
     let root_canonical = CanonicalRef::parse(item_ref)
         .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
 
+    let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
+        &prepared.project.effective_path,
+        local_handler_context.scopes.clone(),
+        &state.isolation,
+    )
+    .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-        prepared.effective_path.clone(),
+        prepared.project.effective_path.clone(),
         prepared.exec_ctx.engine.clone(),
-    );
+        resolved_authority.project,
+    )
+    .map_err(|error| HandlerError::Internal(error.to_string()))?;
 
     let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
-        launch_mode: "inline",
+        launch_mode: "wait",
         target_site_id: None,
         validate_only: false,
         params: req.params.clone(),
         ref_bindings: req.ref_bindings.clone(),
         acting_principal: prepared.exec_ctx.principal_fingerprint.as_str(),
-        project_path: &prepared.effective_path,
+        project_path: &prepared.project.effective_path,
         provenance,
+        lifecycle_authority: resolved_authority.lifecycle,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
         usage_subject: None,

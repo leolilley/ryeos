@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.44"
+version = "0.5.45"
 dependencies = [
  "anyhow",
  "base64",
@@ -2364,6 +2364,7 @@ dependencies = [
  "rmp-serde",
  "ryeos-app",
  "ryeos-bundle",
+ "ryeos-directive-core",
  "ryeos-engine",
  "ryeos-executor",
  "ryeos-handler-protocol",
@@ -2384,6 +2385,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2454,12 +2456,14 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.44"
+version = "0.5.45"
 dependencies = [
  "anyhow",
  "base64",
  "clap",
+ "crossterm",
  "dirs",
+ "futures-util",
  "hex",
  "libc",
  "lillux",
@@ -2468,6 +2472,7 @@ dependencies = [
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-core-tools",
+ "ryeos-directive-core",
  "ryeos-engine",
  "ryeos-node",
  "ryeos-runtime",
@@ -2481,6 +2486,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unicode-width",
+ "zeroize",
 ]
 
 [[package]]
@@ -2549,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-core-tools"
-version = "0.5.44"
+version = "0.5.45"
 dependencies = [
  "anyhow",
  "base64",
@@ -2585,6 +2591,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -2653,6 +2660,7 @@ dependencies = [
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-handler-protocol",
+ "ryeos-isolation-protocol",
  "ryeos-runtime",
  "ryeos-state",
  "ryeos-tracing",
@@ -2744,7 +2752,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "chrono",
  "dirs",
+ "hex",
+ "hkdf",
  "libc",
  "lillux",
  "rand 0.8.6",
@@ -2756,14 +2767,16 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tempfile",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
 name = "ryeos-runtime"
-version = "0.5.44"
+version = "0.5.45"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2814,6 +2827,7 @@ dependencies = [
  "glob",
  "libc",
  "lillux",
+ "rand 0.8.6",
  "rusqlite",
  "ryeos-tracing",
  "serde",
@@ -2892,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.44"
+version = "0.5.45"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2924,6 +2938,7 @@ dependencies = [
  "ryeos-core-tools",
  "ryeos-engine",
  "ryeos-executor",
+ "ryeos-isolation-protocol",
  "ryeos-node",
  "ryeos-runtime",
  "ryeos-scheduler",

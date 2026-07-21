@@ -11,7 +11,7 @@ distribution is Linux x86-64. See the
 
 Work in RyeOS — a tool run, a multi-step workflow, a scheduled job — is
 data: signed, content-addressed, durable. Durability here means the explicit
-[filesystem and recovery contract](docs/architecture/filesystem-durability.md),
+[filesystem and recovery contract](.ai/knowledge/ryeos/development/filesystem-durability.md),
 not cross-filesystem transactions or identical guarantees on every platform.
 Because it is data, it can prove
 what it is, who authorized it, and what it actually did. And because it is
@@ -168,9 +168,12 @@ ryeos start
 ryeos node status
 ```
 
-`ryeos init` discovers packaged bundles under `/usr/share/ryeos`, installs them
-into the system space, creates operator and node keys, initializes trust and
-vault material, and writes node configuration. The isolation policy defaults
+On a capable terminal, `ryeos init` opens the first-contact ceremony. It
+discovers packaged bundles under `/usr/share/ryeos`, installs them into the
+system space, creates operator and node keys, initializes trust and vault
+material, and optionally connects a verified model provider. Use
+`ryeos setup` to reopen provider/model setup later. Automation must use
+`ryeos init --non-interactive` or `ryeos init --json`. The isolation policy defaults
 to `mode: disabled` with no backend selected. Isolation backends are ordinary,
 separately installed bundles; RyeOS distributions do not include one by
 default. `ryeos start`
@@ -181,7 +184,8 @@ enabling or tightening the node-owned policy.
 The user lifecycle surface is intentionally small:
 
 ```bash
-ryeos init          # bootstrap operator keys, trust, and bundles
+ryeos init          # interactive first-contact initialization
+ryeos setup         # reopen optional provider/model setup
 ryeos start         # bring the local node online
 ryeos stop          # stop it
 ryeos node status   # local node lifecycle status
@@ -197,7 +201,7 @@ docker pull ghcr.io/leolilley/ryeos-standard:latest
 ```
 
 The image includes `ryeosd`, `ryeos`, core tools, and signed bundle trees. The
-entrypoint runs `ryeos init` on every boot (idempotent) before starting
+entrypoint runs `ryeos init --non-interactive` on every boot (idempotent) before starting
 `ryeosd`; the app root lives at `/data/app` on the persistent `/data` volume,
 so keys, trust, and runtime state survive redeploys. Release containers rely
 only on the official publisher key compiled into `ryeos`; the entrypoint does
@@ -257,7 +261,9 @@ need to be regenerated.
 
 ## Five-minute first run
 
-After installation, initialize the local system space and start the node:
+After installation, initialize the local system space. The terminal ceremony
+can start the node for optional provider setup; `ryeos start` remains
+idempotent if setup was skipped or initialization was non-interactive:
 
 ```bash
 ryeos init
@@ -377,7 +383,7 @@ projection of its thread's durable state.
 
 | Path                           | Purpose                                                                             |
 | ------------------------------ | ----------------------------------------------------------------------------------- |
-| `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support; see the [durability matrix](docs/architecture/filesystem-durability.md). |
+| `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support; see the [durability matrix](.ai/knowledge/ryeos/development/filesystem-durability.md). |
 | `crates/engine/ryeos-engine`   | Item resolution, composition, policy facts, and execution planning.                 |
 | `crates/engine/ryeos-executor` | Execution dispatch and runtime integration.                                         |
 | `crates/daemon/*`              | Daemon crates: app core, HTTP API, bundle install, node lifecycle, and UI assets.   |

@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-08T04:27:34Z:36b82e5a86aa3084ba47e57637ea4c9c008956e225224356a69236d16038580f:8/CDYNgh9JhKxrrDZDEzkqvqlAx0oHcnsVbGzw2hbv8o98h2LhGnLphGgCR+c6y6baR4I6Vkh/o3FGPpPsoBCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T00:24:30Z:ef5b881098dbed27abf8b43b6c7b9729257586932e36121d8df900351c1a1f68:sxCzUwoL++DaPqV5cNj1khhqsXqfN05/e29SnJ0O7ldR5gxpgeAwCTwmBPwpnH/moKqTiyIQSxA+dyosBqA6Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/services
 tags: [service, trace, replay, branch, provenance, state-anchor]
-version: "1.0.0"
+version: "1.1.0"
 description: Programmable trace service reference.
 ---
 
@@ -102,7 +102,7 @@ Request shape:
   "kind": "directive",
   "item_ref": "directive:...",
   "executor_ref": "native:...",
-  "launch_mode": "inline",
+  "launch_mode": "wait",
   "restore_contract": {},
   "metadata": {}
 }

@@ -550,12 +550,26 @@ fn read_current_snapshot_for_mutation(
             chain_state.chain_root_id
         )
     })?;
-    let snapshot: ThreadSnapshot = read_cas_object(
-        cas_root,
-        chain_lock,
-        &entry.snapshot_hash,
-        &format!("current snapshot for thread {thread_id}"),
-    )?;
+    let snapshot_value = cas_store_for_lock(cas_root, chain_lock)?
+        .get_object(&entry.snapshot_hash)
+        .with_context(|| {
+            format!(
+                "read current snapshot for thread {thread_id} CAS object {}",
+                entry.snapshot_hash
+            )
+        })?
+        .ok_or_else(|| {
+            anyhow!(
+                "current snapshot for thread {thread_id} CAS object is absent: {}",
+                entry.snapshot_hash
+            )
+        })?;
+    let snapshot = ThreadSnapshot::from_current_value(snapshot_value).with_context(|| {
+        format!(
+            "decode current snapshot for thread {thread_id} CAS object {}",
+            entry.snapshot_hash
+        )
+    })?;
     let canonical = lillux::canonical_json(&snapshot.to_value())
         .context("failed to canonicalize current thread snapshot")?;
     let canonical_hash = lillux::sha256_hex(canonical.as_bytes());
@@ -2271,8 +2285,10 @@ pub(crate) fn read_thread_snapshot(
     let snapshot_json =
         std::fs::read_to_string(&cas_path).context("failed to read snapshot from CAS")?;
 
-    let snapshot: ThreadSnapshot =
-        serde_json::from_str(&snapshot_json).context("failed to parse snapshot")?;
+    let snapshot_value =
+        serde_json::from_str(&snapshot_json).context("failed to parse snapshot JSON")?;
+    let snapshot = ThreadSnapshot::from_current_value(snapshot_value)
+        .context("failed to decode current thread snapshot")?;
 
     validation::validate_stored_snapshot(&chain_state, thread_id, thread_entry, &snapshot)?;
     let canonical = lillux::canonical_json(&snapshot.to_value())

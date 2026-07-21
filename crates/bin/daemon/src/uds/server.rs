@@ -337,6 +337,20 @@ pub(crate) async fn dispatch_runtime_method(
         )
     };
 
+    let callback_launch_owner = callback_cap
+        .as_ref()
+        .map(|cap| {
+            cap.launch_owner
+                .as_deref()
+                .ok_or_else(|| anyhow!("execution callback capability has no launch owner"))
+        })
+        .transpose()?;
+    if let (Some(cap), Some(owner)) = (callback_cap.as_ref(), callback_launch_owner) {
+        state
+            .state_store
+            .assert_launch_owner(&cap.thread_id, owner)?;
+    }
+
     enforce_runtime_callback_admission(method, params, state)?;
 
     // Strip transport-level fields before typed deserialization so
@@ -391,7 +405,9 @@ pub(crate) async fn dispatch_runtime_method(
             validated_thread_auth.as_ref(),
         ),
         "runtime.finalize_thread" => {
-            let result = handle_finalize(&clean_params, state)?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("runtime.finalize_thread requires a launch owner"))?;
+            let result = handle_finalize(&clean_params, state, owner)?;
             // A self-finalizing follow child (the normal path) flips its waiter to
             // `ready` here — kick the parent resume live, keyed on the child's chain.
             if let Some(chain_root_id) = result.get("chain_root_id").and_then(|v| v.as_str()) {
@@ -419,7 +435,11 @@ pub(crate) async fn dispatch_runtime_method(
         "runtime.claim_commands" => handle_claim_commands(&clean_params, state),
         "runtime.complete_command" => handle_complete_command(&clean_params, state),
         "runtime.get_thread_events" => handle_replay_events(&clean_params, state),
-        "runtime.attach_process" => handle_attach_process(&clean_params, state, peer).await,
+        "runtime.attach_process" => {
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("runtime.attach_process requires a launch owner"))?;
+            handle_attach_process(&clean_params, state, peer, owner).await
+        }
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
@@ -570,6 +590,7 @@ async fn handle_attach_process(
     params: &serde_json::Value,
     state: &AppState,
     peer: Option<&AuthenticatedUnixPeer>,
+    launch_owner: &str,
 ) -> Result<serde_json::Value> {
     let wire: RuntimeAttachProcessParams =
         serde_json::from_value(params.clone()).context("invalid runtime.attach_process params")?;
@@ -601,7 +622,7 @@ async fn handle_attach_process(
         metadata: None,
         launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
     };
-    let attached = match state.threads.attach_process(&params) {
+    let attached = match state.threads.attach_process_owned(&params, launch_owner) {
         Ok(thread) => thread,
         Err(error) => {
             if let Some(identity) = params.process_identity.clone() {
@@ -766,7 +787,11 @@ fn final_cost_from_runtime(
     })
 }
 
-fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
+fn handle_finalize(
+    params: &serde_json::Value,
+    state: &AppState,
+    launch_owner: &str,
+) -> Result<serde_json::Value> {
     let params: RuntimeFinalizeParams =
         serde_json::from_value(params.clone()).context("invalid runtime.finalize_thread params")?;
     let final_cost = params
@@ -802,8 +827,9 @@ fn handle_finalize(params: &serde_json::Value, state: &AppState) -> Result<serde
         continuation_request: None,
         metadata: None,
     };
-    let finalized = state.threads.finalize_from_runtime_completion(
+    let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
+        launch_owner,
         &completion,
         Some(managed_envelope),
     )?;
@@ -1413,9 +1439,125 @@ mod tests {
     type TestProvenance = ryeos_app::execution_provenance::ExecutionProvenance;
 
     fn test_provenance(state: &AppState, path: &str) -> TestProvenance {
+        let project_path = std::path::PathBuf::from(path);
+        let authored_project_identity = format!("test:{path}");
+        let authority_id = lillux::sha256_hex(
+            format!("live-project\0{authored_project_identity}\0{path}").as_bytes(),
+        );
+        let authority = ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+            authority_id: authority_id.clone(),
+            authored_project_identity,
+            canonical_root: project_path.clone(),
+            live_access: ryeos_state::objects::LiveAccessAuthority {
+                access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                authorized_write_namespaces: vec!["project".to_string()],
+                confinement:
+                    ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+            },
+            environment: ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
+                project_authority_id: authority_id,
+                source_identity: format!("dotenv:{path}/.env"),
+                include_operator_vault: true,
+                name_authority: ryeos_state::objects::EnvironmentNameAuthority::DeclaredRequired,
+            },
+            capability_ceiling: Vec::new(),
+            child_policy: ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit,
+        };
         ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            std::path::PathBuf::from(path),
+            project_path,
             state.engine.clone(),
+            authority,
+        )
+        .expect("synthetic UDS test live authority must be valid")
+    }
+
+    fn bind_test_callback_owner(
+        state: &AppState,
+        mut capability: ryeos_app::callback_token::CallbackCapability,
+    ) -> ryeos_app::callback_token::CallbackCapability {
+        let claim = match state
+            .state_store
+            .get_launch_claim(&capability.thread_id)
+            .expect("read test launch claim")
+        {
+            Some(claim) => claim,
+            None => {
+                let claim_id = format!("test-callback-{}", capability.thread_id);
+                assert!(matches!(
+                    state
+                        .state_store
+                        .claim_thread_launch(
+                            &capability.thread_id,
+                            &claim_id,
+                            "test-daemon-generation",
+                        )
+                        .expect("claim test callback launch"),
+                    ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+                ));
+                state
+                    .state_store
+                    .get_launch_claim(&capability.thread_id)
+                    .expect("read claimed test launch")
+                    .expect("claimed test launch exists")
+            }
+        };
+        assert!(state
+            .callback_tokens
+            .set_launch_owner(&capability.token, claim.claimed_by.clone()));
+        capability.launch_owner = Some(claim.claimed_by);
+        capability
+    }
+
+    fn generate_test_callback(
+        state: &AppState,
+        thread_id: &str,
+        project_path: std::path::PathBuf,
+        ttl: std::time::Duration,
+        effective_caps: Vec<String>,
+        provenance: TestProvenance,
+        root_content_digest: String,
+    ) -> ryeos_app::callback_token::CallbackCapability {
+        bind_test_callback_owner(
+            state,
+            state.callback_tokens.generate(
+                thread_id,
+                project_path,
+                ttl,
+                effective_caps,
+                provenance,
+                root_content_digest,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn generate_test_callback_with_context(
+        state: &AppState,
+        thread_id: &str,
+        project_path: std::path::PathBuf,
+        ttl: std::time::Duration,
+        effective_caps: Vec<String>,
+        provenance: TestProvenance,
+        effective_bundle_id: Option<String>,
+        item_ref: Option<String>,
+        root_content_digest: String,
+        hard_limits: serde_json::Value,
+        depth: u32,
+    ) -> ryeos_app::callback_token::CallbackCapability {
+        bind_test_callback_owner(
+            state,
+            state.callback_tokens.generate_with_context(
+                thread_id,
+                project_path,
+                ttl,
+                effective_caps,
+                provenance,
+                effective_bundle_id,
+                item_ref,
+                root_content_digest,
+                hard_limits,
+                depth,
+            ),
         )
     }
 
@@ -1581,12 +1723,14 @@ mod tests {
             kind: "system_task".to_string(),
             item_ref: "directive:test/directive".to_string(),
             executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: None,
             requested_by: Some("user:test".to_string()),
             project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
@@ -1612,6 +1756,8 @@ mod tests {
             upstream_thread_id: None,
             requested_by: Some("session:test".to_string()),
             project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: Some(sealed.captured_history_policy().clone()),
@@ -1860,7 +2006,8 @@ mod tests {
         // threads.create is internal — call service directly
         state.threads.create_thread_for_test(&params).unwrap();
 
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -2037,7 +2184,8 @@ mod tests {
                 },
             )
             .unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            state,
             "P",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
@@ -2132,6 +2280,18 @@ mod tests {
             upstream_thread_id: upstream.map(Into::into),
             requested_by: Some("user:test".to_string()),
             project_root: Some(std::path::PathBuf::from("/tmp/p")),
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::pinned(
+                "local:/tmp/p".to_string(),
+                Some(std::path::PathBuf::from("/tmp/p")),
+                "a".repeat(64),
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+                },
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
+            base_project_snapshot_hash: Some("a".repeat(64)),
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy,
@@ -2148,6 +2308,18 @@ mod tests {
         };
         let mut parent = make_create_params("P", "P");
         parent.project_root = Some(std::path::PathBuf::from("/tmp/p"));
+        parent.base_project_snapshot_hash = Some("a".repeat(64));
+        parent.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "local:/tmp/p".to_string(),
+            Some(std::path::PathBuf::from("/tmp/p")),
+            "a".repeat(64),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
         state.threads.create_thread_for_test(&parent).unwrap();
         state.threads.mark_running("P").unwrap();
         state
@@ -2165,7 +2337,29 @@ mod tests {
                         project_context: ProjectContext::LocalPath {
                             path: std::path::PathBuf::from("/tmp/p"),
                         },
-                        original_snapshot_hash: None,
+                        project_authority: ryeos_state::objects::ExecutionProjectAuthority::pinned(
+                            "local:/tmp/p".to_string(),
+                            Some(std::path::PathBuf::from("/tmp/p")),
+                            "a".repeat(64),
+                            ryeos_state::objects::PinnedProjectRealization::Cow {
+                                terminal_publication:
+                                    ryeos_state::objects::PinnedTerminalPublication::Discard,
+                            },
+                            ryeos_state::objects::EnvironmentAuthority::None,
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                        lifecycle_authority:
+                            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+                        stable_project_identity: Some(
+                            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                                std::path::Path::new("/tmp/p"),
+                                "site:test",
+                            )
+                            .unwrap(),
+                        ),
+                        local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
+                        original_snapshot_hash: Some("a".repeat(64)),
                         original_pushed_head_ref: None,
                         state_root: None,
                         current_site_id: "site:test".into(),
@@ -2176,6 +2370,7 @@ mod tests {
                         }),
                         execution_hints: ExecutionHints::default(),
                         effective_caps: vec![],
+                        parent_delegation_caps: None,
                         executor_ref: None,
                         runtime_ref: None,
                     }),
@@ -2213,6 +2408,7 @@ mod tests {
                 frontier_id: None,
                 fanout: false,
                 expected_children: 1,
+                child_project_authority: None,
             })
             .unwrap();
         set_test_follow_child(state, wk, child);
@@ -2253,6 +2449,7 @@ mod tests {
         let sealed =
             ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
         let mut metadata = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
             .with_resume_context(ResumeContext {
                 kind: "graph_run".to_string(),
                 item_ref: sealed.item_ref().to_string(),
@@ -2260,6 +2457,11 @@ mod tests {
                 launch_mode: "detached".to_string(),
                 parameters: json!({}),
                 project_context: ProjectContext::None,
+                project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+                lifecycle_authority:
+                    ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+                stable_project_identity: None,
+                local_overlay_root: None,
                 original_snapshot_hash: None,
                 original_pushed_head_ref: None,
                 state_root: None,
@@ -2271,9 +2473,30 @@ mod tests {
                 }),
                 execution_hints: Default::default(),
                 effective_caps: Vec::new(),
+                parent_delegation_caps: Some(Vec::new()),
                 executor_ref: Some(sealed.executor_ref().to_string()),
                 runtime_ref: Some(sealed.runtime_ref().to_string()),
             })
+            .with_admitted_artifact_identity(
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                    runtime_ref: sealed.runtime_ref().to_string(),
+                    runtime_content_hash: "a".repeat(64),
+                    runtime_signer_fingerprint: "fp:test-runtime".to_string(),
+                    protocol_ref: "protocol:test/runtime".to_string(),
+                    protocol_content_hash: "b".repeat(64),
+                    protocol_signer_fingerprint: "fp:test-protocol".to_string(),
+                    executor_ref: sealed.executor_ref().to_string(),
+                    executor_content_hash: "c".repeat(64),
+                    executor_bundle_manifest_hash: "d".repeat(64),
+                    executor_bundle_signer_fingerprint: "fp:test-executor-bundle".to_string(),
+                },
+            )
+            .with_admitted_prepared_launch(json!({
+                "runtime_data": {},
+                "required_secrets": [],
+                "runtime_facts": {},
+                "binding_records": {},
+            }))
             .with_sealed_root_request(sealed);
         metadata.follow_parent_context = Some(PersistedParentExecutionContext {
             parent_thread_id: "P".to_string(),
@@ -2476,11 +2699,27 @@ mod tests {
             .unwrap();
         state.threads.mark_running("Cnr").unwrap();
         arm_waiting_follow(&state, "wk-nr", "Cnr");
+        assert!(matches!(
+            state
+                .state_store
+                .claim_thread_launch("Cnr", "claim-nr", "test-generation")
+                .unwrap(),
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+        ));
+        let launch_owner = state
+            .state_store
+            .get_launch_claim("Cnr")
+            .unwrap()
+            .map(|claim| {
+                lillux::canonical_json(&serde_json::to_value(claim.owner).unwrap()).unwrap()
+            })
+            .unwrap();
 
         ryeos_executor::execution::launch::finalize_failed_and_kick_follow(
             &state,
             "Cnr",
             "Cnr",
+            &launch_owner,
             json!({ "error": "resume rebuild failed" }),
         )
         .unwrap();
@@ -2568,6 +2807,7 @@ mod tests {
                     artifacts: vec![],
                     final_cost: None,
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                 },
             )
             .unwrap();
@@ -2759,6 +2999,7 @@ mod tests {
                 frontier_id: None,
                 fanout: false,
                 expected_children: 1,
+                child_project_authority: None,
             })
             .unwrap();
         set_test_follow_child(&state, "wk-res", "Cres");
@@ -2816,6 +3057,7 @@ mod tests {
                 frontier_id: None,
                 fanout: false,
                 expected_children: 1,
+                child_project_authority: None,
             })
             .unwrap();
         set_test_follow_child(&state, "wk-res2", "Cnc");
@@ -2949,6 +3191,8 @@ mod tests {
                 upstream_thread_id: params.upstream_thread_id,
                 requested_by: params.requested_by,
                 project_root: params.project_root,
+                project_authority: params.project_authority,
+                base_project_snapshot_hash: params.base_project_snapshot_hash,
                 usage_subject: params.usage_subject,
                 usage_subject_asserted_by: params.usage_subject_asserted_by,
                 captured_history_policy: params.captured_history_policy,
@@ -3116,7 +3360,8 @@ mod tests {
         // The child SELF-finalizes via the runtime callback wire (not the executor
         // fallback), carrying a `directive_return`-style result plus its structured
         // outputs + warnings.
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "C",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
@@ -3251,7 +3496,8 @@ mod tests {
             .create_thread_for_test(&make_create_params("P", "P"))
             .unwrap();
         state.threads.mark_running("P").unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "P",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
@@ -3433,7 +3679,8 @@ mod tests {
     async fn runtime_finalize_revokes_callback_but_events_remain_replayable() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-events-1");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-events-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3516,7 +3763,8 @@ mod tests {
         // hub so SSE subscribers tail in real time.
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-stream-1");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-stream-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3563,7 +3811,8 @@ mod tests {
     async fn ephemeral_append_event_bridges_without_replay_persistence() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-ephemeral-1");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-ephemeral-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3623,7 +3872,8 @@ mod tests {
     async fn lifecycle_event_cannot_be_ephemeral() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-ephemeral-bad");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-ephemeral-bad",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3663,7 +3913,8 @@ mod tests {
         // the runtime's emission sequence verbatim.
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-stream-2");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-stream-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3729,7 +3980,8 @@ mod tests {
         )
         .unwrap();
         create_running_test_thread(&state, "T-bundle-1");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-bundle-1",
             project.path().to_path_buf(),
             std::time::Duration::from_secs(300),
@@ -3826,7 +4078,8 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-bundle-deny");
         create_running_test_thread(&state, "T-bundle-deny-2");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-bundle-deny",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3863,7 +4116,8 @@ mod tests {
             rpc_err(&caller_bundle_id).message
         );
 
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-bundle-deny-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3903,7 +4157,8 @@ mod tests {
     async fn runtime_vault_put_get_list_delete_use_callback_bundle_identity_and_caps() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-vault-1");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -3998,7 +4253,8 @@ mod tests {
         create_running_test_thread(&state, "T-vault-deny");
         create_running_test_thread(&state, "T-vault-deny-2");
         create_running_test_thread(&state, "T-vault-deny-3");
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-deny",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4034,7 +4290,8 @@ mod tests {
             rpc_err(&caller_bundle_id).message
         );
 
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-deny-2",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4068,7 +4325,8 @@ mod tests {
             rpc_err(&missing_cap).message
         );
 
-        let cbt = state.callback_tokens.generate_with_context(
+        let cbt = generate_test_callback_with_context(
+            &state,
             "T-vault-deny-3",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4109,7 +4367,8 @@ mod tests {
             .create_thread_for_test(&make_create_params("T-cmd-1", "T-cmd-1"))
             .unwrap();
 
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-cmd-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4191,7 +4450,8 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("T-tat-missing", "T-tat-missing"))
             .unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-tat-missing",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4233,7 +4493,8 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("T-tat-wrong", "T-tat-wrong"))
             .unwrap();
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-tat-wrong",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4270,7 +4531,8 @@ mod tests {
     async fn dispatch_action_with_correct_token_uses_server_side_principal() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-tat-ok");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-tat-ok",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4358,7 +4620,8 @@ mod tests {
     async fn runtime_callback_with_empty_caps_is_denied_at_uds_boundary() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-caps-empty");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-caps-empty",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4405,7 +4668,8 @@ mod tests {
     async fn runtime_callback_with_wildcard_caps_is_allowed_past_uds_boundary() {
         let (_tmp, state) = setup_app_state();
         create_running_test_thread(&state, "T-caps-wild");
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-caps-wild",
             std::path::PathBuf::from("/p"),
             std::time::Duration::from_secs(300),
@@ -4459,7 +4723,8 @@ mod tests {
             .create_thread_for_test(&make_create_params("T-facets-1", "T-facets-1"))
             .unwrap();
 
-        let cbt = state.callback_tokens.generate(
+        let cbt = generate_test_callback(
+            &state,
             "T-facets-1",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4504,7 +4769,8 @@ mod tests {
             .threads
             .create_thread_for_test(&make_create_params("T-succ", "T-pred"))
             .unwrap();
-        state.callback_tokens.generate(
+        generate_test_callback(
+            state,
             "T-succ",
             std::path::PathBuf::from("/test"),
             std::time::Duration::from_secs(300),
@@ -4711,12 +4977,14 @@ mod tests {
                     kind: "system_task".to_string(),
                     item_ref: "directive:test/directive".to_string(),
                     executor_ref: "test/executor".to_string(),
-                    launch_mode: "inline".to_string(),
+                    launch_mode: "wait".to_string(),
                     current_site_id: "site:test".to_string(),
                     origin_site_id: "site:test".to_string(),
                     upstream_thread_id: Some("T-pred".to_string()),
                     requested_by: Some("user:test".to_string()),
                     project_root: None,
+                    project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+                    base_project_snapshot_hash: None,
                     usage_subject: None,
                     usage_subject_asserted_by: None,
                     captured_history_policy: None,

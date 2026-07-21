@@ -552,6 +552,7 @@ fn gc_progress(progress: &OfflineThreadHistoryGcProgress) -> (&'static str, Opti
             "retiring thread history",
             0.15 + within.clamp(0.0, 1.0) * 0.60,
         ),
+        OfflineThreadHistoryGcPhase::RetiringProjectHeads => ("retiring project generations", 0.77),
         OfflineThreadHistoryGcPhase::RebuildingProjection => ("publishing empty projection", 0.78),
         OfflineThreadHistoryGcPhase::ClearingRuntime => ("clearing execution recovery", 0.84),
         OfflineThreadHistoryGcPhase::ClearingScheduler => ("clearing scheduler history", 0.90),

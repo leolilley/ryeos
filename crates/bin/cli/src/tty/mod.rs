@@ -21,6 +21,11 @@ use crate::transport::signing::Signer;
 mod capabilities;
 mod diagnostic;
 mod document;
+pub(crate) mod help_flow;
+pub(crate) mod interaction;
+pub(crate) mod onboarding_spec;
+pub(crate) mod onboarding_journal;
+pub(crate) mod onboarding_flow;
 mod progress;
 mod result;
 mod theme;
@@ -32,6 +37,13 @@ pub use progress::{
 };
 pub use result::{write_json, write_machine_diagnostics, write_raw};
 pub use theme::Tone;
+
+pub(crate) fn sanitize_terminal_inline(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| if character.is_control() { '�' } else { character })
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct Console {
@@ -418,16 +430,54 @@ fn write_lines(
 ) -> io::Result<()> {
     for line in lines {
         if let Some(width) = terminal_width {
-            writeln!(
-                out,
-                "{}",
-                clamp_visible(line, width.saturating_sub(1).max(1))
-            )?;
+            for wrapped in wrap_visible_preserving(line, width.saturating_sub(1).max(1)) {
+                writeln!(out, "{wrapped}")?;
+            }
         } else {
             writeln!(out, "{line}")?;
         }
     }
     out.flush()
+}
+
+fn wrap_visible_preserving(value: &str, max_width: usize) -> Vec<&str> {
+    if value.is_empty() {
+        return vec![value];
+    }
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut width = 0;
+    let mut escape = 0_u8;
+    for (index, ch) in value.char_indices() {
+        let ch_width = match escape {
+            1 if ch == '[' => {
+                escape = 2;
+                0
+            }
+            1 => {
+                escape = 0;
+                0
+            }
+            2 if ('@'..='~').contains(&ch) => {
+                escape = 0;
+                0
+            }
+            2 => 0,
+            _ if ch == '\x1b' => {
+                escape = 1;
+                0
+            }
+            _ => ch.width().unwrap_or(0),
+        };
+        if ch_width > 0 && width + ch_width > max_width {
+            lines.push(&value[start..index]);
+            start = index;
+            width = 0;
+        }
+        width += ch_width;
+    }
+    lines.push(&value[start..]);
+    lines
 }
 
 pub(crate) fn visible_width(value: &str) -> usize {
@@ -450,8 +500,14 @@ pub(crate) fn clamp_visible(value: &str, max_width: usize) -> String {
     if visible_width(value) <= max_width {
         return value.to_string();
     }
-    let ellipsis = if value.is_ascii() { "..." } else { "…" };
-    let ellipsis_width = visible_width(ellipsis).min(max_width);
+    let ellipsis = if value.is_ascii() {
+        ".".repeat(max_width.min(3))
+    } else if max_width == 0 {
+        String::new()
+    } else {
+        "…".to_string()
+    };
+    let ellipsis_width = visible_width(&ellipsis);
     let target = max_width.saturating_sub(ellipsis_width);
     let mut out = String::new();
     let mut width = 0;
@@ -479,7 +535,7 @@ pub(crate) fn clamp_visible(value: &str, max_width: usize) -> String {
         width += ch_width;
         out.push(ch);
     }
-    out.push_str(ellipsis);
+    out.push_str(&ellipsis);
     if value.contains('\x1b') {
         out.push_str("\x1b[0m");
     }
@@ -1745,8 +1801,9 @@ mod tests {
         let mut tty = Vec::new();
         write_lines(&mut tty, std::slice::from_ref(&line), Some(80)).expect("write tty line");
         let tty = String::from_utf8(tty).expect("utf-8 output");
-        assert!(tty.ends_with("...\n"));
-        assert!(visible_width(tty.trim_end()) < 80);
+        assert!(tty.contains("inventory build failed"));
+        assert_eq!(tty.lines().collect::<String>(), line);
+        assert!(tty.lines().all(|line| visible_width(line) < 80));
     }
 
     #[test]
@@ -1769,5 +1826,11 @@ mod tests {
         let rendered = clamp_visible("\x1b[31mabcdef\x1b[0m", 4);
         assert!(visible_width(&rendered) <= 4);
         assert!(rendered.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn visible_clamp_respects_one_and_two_column_viewports() {
+        assert_eq!(visible_width(&clamp_visible("abcdef", 1)), 1);
+        assert_eq!(visible_width(&clamp_visible("abcdef", 2)), 2);
     }
 }

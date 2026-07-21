@@ -9,8 +9,12 @@ use serde_json::Value;
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContext,
-    RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
+    authenticated_execution_origin, CompiledRouteInvocation, PrincipalPolicy, RouteEventStream,
+    RouteInvocationContext, RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
+};
+use crate::routes::response_modes::execute_mode::{
+    preauthorize_execution_policy, resolve_execution_contract, resolve_project_context_off_thread,
+    ProjectRootNormalization,
 };
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
@@ -20,6 +24,19 @@ use super::stream_helpers::*;
 
 pub struct CompiledGatewayStreamInvocation {
     pub keep_alive_secs: u64,
+}
+
+/// Streaming keeps request-scoped launches owned by the SSE request. Tokio
+/// join handles detach when dropped, so an explicit abort guard is required;
+/// daemon-owned launches deliberately carry no abort handle.
+struct RequestScopedLaunchGuard(Option<tokio::task::AbortHandle>);
+
+impl Drop for RequestScopedLaunchGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// Typed body shape for gateway launch requests.
@@ -36,12 +53,12 @@ pub(crate) struct LaunchRequest {
     pub(crate) project_path: String,
     #[serde(default)]
     pub(crate) parameters: Value,
-    /// Launch mode. Defaults to "inline".
-    #[serde(default = "default_launch_mode")]
+    pub(crate) execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
+    #[serde(skip)]
     pub(crate) launch_mode: String,
     /// Target site id for remote execution forwarding.
     /// Non-local target_site_id returns a stream_error.
-    #[serde(default)]
+    #[serde(skip)]
     pub(crate) target_site_id: Option<String>,
     /// Whether to validate descriptor composition only, without execution.
     #[serde(default)]
@@ -52,10 +69,6 @@ pub(crate) struct LaunchRequest {
     pub(crate) call: Option<ryeos_engine::method_call::MethodCall>,
     #[serde(default)]
     pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
-}
-
-fn default_launch_mode() -> String {
-    "inline".to_string()
 }
 
 fn pre_spawn_stream_error(
@@ -134,8 +147,27 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         }
 
         // Parse launch request from input (mode prepares it from body).
-        let req: LaunchRequest = serde_json::from_value(ctx.input.clone())
+        let mut req: LaunchRequest = serde_json::from_value(ctx.input.clone())
             .map_err(|e| RouteDispatchError::BadRequest(format!("invalid request body: {e}")))?;
+        req.execution_policy
+            .validate()
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        req.launch_mode = match req.execution_policy.response {
+            ryeos_app::execution_policy::ExecutionResponse::Wait => "wait".to_string(),
+            ryeos_app::execution_policy::ExecutionResponse::Accepted => "accepted".to_string(),
+        };
+        req.target_site_id = match &req.execution_policy.target {
+            ryeos_app::execution_policy::ExecutionTarget::Here => None,
+            ryeos_app::execution_policy::ExecutionTarget::Site { site_id } => Some(site_id.clone()),
+        };
+        if !matches!(
+            &req.execution_policy.project,
+            ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }
+        ) {
+            return Err(RouteDispatchError::BadRequest(
+                "/execute/stream requires explicit live_direct project policy".to_string(),
+            ));
+        }
         if let Err(error) =
             ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
         {
@@ -236,12 +268,12 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
 
         // The dispatch-launch stream is a fire-and-tail-until-terminal
-        // contract. Non-inline launches can return before the thread is
+        // contract. Non-waiting launches can return before the thread is
         // terminal, and validate-only dispatch can complete without a
         // lifecycle thread at all. Reject both before admission and id minting.
-        if req.launch_mode != "inline" {
+        if req.launch_mode != "wait" {
             return Err(RouteDispatchError::BadRequest(format!(
-                "/execute/stream supports launch_mode='inline' only; got '{}'",
+                "/execute/stream supports launch_mode='wait' only; got '{}'",
                 req.launch_mode
             )));
         }
@@ -262,7 +294,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 return Err(RouteDispatchError::BadRequest(format!(
                     "target-site streaming is not yet supported on /execute/stream \
                          (target_site_id: '{target_site_id}'); unary target-site forwarding is \
-                         currently inline-only via POST /execute"
+                         currently wait-only via POST /execute"
                 )));
             }
             // Self-target: normalize to local (fall through).
@@ -283,17 +315,54 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             .as_ref()
             .map(|p| p.scopes.clone())
             .unwrap_or_default();
+        let execution_origin_site_id =
+            authenticated_execution_origin(ctx.principal.as_ref(), ctx.state.threads.site_id());
+
+        // Policy capability checks precede canonicalization or any other
+        // caller-selected project filesystem access.
+        preauthorize_execution_policy(&req.execution_policy, &principal_scopes, &ctx.state)
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+
+        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
+        let mut project_ctx = resolve_project_context_off_thread(
+            ctx.state.clone(),
+            project_source.clone(),
+            project_path.as_path().to_path_buf(),
+            principal_id.clone(),
+            format!("stream-{thread_id}"),
+            ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+            ProjectRootNormalization::CanonicalizeLive,
+        )
+        .await
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("resolve stream project: {error}"))
+        })?;
+        let resolved_contract = resolve_execution_contract(
+            &req.execution_policy,
+            &project_source,
+            &project_ctx,
+            project_ctx.temp_dir.clone(),
+            None,
+            &principal_id,
+            &principal_scopes,
+            &ctx.state,
+        )
+        .map_err(|error| {
+            RouteDispatchError::BadRequest(format!("resolve stream execution authority: {error}"))
+        })?;
 
         // Resolve the actual persisted root (including wrapper targets), verify
         // it, and capture its policy before exposing an id to the stream.
         let preflight = crate::routes::launch::preflight_dispatch_launch(
             &ctx.state,
             &item_ref,
-            &project_path,
+            &project_ctx,
             &req.parameters,
             &req.ref_bindings,
             &principal_id,
             &principal_scopes,
+            &execution_origin_site_id,
             req.call.clone(),
             &req.launch_mode,
             req.validate_only,
@@ -316,7 +385,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         })?;
         let mut options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
-            project_path.as_path(),
+            &project_ctx.effective_path,
             req.ref_bindings,
         )
         .map_err(|error| {
@@ -330,8 +399,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         options.usage_subject = usage_subject;
         options.usage_subject_asserted_by = usage_subject_asserted_by;
         options.call = req.call;
-
-        let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        options.lifecycle_authority = resolved_contract.lifecycle_authority;
+        let request_scoped = resolved_contract.lifecycle_authority.ownership
+            == ryeos_state::objects::ExecutionOwnershipAuthority::RequestScoped;
+        options = options.retain_captured_generation(project_ctx.take_captured_generation());
 
         let route_id: String = ctx.route_id.to_string();
 
@@ -347,10 +418,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
-        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            options.project_path().to_path_buf(),
-            ctx.state.engine.clone(),
-        );
+        let launch_provenance = resolved_contract.provenance;
         let (mut launch_handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,
@@ -361,6 +429,11 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             launch_provenance,
             options,
         );
+        let launch_scope = RequestScopedLaunchGuard(if request_scoped {
+            Some(launch_handle.abort_handle())
+        } else {
+            None
+        });
         let ready_thread_id = tokio::select! {
             biased;
             readiness = ready => match readiness {
@@ -437,6 +510,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
         let stream = async_stream::stream! {
             let _guard = span.enter();
+            let _launch_scope = launch_scope;
             // Move the subscription guard (which owns the receiver) into the
             // stream so the sender is reclaimed when the stream ends.
             let mut sub = sub;
@@ -657,7 +731,7 @@ mod tests {
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "directive:foo/bar");
         assert_eq!(req.project_path, "/tmp/project");
-        assert_eq!(req.launch_mode, "inline");
+        assert_eq!(req.launch_mode, "wait");
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
         assert!(req.call.is_none());
@@ -715,7 +789,7 @@ mod tests {
             "parameters": {}
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.launch_mode, "inline");
+        assert_eq!(req.launch_mode, "wait");
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
         assert!(req.call.is_none());

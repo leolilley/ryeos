@@ -434,6 +434,20 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         Err(error) => return Err(error),
     };
 
+    // Materialized project generations are executor-owned cache. Deep GC
+    // reclaims them through their exact construction/lease protocol while the
+    // daemon write barrier and cross-process CAS guard are held; the generic
+    // state-layer cache purge deliberately does not guess at this liveness.
+    let materialization_cleanup = if params.deep {
+        ryeos_executor::execution::cache::MaterializationCache::from_runtime_state(
+            runtime_directory.path(),
+        )
+        .prune_inactive_generations(params.dry_run)
+        .context("lease-aware materialized snapshot cache purge failed")?
+    } else {
+        ryeos_executor::execution::cache::MaterializationPruneReport::default()
+    };
+
     let mut result = gc::run_gc_with_pinned_authority(
         state_authority,
         cas_guard,
@@ -442,10 +456,18 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
         &operational_roots,
     )
     .context("GC pipeline failed")?;
-    result.deleted_runtime_files = runtime_cleanup.deleted_runtime_files;
+    result.deleted_runtime_files = runtime_cleanup
+        .deleted_runtime_files
+        .saturating_add(materialization_cleanup.reclaimable_files);
     result.deleted_fire_records = runtime_cleanup.deleted_fire_records;
     result.deleted_fire_projection_rows = deleted_fire_projection_rows;
-    result.freed_bytes += runtime_cleanup.freed_bytes;
+    result.freed_bytes = result
+        .freed_bytes
+        .saturating_add(runtime_cleanup.freed_bytes)
+        .saturating_add(materialization_cleanup.reclaimable_bytes);
+    result.inspected_materialized_snapshots = materialization_cleanup.inspected_generations;
+    result.deleted_materialized_snapshots = materialization_cleanup.reclaimable_generations;
+    result.preserved_active_materialized_snapshots = materialization_cleanup.active_generations;
     result.reaped_seats = reaped_seats;
     result.terminal_chain_candidates = terminal_chain_candidates;
     result.retired_terminal_chains = retired_terminal_chains;
@@ -490,6 +512,7 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
                 reachable_blobs: result.reachable_blobs,
                 deleted_objects: result.deleted_objects,
                 deleted_blobs: result.deleted_blobs,
+                deleted_cas_staging_files: result.deleted_cas_staging_files,
                 deleted_runtime_files: result.deleted_runtime_files,
                 deleted_fire_records: result.deleted_fire_records,
                 deleted_fire_projection_rows: result.deleted_fire_projection_rows,
@@ -503,6 +526,10 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
                 deleted_thread_runtime_files: result.deleted_thread_runtime_files,
                 pending_retirements_recovered: result.pending_retirements_recovered,
                 retired_durable_cas_uploads: result.retired_durable_cas_uploads,
+                inspected_materialized_snapshots: result.inspected_materialized_snapshots,
+                deleted_materialized_snapshots: result.deleted_materialized_snapshots,
+                preserved_active_materialized_snapshots: result
+                    .preserved_active_materialized_snapshots,
                 freed_bytes: result.freed_bytes,
                 snapshots_compacted: result
                     .compaction

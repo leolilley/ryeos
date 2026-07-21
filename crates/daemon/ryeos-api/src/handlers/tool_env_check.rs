@@ -102,6 +102,7 @@ pub async fn handle(
     }
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
+    let site_id = state.threads.site_id().to_string();
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: ctx.fingerprint.clone(),
@@ -110,8 +111,8 @@ pub async fn handle(
         project_context: ProjectContext::LocalPath {
             path: project_path.clone(),
         },
-        current_site_id: state.threads.site_id().to_string(),
-        origin_site_id: state.threads.site_id().to_string(),
+        current_site_id: site_id.clone(),
+        origin_site_id: ctx.execution_origin(&site_id),
         execution_hints: Default::default(),
         validate_only: true,
     };
@@ -213,6 +214,7 @@ pub async fn handle(
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: &project_path,
                     project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+                    live_access: None,
                     state_root: None,
                     checkpoint_dir: None,
                     daemon_socket_path: None,

@@ -4,6 +4,7 @@
 //! the local node before the daemon exists or is reachable:
 //!
 //!   - `ryeos init`   — bootstrap operator keys, trust store, and bundles
+//!   - `ryeos setup`  — reopen optional provider and model setup
 //!   - `ryeos start`  — bring the local node runtime online
 //!   - `ryeos stop`   — gracefully stop the local node runtime
 //!   - `ryeos node status` — show local node lifecycle status
@@ -17,6 +18,7 @@
 //! descriptor-driven and dispatched through the offline/dual path
 //! (see `offline_dispatch.rs`) or forwarded to the daemon.
 
+use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -46,7 +48,12 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     },
     LocalCommandDescriptor {
         tokens: &["init"],
-        summary: "Bootstrap local node state and packaged bundles",
+        summary: "Initialize RyeOS with an interactive first-contact ceremony",
+        category: "lifecycle",
+    },
+    LocalCommandDescriptor {
+        tokens: &["setup"],
+        summary: "Configure a verified model provider and default model",
         category: "lifecycle",
     },
     LocalCommandDescriptor {
@@ -72,6 +79,11 @@ const LOCAL_COMMANDS: &[LocalCommandDescriptor] = &[
     LocalCommandDescriptor {
         tokens: &["node", "gc"],
         summary: "Run explicit offline node garbage collection",
+        category: "maintenance",
+    },
+    LocalCommandDescriptor {
+        tokens: &["node", "auth-reset"],
+        summary: "Discard grants and recreate the local operator authorization",
         category: "maintenance",
     },
     LocalCommandDescriptor {
@@ -112,7 +124,15 @@ pub async fn try_dispatch(
             Ok(true)
         }
         ("init", _) => {
-            run_init_command(&argv[1..], console).map_err(map_local_err)?;
+            run_init_command(&argv[1..], console)
+                .await
+                .map_err(map_local_err)?;
+            Ok(true)
+        }
+        ("setup", _) => {
+            run_setup_command(&argv[1..], console)
+                .await
+                .map_err(map_local_err)?;
             Ok(true)
         }
         ("node", Some("status")) => {
@@ -131,6 +151,10 @@ pub async fn try_dispatch(
             run_node_gc_command(&argv[2..], console).map_err(map_local_err)?;
             Ok(true)
         }
+        ("node", Some("auth-reset")) => {
+            run_node_auth_reset_command(&argv[2..], console).map_err(map_local_err)?;
+            Ok(true)
+        }
         ("start", _) => {
             run_start_command(&argv[1..], console)
                 .await
@@ -147,13 +171,133 @@ pub async fn try_dispatch(
     }
 }
 
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos node auth-reset",
+    about = "Discard every authorized-key grant and recreate only the local operator grant",
+    long_about = "Perform the explicit no-backcompat authorized-key cutover. The daemon must be stopped. Every local-client and remote-node grant is discarded atomically; only the configured local operator key is re-authorized. Remote nodes must be admitted again.",
+    no_binary_name = true
+)]
+struct NodeAuthResetArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+
+    /// Required acknowledgement that every existing authorization is discarded.
+    #[arg(long)]
+    confirm_discard_authorized_keys: bool,
+
+    /// Emit structured JSON.
+    #[arg(long)]
+    json: bool,
+}
+
+fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<NodeAuthResetArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !args.confirm_discard_authorized_keys {
+        anyhow::bail!("discarding every authorized key requires --confirm-discard-authorized-keys");
+    }
+    let config = ryeos_app::config::Config::load(&ryeos_app::config::ConfigSources {
+        app_root: args.app_root,
+        ..Default::default()
+    })
+    .context("load local node configuration for authorization reset")?;
+    let _state_lock = ryeos_app::state_lock::StateLock::acquire(
+        &ryeos_app::state_lock::default_lock_path(&config.app_root),
+    )
+    .context("authorization reset requires the daemon to be stopped")?;
+
+    let node = ryeos_app::identity::NodeIdentity::load(&config.node_signing_key_path)
+        .context("load node identity for authorization reset")?;
+    let operator = ryeos_app::identity::NodeIdentity::load(&config.operator_signing_key_path)
+        .context("load operator identity for authorization reset")?;
+    let parent = config
+        .authorized_keys_dir
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("authorized-key namespace has no parent directory"))?;
+    fs::create_dir_all(parent)?;
+    if let Ok(metadata) = fs::symlink_metadata(&config.authorized_keys_dir) {
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+            anyhow::bail!(
+                "authorized-key namespace is not a regular directory: {}",
+                config.authorized_keys_dir.display()
+            );
+        }
+    }
+    let nonce = std::process::id();
+    let staging = parent.join(format!(".authorized_keys.reset-{nonce}"));
+    if staging.exists() {
+        anyhow::bail!(
+            "authorization reset staging paths already exist; inspect {}",
+            parent.display()
+        );
+    }
+    fs::create_dir(&staging)?;
+    let operator_key = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        operator.verifying_key().as_bytes(),
+    );
+    ryeos_app::identity::write_authorized_key_toml(
+        &staging,
+        operator.fingerprint(),
+        &operator_key,
+        &["*".to_string()],
+        "bootstrap-authorized-user",
+        operator.fingerprint(),
+        &lillux::time::iso8601_now(),
+        node.signing_key(),
+        ryeos_app::identity::WildcardPolicy::AllowBootstrap,
+    )?;
+    lillux::sync_tree_durable(&staging)
+        .context("durably flush reset authorized-key namespace before publication")?;
+    let discarded = if config.authorized_keys_dir.exists() {
+        let count = fs::read_dir(&config.authorized_keys_dir)?.count();
+        // Exchange keeps the live namespace present at every instant. The
+        // exchanged staging path becomes the retired tree only after the new
+        // namespace is durably published in the parent directory.
+        lillux::atomic_exchange_paths(&config.authorized_keys_dir, &staging)
+            .map_err(anyhow::Error::from)
+            .context("atomically publish reset authorized-key namespace")?;
+        lillux::remove_dir_all_durable(&staging)
+            .context("durably remove retired authorized-key namespace")?;
+        count
+    } else {
+        lillux::rename_path_noreplace_durable(&staging, &config.authorized_keys_dir)
+            .map_err(anyhow::Error::from)
+            .context("durably publish initial authorized-key namespace")?;
+        0
+    };
+    let result = serde_json::json!({
+        "discarded_grants": discarded,
+        "operator_fingerprint": operator.fingerprint(),
+        "authorized_keys_dir": config.authorized_keys_dir,
+    });
+    if args.json {
+        crate::tty::write_json(&result)?;
+    } else {
+        let mut status = crate::tty::StatusBanner::new(
+            crate::tty::Tone::Success,
+            "AUTHORIZATION RESET COMPLETE",
+        );
+        status.rows = vec![
+            crate::tty::Row::key_value("discarded grants", discarded.to_string()),
+            crate::tty::Row::key_value("operator", operator.fingerprint()),
+            crate::tty::Row::key_value("remote nodes", "re-admission required"),
+        ];
+        console.success(&status)?;
+    }
+    Ok(())
+}
+
 // ── ryeos node gc ──────────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(
     name = "ryeos node gc",
     about = "Run bootstrap-safe offline node garbage collection",
-    long_about = "Run bootstrap-safe offline node garbage collection. The thread-history mode retires every authoritative thread-chain head, clears execution recovery rows/files and scheduler fire history, and publishes an empty current thread projection. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, project heads, operational sync/admission state, and independently retained logs/caches are preserved.",
+    long_about = "Run bootstrap-safe offline node garbage collection. The thread-history mode retires every authoritative thread-chain head, clears execution recovery rows/files and scheduler fire history, and publishes an empty current thread projection. Principal and deployed project HEADs are preserved unless the explicit schema-cutover flags are also supplied. Node identity, trust, config, installed bundles, vault data, signed schedule definitions, operational sync/admission state, and independently retained logs/caches are preserved.",
     no_binary_name = true
 )]
 struct NodeGcArgs {
@@ -168,6 +312,14 @@ struct NodeGcArgs {
     /// Required acknowledgement for destructive thread-history retirement.
     #[arg(long)]
     confirm_discard_thread_history: bool,
+
+    /// Also retire every principal and deployed project HEAD for an immutable object-schema cutover.
+    #[arg(long)]
+    discard_project_heads: bool,
+
+    /// Required acknowledgement for destructive project-HEAD retirement.
+    #[arg(long)]
+    confirm_discard_project_heads: bool,
 
     /// Inspect and report without mutating any store.
     #[arg(long)]
@@ -195,6 +347,14 @@ impl NodeGcArgs {
                 "discarding all thread history requires --confirm-discard-thread-history"
             );
         }
+        if self.discard_project_heads && !self.discard_thread_history {
+            anyhow::bail!("--discard-project-heads requires --discard-thread-history");
+        }
+        if self.discard_project_heads && !self.dry_run && !self.confirm_discard_project_heads {
+            anyhow::bail!(
+                "discarding all principal and deployed project HEADs requires --confirm-discard-project-heads"
+            );
+        }
         if self.dry_run && self.sweep_cas {
             anyhow::bail!(
                 "--sweep-cas cannot be combined with --dry-run; inspect history first, then sweep only with the confirmed discard"
@@ -214,6 +374,7 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
         app_root: args.app_root,
         dry_run: args.dry_run,
         sweep_cas: args.sweep_cas,
+        discard_project_heads: args.discard_project_heads,
     };
     let mut progress = crate::tty::OfflineGcProgress::new(!args.json, console.capabilities());
     let report = match progress.as_mut() {
@@ -248,6 +409,7 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
     status.detail = Some(report.app_root.display().to_string());
     status.rows = vec![
         crate::tty::Row::key_value("chain heads", report.chain_heads.to_string()),
+        crate::tty::Row::key_value("project heads", report.project_heads.to_string()),
         crate::tty::Row::key_value(
             "chain/recovery artifacts",
             (report.chain_ref_artifacts + report.pending_transitions).to_string(),
@@ -381,9 +543,15 @@ struct InitArgs {
     /// Emit the exact structured initialization report.
     #[arg(long)]
     json: bool,
+
+    /// Run the typed initialization transaction without interactive prompts.
+    /// Package installers and automation should always pass this flag or
+    /// `--json` instead of relying on terminal detection.
+    #[arg(long, conflicts_with = "json")]
+    non_interactive: bool,
 }
 
-fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+async fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
     let Some(args) = parse_or_render_help::<InitArgs>(argv, console)? else {
         return Ok(());
     };
@@ -395,6 +563,29 @@ fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()
         trust_files: args.trust_files,
         skip_preflight: false,
     };
+
+    if !args.json
+        && !args.non_interactive
+        && console.capabilities().interactive()
+        && !crate::tty::onboarding_flow::supported_geometry()
+    {
+        anyhow::bail!(
+            "interactive onboarding requires a terminal of at least 40x12; resize it or pass --non-interactive/--json explicitly"
+        );
+    }
+
+    if !args.json
+        && !args.non_interactive
+        && console.capabilities().interactive()
+        && crate::tty::onboarding_flow::supported_geometry()
+    {
+        return crate::tty::onboarding_flow::run(
+            console,
+            crate::tty::onboarding_flow::OnboardingOptions { init: opts },
+        )
+        .await;
+    }
+
     let mut progress = if args.json {
         None
     } else {
@@ -449,6 +640,36 @@ fn run_init_command(argv: &[String], console: &crate::tty::Console) -> Result<()
         console.success(&status)?;
     }
     Ok(())
+}
+
+// ── ryeos setup ────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "ryeos setup",
+    about = "Configure a verified model provider and default model",
+    no_binary_name = true
+)]
+struct SetupArgs {
+    /// App root (parent of `.ai/`). Defaults to XDG data dir / ryeos.
+    #[arg(long)]
+    app_root: Option<PathBuf>,
+}
+
+async fn run_setup_command(argv: &[String], console: &crate::tty::Console) -> Result<()> {
+    let Some(args) = parse_or_render_help::<SetupArgs>(argv, console)? else {
+        return Ok(());
+    };
+    if !console.capabilities().interactive() || !crate::tty::onboarding_flow::supported_geometry() {
+        anyhow::bail!(
+            "ryeos setup requires an interactive terminal of at least 40x12; use verified config and vault operations for automation"
+        );
+    }
+    crate::tty::onboarding_flow::run_setup(
+        console,
+        args.app_root.unwrap_or_else(default_app_root),
+    )
+    .await
 }
 
 // ── ryeos {node status,start,stop} ──────────────────────────────────
@@ -1425,6 +1646,8 @@ mod tests {
             app_root: None,
             discard_thread_history: true,
             confirm_discard_thread_history: confirm,
+            discard_project_heads: false,
+            confirm_discard_project_heads: false,
             dry_run,
             sweep_cas,
             json: false,
@@ -1441,6 +1664,23 @@ mod tests {
         assert!(node_gc_args(false, false, false).validate().is_err());
         assert!(node_gc_args(false, true, false).validate().is_ok());
         assert!(node_gc_args(true, false, true).validate().is_err());
+    }
+
+    #[test]
+    fn project_head_cutover_requires_the_combined_explicit_confirmation() {
+        let mut args = node_gc_args(false, true, false);
+        args.discard_project_heads = true;
+        assert!(args.validate().is_err());
+
+        args.confirm_discard_project_heads = true;
+        assert!(args.validate().is_ok());
+
+        args.discard_thread_history = false;
+        assert!(args.validate().is_err());
+
+        let mut preview = node_gc_args(true, false, false);
+        preview.discard_project_heads = true;
+        assert!(preview.validate().is_ok());
     }
 
     fn isolation_policy(mode: &str, open_files: Option<u64>) -> String {

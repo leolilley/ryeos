@@ -78,12 +78,14 @@ mod integration_tests {
             kind: kind.to_string(),
             item_ref: item_ref.to_string(),
             executor_ref: "test/executor".to_string(),
-            launch_mode: "inline".to_string(),
+            launch_mode: "wait".to_string(),
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             upstream_thread_id: upstream.map(|s| s.to_string()),
             requested_by: Some("user:test".to_string()),
             project_root: None,
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            base_project_snapshot_hash: None,
             usage_subject: None,
             usage_subject_asserted_by: None,
             captured_history_policy: (thread_id == chain_root_id)
@@ -99,7 +101,17 @@ mod integration_tests {
         upstream: Option<&str>,
     ) -> NewThreadRecord {
         let mut thread = make_thread(thread_id, chain_root_id, kind, item_ref, upstream);
-        thread.project_root = Some(std::path::PathBuf::from("/tmp/p"));
+        let project_root = std::path::PathBuf::from("/tmp/p");
+        thread.project_root = Some(project_root.clone());
+        thread.project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
+            project_root,
+            "local:/tmp/p".to_string(),
+            ryeos_state::objects::LiveProjectAccess::ReadWrite,
+            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
         thread
     }
 
@@ -120,6 +132,7 @@ mod integration_tests {
             frontier_id: None,
             fanout: false,
             expected_children: 1,
+            child_project_authority: None,
         }
     }
 
@@ -283,11 +296,30 @@ mod integration_tests {
                         kind: kind.into(),
                         item_ref: item_ref.into(),
                         ref_bindings: std::collections::BTreeMap::new(),
-                        launch_mode: "inline".into(),
+                        launch_mode: "wait".into(),
                         parameters: serde_json::json!({}),
                         project_context: ProjectContext::LocalPath {
                             path: std::path::PathBuf::from("/tmp/p"),
                         },
+                        project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
+                            std::path::PathBuf::from("/tmp/p"),
+                            "local:/tmp/p".to_string(),
+                            ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                            ryeos_state::objects::EnvironmentAuthority::None,
+                            Vec::new(),
+                        )
+                        .unwrap(),
+                        lifecycle_authority:
+                            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+                        stable_project_identity: Some(
+                            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                                std::path::Path::new("/tmp/p"),
+                                "site:test",
+                            )
+                            .unwrap(),
+                        ),
+                        local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
                         original_snapshot_hash: None,
                         original_pushed_head_ref: None,
                         state_root: None,
@@ -299,6 +331,7 @@ mod integration_tests {
                         }),
                         execution_hints: ExecutionHints::default(),
                         effective_caps: vec![],
+                        parent_delegation_caps: None,
                         executor_ref: None,
                         runtime_ref: None,
                     }),
@@ -588,6 +621,7 @@ mod integration_tests {
                     group_leader_start_time_ticks: 20,
                 },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
             )
             .expect("attach_thread_process should succeed");
     }
@@ -649,6 +683,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -703,6 +738,7 @@ mod integration_tests {
             error_json: Some(err.clone()),
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         store
@@ -833,6 +869,7 @@ mod integration_tests {
                 metadata: None,
             }],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -948,6 +985,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1026,6 +1064,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1099,6 +1138,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1266,6 +1306,7 @@ mod integration_tests {
                     error_json: None,
                     artifacts: vec![],
                     managed_envelope: None,
+                    result_project_snapshot_hash: None,
                     final_cost: None,
                 },
             )
@@ -1371,11 +1412,30 @@ mod integration_tests {
             kind: "directive".into(),
             item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
-            launch_mode: "inline".into(),
+            launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
+                std::path::PathBuf::from("/tmp/p"),
+                "local:/tmp/p".to_string(),
+                ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity: Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    std::path::Path::new("/tmp/p"),
+                    "site:test",
+                )
+                .unwrap(),
+            ),
+            local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -1387,6 +1447,7 @@ mod integration_tests {
             }),
             execution_hints: ExecutionHints::default(),
             effective_caps: vec![],
+            parent_delegation_caps: None,
             executor_ref: None,
             runtime_ref: None,
         };
@@ -1491,11 +1552,30 @@ mod integration_tests {
             kind: "directive".into(),
             item_ref: "directive:test/item".into(),
             ref_bindings: std::collections::BTreeMap::new(),
-            launch_mode: "inline".into(),
+            launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
                 path: std::path::PathBuf::from("/tmp/p"),
             },
+            project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
+                std::path::PathBuf::from("/tmp/p"),
+                "local:/tmp/p".to_string(),
+                ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap(),
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity: Some(
+                ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                    std::path::Path::new("/tmp/p"),
+                    "site:test",
+                )
+                .unwrap(),
+            ),
+            local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -1507,6 +1587,7 @@ mod integration_tests {
             }),
             execution_hints: ExecutionHints::default(),
             effective_caps: vec![],
+            parent_delegation_caps: None,
             executor_ref: None,
             runtime_ref: None,
         };
@@ -1891,6 +1972,7 @@ mod integration_tests {
                 metadata: Some(serde_json::json!({"lines": 10})),
             }],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -2034,6 +2116,7 @@ mod integration_tests {
                 metadata: None,
             }],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: Some(ryeos_engine::contracts::FinalCost {
                 turns: 3,
                 input_tokens: 1500,
@@ -2148,6 +2231,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         store
@@ -2168,6 +2252,7 @@ mod integration_tests {
                     group_leader_start_time_ticks: 10,
                 },
                 &ryeos_app::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
             )
             .expect_err("attach_process on a terminal thread must fail loudly");
         assert_eq!(
@@ -2214,6 +2299,7 @@ mod integration_tests {
             error_json: Some(serde_json::json!({"reason": "test_cancel"})),
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 
@@ -2265,6 +2351,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         store
@@ -2279,6 +2366,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
         let err = store
@@ -2313,6 +2401,7 @@ mod integration_tests {
             error_json: None,
             artifacts: vec![],
             managed_envelope: None,
+            result_project_snapshot_hash: None,
             final_cost: None,
         };
 

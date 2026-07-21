@@ -102,7 +102,11 @@ config:
 /// `<state>/threads/` and return its id (the daemon creates
 /// `<state>/threads/<thread_id>/checkpoints` at launch, before the
 /// runtime subprocess starts).
-async fn await_thread_id(state_path: &Path, deadline: Instant) -> String {
+async fn await_thread_id(
+    state_path: &Path,
+    deadline: Instant,
+    execute_request: &mut tokio::task::JoinHandle<Result<(u16, String), String>>,
+) -> String {
     let threads_root = state_path.join("threads");
     loop {
         if let Ok(entries) = std::fs::read_dir(&threads_root) {
@@ -124,14 +128,26 @@ async fn await_thread_id(state_path: &Path, deadline: Instant) -> String {
             "no graph thread dir appeared under {}",
             threads_root.display()
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::select! {
+            result = &mut *execute_request => {
+                panic!("execute request settled before graph admission: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
     }
 }
 
 /// Block until the graph has durably written a checkpoint whose cursor is
 /// `cursor` (proves node before `cursor` completed and the runtime is now
 /// parked at the test hook).
-async fn await_checkpoint_cursor(checkpoints_dir: &Path, cursor: &str, deadline: Instant) {
+async fn await_checkpoint_cursor(
+    state_path: &Path,
+    thread_id: &str,
+    checkpoints_dir: &Path,
+    cursor: &str,
+    deadline: Instant,
+    execute_request: &mut tokio::task::JoinHandle<Result<(u16, String), String>>,
+) {
     let reader = CheckpointWriter::new(checkpoints_dir.to_path_buf());
     loop {
         if let Ok(Some(payload)) = reader.load_latest() {
@@ -141,10 +157,16 @@ async fn await_checkpoint_cursor(checkpoints_dir: &Path, cursor: &str, deadline:
         }
         assert!(
             Instant::now() < deadline,
-            "checkpoint with cursor `{cursor}` never appeared at {}",
-            checkpoints_dir.display()
+            "checkpoint with cursor `{cursor}` never appeared at {}; events={:#?}",
+            checkpoints_dir.display(),
+            projection_events(state_path, thread_id),
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::select! {
+            result = &mut *execute_request => {
+                panic!("execute request settled before checkpoint `{cursor}`: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
     }
 }
 
@@ -264,6 +286,24 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
+        "execution_policy": {
+            "schema_version": 2,
+            "ownership": "daemon_owned",
+            "recovery": "restart_recoverable",
+            "response": "wait",
+            "target": { "kind": "here" },
+            "environment": {
+                "kind": "project_overlay",
+                "include_operator_vault": true,
+                "name_policy": { "kind": "declared_required" }
+            },
+            "project": {
+                "kind": "pinned",
+                "source": { "kind": "capture_live", "scope": "full_project" },
+                "realization": { "kind": "read_only" },
+                "child_policy": { "kind": "inherit" }
+            }
+        }
     });
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
     let headers = build_signed_headers_for_bytes(
@@ -273,7 +313,7 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         "/execute",
         &body_bytes,
     );
-    let exec_task = tokio::spawn(async move {
+    let mut exec_task = tokio::spawn(async move {
         let mut req = reqwest::Client::new()
             .post(url)
             .header("content-type", "application/json")
@@ -281,20 +321,30 @@ async fn graph_resumes_from_checkpoint_after_daemon_crash() {
         for (k, v) in headers {
             req = req.header(k, v);
         }
-        // Result is intentionally discarded — the daemon is killed mid-flight.
-        let _ = req.send().await;
+        let response = req.send().await.map_err(|error| error.to_string())?;
+        let status = response.status().as_u16();
+        let body = response.text().await.map_err(|error| error.to_string())?;
+        Ok((status, body))
     });
 
     let setup_deadline = Instant::now() + Duration::from_secs(30);
 
     // 1. Discover the graph thread + wait for it to checkpoint at cursor `b`.
-    let thread_id = await_thread_id(&h.state_path, setup_deadline).await;
+    let thread_id = await_thread_id(&h.state_path, setup_deadline, &mut exec_task).await;
     let checkpoints_dir = h
         .state_path
         .join("threads")
         .join(&thread_id)
         .join("checkpoints");
-    await_checkpoint_cursor(&checkpoints_dir, "b", setup_deadline).await;
+    await_checkpoint_cursor(
+        &h.state_path,
+        &thread_id,
+        &checkpoints_dir,
+        "b",
+        setup_deadline,
+        &mut exec_task,
+    )
+    .await;
 
     // Sanity: pre-crash, node `a` ran exactly once and the thread started once.
     let pre = projection_events(&h.state_path, &thread_id);

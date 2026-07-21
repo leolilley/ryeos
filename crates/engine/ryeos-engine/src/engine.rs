@@ -11,7 +11,7 @@ use crate::contracts::{
     VerifiedItem,
 };
 use crate::error::EngineError;
-use crate::item_resolution::ResolutionRoots;
+use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
 use crate::kind_registry::KindRegistry;
 use crate::launch_preparers::LaunchPreparerRegistry;
 use crate::parsers::ParserDispatcher;
@@ -76,7 +76,7 @@ pub struct EffectiveItem {
 /// Holds the kind registry and metadata parser registry. Exposes the
 /// four pipeline methods directly — no trait boundary, no dyn dispatch
 /// at the seam. The seam is the data contracts.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Engine {
     pub kinds: KindRegistry,
     pub parser_dispatcher: ParserDispatcher,
@@ -116,6 +116,11 @@ pub struct Engine {
 
     /// System bundle roots (parents of `AI_DIR`)
     pub bundle_roots: Vec<PathBuf>,
+
+    /// Operator-owned `.ai/` root. This is intentionally excluded from
+    /// ordinary item resolution and is admitted only for signed launch-config
+    /// inputs, between an active project and installed bundles.
+    operator_ai_root: Option<PathBuf>,
 
     /// Generation guard shared with launch preparation. It is inert for
     /// directly-constructed test engines and active for node engines.
@@ -218,6 +223,7 @@ impl Engine {
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
             bundle_roots,
+            operator_ai_root: None,
             isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
         }
     }
@@ -227,6 +233,11 @@ impl Engine {
         isolation: std::sync::Arc<crate::isolation::IsolationRuntime>,
     ) -> Self {
         self.isolation_generation = isolation;
+        self
+    }
+
+    pub fn with_operator_ai_root(mut self, operator_ai_root: PathBuf) -> Self {
+        self.operator_ai_root = Some(operator_ai_root);
         self
     }
 
@@ -270,6 +281,32 @@ impl Engine {
     pub fn with_node_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.node_trust_store = trust_store;
         self
+    }
+
+    /// Derive a project-scoped engine from this already-admitted node
+    /// generation.
+    ///
+    /// Installed schemas, handlers, runtimes, protocols, host bindings, and
+    /// the isolation generation are immutable for a daemon generation and are
+    /// cloned from the admitted engine. Only item trust is rebuilt from the
+    /// pinned project root plus an optional caller-scoped overlay. This avoids
+    /// re-admitting node executors while serving a request and guarantees the
+    /// project engine cannot observe a different installed-bundle generation.
+    pub fn for_project_root(
+        &self,
+        project_root: &Path,
+        trust_overlay: Option<&TrustStore>,
+    ) -> Result<Self, EngineError> {
+        let mut trust_store = self
+            .node_trust_store
+            .with_project_keys(project_root)?
+            .into_owned();
+        if let Some(overlay) = trust_overlay {
+            trust_store.extend_from(overlay);
+        }
+        let mut engine = self.clone();
+        engine.trust_store = trust_store;
+        Ok(engine)
     }
 
     fn effective_trust_store(
@@ -746,7 +783,7 @@ impl Engine {
         &self,
         ctx: &EngineContext,
         plan: &ExecutionPlan,
-    ) -> Result<crate::dispatch::SpawnedExecution, EngineError> {
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
         self.checked_bundle_generation(|| {
             tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
             crate::dispatch::spawn_plan(plan, ctx)
@@ -758,6 +795,31 @@ impl Engine {
         let system_ai: Vec<PathBuf> = self.bundle_roots.iter().map(|p| p.join(AI_DIR)).collect();
         let project_ai = project_root.map(|p| p.join(AI_DIR));
         ResolutionRoots::from_flat(project_ai, system_ai)
+    }
+
+    /// Add operator configuration to launch-config lookup only. Keeping this
+    /// separate prevents mutable node state from becoming a general item root.
+    pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
+        let mut ordered = roots.ordered.clone();
+        let Some(operator_ai_root) = &self.operator_ai_root else {
+            return ResolutionRoots { ordered };
+        };
+        if ordered.iter().any(|root| root.ai_root == *operator_ai_root) {
+            return ResolutionRoots { ordered };
+        }
+        let position = ordered
+            .iter()
+            .position(|root| root.space == crate::contracts::ItemSpace::Bundle)
+            .unwrap_or(ordered.len());
+        ordered.insert(
+            position,
+            ResolutionRoot {
+                space: crate::contracts::ItemSpace::Project,
+                label: "operator".to_string(),
+                ai_root: operator_ai_root.clone(),
+            },
+        );
+        ResolutionRoots { ordered }
     }
 
     /// Composite cache fingerprint over the kind registry and the
@@ -1004,6 +1066,22 @@ formats:
         let fp = engine.registry_fingerprint();
         assert!(!fp.is_empty());
         assert_eq!(fp, test_engine().registry_fingerprint());
+    }
+
+    #[test]
+    fn operator_root_is_added_only_to_launch_config_precedence() {
+        let engine = test_engine().with_operator_ai_root(PathBuf::from("/operator/.ai"));
+        let ordinary = engine.resolution_roots(Some(PathBuf::from("/project")));
+        assert_eq!(ordinary.ordered.len(), engine.bundle_roots.len() + 1);
+        assert!(!ordinary
+            .ordered
+            .iter()
+            .any(|root| root.ai_root == PathBuf::from("/operator/.ai")));
+
+        let launch = engine.launch_config_roots(&ordinary);
+        assert_eq!(launch.ordered[0].label, "project");
+        assert_eq!(launch.ordered[1].label, "operator");
+        assert_eq!(launch.ordered[1].space, crate::contracts::ItemSpace::Project);
     }
 
     #[test]
