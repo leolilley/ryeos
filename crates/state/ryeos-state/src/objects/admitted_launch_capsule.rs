@@ -403,7 +403,7 @@ mod tests {
                 executable_identity,
             },
             prepared_launch: None,
-            effective_caps: vec!["project.read".to_string()],
+            effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:direct".to_string(),
             executor_ref: "tool:test/executor".to_string(),
         }
@@ -454,7 +454,7 @@ mod tests {
                 executor_bundle_signer_fingerprint: "fp:executor-bundle".to_string(),
             },
             prepared_launch,
-            effective_caps: vec!["project.read".to_string()],
+            effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:test/directive".to_string(),
             executor_ref: "executor:test/subprocess".to_string(),
         }
