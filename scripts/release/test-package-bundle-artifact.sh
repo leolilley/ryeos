@@ -40,9 +40,20 @@ set -euo pipefail
     echo "release verification must not accept a trust-file override" >&2
     exit 2
 }
-[[ "${1:-}" == init && "${2:-}" == --app-root && "${4:-}" == --source ]]
-[[ -d "${5:-}/.ai" ]]
-mkdir -p "${3:-}"
+[[ "${1:-}" == init ]]
+shift
+app_root=""
+source_dir=""
+while (( $# > 0 )); do
+    case "$1" in
+        --non-interactive) shift ;;
+        --app-root) app_root="${2:-}"; shift 2 ;;
+        --source) source_dir="${2:-}"; shift 2 ;;
+        *) echo "unexpected init argument: $1" >&2; exit 2 ;;
+    esac
+done
+[[ -n "$app_root" && -n "$source_dir" && -d "$source_dir/.ai" ]]
+mkdir -p "$app_root"
 EOF
 chmod +x "$fake_ryeos"
 
