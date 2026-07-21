@@ -665,11 +665,8 @@ async fn run_setup_command(argv: &[String], console: &crate::tty::Console) -> Re
             "ryeos setup requires an interactive terminal of at least 40x12; use verified config and vault operations for automation"
         );
     }
-    crate::tty::onboarding_flow::run_setup(
-        console,
-        args.app_root.unwrap_or_else(default_app_root),
-    )
-    .await
+    crate::tty::onboarding_flow::run_setup(console, args.app_root.unwrap_or_else(default_app_root))
+        .await
 }
 
 // ── ryeos {node status,start,stop} ──────────────────────────────────

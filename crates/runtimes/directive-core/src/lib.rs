@@ -368,37 +368,44 @@ impl PricingConfig {
 impl ProviderConfig {
     pub fn setup_projection(&self, provider_id: &str) -> Result<ProviderSetupProjection> {
         let setup = match self.extra.get("setup") {
-            Some(value) => serde_json::from_value::<ProviderSetupConfig>(value.clone())
-                .map_err(|error| anyhow::anyhow!("provider '{provider_id}' setup metadata is invalid: {error}"))?,
-            None => ProviderSetupConfig {
-                display_name: provider_id.to_string(),
-                priority: default_setup_priority(),
-                recommended: false,
-                credential: self.auth.env_var.as_ref().map(|secret_name| ProviderSetupCredential {
-                    label: "Credential".to_string(),
-                    secret_name: secret_name.clone(),
-                    input: ProviderSetupInput::Secret,
-                }),
-                help_url: None,
-                validation: None,
-                models: self
-                    .pricing
-                    .as_ref()
-                    .map(|pricing| {
-                        let mut names = pricing.models.keys().cloned().collect::<Vec<_>>();
-                        names.sort();
-                        names
-                            .into_iter()
-                            .map(|name| ProviderSetupModel {
-                                name,
-                                display_name: None,
-                                context_window: None,
-                                recommended: false,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            },
+            Some(value) => {
+                serde_json::from_value::<ProviderSetupConfig>(value.clone()).map_err(|error| {
+                    anyhow::anyhow!("provider '{provider_id}' setup metadata is invalid: {error}")
+                })?
+            }
+            None => {
+                ProviderSetupConfig {
+                    display_name: provider_id.to_string(),
+                    priority: default_setup_priority(),
+                    recommended: false,
+                    credential: self.auth.env_var.as_ref().map(|secret_name| {
+                        ProviderSetupCredential {
+                            label: "Credential".to_string(),
+                            secret_name: secret_name.clone(),
+                            input: ProviderSetupInput::Secret,
+                        }
+                    }),
+                    help_url: None,
+                    validation: None,
+                    models: self
+                        .pricing
+                        .as_ref()
+                        .map(|pricing| {
+                            let mut names = pricing.models.keys().cloned().collect::<Vec<_>>();
+                            names.sort();
+                            names
+                                .into_iter()
+                                .map(|name| ProviderSetupModel {
+                                    name,
+                                    display_name: None,
+                                    context_window: None,
+                                    recommended: false,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                }
+            }
         };
         if setup.display_name.trim().is_empty()
             || setup.display_name.len() > 160
@@ -427,8 +434,7 @@ impl ProviderConfig {
             }
         }
         if setup.help_url.as_deref().is_some_and(|url| {
-            url.len() > 4096
-                || !(url.starts_with("https://") || url.starts_with("http://"))
+            url.len() > 4096 || !(url.starts_with("https://") || url.starts_with("http://"))
         }) {
             bail!("provider '{provider_id}' setup help_url is invalid");
         }
@@ -667,11 +673,13 @@ fn validate_setup_endpoint(
     sends_credential: bool,
 ) -> Result<()> {
     let validation_source = validation.url.replace("{model}", "setup-probe");
-    let validation_url = Url::parse(&validation_source)
-        .map_err(|error| anyhow::anyhow!("provider '{provider_id}' setup validation URL is invalid: {error}"))?;
+    let validation_url = Url::parse(&validation_source).map_err(|error| {
+        anyhow::anyhow!("provider '{provider_id}' setup validation URL is invalid: {error}")
+    })?;
     let base_source = base_url.replace("{model}", "setup-probe");
-    let base = Url::parse(&base_source)
-        .map_err(|error| anyhow::anyhow!("provider '{provider_id}' base_url is invalid: {error}"))?;
+    let base = Url::parse(&base_source).map_err(|error| {
+        anyhow::anyhow!("provider '{provider_id}' base_url is invalid: {error}")
+    })?;
     if validation_url.username() != ""
         || validation_url.password().is_some()
         || base.username() != ""

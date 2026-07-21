@@ -1081,7 +1081,10 @@ formats:
         let launch = engine.launch_config_roots(&ordinary);
         assert_eq!(launch.ordered[0].label, "project");
         assert_eq!(launch.ordered[1].label, "operator");
-        assert_eq!(launch.ordered[1].space, crate::contracts::ItemSpace::Project);
+        assert_eq!(
+            launch.ordered[1].space,
+            crate::contracts::ItemSpace::Project
+        );
     }
 
     #[test]

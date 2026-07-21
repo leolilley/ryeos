@@ -228,7 +228,10 @@ mod tests {
         assert!(error
             .to_string()
             .contains("refusing to replace unverified or operator-authored"));
-        assert_eq!(fs::read_to_string(path).expect("preserved route"), "tiers: {}\n");
+        assert_eq!(
+            fs::read_to_string(path).expect("preserved route"),
+            "tiers: {}\n"
+        );
     }
 
     #[test]
@@ -244,6 +247,8 @@ mod tests {
             context_window: 128_000,
         })
         .expect_err("unsigned marker must not be trusted");
-        assert!(error.to_string().contains("unverified or operator-authored"));
+        assert!(error
+            .to_string()
+            .contains("unverified or operator-authored"));
     }
 }

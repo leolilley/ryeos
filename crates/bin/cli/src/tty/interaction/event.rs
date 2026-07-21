@@ -80,13 +80,11 @@ impl EventReader {
         let mut ticks = tokio::time::interval(tick_interval);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         #[cfg(unix)]
-        let terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
         #[cfg(unix)]
         let hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())?;
         #[cfg(unix)]
-        let interrupt =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
         Ok(Self {
             input: EventStream::new(),
             ticks,

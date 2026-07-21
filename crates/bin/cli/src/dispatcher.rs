@@ -88,8 +88,7 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         if exhaustive {
             if !help_tokens.is_empty() {
                 return Err(CliError::Local {
-                    detail: "`ryeos help --all` cannot be combined with command tokens"
-                        .to_string(),
+                    detail: "`ryeos help --all` cannot be combined with command tokens".to_string(),
                 });
             }
             let snapshot = crate::node_descriptors::load_verified_snapshot(&app_root);

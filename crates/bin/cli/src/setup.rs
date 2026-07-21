@@ -25,14 +25,11 @@ pub(crate) fn discover_verified_providers(app_root: &Path) -> Result<ProviderCat
         }
     })?;
     let bundle_roots = crate::effective_metadata::snapshot_bundle_roots(&snapshot);
-    let engine = crate::effective_metadata::build_effective_item_engine(
-        app_root,
-        None,
-        &bundle_roots,
-    )
-    .map_err(|error| CliError::Local {
-        detail: format!("build verified provider projection: {error:#}"),
-    })?;
+    let engine =
+        crate::effective_metadata::build_effective_item_engine(app_root, None, &bundle_roots)
+            .map_err(|error| CliError::Local {
+                detail: format!("build verified provider projection: {error:#}"),
+            })?;
     let mut ids = BTreeSet::new();
     let mut warnings = Vec::new();
     for root in &bundle_roots {
@@ -43,7 +40,10 @@ pub(crate) fn discover_verified_providers(app_root: &Path) -> Result<ProviderCat
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
-                warnings.push(format!("read provider catalog {}: {error}", directory.display()));
+                warnings.push(format!(
+                    "read provider catalog {}: {error}",
+                    directory.display()
+                ));
                 continue;
             }
         };
@@ -56,7 +56,10 @@ pub(crate) fn discover_verified_providers(app_root: &Path) -> Result<ProviderCat
             if metadata.file_type().is_symlink() {
                 continue;
             }
-            if !matches!(path.extension().and_then(|value| value.to_str()), Some("yaml" | "yml")) {
+            if !matches!(
+                path.extension().and_then(|value| value.to_str()),
+                Some("yaml" | "yml")
+            ) {
                 continue;
             }
             if let Some(id) = path.file_stem().and_then(|value| value.to_str()) {
@@ -68,9 +71,7 @@ pub(crate) fn discover_verified_providers(app_root: &Path) -> Result<ProviderCat
     for id in ids {
         let item_ref = format!("config:ryeos-runtime/model-providers/{id}");
         let value = match crate::effective_metadata::resolve_effective_composed_value(
-            &engine,
-            &item_ref,
-            None,
+            &engine, &item_ref, None,
         ) {
             Ok(Some(value)) => value,
             Ok(None) => {
@@ -78,14 +79,18 @@ pub(crate) fn discover_verified_providers(app_root: &Path) -> Result<ProviderCat
                 continue;
             }
             Err(error) => {
-                warnings.push(format!("verified provider '{id}' failed resolution: {error:#}"));
+                warnings.push(format!(
+                    "verified provider '{id}' failed resolution: {error:#}"
+                ));
                 continue;
             }
         };
         let provider: ProviderConfig = match serde_json::from_value(value) {
             Ok(provider) => provider,
             Err(error) => {
-                warnings.push(format!("verified provider '{id}' has invalid schema: {error}"));
+                warnings.push(format!(
+                    "verified provider '{id}' has invalid schema: {error}"
+                ));
                 continue;
             }
         };
@@ -169,20 +174,22 @@ impl LocalSetupClient {
         projection: &ProviderSetupProjection,
         model: Option<&str>,
     ) -> Result<Value, CliError> {
-        let validation = projection.validation.as_ref().ok_or_else(|| CliError::Local {
-            detail: format!(
-                "provider '{}' does not declare a validation operation",
-                projection.display_name
-            ),
-        })?;
-        let validation_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&validation.r#ref).map_err(|error| {
-            CliError::Local {
+        let validation = projection
+            .validation
+            .as_ref()
+            .ok_or_else(|| CliError::Local {
+                detail: format!(
+                    "provider '{}' does not declare a validation operation",
+                    projection.display_name
+                ),
+            })?;
+        let validation_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&validation.r#ref)
+            .map_err(|error| CliError::Local {
                 detail: format!(
                     "provider '{}' declares invalid validation ref '{}': {error}",
                     projection.display_name, validation.r#ref
                 ),
-            }
-        })?;
+            })?;
         if validation_ref.to_string() != SUPPORTED_PROVIDER_VALIDATION_REF {
             return Err(CliError::Local {
                 detail: format!(

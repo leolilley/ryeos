@@ -71,17 +71,23 @@ impl Journal {
             || !metadata.file_type().is_file()
             || metadata.len() > JOURNAL_MAX_BYTES
         {
-            anyhow::bail!("unsafe or oversized onboarding journal at {}", path.display());
+            anyhow::bail!(
+                "unsafe or oversized onboarding journal at {}",
+                path.display()
+            );
         }
         let source = String::from_utf8(lillux::read_regular_file_bounded_no_follow(
             &path,
             JOURNAL_MAX_BYTES,
         )?)
-            .with_context(|| format!("read onboarding journal {}", path.display()))?;
+        .with_context(|| format!("read onboarding journal {}", path.display()))?;
         let journal: Self = serde_json::from_str(&source)
             .with_context(|| format!("parse onboarding journal {}", path.display()))?;
         if journal.schema != JOURNAL_SCHEMA {
-            anyhow::bail!("unsupported onboarding journal schema '{}'; expected {JOURNAL_SCHEMA}", journal.schema);
+            anyhow::bail!(
+                "unsupported onboarding journal schema '{}'; expected {JOURNAL_SCHEMA}",
+                journal.schema
+            );
         }
         Ok(journal)
     }
@@ -167,8 +173,9 @@ impl Journal {
             anyhow::bail!("onboarding journal exceeds size limit");
         }
         let path = journal_path(app_root);
-        lillux::atomic_write(&path, &bytes)
-            .map_err(|error| anyhow::anyhow!("write onboarding journal {}: {error}", path.display()))?;
+        lillux::atomic_write(&path, &bytes).map_err(|error| {
+            anyhow::anyhow!("write onboarding journal {}: {error}", path.display())
+        })?;
         Ok(())
     }
 }

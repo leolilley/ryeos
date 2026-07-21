@@ -95,10 +95,16 @@ fn validate(spec: &OnboardingSpec) -> Result<()> {
     for page in &spec.pages {
         if let Some(next) = &page.next {
             if !ids.contains(next.as_str()) {
-                bail!("onboarding page '{}' targets unknown page '{next}'", page.id);
+                bail!(
+                    "onboarding page '{}' targets unknown page '{next}'",
+                    page.id
+                );
             }
         } else if page.action != ActionId::Finish {
-            bail!("non-terminal onboarding page '{}' has no next page", page.id);
+            bail!(
+                "non-terminal onboarding page '{}' has no next page",
+                page.id
+            );
         }
     }
     Ok(())
