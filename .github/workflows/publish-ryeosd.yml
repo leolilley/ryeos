@@ -2,6 +2,8 @@ name: Publish RyeOS release artifacts
 
 # Triggered by project release tags. Publishes signed GHCR images plus the
 # officially signed bundle archive consumed by native packages.
+# Workspace qualification belongs to CI and deliberately does not gate this
+# workflow. Release-specific integrity and artifact checks remain fail-closed.
 
 on:
   push:
@@ -13,11 +15,6 @@ on:
         description: "Version (without `v` prefix), e.g. 0.5.0"
         required: true
         type: string
-      skip_workspace_tests:
-        description: "Operator override: publish without running the workspace test gate"
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -28,7 +25,7 @@ concurrency:
 
 jobs:
   qualify:
-    name: Qualify release source
+    name: Resolve release source
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -37,15 +34,14 @@ jobs:
       build_date: ${{ steps.release.outputs.build_date }}
       source_sha: ${{ steps.source.outputs.sha }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # On manual recovery, begin with the workflow revision selected by the
+      # operator so version validation cannot execute code from an unvalidated
+      # input ref. The immutable release tag is checked out below only after
+      # the requested version passes the repository's strict resolver.
+      - name: Check out release workflow source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-
-      - name: Install checksum-pinned workflow and shell linters
-        run: ./scripts/ci/install-static-linters.sh "$RUNNER_TEMP/ryeos-linters"
-
-      - name: Check workflows and release/install shell
-        run: ./scripts/ci/lint-workflows-and-shell.sh "$RUNNER_TEMP/ryeos-linters"
 
       - name: Resolve and validate version
         id: release
@@ -60,8 +56,11 @@ jobs:
           echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Resolved version: $VERSION"
 
-      - name: Check release version resolver cases
-        run: ./scripts/release/test-resolve-version.sh
+      - name: Check out immutable release tag
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/v${{ steps.release.outputs.version }}
 
       - name: Resolve and verify source revision
         id: source
@@ -84,68 +83,8 @@ jobs:
           echo "Source SHA: $SOURCE_SHA"
           echo "Tag commit: $TAG_COMMIT"
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
-        with:
-          toolchain: 1.95.0
-          components: rustfmt, clippy
-
-      - name: Install cargo-nextest
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_workspace_tests }}
-        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
-
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # cargo-deny
-
-      - name: Cache cargo artifacts
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check Clippy policy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-      - name: Check dependency advisories, licenses, and sources
-        run: cargo deny check
-
-      - name: Scan repository history for secrets
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_workspace_tests }}
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Scan release revision for secrets
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_workspace_tests }}
-        env:
-          GITLEAKS_ARCHIVE_SHA256: 9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c
-          GITLEAKS_VERSION: 8.24.3
-        run: |
-          ARCHIVE="$RUNNER_TEMP/gitleaks.tar.gz"
-          INSTALL_DIR="$RUNNER_TEMP/gitleaks"
-          curl --fail --silent --show-error --location \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            --output "$ARCHIVE"
-          echo "${GITLEAKS_ARCHIVE_SHA256}  ${ARCHIVE}" | sha256sum --check --strict
-          mkdir -p "$INSTALL_DIR"
-          tar -xzf "$ARCHIVE" -C "$INSTALL_DIR" gitleaks
-          "$INSTALL_DIR/gitleaks" git --redact --verbose --log-opts=-1 "$GITHUB_WORKSPACE"
-
-      - name: Run release qualification gate
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.skip_workspace_tests }}
-        env:
-          GATE_BUILD_JOBS: 2
-          GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
-          GATE_TEST_THREADS: 2
-        run: ./scripts/gate.sh --refresh-bundles
-
   publish:
-    name: Publish qualified artifacts
+    name: Publish release artifacts
     needs: qualify
     runs-on: ubuntu-latest
     permissions:
@@ -158,13 +97,13 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.qualify.outputs.source_sha }}
 
-      - name: Verify qualified source revision
+      - name: Verify release source revision
         env:
           EXPECTED_SHA: ${{ needs.qualify.outputs.source_sha }}
         run: |
           SOURCE_SHA="$(git rev-parse HEAD)"
           if [ "$SOURCE_SHA" != "$EXPECTED_SHA" ]; then
-            echo "::error::Publish source $SOURCE_SHA differs from qualified source $EXPECTED_SHA"
+            echo "::error::Publish source $SOURCE_SHA differs from release source $EXPECTED_SHA"
             exit 1
           fi
 
