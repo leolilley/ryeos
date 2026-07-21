@@ -481,13 +481,6 @@ fn project_summary(path: &Path) -> ProjectSummary {
     }
 }
 
-fn local_project_root(context: &PlanContext) -> Option<PathBuf> {
-    let ProjectContext::LocalPath { path } = &context.project_context else {
-        return None;
-    };
-    Some(path.clone())
-}
-
 fn sort_thread_list_items(items: &mut [ThreadListItem], sort: ryeos_state::queries::ThreadSort) {
     match sort {
         ryeos_state::queries::ThreadSort::Default => {
@@ -2310,7 +2303,9 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
-            project_root: local_project_root(&request.plan_context),
+            project_root: project_authority
+                .project_root_projection()
+                .map(PathBuf::from),
             base_project_snapshot_hash: project_authority
                 .base_snapshot_projection()
                 .map(str::to_owned),
@@ -2375,7 +2370,9 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: None,
             requested_by: request.requested_by.clone(),
-            project_root: local_project_root(&request.plan_context),
+            project_root: project_authority
+                .project_root_projection()
+                .map(PathBuf::from),
             base_project_snapshot_hash: project_authority
                 .base_snapshot_projection()
                 .map(str::to_owned),
@@ -2476,7 +2473,9 @@ impl ThreadLifecycleService {
             origin_site_id: request.origin_site_id.clone(),
             upstream_thread_id: Some(source.thread_id.clone()),
             requested_by: request.requested_by.clone(),
-            project_root: local_project_root(&request.plan_context),
+            project_root: project_authority
+                .project_root_projection()
+                .map(PathBuf::from),
             base_project_snapshot_hash: project_authority
                 .base_snapshot_projection()
                 .map(str::to_owned),
@@ -2841,6 +2840,21 @@ impl ThreadLifecycleService {
         self.attach_process_with_owner(params, Some(launch_owner))
     }
 
+    /// Persist a daemon-held identity before its one-shot release. Exact
+    /// repeats are rejected because target code cannot legitimately have
+    /// self-attached while still awaiting release.
+    pub fn attach_new_process(&self, params: &ThreadAttachProcessParams) -> Result<ThreadDetail> {
+        self.attach_new_process_with_owner(params, None)
+    }
+
+    pub fn attach_new_process_owned(
+        &self,
+        params: &ThreadAttachProcessParams,
+        launch_owner: &str,
+    ) -> Result<ThreadDetail> {
+        self.attach_new_process_with_owner(params, Some(launch_owner))
+    }
+
     fn attach_process_with_owner(
         &self,
         params: &ThreadAttachProcessParams,
@@ -2867,6 +2881,56 @@ impl ThreadLifecycleService {
                 params.thread_id
             )
         })
+    }
+
+    fn attach_new_process_with_owner(
+        &self,
+        params: &ThreadAttachProcessParams,
+        launch_owner: Option<&str>,
+    ) -> Result<ThreadDetail> {
+        let process_identity = params.process_identity.as_ref().ok_or_else(|| {
+            anyhow!(
+                "refusing to attach process {}/{} without a durable process identity",
+                params.pid,
+                params.pgid
+            )
+        })?;
+        self.state_store.attach_new_thread_process(
+            &params.thread_id,
+            params.pid,
+            params.pgid,
+            process_identity,
+            &params.launch_metadata,
+            launch_owner,
+        )?;
+        self.get_thread(&params.thread_id)?.ok_or_else(|| {
+            anyhow!(
+                "thread not found after pre-release process attachment: {}",
+                params.thread_id
+            )
+        })
+    }
+
+    pub fn authorize_process_release(
+        &self,
+        thread_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+    ) -> Result<()> {
+        self.state_store
+            .authorize_attached_process_release(thread_id, process_identity, None)
+    }
+
+    pub fn authorize_process_release_owned(
+        &self,
+        thread_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        launch_owner: &str,
+    ) -> Result<()> {
+        self.state_store.authorize_attached_process_release(
+            thread_id,
+            process_identity,
+            Some(launch_owner),
+        )
     }
 
     #[tracing::instrument(
@@ -4866,7 +4930,7 @@ pub fn validate_item(
 }
 
 /// Result of spawning the engine pipeline.
-pub struct SpawnedItem {
+pub struct SpawnedItemAwaitingAttachment {
     pub pid: u32,
     pub pgid: i64,
     pub process_identity: crate::process::ExecutionProcessIdentity,
@@ -4875,26 +4939,44 @@ pub struct SpawnedItem {
     /// pid/pgid so the daemon shutdown / cancel paths can route
     /// termination without re-loading the spec.
     pub launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata,
-    spawned: ryeos_engine::dispatch::SpawnedExecution,
+    spawned: ryeos_engine::dispatch::SpawnedExecutionAwaitingAttachment,
 }
 
-impl SpawnedItem {
-    /// Permit the supervised target to exec only after its exact identity has
-    /// been durably attached to the thread row.
-    pub fn release_start_gate(&mut self) -> Result<()> {
-        let released = self
+impl SpawnedItemAwaitingAttachment {
+    pub fn release_after_attachment(self) -> Result<RunningItem> {
+        let running = self
             .spawned
-            .release_start_gate()
-            .map_err(|error| anyhow!("release item start gate: {error}"))?;
-        if !released {
-            bail!("durable item launch was created without the mandatory pre-exec start gate");
-        }
-        Ok(())
+            .release_after_attachment()
+            .map_err(|error| anyhow!("release item after durable attachment: {error}"))?;
+        Ok(RunningItem {
+            process_identity: self.process_identity,
+            launch_metadata: self.launch_metadata,
+            running,
+        })
+    }
+
+    pub fn abort_and_reap(self) -> Result<()> {
+        self.spawned
+            .abort_and_reap()
+            .map(|_| ())
+            .map_err(|error| anyhow!("abort item awaiting attachment: {error}"))
+    }
+}
+
+pub struct RunningItem {
+    pub process_identity: crate::process::ExecutionProcessIdentity,
+    pub launch_metadata: crate::launch_metadata::RuntimeLaunchMetadata,
+    running: ryeos_engine::dispatch::RunningExecution,
+}
+
+impl RunningItem {
+    pub fn abort(self) {
+        self.running.abort();
     }
 
     /// Block until subprocess completes.
     pub fn wait(self) -> ExecutionCompletion {
-        self.spawned.wait()
+        self.running.wait()
     }
 }
 
@@ -5017,7 +5099,7 @@ pub fn prepare_item_plan(
 /// `native_resume`, the daemon-side checkpoint directory
 /// (`<thread_state_dir>/checkpoints/`) is created and injected as
 /// `RYEOS_CHECKPOINT_DIR` into the subprocess env. The path is also
-/// captured in `SpawnedItem.launch_metadata.checkpoint_dir` so the
+/// captured in `SpawnedItemAwaitingAttachment.launch_metadata.checkpoint_dir` so the
 /// daemon can persist it for the resume path. When `is_resume = true`,
 /// `RYEOS_RESUME=1` is also injected so replay-aware tools can branch
 /// on cold-start vs. resume.
@@ -5035,6 +5117,8 @@ pub struct SpawnItemParams<'a> {
     pub roots: DaemonRootEnv,
     pub isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
     pub isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
+    pub isolation_live_access_authority:
+        Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>,
     /// Exact daemon socket requested by the verified callback channel, or
     /// `None` for a callback-free launch.
     pub isolation_daemon_socket_path: Option<&'a std::path::Path>,
@@ -5058,7 +5142,7 @@ pub struct SpawnItemParams<'a> {
         snapshot_pinned = params.original_snapshot_hash.is_some(),
     )
 )]
-pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
+pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAttachment> {
     let SpawnItemParams {
         engine,
         resolved,
@@ -5070,6 +5154,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         roots,
         isolation,
         isolation_project_authority,
+        isolation_live_access_authority,
         isolation_daemon_socket_path,
         thread_state_dir,
         is_resume,
@@ -5081,11 +5166,6 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         .as_deref()
         .map(std::path::PathBuf::from)
         .context("spawn roots missing RYEOS_APP_ROOT")?;
-    if !isolation.is_enforced() {
-        bail!(
-            "durable daemon-owned execution requires enforced isolation so attach-before-exec can be guaranteed"
-        );
-    }
     // vault_bindings: user-provided secret/capability env vars.
     // protocol_env_bindings: the verified terminator protocol's exact signed
     // env contract. Values are produced from daemon-owned launch facts by the
@@ -5231,6 +5311,7 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
         app_root,
         isolation,
         isolation_project_authority,
+        isolation_live_access_authority,
         isolation_state_root: state_root.map(std::path::Path::to_path_buf),
         isolation_checkpoint_dir: allocated_checkpoint_dir.clone(),
         isolation_daemon_socket_path: isolation_daemon_socket_path
@@ -5275,38 +5356,36 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItem> {
     let spawned = engine
         .spawn_plan(&engine_ctx, &plan)
         .map_err(|e| anyhow!("spawn failed: {e}"))?;
-    let process_identity = match crate::process::capture_execution_process_identity(
-        spawned.pid as i64,
-        Some(spawned.pgid),
-    ) {
+    #[cfg(target_os = "linux")]
+    let process_identity_result = crate::process::capture_execution_process_identity_from_pidfd(
+        spawned.pid() as i64,
+        Some(spawned.pgid()),
+        spawned.pidfd(),
+    )
+    .context("capture held spawned target identity from Lillux pidfd");
+    #[cfg(not(target_os = "linux"))]
+    let process_identity_result = crate::process::capture_execution_process_identity(
+        spawned.pid() as i64,
+        Some(spawned.pgid()),
+    )
+    .context("capture held spawned target identity");
+    let process_identity = match process_identity_result {
         Ok(identity) => identity,
-        Err(
-            target_error @ crate::process::ExecutionProcessIdentityCaptureError::TargetAlreadyDeadOrStale,
-        ) => {
-            // A supervised launcher can report a very short command and reap
-            // it before the daemon captures its birth identity. Lillux retains the
-            // wrapper/group leader and owns its wait/output path. Use that exact
-            // leader as the durable control target rather than turning a
-            // successful fast command into a spawn failure. The reported child
-            // PID remains internal accounting in SpawnedExecution.
-            crate::process::capture_execution_process_identity(
-                spawned.pgid,
-                Some(spawned.pgid),
-            )
-            .with_context(|| {
-                format!(
-                    "capture spawned target identity ({target_error}); capture retained wrapper identity"
-                )
-            })?
+        Err(error) => {
+            let cleanup = spawned.abort_and_reap().err();
+            return Err(match cleanup {
+                Some(cleanup) => {
+                    error.context(format!("pending-process cleanup failed: {cleanup}"))
+                }
+                None => error,
+            });
         }
-        Err(error) => return Err(error).context("capture spawned target identity"),
     };
-    let durable_pid = u32::try_from(process_identity.target_pid)
-        .context("durable spawned target PID exceeds u32")?;
+    let durable_pid = spawned.pid();
 
-    Ok(SpawnedItem {
+    Ok(SpawnedItemAwaitingAttachment {
         pid: durable_pid,
-        pgid: spawned.pgid,
+        pgid: spawned.pgid(),
         process_identity,
         launch_metadata,
         spawned,

@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-15T10:39:49Z:994041acdbfa0485c8438f9f2d3ebb71f2cac6c0579260a500e92bead7f433e0:Yiuz1u5O36FhjtWqDO9k80mtZ8fBOl7b5ONPXHQqqNTXPRtc/VPno+bt+/v9teLGZ4aa+1QWJNyItv+71qVlDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T00:24:30Z:04c985679c14c5304e1907e819d3428f50a3fd4c1439cfa9f5903762b3970c6c:Qld55Scx7TZ2V7lQJzGNTnNlsKyhHYC3yLNWV970ldW9+a6et9Kh1Z2zKdTKZ/Kr7McGdwMk1pUZTCxhtGioAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/state
 tags: [architecture, cas, state, truth, projection, sqlite]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   The three-tier truth model — CAS objects, signed refs, and the
   rebuildable SQLite projection. Content-addressed storage as the
@@ -126,9 +126,13 @@ On open, the system performs a four-step exhaustive check:
 Ownership failure never renames, archives, resets, or replaces the file. The
 database class determines recovery:
 
-- retained source-of-truth stores (`runtime.sqlite3` and
-  `operational.sqlite3`) accept only explicitly recognized predecessor schemas
-  and migrate them atomically in place; unknown shapes fail before mutation;
+- `runtime.sqlite3` is exact-current execution history. A predecessor table or
+  embedded authority contract fails before row interpretation and requires the
+  operator-confirmed thread-history/project-head reset; normal open never
+  migrates or reinterprets it;
+- `operational.sqlite3` is retained source-of-truth state. It accepts only its
+  exact current schema today; any future deployed predecessor requires a
+  separately designed explicit atomic forward migration rather than reset;
 - rebuildable stores (`projection.<instance-id>.sqlite3` and
   `scheduler.sqlite3`) evolve through their explicit reset-and-rebuild paths
   from durable source material.
@@ -136,6 +140,21 @@ database class determines recovery:
 An empty file (new database) triggers `init_owned()`, which runs the DDL and
 stamps the application ID. A non-empty unstamped or foreign file fails closed
 and remains untouched.
+
+### Exact execution authority contracts
+
+Thread snapshots, admitted launch capsules, runtime launch metadata, and
+standalone persisted project authority are independent exact wire contracts.
+Authoritative readers inspect the outer kind and numeric schema epoch before
+typed deserialization, then validate the complete current shape and canonical
+bytes. A nested predecessor shape therefore fails at its owning epoch instead
+of being partially interpreted or reported as an incidental missing field.
+
+RyeOS carries no compatibility decoder, alias, default, or in-place normalizer
+for these execution contracts. When a clean-cut release changes them, startup
+names the explicit offline reset command. That reset retires thread history and
+project heads together before recreating an empty exact-current runtime store;
+it does not delete project source, bundles, vault values, or node identities.
 
 ## Event Durability Tiers
 

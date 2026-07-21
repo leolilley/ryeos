@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, DeserializeSeed, Error as _, MapAccess, SeqAcc
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v3";
+pub const ISOLATION_ADAPTER_PROTOCOL: &str = "ryeos.isolation-adapter/v1";
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 pub const MAX_WORKSPACE_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
@@ -150,10 +150,6 @@ impl<'de> Visitor<'de> for StrictJsonValueVisitor {
 pub enum IsolationAdapterProtocolVersion {
     #[serde(rename = "ryeos.isolation-adapter/v1")]
     V1,
-    #[serde(rename = "ryeos.isolation-adapter/v2")]
-    V2,
-    #[serde(rename = "ryeos.isolation-adapter/v3")]
-    V3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -693,15 +689,29 @@ pub struct AdapterLaunchRequest {
     pub authorities: Vec<IsolationAuthority>,
     pub artifacts: BTreeMap<IsolationArtifactRole, u32>,
     pub status_fd: u32,
-    /// Read end of the daemon-owned one-shot launch barrier. The backend must
-    /// report the target PID while the target remains blocked, then consume
-    /// this descriptor immediately before target exec.
-    pub start_gate_fd: u32,
-    /// Child-owned duplicate of the gate writer. Keeping this descriptor open
-    /// ensures parent death cannot surface as EOF on `start_gate_fd` and
-    /// accidentally satisfy a backend that treats any completed read as a
-    /// release.
-    pub start_gate_keepalive_fd: u32,
+    pub lifecycle: AdapterLaunchLifecycle,
+}
+
+/// Exact target lifecycle requested from an isolation adapter.
+///
+/// A normal launch carries no attachment descriptors and must let the target
+/// run as soon as the backend is ready. An attachment launch reports its target
+/// while that target is held at the final backend boundary. The distinct wire
+/// variants deliberately make the two contracts impossible to infer from
+/// optional fields or descriptor presence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdapterLaunchLifecycle {
+    Run,
+    AwaitAttachment {
+        /// Read end of the daemon-owned one-shot release boundary. The backend
+        /// must consume it immediately before target exec.
+        release_fd: u32,
+        /// Child-owned duplicate of the release writer. This prevents parent
+        /// death from becoming EOF on a backend whose boundary treats EOF as a
+        /// completed wait.
+        release_keepalive_fd: u32,
+    },
 }
 
 /// Adapter-owned lifecycle operations for one durable project workspace.
@@ -730,11 +740,6 @@ pub struct AdapterWorkspaceRequest {
 
 impl AdapterWorkspaceRequest {
     pub fn validate(&self) -> Result<(), ProtocolValidationError> {
-        if self.protocol != IsolationAdapterProtocolVersion::V3 {
-            return Err(ProtocolValidationError::new(
-                "workspace lifecycle requires isolation adapter protocol v3",
-            ));
-        }
         validate_identifier("workspace id", &self.workspace_id)?;
         validate_string("launch owner", &self.launch_owner)?;
         validate_sha256("lower snapshot", &self.lower_snapshot)?;
@@ -840,7 +845,7 @@ impl AdapterWorkspaceResponse {
         &self,
         request: &AdapterWorkspaceRequest,
     ) -> Result<(), ProtocolValidationError> {
-        if self.protocol != IsolationAdapterProtocolVersion::V3
+        if self.protocol != request.protocol
             || self.operation != request.operation
             || self.workspace_id != request.workspace_id
             || self.launch_owner != request.launch_owner
@@ -922,15 +927,21 @@ impl AdapterLaunchRequest {
             ));
         }
         let mut descriptors = validate_artifact_descriptors(&self.artifacts, Some(self.status_fd))?;
-        if self.start_gate_fd <= 2 || !descriptors.insert(self.start_gate_fd) {
-            return Err(ProtocolValidationError::new(
-                "start-gate descriptor overlaps stdio or another isolation protocol role",
-            ));
-        }
-        if self.start_gate_keepalive_fd <= 2 || !descriptors.insert(self.start_gate_keepalive_fd) {
-            return Err(ProtocolValidationError::new(
-                "start-gate keepalive descriptor overlaps stdio or another isolation protocol role",
-            ));
+        if let AdapterLaunchLifecycle::AwaitAttachment {
+            release_fd,
+            release_keepalive_fd,
+        } = self.lifecycle
+        {
+            if release_fd <= 2 || !descriptors.insert(release_fd) {
+                return Err(ProtocolValidationError::new(
+                    "attachment release descriptor overlaps stdio or another isolation protocol role",
+                ));
+            }
+            if release_keepalive_fd <= 2 || !descriptors.insert(release_keepalive_fd) {
+                return Err(ProtocolValidationError::new(
+                    "attachment release keepalive descriptor overlaps stdio or another isolation protocol role",
+                ));
+            }
         }
         for authority in &self.authorities {
             if !descriptors.insert(authority.inherited_fd) {
@@ -1377,16 +1388,54 @@ mod tests {
             protocol: IsolationAdapterProtocolVersion::V1,
             plan,
             authorities,
-            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 5)]),
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
             status_fd: 6,
-            start_gate_fd: 5,
-            start_gate_keepalive_fd: 7,
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 7,
+                release_keepalive_fd: 8,
+            },
         };
-        assert!(request
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("start-gate descriptor overlaps stdio or another isolation protocol role"));
+        assert!(request.validate().unwrap_err().to_string().contains(
+            "attachment release descriptor overlaps stdio or another isolation protocol role"
+        ));
+    }
+
+    #[test]
+    fn launch_lifecycle_wire_shape_is_exact() {
+        let (plan, authorities) = complete_plan();
+        let run = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::V1,
+            plan: plan.clone(),
+            authorities: authorities.clone(),
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::Run,
+        };
+        let value = serde_json::to_value(&run).unwrap();
+        assert_eq!(value["lifecycle"], serde_json::json!({ "kind": "run" }));
+        run.validate().unwrap();
+
+        let awaiting = AdapterLaunchRequest {
+            protocol: IsolationAdapterProtocolVersion::V1,
+            plan,
+            authorities,
+            artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 7)]),
+            status_fd: 6,
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: 8,
+                release_keepalive_fd: 9,
+            },
+        };
+        let value = serde_json::to_value(&awaiting).unwrap();
+        assert_eq!(
+            value["lifecycle"],
+            serde_json::json!({
+                "kind": "await_attachment",
+                "release_fd": 8,
+                "release_keepalive_fd": 9
+            })
+        );
+        awaiting.validate().unwrap();
     }
 
     #[test]

@@ -5,7 +5,7 @@
 Lillux is a native Rust binary that provides the OS-level primitives beneath RYE. Every tool call in RYE eventually bottoms out in a Lillux primitive. It handles process lifecycle, content-addressed storage, cryptographic identity (signing, key management, and sealed secret envelopes), and time — nothing more. RYE never sees your secrets or environment variables; that happens at the Lillux level, below RYE entirely.
 
 Filesystem atomicity, flush, locking, and platform claims are defined in the
-[repository durability matrix](../../../docs/architecture/filesystem-durability.md).
+[repository durability matrix](../../../.ai/knowledge/ryeos/development/filesystem-durability.md).
 Batch writes and recursive removal are not multi-file atomic transactions, and
 directory durability is currently stronger on Unix than on non-Unix systems.
 
@@ -17,6 +17,34 @@ directory durability is currently stronger on Unix than on non-Unix systems.
 | **Memory**   | `lillux cas`                                     | Content-addressed storage — store, fetch, verify, existence check                |
 | **Identity** | `lillux identity`                                | Ed25519 signing/verification, keypair generation, sealed secret envelopes        |
 | **Time**     | `lillux time`                                    | Wall-clock timestamp, sleep                                                      |
+
+## Attachment-before-execution API
+
+RyeOS uses Lillux's Rust process API to make durable process ownership precede
+target execution:
+
+```rust
+let pending = lillux::spawn_awaiting_attachment(request)?;
+persist_exact_identity(pending.pid(), pending.pgid(), pending.pidfd())?;
+let running = pending.release_after_attachment()?;
+let result = running.wait()?;
+```
+
+`ProcessAwaitingAttachment` is a distinct type state. It can be released after
+the caller durably attaches its exact target identity, or aborted and reaped;
+it cannot be waited as a running process. Release consumes it and returns a
+`RunningProcess`.
+
+Direct execution uses a native pre-exec hold. A supervised isolation request
+must carry a backend target hold and exact target-status channel or the
+attachment spawn is refused. Cleanup retains the pidfd and unreaped process
+group leader until exact target exit, group quiescence, and leader reap are
+proven. This lifecycle primitive does not require or select an isolation
+backend.
+
+See the RyeOS knowledge entry
+`knowledge:ryeos/core/execution/attachment-before-execution` for the durable
+daemon contract layered on this primitive.
 
 ## Install
 

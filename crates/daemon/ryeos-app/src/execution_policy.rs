@@ -280,6 +280,7 @@ impl ExecutionPolicy {
     pub fn resolve_live_project_authority(
         &self,
         project_path: &std::path::Path,
+        confinement: ryeos_state::objects::LiveFilesystemConfinement,
         capability_ceiling: Vec<String>,
     ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
         self.validate()?;
@@ -358,6 +359,7 @@ impl ExecutionPolicy {
                 LiveAccess::ReadOnly => ryeos_state::objects::LiveProjectAccess::ReadOnly,
                 LiveAccess::ReadWrite => ryeos_state::objects::LiveProjectAccess::ReadWrite,
             },
+            confinement,
             environment,
             capability_ceiling,
         )?
@@ -382,14 +384,32 @@ pub struct ResolvedStandardLocalLiveAuthority {
 pub fn resolve_standard_local_live_authority(
     project_path: &std::path::Path,
     capability_ceiling: Vec<String>,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> anyhow::Result<ResolvedStandardLocalLiveAuthority> {
     authorize_standard_local_live_execution(&capability_ceiling)?;
     let policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
     policy.validate()?;
     Ok(ResolvedStandardLocalLiveAuthority {
-        project: policy.resolve_live_project_authority(project_path, capability_ceiling)?,
+        project: policy.resolve_live_project_authority(
+            project_path,
+            live_filesystem_confinement_for_isolation(isolation.mode()),
+            capability_ceiling,
+        )?,
         lifecycle: policy.lifecycle_authority(),
     })
+}
+
+pub fn live_filesystem_confinement_for_isolation(
+    mode: ryeos_engine::isolation::IsolationMode,
+) -> ryeos_state::objects::LiveFilesystemConfinement {
+    match mode {
+        ryeos_engine::isolation::IsolationMode::Enforce => {
+            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted()
+        }
+        ryeos_engine::isolation::IsolationMode::Disabled => {
+            ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost
+        }
+    }
 }
 
 /// Authorize the standard read-write live profile before any project capture,
@@ -416,7 +436,8 @@ pub(crate) fn synthetic_test_live_project_authority(
 ) -> ryeos_state::objects::ExecutionProjectAuthority {
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
-        ExecutionProjectAuthority, LiveAccessAuthority, LiveProjectAccess, LiveSymlinkPolicy,
+        ExecutionProjectAuthority, LiveAccessAuthority, LiveFilesystemConfinement,
+        LiveProjectAccess,
     };
 
     let authored_project_identity = format!("test:{}", project_path.display());
@@ -434,9 +455,8 @@ pub(crate) fn synthetic_test_live_project_authority(
         canonical_root: project_path.to_path_buf(),
         live_access: LiveAccessAuthority {
             access: LiveProjectAccess::ReadWrite,
-            denied_control_paths: ryeos_state::project_sync::live_execution_denied_control_paths(),
             authorized_write_namespaces: vec!["project".to_string()],
-            symlink_policy: LiveSymlinkPolicy::DescriptorRootedNoEscape,
+            confinement: LiveFilesystemConfinement::standard_descriptor_rooted(),
         },
         environment: EnvironmentAuthority::ProjectOverlay {
             project_authority_id: authority_id,
@@ -571,20 +591,40 @@ mod policy_tests {
     #[test]
     fn standard_live_authority_requires_project_write_and_resolves_both_halves() {
         let project = tempfile::tempdir().unwrap();
-        let error =
-            resolve_standard_local_live_authority(project.path(), vec!["project.read".to_string()])
-                .unwrap_err();
+        let error = resolve_standard_local_live_authority(
+            project.path(),
+            vec!["project.read".to_string()],
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("project.write"));
 
-        let authority =
-            resolve_standard_local_live_authority(project.path(), vec!["*".to_string()]).unwrap();
+        let authority = resolve_standard_local_live_authority(
+            project.path(),
+            vec!["*".to_string()],
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+        )
+        .unwrap();
         assert!(matches!(
             authority.project,
-            ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+                live_access: ryeos_state::objects::LiveAccessAuthority {
+                    confinement: ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost,
+                    ..
+                },
+                ..
+            }
         ));
         assert_eq!(
             authority.lifecycle,
             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE
         );
+
+        assert!(matches!(
+            live_filesystem_confinement_for_isolation(
+                ryeos_engine::isolation::IsolationMode::Enforce
+            ),
+            ryeos_state::objects::LiveFilesystemConfinement::DescriptorRootedMasked { .. }
+        ));
     }
 }

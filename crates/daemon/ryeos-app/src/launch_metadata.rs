@@ -8,9 +8,10 @@
 //! routing, checkpoint dir, original params, snapshot/base hash,
 //! executor chain refs, vault references…) lives here.
 //!
-//! Persisted as a versioned JSON blob in
-//! `runtime_db.thread_runtime.launch_metadata`. Shape changes use the owned
-//! launch-metadata normalizer independently of SQLite table migrations.
+//! Persisted as an exact-epoch JSON blob in
+//! `runtime_db.thread_runtime.launch_metadata`. Shape changes advance the
+//! epoch and require the explicit owned-runtime reset; no compatibility
+//! normalizer interprets predecessor authority.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -57,7 +58,10 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 /// breaking shape change ships; readers MUST decode loudly so a
 /// schema mismatch surfaces in logs rather than silently disabling
 /// downstream behaviors (see `runtime_db::get_runtime_info`).
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 9;
+// Exact durable launch metadata contract. Changes to any embedded authority
+// shape require a new epoch so startup rejects the old store before nested
+// deserialization can reinterpret (or partially decode) that authority.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 10;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -317,7 +321,8 @@ impl OriginalPushedHeadRef {
 /// over the live LocalPath when reconstructing the resume request, so
 /// resume runs against the project version that was current at the
 /// time the checkpoint was written, NOT the current head of the
-/// working directory. See `docs/future/native-resume-snapshot-pinning.md`.
+/// working directory. See
+/// `.ai/knowledge/ryeos/future/native-resume-snapshot-pinning.md`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeContext {
@@ -1006,6 +1011,7 @@ mod tests {
                     path.clone(),
                     format!("local:{}", path.display()),
                     ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                    ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                     ryeos_state::objects::EnvironmentAuthority::None,
                     Vec::new(),
                 )
@@ -1222,6 +1228,7 @@ mod tests {
         let live_authority = crate::execution_policy::resolve_standard_local_live_authority(
             live_dir.path(),
             vec!["project.write".to_string()],
+            &ryeos_engine::isolation::IsolationRuntime::default(),
         )
         .unwrap()
         .project;

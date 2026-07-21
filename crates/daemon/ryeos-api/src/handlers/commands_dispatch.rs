@@ -123,6 +123,7 @@ pub async fn handle(
     let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
         &project_ctx.effective_path,
         ctx.scopes.clone(),
+        &state.isolation,
     )
     .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(

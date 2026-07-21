@@ -11,7 +11,7 @@ distribution is Linux x86-64. See the
 
 Work in RyeOS — a tool run, a multi-step workflow, a scheduled job — is
 data: signed, content-addressed, durable. Durability here means the explicit
-[filesystem and recovery contract](docs/architecture/filesystem-durability.md),
+[filesystem and recovery contract](.ai/knowledge/ryeos/development/filesystem-durability.md),
 not cross-filesystem transactions or identical guarantees on every platform.
 Because it is data, it can prove
 what it is, who authorized it, and what it actually did. And because it is
@@ -377,7 +377,7 @@ projection of its thread's durable state.
 
 | Path                           | Purpose                                                                             |
 | ------------------------------ | ----------------------------------------------------------------------------------- |
-| `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support; see the [durability matrix](docs/architecture/filesystem-durability.md). |
+| `crates/kernel/lillux`         | Low-level signing, hashing, atomic IO, process, and primitive execution support; see the [durability matrix](.ai/knowledge/ryeos/development/filesystem-durability.md). |
 | `crates/engine/ryeos-engine`   | Item resolution, composition, policy facts, and execution planning.                 |
 | `crates/engine/ryeos-executor` | Execution dispatch and runtime integration.                                         |
 | `crates/daemon/*`              | Daemon crates: app core, HTTP API, bundle install, node lifecycle, and UI assets.   |

@@ -762,7 +762,7 @@ fn load_hashed_snapshot(cas: &lillux::CasStore, hash: &str) -> anyhow::Result<Th
         .get_object(hash)
         .with_context(|| format!("read authoritative snapshot object {hash}"))?
         .ok_or_else(|| anyhow::anyhow!("authoritative snapshot object {hash} is absent"))?;
-    let snapshot: ThreadSnapshot = serde_json::from_value(value)
+    let snapshot = ThreadSnapshot::from_current_value(value)
         .with_context(|| format!("decode authoritative snapshot object {hash}"))?;
     let canonical = lillux::canonical_json(&snapshot.to_value())
         .with_context(|| format!("canonicalize authoritative snapshot {hash}"))?;

@@ -1094,15 +1094,13 @@ fn validate_current_object(value: &Value) -> Result<(), String> {
         "chain_state" => serde_json::from_value::<crate::objects::ChainState>(value.clone())
             .context("deserialize chain_state")
             .and_then(|object| object.validate()),
-        "thread_snapshot" => {
-            serde_json::from_value::<crate::objects::ThreadSnapshot>(value.clone())
-                .context("deserialize thread_snapshot")
-                .and_then(|object| object.validate())
-        }
+        "thread_snapshot" => crate::objects::ThreadSnapshot::from_current_value(value.clone())
+            .context("deserialize current thread_snapshot")
+            .map(|_| ()),
         "admitted_launch_capsule" => {
-            serde_json::from_value::<crate::objects::AdmittedLaunchCapsule>(value.clone())
-                .context("deserialize admitted_launch_capsule")
-                .and_then(|object| object.validate())
+            crate::objects::AdmittedLaunchCapsule::from_current_value(value.clone())
+                .context("deserialize current admitted_launch_capsule")
+                .map(|_| ())
         }
         "thread_event" => serde_json::from_value::<crate::objects::ThreadEvent>(value.clone())
             .context("deserialize thread_event")

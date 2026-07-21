@@ -470,7 +470,7 @@ pub async fn run(
             .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
         let applied = state
             .isolation
-            .apply_with_provenance(
+            .apply_awaiting_attachment_with_provenance(
                 subprocess_request,
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path,

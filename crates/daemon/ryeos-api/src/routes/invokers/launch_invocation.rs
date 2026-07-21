@@ -165,6 +165,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             ryeos_app::execution_policy::resolve_standard_local_live_authority(
                 &project_ctx.effective_path,
                 principal_scopes.clone(),
+                &ctx.state.isolation,
             )
             .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         launch_options.lifecycle_authority = resolved_authority.lifecycle;

@@ -802,10 +802,54 @@ pub enum StopIfAdmissionOpenOutcome {
     PreservedForShutdown,
 }
 
+#[derive(Clone, Copy)]
+enum ProcessAttachmentMode<'a> {
+    Idempotent { launch_owner: Option<&'a str> },
+    New { launch_owner: Option<&'a str> },
+}
+
+impl<'a> ProcessAttachmentMode<'a> {
+    fn launch_owner(self) -> Option<&'a str> {
+        match self {
+            Self::Idempotent { launch_owner } | Self::New { launch_owner } => launch_owner,
+        }
+    }
+
+    fn requires_empty(self) -> bool {
+        matches!(self, Self::New { .. })
+    }
+}
+
 struct Inner {
     state_db: StateDb,
     runtime_db: runtime_db::RuntimeDb,
     signer: Arc<dyn Signer>,
+}
+
+/// StateStore guard paired with Lillux's fork-sensitive descriptor lease.
+///
+/// Authoritative state operations may acquire per-chain flocks beneath the
+/// store mutex. Retaining the shared lease for the entire mutex scope prevents
+/// a direct attachment child from forking with any such transient lock in its
+/// descriptor table. The order is always descriptor lease, then StateStore
+/// mutex.
+struct StateStoreGuard<'a> {
+    inner: std::sync::MutexGuard<'a, Inner>,
+    _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
+}
+
+impl std::ops::Deref for StateStoreGuard<'_> {
+    type Target = Inner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for StateStoreGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
 }
 
 pub struct StateStore {
@@ -831,6 +875,7 @@ pub struct StateStore {
 struct StateMutationPermit {
     cas_guard: ryeos_state::CasMutationGuard,
     _write_permit: WritePermit,
+    _fork_sensitive_descriptors: lillux::ForkSensitiveDescriptorLease,
 }
 
 impl StateMutationPermit {
@@ -887,9 +932,8 @@ fn load_admitted_launch_capsule(
         .cas_store()?
         .get_object(capsule_hash)?
         .ok_or_else(|| anyhow!("admitted launch capsule is missing from CAS: {capsule_hash}"))?;
-    let capsule: ryeos_state::objects::AdmittedLaunchCapsule =
-        serde_json::from_value(value).context("decode admitted launch capsule")?;
-    capsule.validate()?;
+    let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)
+        .context("decode current admitted launch capsule")?;
     if capsule.content_hash()? != capsule_hash {
         bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
     }
@@ -2092,6 +2136,7 @@ impl StateStore {
     pub fn verify_projection_generation(
         &self,
     ) -> Result<ryeos_state::rebuild::ProjectionVerificationReport> {
+        let _fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let _cas_guard = self
             .state_authority
             .acquire_exclusive_guard(!self.read_only)?;
@@ -2112,6 +2157,7 @@ impl StateStore {
                 "projection rebuild is available only in the authored offline rebuild bootstrap mode"
             );
         }
+        let _fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let cas_guard = self.state_authority.acquire_exclusive_guard(true)?;
         let _write_permit = self.write_barrier.try_acquire().map_err(|error| {
             anyhow!("cannot acquire write permit for projection rebuild: {error}")
@@ -2143,9 +2189,10 @@ impl StateStore {
         )
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Inner>> {
+    fn lock(&self) -> Result<StateStoreGuard<'_>> {
         let started = std::time::Instant::now();
-        let guard = self
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
+        let inner = self
             .inner
             .lock()
             .map_err(|e| anyhow!("StateStore lock poisoned: {e}"))?;
@@ -2156,7 +2203,10 @@ impl StateStore {
                 "StateStore lock acquisition was delayed"
             );
         }
-        Ok(guard)
+        Ok(StateStoreGuard {
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
+            inner,
+        })
     }
 
     fn warn_slow_lock_hold(operation: &'static str, started: std::time::Instant) {
@@ -2176,12 +2226,14 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
             .try_acquire()
             .map_err(|e| anyhow!("cannot acquire write permit: {e}"))?;
         Ok(StateMutationPermit {
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             cas_guard,
             _write_permit: write_permit,
         })
@@ -2194,12 +2246,14 @@ impl StateStore {
         if self.read_only {
             bail!("state store is open for strict read-only verification");
         }
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
             .try_acquire()
             .map_err(|e| anyhow!("cannot acquire GC inspection permit: {e}"))?;
         Ok(StateMutationPermit {
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             cas_guard,
             _write_permit: write_permit,
         })
@@ -2212,12 +2266,14 @@ impl StateStore {
         if self.read_only && !self.allow_projection_rebuild {
             bail!("state store is open for strict read-only verification");
         }
+        let fork_sensitive_descriptors = lillux::retain_fork_sensitive_descriptors();
         let cas_guard = self.state_authority.acquire_shared_guard()?;
         let write_permit = self
             .write_barrier
             .try_acquire()
             .map_err(|e| anyhow!("cannot acquire recovery cleanup permit: {e}"))?;
         Ok(StateMutationPermit {
+            _fork_sensitive_descriptors: fork_sensitive_descriptors,
             cas_guard,
             _write_permit: write_permit,
         })
@@ -5416,9 +5472,54 @@ impl StateStore {
         launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
         expected_launch_owner: Option<&str>,
     ) -> Result<()> {
+        self.attach_thread_process_with_mode(
+            thread_id,
+            pid,
+            pgid,
+            process_identity,
+            launch_metadata,
+            ProcessAttachmentMode::Idempotent {
+                launch_owner: expected_launch_owner,
+            },
+        )
+    }
+
+    /// Persist a daemon-held process at the attachment-before-execution
+    /// boundary. The runtime cannot have self-attached before this call, so an
+    /// existing identity (including an exact repeat) is rejected.
+    pub fn attach_new_thread_process(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        expected_launch_owner: Option<&str>,
+    ) -> Result<()> {
+        self.attach_thread_process_with_mode(
+            thread_id,
+            pid,
+            pgid,
+            process_identity,
+            launch_metadata,
+            ProcessAttachmentMode::New {
+                launch_owner: expected_launch_owner,
+            },
+        )
+    }
+
+    fn attach_thread_process_with_mode(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        mode: ProcessAttachmentMode<'_>,
+    ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
         let g = self.lock()?;
-        if let Some(expected) = expected_launch_owner {
+        if let Some(expected) = mode.launch_owner() {
             let claim = g
                 .runtime_db
                 .get_launch_claim(thread_id)?
@@ -5433,14 +5534,14 @@ impl StateStore {
         let thread = g.state_db.get_thread(thread_id)?.ok_or_else(|| {
             anyhow::anyhow!("thread not found before process attach: {thread_id}")
         })?;
-        let exact_repeat = g
-            .runtime_db
-            .get_runtime_info(thread_id)?
-            .is_some_and(|runtime| {
-                runtime.pid == Some(pid)
-                    && runtime.pgid == Some(pgid)
-                    && runtime.process_identity.as_ref() == Some(process_identity)
-            });
+        let exact_repeat = !mode.requires_empty()
+            && g.runtime_db
+                .get_runtime_info(thread_id)?
+                .is_some_and(|runtime| {
+                    runtime.pid == Some(pid)
+                        && runtime.pgid == Some(pgid)
+                        && runtime.process_identity.as_ref() == Some(process_identity)
+                });
         if !exact_repeat
             && !self
                 .process_attachment_admission_open
@@ -5475,8 +5576,67 @@ impl StateStore {
             );
         }
         let _admission = Self::authorize_runtime_pin_for_thread(&g, thread_id)?;
-        g.runtime_db
-            .attach_process(thread_id, pid, pgid, process_identity, launch_metadata)
+        if mode.requires_empty() {
+            g.runtime_db
+                .attach_new_process(thread_id, pid, pgid, process_identity, launch_metadata)
+        } else {
+            g.runtime_db
+                .attach_process(thread_id, pid, pgid, process_identity, launch_metadata)
+        }
+    }
+
+    /// Linearization point between durable process attachment and target
+    /// release. A stop that wins this lock prevents release; a stop that lands
+    /// afterward observes the exact attached identity and terminates it.
+    pub fn authorize_attached_process_release(
+        &self,
+        thread_id: &str,
+        process_identity: &crate::process::ExecutionProcessIdentity,
+        expected_launch_owner: Option<&str>,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        if let Some(expected) = expected_launch_owner {
+            let claim = g
+                .runtime_db
+                .get_launch_claim(thread_id)?
+                .ok_or_else(|| anyhow::anyhow!("thread {thread_id} has no launch owner"))?;
+            if claim.claimed_by != expected {
+                anyhow::bail!("stale launch owner cannot release process for {thread_id}");
+            }
+        }
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            anyhow::bail!("process release is fenced during daemon shutdown");
+        }
+        let thread = g.state_db.get_thread(thread_id)?.ok_or_else(|| {
+            anyhow::anyhow!("thread not found before process release: {thread_id}")
+        })?;
+        if is_terminal_status(&thread.status) {
+            anyhow::bail!(
+                "refusing to release process for terminal thread {thread_id} ({})",
+                thread.status
+            );
+        }
+        let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
+            anyhow::anyhow!("runtime row missing before process release: {thread_id}")
+        })?;
+        if let Some(intent) = runtime.stop_intent {
+            anyhow::bail!(
+                "process release is fenced after {} request for thread {thread_id}",
+                intent.as_str()
+            );
+        }
+        if runtime.pid != Some(process_identity.target_pid)
+            || runtime.pgid != Some(process_identity.group_leader_pid)
+            || runtime.process_identity.as_ref() != Some(process_identity)
+        {
+            anyhow::bail!(
+                "process release identity does not match durable attachment for thread {thread_id}"
+            );
+        }
+        Ok(())
     }
 
     /// Close process attachment admission at the shutdown serialization point.
@@ -7198,6 +7358,42 @@ mod tests {
     }
 
     #[test]
+    fn direct_attachment_fork_waits_for_state_store_descriptor_scope() {
+        let store = Arc::new(test_store());
+        let guard = store.lock().expect("hold state store");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let pending = lillux::spawn_awaiting_attachment(lillux::SubprocessRequest {
+                cmd: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "exit 0".to_string()],
+                cwd: None,
+                envs: Vec::new(),
+                stdin_data: None,
+                timeout: 5.0,
+                limits: None,
+                inherited_fds: Vec::new(),
+                supervised_status: None,
+            })
+            .expect("spawn after state store scope quiesces");
+            sender.send(pending).expect("publish pending process");
+        });
+
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "direct child forked while the StateStore descriptor scope was retained"
+        );
+        drop(guard);
+
+        let pending = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("direct fork resumes after StateStore scope");
+        pending.abort_and_reap().expect("abort held test target");
+        worker.join().expect("spawn worker");
+    }
+
+    #[test]
     fn direct_projection_access_fails_closed_while_repair_is_pending() {
         let store = test_store();
         ryeos_state::ProjectionRepairSink::request_repair(
@@ -7593,6 +7789,55 @@ mod tests {
             replayed_event_types(&attached_store, attached_id),
             attached_before
         );
+    }
+
+    #[test]
+    fn pre_release_attachment_is_strict_and_release_observes_stop_tombstone() {
+        let store = test_store();
+        let thread_id = "T-pre-release-attachment";
+        store
+            .create_thread_for_test(&thread_record(thread_id, thread_id))
+            .expect("create attachment fixture");
+        let identity = crate::process::ExecutionProcessIdentity {
+            schema_version: crate::process::PROCESS_IDENTITY_SCHEMA_VERSION,
+            boot_id: "test-boot".to_string(),
+            target_pid: 12345,
+            target_start_time_ticks: 10,
+            group_leader_pid: 12345,
+            group_leader_start_time_ticks: 10,
+        };
+        store
+            .attach_new_thread_process(
+                thread_id,
+                identity.target_pid,
+                identity.group_leader_pid,
+                &identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
+            )
+            .expect("attach exact held identity");
+        let repeat = store
+            .attach_new_thread_process(
+                thread_id,
+                identity.target_pid,
+                identity.group_leader_pid,
+                &identity,
+                &crate::launch_metadata::RuntimeLaunchMetadata::default(),
+                None,
+            )
+            .expect_err("pre-release exact repeat must be rejected");
+        assert!(repeat.to_string().contains("already attached"));
+
+        store
+            .authorize_attached_process_release(thread_id, &identity, None)
+            .expect("release exact attached identity");
+        store
+            .request_thread_stop(thread_id, StopIntent::Cancel)
+            .expect("persist stop tombstone");
+        let stopped = store
+            .authorize_attached_process_release(thread_id, &identity, None)
+            .expect_err("stop tombstone must fence release");
+        assert!(stopped.to_string().contains("cancel request"));
     }
 
     fn continuation_resume_context(

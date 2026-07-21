@@ -124,6 +124,7 @@ impl SchedulerContext for AppSchedulerContext {
             ryeos_app::execution_policy::resolve_standard_local_live_authority(
                 &project_ctx.effective_path,
                 spec.capabilities.clone(),
+                &self.0.isolation,
             )?;
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_ctx.effective_path.clone(),

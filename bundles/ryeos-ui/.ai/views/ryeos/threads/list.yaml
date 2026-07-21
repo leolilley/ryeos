@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-16T01:27:49Z:fc5fc703fec0a6c0c4daa3190afc68f425bffa2a013473c1f3cfe8dc6560657f:CaCwp+AvOvq7pJ0FG2FvgsEVCwPHBSXaV9MC5V5mImDf+XmrqJNDpfYsbh2gTnAK/283GU9sYgKshucYHpXnDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:24:29Z:fff3d94fbab5e888ac8c3d2db76b5782bb04abd9cabc937bc0b0be1c7809ccb1:NJdkP3zxtNonZd4MiDyOMtBPzig2GJk+5Ritor4AFnIwqIoYZJL2ALeBPOv+Y/qz+p9XnSQEww2FPnEXTlBsBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 name: threads-list
 version: "1.0.0"
 description: Thread list over the ryeos-ui threads source
@@ -122,7 +122,7 @@ affordances:
   # the per-thread ownership check and writes a command record, unlike the raw
   # cancel services. Args reach the daemon as /execute parameters (the token
   # path would drop them), so `{record.thread_id}` targets THIS row rather than
-  # the route head. See docs/decisions/steering-graph-interrupt-and-cancel-path.md.
+  # the route head. See .ai/knowledge/ryeos/development/steering-graph-interrupt-and-cancel-path.md.
   - id: cancel
     label: Cancel
     invoke:

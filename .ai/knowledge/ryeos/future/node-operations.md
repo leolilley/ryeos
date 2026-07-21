@@ -1,4 +1,14 @@
-# Future `node/operations` catalog
+<!-- ryeos:signed:2026-07-21T00:24:56Z:0ebdb18b6c114e1c9b831c143158e069080dd30dbe1d188e76aaadc669deb44d:SKHPejvKmkC22fgDU4H3OxOoRlLH0dzoOaCDFCCsvIiqP59Z/AUl4E8adhaHXfl5d85RffyJWjD6BXKTt08VBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/future
+name: node-operations
+title: Future Node Operations Catalog
+description: Deferred criteria and constraints for a non-CLI operation taxonomy
+entry_type: design
+version: "1.0.0"
+```
+
+# Future `node/operations` Catalog
 
 ## Status
 

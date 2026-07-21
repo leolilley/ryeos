@@ -684,6 +684,7 @@ mod tests {
         let authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
             project.path(),
             vec!["project.write".to_string()],
+            &ryeos_engine::isolation::IsolationRuntime::default(),
         )
         .unwrap()
         .project;

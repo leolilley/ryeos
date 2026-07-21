@@ -107,6 +107,7 @@ mod integration_tests {
             project_root,
             "local:/tmp/p".to_string(),
             ryeos_state::objects::LiveProjectAccess::ReadWrite,
+            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
             ryeos_state::objects::EnvironmentAuthority::None,
             Vec::new(),
         )
@@ -304,6 +305,7 @@ mod integration_tests {
                             std::path::PathBuf::from("/tmp/p"),
                             "local:/tmp/p".to_string(),
                             ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                             ryeos_state::objects::EnvironmentAuthority::None,
                             Vec::new(),
                         )
@@ -1419,6 +1421,7 @@ mod integration_tests {
                 std::path::PathBuf::from("/tmp/p"),
                 "local:/tmp/p".to_string(),
                 ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                 ryeos_state::objects::EnvironmentAuthority::None,
                 Vec::new(),
             )
@@ -1558,6 +1561,7 @@ mod integration_tests {
                 std::path::PathBuf::from("/tmp/p"),
                 "local:/tmp/p".to_string(),
                 ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                 ryeos_state::objects::EnvironmentAuthority::None,
                 Vec::new(),
             )

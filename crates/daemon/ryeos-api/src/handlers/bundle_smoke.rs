@@ -251,6 +251,7 @@ async fn run_entry(
         match ryeos_app::execution_policy::resolve_standard_local_live_authority(
             source,
             ctx.scopes.clone(),
+            &state.isolation,
         ) {
             Ok(authority) => authority,
             Err(error) => {

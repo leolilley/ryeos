@@ -117,6 +117,7 @@ fn resolve_project_authority(
     policy: &ExecutionPolicy,
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
@@ -212,6 +213,9 @@ fn resolve_project_authority(
                         LiveProjectAccess::ReadWrite
                     }
                 },
+                ryeos_app::execution_policy::live_filesystem_confinement_for_isolation(
+                    isolation.mode(),
+                ),
                 environment,
                 Vec::new(),
             )
@@ -350,6 +354,7 @@ pub(crate) fn resolve_execution_contract(
         policy,
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
+        &state.isolation,
     )?;
     authorize_terminal_publication(
         policy,

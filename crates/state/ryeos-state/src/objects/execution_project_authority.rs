@@ -81,13 +81,37 @@ pub enum LiveSymlinkPolicy {
     DescriptorRootedNoEscape,
 }
 
+/// The actual filesystem confinement carried by a live-project authority.
+///
+/// This is persisted with the admitted execution. A descriptor-rooted
+/// authority cannot later be reinterpreted as host access merely because the
+/// recovering node has isolation disabled, and an explicit host-access grant
+/// cannot be reported as though path masks were enforced.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LiveFilesystemConfinement {
+    DescriptorRootedMasked {
+        denied_control_paths: Vec<String>,
+        symlink_policy: LiveSymlinkPolicy,
+    },
+    UnconfinedHost,
+}
+
+impl LiveFilesystemConfinement {
+    pub fn standard_descriptor_rooted() -> Self {
+        Self::DescriptorRootedMasked {
+            denied_control_paths: crate::project_sync::live_execution_denied_control_paths(),
+            symlink_policy: LiveSymlinkPolicy::DescriptorRootedNoEscape,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LiveAccessAuthority {
     pub access: LiveProjectAccess,
-    pub denied_control_paths: Vec<String>,
     pub authorized_write_namespaces: Vec<String>,
-    pub symlink_policy: LiveSymlinkPolicy,
+    pub confinement: LiveFilesystemConfinement,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,6 +438,7 @@ impl ExecutionProjectAuthority {
         canonical_root: PathBuf,
         authored_project_identity: String,
         access: LiveProjectAccess,
+        confinement: LiveFilesystemConfinement,
         mut environment: EnvironmentAuthority,
         capability_ceiling: Vec<String>,
     ) -> anyhow::Result<Self> {
@@ -429,16 +454,14 @@ impl ExecutionProjectAuthority {
                 canonical_root.display()
             );
         }
-        let denied_control_paths = crate::project_sync::live_execution_denied_control_paths();
         let authorized_write_namespaces = match access {
             LiveProjectAccess::ReadOnly => Vec::new(),
             LiveProjectAccess::ReadWrite => vec!["project".to_string()],
         };
         let live_access = LiveAccessAuthority {
             access,
-            denied_control_paths,
             authorized_write_namespaces,
-            symlink_policy: LiveSymlinkPolicy::DescriptorRootedNoEscape,
+            confinement,
         };
         let authority_id = lillux::sha256_hex(
             format!(
@@ -668,7 +691,19 @@ impl ExecutionProjectAuthority {
 
 impl LiveAccessAuthority {
     pub fn validate(&self) -> anyhow::Result<()> {
-        validate_sorted_relative_paths("denied live control path", &self.denied_control_paths)?;
+        match &self.confinement {
+            LiveFilesystemConfinement::DescriptorRootedMasked {
+                denied_control_paths,
+                symlink_policy: LiveSymlinkPolicy::DescriptorRootedNoEscape,
+            } => validate_sorted_relative_paths("denied live control path", denied_control_paths)?,
+            LiveFilesystemConfinement::UnconfinedHost => {
+                if self.access == LiveProjectAccess::ReadOnly {
+                    anyhow::bail!(
+                        "unconfined host live access cannot truthfully enforce read-only project authority"
+                    );
+                }
+            }
+        }
         let mut previous: Option<&str> = None;
         for namespace in &self.authorized_write_namespaces {
             validate_trimmed_control_free("live write namespace", namespace, false)?;
@@ -757,4 +792,56 @@ fn validate_capability_ceiling(capabilities: &[String]) -> anyhow::Result<()> {
         previous = Some(capability);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_access_schema_requires_explicit_confinement() {
+        let missing = serde_json::json!({
+            "access": "read_write",
+            "authorized_write_namespaces": ["project"]
+        });
+        let error = serde_json::from_value::<LiveAccessAuthority>(missing).unwrap_err();
+        assert!(error.to_string().contains("confinement"));
+    }
+
+    #[test]
+    fn live_access_schema_preserves_exact_confinement() {
+        let unconfined = LiveAccessAuthority {
+            access: LiveProjectAccess::ReadWrite,
+            authorized_write_namespaces: vec!["project".to_string()],
+            confinement: LiveFilesystemConfinement::UnconfinedHost,
+        };
+        let encoded = serde_json::to_value(&unconfined).unwrap();
+        assert_eq!(encoded["confinement"]["kind"], "unconfined_host");
+        assert_eq!(
+            serde_json::from_value::<LiveAccessAuthority>(encoded).unwrap(),
+            unconfined
+        );
+
+        let confined = LiveAccessAuthority {
+            access: LiveProjectAccess::ReadOnly,
+            authorized_write_namespaces: Vec::new(),
+            confinement: LiveFilesystemConfinement::DescriptorRootedMasked {
+                denied_control_paths: vec![".ai".to_string()],
+                symlink_policy: LiveSymlinkPolicy::DescriptorRootedNoEscape,
+            },
+        };
+        let encoded = serde_json::to_value(&confined).unwrap();
+        assert_eq!(encoded["confinement"]["kind"], "descriptor_rooted_masked");
+        assert_eq!(
+            serde_json::from_value::<LiveAccessAuthority>(encoded).unwrap(),
+            confined
+        );
+
+        let false_read_only = LiveAccessAuthority {
+            access: LiveProjectAccess::ReadOnly,
+            authorized_write_namespaces: Vec::new(),
+            confinement: LiveFilesystemConfinement::UnconfinedHost,
+        };
+        assert!(false_read_only.validate().is_err());
+    }
 }

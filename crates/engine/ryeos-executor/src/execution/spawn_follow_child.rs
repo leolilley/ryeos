@@ -1327,6 +1327,7 @@ mod tests {
             project.path().canonicalize().unwrap(),
             "project:test".to_string(),
             LiveProjectAccess::ReadWrite,
+            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
             EnvironmentAuthority::None,
             Vec::new(),
         )
