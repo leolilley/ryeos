@@ -1395,7 +1395,7 @@ fn load_or_create_operator_key(
         let mut seed = Zeroizing::new([0_u8; 32]);
         hkdf.expand(b"ed25519 signing seed", &mut *seed)
             .map_err(|_| anyhow!("derive operator signing seed"))?;
-        let signing_key = SigningKey::from_bytes(&*seed);
+        let signing_key = SigningKey::from_bytes(&seed);
         let pem = signing_key
             .to_pkcs8_pem(Default::default())
             .map_err(|error| anyhow!("encode generated operator key: {error}"))?;
@@ -1438,7 +1438,7 @@ fn ensure_operator_genesis_locked(
     key_created: bool,
     contribution_digest: Option<&str>,
 ) -> Result<()> {
-    match fs::symlink_metadata(&path) {
+    match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
             bail!("refusing unsafe operator genesis path {}", path.display())
         }
@@ -1561,7 +1561,7 @@ fn ensure_operator_genesis_locked(
         base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
     ));
     let bytes = serde_json::to_vec_pretty(&document)?;
-    lillux::atomic_write(&path, &bytes)
+    lillux::atomic_write(path, &bytes)
         .map_err(|error| anyhow!("write operator genesis {}: {error}", path.display()))?;
     Ok(())
 }
