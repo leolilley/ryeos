@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T23:18:43Z:18a8f7bce7fe6523786076c9acff1d0ec2abe0a8de29d995cd0dadb26a1f3cd3:0gGT8KXa28QMC+Z+jiuNUPucVUD7TACWfMjWVwN6Mh0bRLnXjKh/pPV+9bo6hHRivL6yn05iGoAai69M4DSfCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T01:18:25Z:3085ddff7305ed54f42ef578b24b432ce1274b8bb2a232ffab187e49742b0b88:2XPBdAOMxL/wPecu0/xWY42TXJAU3tuv0hS3iDU76qvetg9FCmn3amEP35CJSzBALfGYafo6UHt5D/y5hF6EBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: maintenance.gc
 required_caps: ["ryeos.execute.service.maintenance/gc"]
@@ -15,4 +15,4 @@ schema:
   sync_job_retention_days: integer?
   seat_lease_grace_seconds: integer?
   durable_cas_upload_max_age_seconds: integer?
-description: "Run maintenance garbage collection with write barrier quiesce"
+description: "Run maintenance garbage collection with write-barrier quiescence and lease-aware deep cache eviction"

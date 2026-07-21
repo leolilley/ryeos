@@ -201,6 +201,8 @@ pub struct GcResult {
     pub reachable_blobs: usize,
     pub deleted_objects: usize,
     pub deleted_blobs: usize,
+    /// Abandoned files from an interrupted CAS atomic publication.
+    pub deleted_cas_staging_files: usize,
     pub deleted_runtime_files: usize,
     /// Schedule-fire JSONL lines dropped by the retention sweep.
     #[serde(default)]
@@ -238,6 +240,12 @@ pub struct GcResult {
     /// Abandoned durable CAS upload stages retired by an explicit signed age.
     #[serde(default)]
     pub retired_durable_cas_uploads: usize,
+    /// Materialized snapshot generations inspected by daemon-coordinated deep GC.
+    pub inspected_materialized_snapshots: usize,
+    /// Inactive materialized snapshot generations removed, or eligible in dry-run.
+    pub deleted_materialized_snapshots: usize,
+    /// Materialized generations preserved because their exact lease was active.
+    pub preserved_active_materialized_snapshots: usize,
     pub freed_bytes: u64,
     pub compaction: Option<CompactionResult>,
     pub duration_ms: u64,
@@ -592,7 +600,16 @@ fn sweep_sharded_directory(
                 let filename = file_name.to_str().ok_or_else(|| {
                     anyhow::anyhow!("non-UTF8 CAS filename under {}", shard2.path().display())
                 })?;
-                if is_incomplete_batch_temp(filename) {
+                let atomic_staging_hash = incomplete_atomic_write_temp_hash(filename, ext);
+                if let Some(hash) = atomic_staging_hash {
+                    if !canonical_cas_hash_at_shard(hash, shard1_text, shard2_text) {
+                        anyhow::bail!(
+                            "CAS atomic staging entry is not stored at its canonical shard path: {}",
+                            shard2.path().join(&file_name).display()
+                        );
+                    }
+                }
+                if is_incomplete_batch_temp(filename) || atomic_staging_hash.is_some() {
                     let file_size = file.metadata()?.len();
                     if dry_run {
                         tracing::info!(
@@ -609,6 +626,7 @@ fn sweep_sharded_directory(
                             )
                         })?;
                     }
+                    result.deleted_cas_staging_files += 1;
                     result.freed_bytes += file_size;
                     continue;
                 }
@@ -619,11 +637,7 @@ fn sweep_sharded_directory(
                         anyhow::anyhow!("unexpected CAS object filename: {filename}")
                     })?
                 };
-                if !lillux::valid_hash(hash)
-                    || hash.bytes().any(|byte| byte.is_ascii_uppercase())
-                    || &hash[0..2] != shard1_text
-                    || &hash[2..4] != shard2_text
-                {
+                if !canonical_cas_hash_at_shard(hash, shard1_text, shard2_text) {
                     anyhow::bail!(
                         "CAS entry is not stored at its canonical shard path: {}",
                         shard2.path().join(&file_name).display()
@@ -666,6 +680,32 @@ fn sweep_sharded_directory(
     }
 
     Ok(())
+}
+
+fn incomplete_atomic_write_temp_hash<'a>(filename: &'a str, ext: &str) -> Option<&'a str> {
+    let rest = filename.strip_prefix('.')?;
+    let (target, suffix) = rest.rsplit_once(".tmp.")?;
+    let (pid, sequence) = suffix.split_once('.')?;
+    if pid.is_empty()
+        || sequence.is_empty()
+        || sequence.contains('.')
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || !sequence.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    if ext.is_empty() {
+        Some(target)
+    } else {
+        target.strip_suffix(ext)
+    }
+}
+
+fn canonical_cas_hash_at_shard(hash: &str, shard1: &str, shard2: &str) -> bool {
+    lillux::valid_hash(hash)
+        && !hash.bytes().any(|byte| byte.is_ascii_uppercase())
+        && &hash[0..2] == shard1
+        && &hash[2..4] == shard2
 }
 
 fn is_incomplete_batch_temp(filename: &str) -> bool {
@@ -738,8 +778,10 @@ fn remove_directory_contents(
 /// no-project workspaces whose `TempDirGuard`s own cleanup. The isolation's
 /// `cache/verified-code` generations are likewise protected by process-held
 /// lifetime locks and remove themselves when their runtime generation drops.
-/// A deep maintenance pass cannot infer either in-memory liveness state here,
-/// so it must never recursively unlink those directories.
+/// Materialized snapshots are owned by the executor and require its exact
+/// construction/lease protocol; the daemon maintenance coordinator invokes
+/// that lease-aware sweep separately. This generic state layer cannot infer
+/// those liveness contracts, so it must never recursively unlink them.
 fn remove_rebuildable_cache_directory(
     cache_directory: &lillux::PinnedDirectory,
     dry_run: bool,
@@ -1178,6 +1220,78 @@ mod tests {
         assert!(!path.exists(), "file should be gone");
         assert!(!shard2.exists(), "shard2 dir should be cleaned up");
         assert!(!shard1.exists(), "shard1 dir should be cleaned up");
+    }
+
+    #[test]
+    fn sweep_reclaims_exact_atomic_publication_staging_files() {
+        use std::collections::HashSet;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("cas");
+        let object_hash = lillux::sha256_hex(b"staged-object");
+        let object_path = lillux::shard_path(&cas_root, "objects", &object_hash, ".json");
+        let object_temp = object_path
+            .parent()
+            .unwrap()
+            .join(format!(".{object_hash}.json.tmp.123.4"));
+        fs::create_dir_all(object_temp.parent().unwrap()).unwrap();
+        fs::write(&object_temp, b"partial object").unwrap();
+
+        let blob_hash = lillux::sha256_hex(b"staged-blob");
+        let blob_path = lillux::shard_path(&cas_root, "blobs", &blob_hash, "");
+        let blob_temp = blob_path
+            .parent()
+            .unwrap()
+            .join(format!(".{blob_hash}.tmp.456.7"));
+        fs::create_dir_all(blob_temp.parent().unwrap()).unwrap();
+        fs::write(&blob_temp, b"partial blob").unwrap();
+
+        let mut result = GcResult::default();
+        sweep_sharded_dir(
+            &cas_root,
+            "objects",
+            ".json",
+            &HashSet::new(),
+            false,
+            &mut result,
+        )
+        .unwrap();
+        sweep_sharded_dir(&cas_root, "blobs", "", &HashSet::new(), false, &mut result).unwrap();
+
+        assert_eq!(result.deleted_cas_staging_files, 2);
+        assert!(!object_temp.exists());
+        assert!(!blob_temp.exists());
+    }
+
+    #[test]
+    fn sweep_rejects_noncanonical_atomic_staging_names() {
+        use std::collections::HashSet;
+        use std::fs;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("cas");
+        let hash = lillux::sha256_hex(b"malformed-stage");
+        let path = lillux::shard_path(&cas_root, "objects", &hash, ".json");
+        let malformed = path
+            .parent()
+            .unwrap()
+            .join(format!(".{hash}.json.tmp.not-a-pid.1"));
+        fs::create_dir_all(malformed.parent().unwrap()).unwrap();
+        fs::write(&malformed, b"partial").unwrap();
+
+        let error = sweep_sharded_dir(
+            &cas_root,
+            "objects",
+            ".json",
+            &HashSet::new(),
+            false,
+            &mut GcResult::default(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unexpected CAS object filename"));
+        assert!(malformed.is_file());
     }
 
     #[test]

@@ -65,6 +65,24 @@ pub struct MaterializationCache {
     cache_root: PathBuf,
 }
 
+/// Exact outcome of one lease-aware materialization-cache sweep.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MaterializationPruneReport {
+    /// Complete generations inspected by the sweep.
+    pub inspected_generations: usize,
+    /// Inactive generations eligible for removal. In a dry run these are the
+    /// generations that would be removed.
+    pub reclaimable_generations: usize,
+    /// Generations preserved because a builder or workspace holds the exact
+    /// construction/lease lock.
+    pub active_generations: usize,
+    /// Files removed, or files that would be removed during a dry run.
+    pub reclaimable_files: usize,
+    /// Logical bytes removed, or logical bytes that would be removed during a
+    /// dry run. Shared content-cache inodes are counted only when unlinked.
+    pub reclaimable_bytes: u64,
+}
+
 /// One content-cache inode kept open from verification through publication
 /// into a lower tree. Linking uses this descriptor, never a second path walk.
 pub struct VerifiedContentFile {
@@ -96,6 +114,17 @@ impl VerifiedContentFile {
 impl MaterializationCache {
     pub fn new(cache_root: PathBuf) -> Self {
         Self { cache_root }
+    }
+
+    /// Resolve the materialization cache beneath the runtime cache root. This
+    /// keeps ownership of the on-disk layout in the executor layer.
+    pub fn from_runtime_cache(runtime_cache_root: &Path) -> Self {
+        Self::new(runtime_cache_root.join("snapshots"))
+    }
+
+    /// Resolve the materialization cache beneath a runtime-state root.
+    pub fn from_runtime_state(runtime_state_root: &Path) -> Self {
+        Self::from_runtime_cache(&runtime_state_root.join("cache"))
     }
 
     /// Check if a project snapshot hash is already cached.
@@ -423,11 +452,17 @@ impl MaterializationCache {
 
     /// Evict a cache entry.
     pub fn _evict(&self, snapshot_hash: &str) -> Result<bool> {
+        Ok(self.evict_with_footprint(snapshot_hash)?.is_some())
+    }
+
+    fn evict_with_footprint(&self, snapshot_hash: &str) -> Result<Option<(usize, u64)>> {
         validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
         // Construction lock precedes the exact generation lease everywhere.
         // A checkout retains this lock until it has acquired its shared lease,
         // so eviction cannot remove a tree in the link-to-lower gap.
-        let _construction = self.generation_build_lock(snapshot_hash)?;
+        let Some(_construction) = self.try_generation_build_lock(snapshot_hash)? else {
+            return Ok(None);
+        };
         let leases = self.cache_root.join(".leases");
         fs::create_dir_all(&leases)?;
         let lease = fs::OpenOptions::new()
@@ -440,18 +475,26 @@ impl MaterializationCache {
         if unsafe { libc::flock(lease.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(false);
+                return Ok(None);
             }
             return Err(error.into());
         }
         let dir = self.cache_dir(snapshot_hash);
-        if fs::symlink_metadata(&dir).is_ok() {
-            remove_path_no_follow(&dir)?;
-            let marker = self.cache_root.join(".complete").join(snapshot_hash);
-            remove_file_if_present(&marker)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        match fs::symlink_metadata(&dir) {
+            Ok(_) => {
+                let (files, bytes) = path_footprint(&dir)?;
+                let (marker_files, marker_bytes) =
+                    path_footprint(&self.cache_root.join(".complete").join(snapshot_hash))?;
+                remove_path_no_follow(&dir)?;
+                let marker = self.cache_root.join(".complete").join(snapshot_hash);
+                remove_file_if_present(&marker)?;
+                Ok(Some((
+                    files + marker_files,
+                    bytes.saturating_add(marker_bytes),
+                )))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -473,6 +516,72 @@ impl MaterializationCache {
             }
         }
         self.prune_unlinked_content()
+    }
+
+    /// Reclaim every inactive immutable generation.
+    ///
+    /// A generation is disposable cache, but only after the executor acquires
+    /// its construction lock and exact lease exclusively. Active builders and
+    /// workspaces are therefore preserved without relying on process-local
+    /// bookkeeping. Dry-run performs no filesystem mutations, including lock
+    /// anchor creation.
+    pub fn prune_inactive_generations(&self, dry_run: bool) -> Result<MaterializationPruneReport> {
+        if !self.cache_root.is_dir() {
+            return Ok(MaterializationPruneReport::default());
+        }
+        if !dry_run {
+            self.prune_abandoned_staging()?;
+        }
+
+        let mut report = MaterializationPruneReport::default();
+        for hash in self._list()? {
+            validate_canonical_hash("materialization snapshot hash", &hash)?;
+            report.inspected_generations += 1;
+            let active = if dry_run {
+                self.generation_has_live_lock(&hash)?
+            } else {
+                false
+            };
+            if active {
+                report.active_generations += 1;
+                continue;
+            }
+
+            let reclaimed = if dry_run {
+                let (files, bytes) = path_footprint(&self.cache_dir(&hash))?;
+                let (marker_files, marker_bytes) =
+                    path_footprint(&self.cache_root.join(".complete").join(&hash))?;
+                Some((files + marker_files, bytes.saturating_add(marker_bytes)))
+            } else {
+                self.evict_with_footprint(&hash)?
+            };
+            if let Some((files, bytes)) = reclaimed {
+                report.reclaimable_generations += 1;
+                report.reclaimable_files += files;
+                report.reclaimable_bytes = report.reclaimable_bytes.saturating_add(bytes);
+            } else {
+                report.active_generations += 1;
+            }
+        }
+
+        let (content_files, content_bytes) = self.prune_unlinked_content_inner(dry_run)?;
+        report.reclaimable_files += content_files;
+        report.reclaimable_bytes = report.reclaimable_bytes.saturating_add(content_bytes);
+        Ok(report)
+    }
+
+    fn generation_has_live_lock(&self, snapshot_hash: &str) -> Result<bool> {
+        validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
+        if matches!(
+            try_existing_exclusive_lock(&self.cache_root.join(".locks").join(snapshot_hash))?,
+            ExistingLock::Busy
+        ) {
+            return Ok(true);
+        }
+        Ok(matches!(
+            try_existing_exclusive_lock(&self.cache_root.join(".leases").join(snapshot_hash))?,
+            ExistingLock::Busy
+        ))
     }
 
     fn prune_abandoned_staging(&self) -> Result<()> {
@@ -521,10 +630,16 @@ impl MaterializationCache {
     }
 
     fn prune_unlinked_content(&self) -> Result<()> {
+        self.prune_unlinked_content_inner(false).map(|_| ())
+    }
+
+    fn prune_unlinked_content_inner(&self, dry_run: bool) -> Result<(usize, u64)> {
         let content_root = self.cache_root.join(".files").join("v1");
         if !content_root.is_dir() {
-            return Ok(());
+            return Ok((0, 0));
         }
+        let mut removed_files = 0usize;
+        let mut removed_bytes = 0u64;
         for mode in fs::read_dir(&content_root)? {
             let mode = mode?;
             if !mode.file_type()?.is_dir() {
@@ -542,16 +657,32 @@ impl MaterializationCache {
                             "immutable content cache contains an unexpected leaf shard entry"
                         );
                     }
-                    let lock = fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(second.path().join(".build.lock"))?;
-                    #[cfg(unix)]
-                    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-                        return Err(std::io::Error::last_os_error().into());
-                    }
+                    let lock_path = second.path().join(".build.lock");
+                    let _lock = if dry_run {
+                        match try_existing_exclusive_lock(&lock_path)? {
+                            ExistingLock::Busy => continue,
+                            ExistingLock::Absent => None,
+                            ExistingLock::Acquired(file) => Some(file),
+                        }
+                    } else {
+                        let file = fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .truncate(false)
+                            .open(&lock_path)?;
+                        #[cfg(unix)]
+                        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }
+                            != 0
+                        {
+                            let error = std::io::Error::last_os_error();
+                            if error.kind() == std::io::ErrorKind::WouldBlock {
+                                continue;
+                            }
+                            return Err(error.into());
+                        }
+                        Some(file)
+                    };
                     for entry in fs::read_dir(second.path())? {
                         let entry = entry?;
                         if entry.file_name() == ".build.lock" {
@@ -568,14 +699,18 @@ impl MaterializationCache {
                         {
                             use std::os::unix::fs::MetadataExt as _;
                             if metadata.nlink() == 1 {
-                                fs::remove_file(entry.path())?;
+                                removed_files += 1;
+                                removed_bytes = removed_bytes.saturating_add(metadata.len());
+                                if !dry_run {
+                                    fs::remove_file(entry.path())?;
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        Ok(())
+        Ok((removed_files, removed_bytes))
     }
 
     /// List all cached snapshot hashes.
@@ -601,6 +736,62 @@ impl MaterializationCache {
         }
         Ok(entries)
     }
+}
+
+enum ExistingLock {
+    Absent,
+    Acquired(fs::File),
+    Busy,
+}
+
+fn try_existing_exclusive_lock(path: &Path) -> Result<ExistingLock> {
+    let file = match fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ExistingLock::Absent);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    #[cfg(unix)]
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            return Ok(ExistingLock::Busy);
+        }
+        return Err(error.into());
+    }
+    Ok(ExistingLock::Acquired(file))
+}
+
+fn path_footprint(path: &Path) -> Result<(usize, u64)> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "materialization cache contains an unsupported symlink: {}",
+            path.display()
+        );
+    }
+    if metadata.is_file() {
+        return Ok((1, metadata.len()));
+    }
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "materialization cache contains an unsupported entry: {}",
+            path.display()
+        );
+    }
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    for entry in fs::read_dir(path)? {
+        let (entry_files, entry_bytes) = path_footprint(&entry?.path())?;
+        files += entry_files;
+        bytes = bytes.saturating_add(entry_bytes);
+    }
+    Ok((files, bytes))
 }
 
 fn validate_canonical_hash(label: &str, value: &str) -> Result<()> {
@@ -1166,5 +1357,56 @@ mod tests {
         cache.prune_abandoned_staging().unwrap();
         assert!(fs::symlink_metadata(tree_staging).is_err());
         assert!(fs::symlink_metadata(marker_staging).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deep_prune_removes_only_inactive_generations() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        fs::create_dir_all(cache_root.join(".complete")).unwrap();
+        let inactive_hash = "ab".repeat(32);
+        let active_hash = "cd".repeat(32);
+        for hash in [&inactive_hash, &active_hash] {
+            write_regular(&cache_root.join(hash).join("project.txt"), b"project");
+            write_regular(&cache_root.join(".complete").join(hash), b"marker");
+        }
+
+        let cache = MaterializationCache::new(cache_root.clone());
+        let active_lease = cache.generation_lease(&active_hash).unwrap();
+        let report = cache.prune_inactive_generations(false).unwrap();
+
+        assert_eq!(report.inspected_generations, 2);
+        assert_eq!(report.reclaimable_generations, 1);
+        assert_eq!(report.active_generations, 1);
+        assert!(!cache_root.join(&inactive_hash).exists());
+        assert!(cache_root.join(&active_hash).is_dir());
+        drop(active_lease);
+
+        let report = cache.prune_inactive_generations(false).unwrap();
+        assert_eq!(report.reclaimable_generations, 1);
+        assert_eq!(report.active_generations, 0);
+        assert!(!cache_root.join(&active_hash).exists());
+    }
+
+    #[test]
+    fn deep_prune_dry_run_is_mutation_free() {
+        let root = tempfile::tempdir().unwrap();
+        let cache_root = root.path().join("cache");
+        let hash = snapshot_hash();
+        write_regular(&cache_root.join(&hash).join("project.txt"), b"project");
+        write_regular(&cache_root.join(".complete").join(&hash), b"marker");
+        let cache = MaterializationCache::new(cache_root.clone());
+
+        let report = cache.prune_inactive_generations(true).unwrap();
+
+        assert_eq!(report.inspected_generations, 1);
+        assert_eq!(report.reclaimable_generations, 1);
+        assert_eq!(report.active_generations, 0);
+        assert!(report.reclaimable_files >= 2);
+        assert!(cache_root.join(&hash).is_dir());
+        assert!(cache_root.join(".complete").join(&hash).is_file());
+        assert!(!cache_root.join(".locks").exists());
+        assert!(!cache_root.join(".leases").exists());
     }
 }
