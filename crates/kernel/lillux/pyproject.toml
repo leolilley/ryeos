@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "lillux"
-version = "0.5.51"
+version = "0.5.52"
 description = "Lillux microkernel — Execute, Memory, Identity, Time"
 requires-python = ">=3.10"
 license = "MIT"
