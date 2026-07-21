@@ -479,16 +479,6 @@ impl ResumeContext {
     ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
         self.project_authority.validate()?;
         self.lifecycle_authority.validate()?;
-        if matches!(
-            self.project_authority,
-            ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
-        ) && self.lifecycle_authority.recovery
-            == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
-        {
-            anyhow::bail!(
-                "live project authority cannot be restart-recoverable; recovery requires a pinned generation"
-            );
-        }
         match self.project_authority.environment() {
             ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
                 source_identity, ..
@@ -1035,14 +1025,8 @@ mod tests {
         let original_snapshot_hash = project_authority
             .base_snapshot_projection()
             .map(str::to_owned);
-        let lifecycle_authority = if matches!(
-            project_authority,
-            ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
-        ) {
-            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE
-        } else {
-            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE
-        };
+        let lifecycle_authority =
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE;
         ResumeContext {
             kind: "tool_run".to_string(),
             item_ref: "tool:test/run".to_string(),
@@ -1411,6 +1395,26 @@ mod tests {
         );
         context.original_snapshot_hash = Some("b".repeat(64));
         assert!(context.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn live_restartable_authority_roundtrips_without_a_snapshot_pin() {
+        let context = resume_context(local_path_ctx());
+        assert_eq!(
+            context.lifecycle_authority,
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE
+        );
+        assert!(matches!(
+            context.project_authority,
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        ));
+        assert!(context.original_snapshot_hash.is_none());
+        context.authoritative_project_identity().unwrap();
+
+        let encoded = serde_json::to_vec(&context).unwrap();
+        let decoded: ResumeContext = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, context);
+        assert!(decoded.original_snapshot_hash.is_none());
     }
 
     #[test]

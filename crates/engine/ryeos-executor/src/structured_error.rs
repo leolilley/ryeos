@@ -162,6 +162,15 @@ impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
                 source_name,
                 remediation,
             ),
+            DispatchError::ExecutionNotRestartEligible {
+                item_ref,
+                remediation,
+                ..
+            } => Self {
+                item_ref: Some(item_ref.clone()),
+                remediation: Some(remediation.clone()),
+                ..Self::generic(e.code(), e.to_string())
+            },
             DispatchError::MissingCap { required } => Self::missing_cap(e.to_string(), required),
             DispatchError::ServiceNotInstalled {
                 service_ref,
@@ -281,5 +290,19 @@ mod tests {
         let p = StructuredErrorPayload::from(&de);
         assert_eq!(p.code, "invalid_ref");
         assert!(p.details.is_none());
+    }
+
+    #[test]
+    fn restart_ineligible_payload_carries_remediation_without_retry() {
+        let error = crate::dispatch_error::DispatchError::ExecutionNotRestartEligible {
+            item_ref: "tool:test/node-policy".to_string(),
+            reason: "node policy is mutable".to_string(),
+            remediation: "use verified content".to_string(),
+        };
+        let value = StructuredErrorPayload::from(&error).to_value();
+        assert_eq!(value["code"], "execution_not_restart_eligible");
+        assert_eq!(value["item_ref"], "tool:test/node-policy");
+        assert_eq!(value["remediation"], "use verified content");
+        assert_eq!(value["retryable"], false);
     }
 }

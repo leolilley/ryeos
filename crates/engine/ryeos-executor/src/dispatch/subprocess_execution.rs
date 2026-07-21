@@ -1153,10 +1153,7 @@ async fn dispatch_tool_subprocess(
             launch_handoff,
         ))
         .await
-        .map_err(|e| DispatchError::SubprocessRunFailed {
-            item_ref: item_ref_for_error.clone(),
-            detail: e.to_string(),
-        })?;
+        .map_err(|error| map_runner_error(item_ref_for_error.clone(), error))?;
         Ok(json!({
             "thread": result.running_thread,
             "detached": true,
@@ -1168,10 +1165,7 @@ async fn dispatch_tool_subprocess(
             launch_handoff,
         ))
         .await
-        .map_err(|e| DispatchError::SubprocessRunFailed {
-            item_ref: item_ref_for_error,
-            detail: e.to_string(),
-        })?;
+        .map_err(|error| map_runner_error(item_ref_for_error, error))?;
         let mut envelope = json!({
             "thread": result.finalized_thread,
             "result": result.result,
@@ -1180,5 +1174,21 @@ async fn dispatch_tool_subprocess(
             envelope["debug"] = debug;
         }
         Ok(envelope)
+    }
+}
+
+fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
+    if let Some(eligibility) = error.chain().find_map(|cause| {
+        cause.downcast_ref::<crate::execution::runner::ExecutionNotRestartEligible>()
+    }) {
+        return DispatchError::ExecutionNotRestartEligible {
+            item_ref: eligibility.item_ref.clone(),
+            reason: eligibility.reason.clone(),
+            remediation: eligibility.remediation.clone(),
+        };
+    }
+    DispatchError::SubprocessRunFailed {
+        item_ref,
+        detail: error.to_string(),
     }
 }

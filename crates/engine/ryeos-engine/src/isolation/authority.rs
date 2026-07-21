@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum IsolationLiveAccessAuthority {
     DescriptorRootedMasked {
+        /// Exact live root retained from authority resolution through adapter
+        /// spawn. Isolation mounts clone this descriptor; they never reopen the
+        /// ambient project pathname after identity validation.
+        root: Arc<lillux::PinnedDirectory>,
         root_device_id: u64,
         root_inode: u64,
         denied_control_paths: Vec<PathBuf>,

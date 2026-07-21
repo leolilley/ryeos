@@ -171,9 +171,18 @@ pub fn isolation_live_access_authority_for_project(
                 let root = project_authority
                     .open_environment_root()?
                     .ok_or_else(|| anyhow::anyhow!("live project authority lost its root"))?;
+                let ai = root
+                    .open_child_directory(std::ffi::OsStr::new(ryeos_engine::AI_DIR))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "live project authority root has no real descriptor-relative .ai directory"
+                        )
+                    })?;
+                drop(ai);
                 let (root_device_id, root_inode) = root.device_inode()?;
                 Ok(
                     ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedMasked {
+                        root: Arc::new(root),
                         root_device_id,
                         root_inode,
                         denied_control_paths: denied_control_paths
@@ -938,6 +947,7 @@ mod tests {
     #[test]
     fn descriptor_rooted_live_authority_preserves_root_identity_and_masks() {
         let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR)).unwrap();
         let policy = crate::execution_policy::ExecutionPolicy::local_live(
             crate::execution_policy::ExecutionResponse::Wait,
         );
@@ -957,6 +967,7 @@ mod tests {
             .unwrap()
             .expect("live authority");
         let ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root: retained_root,
             root_device_id,
             root_inode,
             denied_control_paths,
@@ -969,6 +980,7 @@ mod tests {
             .unwrap()
             .expect("project root");
         assert_eq!((root_device_id, root_inode), root.device_inode().unwrap());
+        assert!(retained_root.is_same_directory(&root).unwrap());
         assert_eq!(
             denied_control_paths,
             ryeos_state::project_sync::live_execution_denied_control_paths()
@@ -977,6 +989,46 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(authorized_write_namespaces, vec!["project".to_string()]);
+    }
+
+    #[test]
+    fn descriptor_rooted_live_authority_detects_path_replacement_without_losing_its_inode() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
+        let policy = crate::execution_policy::ExecutionPolicy::local_live(
+            crate::execution_policy::ExecutionResponse::Wait,
+        );
+        let project_authority = policy
+            .resolve_live_project_authority(
+                &project,
+                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                vec!["project.write".to_string()],
+            )
+            .unwrap();
+        let live_access = isolation_live_access_authority_for_project(&project_authority)
+            .unwrap()
+            .unwrap();
+        let ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root,
+            root_device_id,
+            root_inode,
+            ..
+        } = live_access
+        else {
+            panic!("expected descriptor-rooted authority");
+        };
+
+        let displaced = parent.path().join("displaced");
+        std::fs::rename(&project, &displaced).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
+
+        assert!(root.ensure_path_binding().is_err());
+        assert_eq!((root_device_id, root_inode), root.device_inode().unwrap());
+        let displaced_root = lillux::PinnedDirectory::open(&displaced).unwrap().unwrap();
+        assert!(root.is_same_directory(&displaced_root).unwrap());
     }
 
     #[test]

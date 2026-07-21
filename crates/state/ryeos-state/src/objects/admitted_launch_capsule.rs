@@ -529,6 +529,13 @@ mod tests {
     }
 
     #[test]
+    fn request_scoped_execution_accepts_a_node_policy_direct_executable() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::NodePolicy);
+        capsule.lifecycle_authority = ExecutionLifecycleAuthority::REQUEST_SCOPED;
+        capsule.validate().unwrap();
+    }
+
+    #[test]
     fn exact_program_hash_is_verified_not_trusted() {
         let mut capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
             content_hash: "f".repeat(64),

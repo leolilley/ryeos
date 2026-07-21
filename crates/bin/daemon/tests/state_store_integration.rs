@@ -2377,6 +2377,56 @@ mod integration_tests {
     }
 
     #[test]
+    fn recovery_refusal_cannot_overwrite_a_competing_launch_owner() {
+        let (_tmpdir, store) = setup_state_store();
+        let thread_id = "T-recovery-refusal-owner";
+        store
+            .create_thread_for_test(&make_thread(
+                thread_id,
+                thread_id,
+                "graph",
+                "graph:test/recovery-owner",
+                None,
+            ))
+            .unwrap();
+        let claim = store
+            .claim_thread_launch_active(thread_id, "claim-live", "generation-live")
+            .unwrap()
+            .expect("competing launcher owns the row");
+        let launch_owner =
+            lillux::canonical_json(&serde_json::to_value(&claim.owner).unwrap()).unwrap();
+        let refusal = FinalizeThreadRecord {
+            status: "failed".to_string(),
+            outcome_code: Some("recovery_preparation_refused".to_string()),
+            result_json: None,
+            error_json: Some(serde_json::json!({
+                "code": "recovery_preparation_refused"
+            })),
+            artifacts: vec![],
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+            final_cost: None,
+        };
+
+        let error = store
+            .finalize_if_nonterminal_owned(thread_id, "stale-refusal-owner", &refusal)
+            .expect_err("a refusal without the exact claim must lose");
+        assert!(error.to_string().contains("stale launch owner"));
+        assert_eq!(
+            store.get_thread(thread_id).unwrap().unwrap().status,
+            "created"
+        );
+
+        store
+            .finalize_if_nonterminal_owned(thread_id, &launch_owner, &refusal)
+            .expect("the exact claim owner may settle the row");
+        assert_eq!(
+            store.get_thread(thread_id).unwrap().unwrap().status,
+            "failed"
+        );
+    }
+
+    #[test]
     fn finalize_as_cancelled_works() {
         let (_tmpdir, store) = setup_state_store();
 

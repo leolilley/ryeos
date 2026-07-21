@@ -1283,22 +1283,19 @@ async fn dispatch_resume_intents(
                         recovery_kind = ?intent.kind,
                         "continuation recovery requires the managed-runtime driver admitted by the continuation protocol"
                     );
-                    state.threads.finalize_thread(
-                        &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                            thread_id,
-                            status: "failed".to_string(),
-                            outcome_code: Some("continuation_driver_invalid".to_string()),
-                            result: None,
-                            error: Some(serde_json::json!({
-                                "code": "continuation_driver_invalid",
-                                "message": "continuation recovery cannot use the direct-item launch driver",
-                            })),
-                            metadata: None,
-                            artifacts: Vec::new(),
-                            final_cost: None,
-                            summary_json: None,
-                        },
-                    )?;
+                    let outcome =
+                        ryeos_executor::execution::launch::settle_recovery_preparation_refusal(
+                            state,
+                            &thread_id,
+                            "continuation_driver_invalid",
+                            "continuation_driver",
+                            "continuation recovery cannot use the direct-item launch driver",
+                        )?;
+                    tracing::warn!(
+                        thread_id,
+                        ?outcome,
+                        "invalid continuation driver refusal classified"
+                    );
                     continue;
                 }
             }
@@ -1322,12 +1319,9 @@ async fn dispatch_resume_intents(
             let outcome = match outcome {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    tracing::error!(
-                        thread_id,
-                        error = %error,
-                        "successor recovery could not be enqueued; leaving it nonterminal for the bounded recovery sweep"
-                    );
-                    continue;
+                    return Err(anyhow::anyhow!(error)).with_context(|| {
+                        format!("durably claim successor recovery for {thread_id}")
+                    });
                 }
             };
             tracing::info!(thread_id, ?outcome, "successor recovery classified");
@@ -1357,13 +1351,9 @@ async fn dispatch_resume_intents(
                 let outcome = match outcome {
                     Ok(outcome) => outcome,
                     Err(error) => {
-                        tracing::error!(
-                            thread_id,
-                            error = %error,
-                            recovery_kind = ?intent.kind,
-                            "managed recovery could not be enqueued; leaving it nonterminal for the bounded recovery sweep"
-                        );
-                        continue;
+                        return Err(anyhow::anyhow!(error)).with_context(|| {
+                            format!("durably claim managed recovery for {thread_id}")
+                        });
                     }
                 };
                 tracing::info!(thread_id, ?outcome, recovery_kind = ?intent.kind, "managed recovery classified");
@@ -1395,24 +1385,21 @@ async fn dispatch_resume_intents(
                 tracing::error!(
                     thread_id,
                     error = %error,
-                    "resume parameters could not be reconstructed; classifying failed"
+                    "resume parameters could not be reconstructed; recording an owner-fenced refusal"
                 );
-                state.threads.finalize_thread(
-                    &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                        thread_id,
-                        status: "failed".to_string(),
-                        outcome_code: Some("resume_rebuild_failed".to_string()),
-                        result: None,
-                        error: Some(serde_json::json!({
-                            "code": "resume_rebuild_failed",
-                            "message": error.to_string(),
-                        })),
-                        metadata: None,
-                        artifacts: Vec::new(),
-                        final_cost: None,
-                        summary_json: None,
-                    },
-                )?;
+                let outcome =
+                    ryeos_executor::execution::launch::settle_recovery_preparation_refusal(
+                        state,
+                        &thread_id,
+                        "resume_rebuild_failed",
+                        "resume_rebuild",
+                        "the sealed request for this thread can no longer be reconstructed",
+                    )?;
+                tracing::warn!(
+                    thread_id,
+                    ?outcome,
+                    "resume reconstruction refusal classified"
+                );
                 continue;
             }
         };
@@ -1454,13 +1441,11 @@ async fn dispatch_resume_intents(
                     })
                     .is_some_and(|status| status.is_terminal());
                 if !terminal {
-                    tracing::error!(
-                        thread_id,
-                        error = %error,
-                        recovery_kind = ?intent.kind,
-                        "direct-executor recovery failed before classification; leaving it nonterminal for the bounded recovery sweep"
-                    );
-                    continue;
+                    return Err(anyhow::anyhow!(error)).with_context(|| {
+                        format!(
+                            "direct-executor recovery for {thread_id} returned without a durable disposition"
+                        )
+                    });
                 }
                 tracing::warn!(
                     thread_id,
@@ -1482,27 +1467,49 @@ fn prepare_follow_recovery_actions(
     actions: Vec<reconcile::FollowReconcileAction>,
 ) -> Result<()> {
     for action in actions {
-        let (label, outcome) = match action {
+        let (label, target_thread_id, outcome) = match action {
             reconcile::FollowReconcileAction::Resume { follow_key } => {
+                let target_thread_id = state
+                    .state_store
+                    .get_follow_waiter_by_key(&follow_key)?
+                    .and_then(|waiter| waiter.parent_successor_thread_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "follow recovery waiter {follow_key} has no successor target"
+                        )
+                    })?;
                 let outcome =
                     ryeos_executor::execution::launch::prepare_and_spawn_follow_resume_recovery(
                         state.clone(),
                         &follow_key,
-                    )
-                    .with_context(|| format!("durably enqueue follow resume {follow_key}"))?;
-                (format!("parent-resume {follow_key}"), outcome)
+                    );
+                (
+                    format!("parent-resume {follow_key}"),
+                    target_thread_id,
+                    outcome,
+                )
             }
             reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
                 let outcome =
                     ryeos_executor::execution::launch::prepare_and_spawn_follow_child_recovery(
                         state.clone(),
                         &child_thread_id,
-                    )
-                    .with_context(|| format!("durably enqueue follow child {child_thread_id}"))?;
-                (format!("child-relaunch {child_thread_id}"), outcome)
+                    );
+                (
+                    format!("child-relaunch {child_thread_id}"),
+                    child_thread_id,
+                    outcome,
+                )
             }
         };
-        tracing::info!(action = %label, ?outcome, "follow recovery classified");
+        match outcome {
+            Ok(outcome) => tracing::info!(action = %label, ?outcome, "follow recovery classified"),
+            Err(error) => {
+                return Err(anyhow::anyhow!(error)).with_context(|| {
+                    format!("durably claim follow recovery {label} for target {target_thread_id}")
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -1574,29 +1581,49 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
 }
 
 /// Drive follow reconcile actions during the periodic live sweep. Every launch
-/// is claim-guarded, so concurrent drives are benign skips. A real action
-/// failure fails this pass loudly; the outer periodic loop isolates that pass
-/// from daemon availability and retries against the durable state later.
+/// is claim-guarded, so concurrent drives are benign skips. Retryable launch
+/// interruptions retain their durable waiter; permanent launch defects must
+/// settle their exact target before returning. Missing dispositions fail only
+/// this pass and are isolated from daemon availability by the outer loop.
 async fn dispatch_follow_actions(
     state: &AppState,
     actions: Vec<reconcile::FollowReconcileAction>,
 ) -> Result<()> {
     for action in actions {
         use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
-        let (label, outcome) = match action {
+        let (label, target_thread_id, resume_follow_key, outcome) = match action {
             reconcile::FollowReconcileAction::Resume { follow_key } => {
+                let target_thread_id = state
+                    .state_store
+                    .get_follow_waiter_by_key(&follow_key)?
+                    .and_then(|waiter| waiter.parent_successor_thread_id)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "periodic follow waiter {follow_key} has no successor target"
+                        )
+                    })?;
                 let outcome = ryeos_executor::execution::launch::launch_follow_resume_successor(
                     state.clone(),
                     &follow_key,
                 )
                 .await;
-                (format!("parent-resume {follow_key}"), outcome)
+                (
+                    format!("parent-resume {follow_key}"),
+                    target_thread_id,
+                    Some(follow_key),
+                    outcome,
+                )
             }
             reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
                 // Reconcile parity: a fresh relaunch, no parent clamp/depth.
                 let outcome =
                     launch_follow_child(state.clone(), &child_thread_id, None, None).await;
-                (format!("child-relaunch {child_thread_id}"), outcome)
+                (
+                    format!("child-relaunch {child_thread_id}"),
+                    child_thread_id,
+                    None,
+                    outcome,
+                )
             }
         };
         match outcome {
@@ -1604,9 +1631,49 @@ async fn dispatch_follow_actions(
             Ok(SuccessorLaunchOutcome::Skipped(reason)) => {
                 tracing::debug!(action = %label, reason, "reconcile: follow action skipped");
             }
+            Err(error) if error.retryable_launch_interruption() => {
+                tracing::warn!(
+                    action = %label,
+                    thread_id = %target_thread_id,
+                    error = %error,
+                    "periodic follow recovery was interrupted; durable waiter retained for retry"
+                );
+            }
             Err(error) => {
-                return Err(anyhow::anyhow!(error))
-                    .with_context(|| format!("reconcile follow action {label}"));
+                let terminal = state
+                    .state_store
+                    .get_thread(&target_thread_id)?
+                    .and_then(|thread| {
+                        ryeos_state::objects::ThreadStatus::from_str_lossy(&thread.status)
+                    })
+                    .is_some_and(|status| status.is_terminal());
+                if terminal {
+                    if let Some(follow_key) = resume_follow_key.as_deref() {
+                        if state
+                            .state_store
+                            .get_follow_waiter_by_key(follow_key)?
+                            .is_some()
+                        {
+                            return Err(anyhow::anyhow!(error)).with_context(|| {
+                                format!(
+                                    "periodic follow recovery {label} terminalized its successor but did not retire waiter {follow_key}"
+                                )
+                            });
+                        }
+                    }
+                    tracing::warn!(
+                        action = %label,
+                        thread_id = %target_thread_id,
+                        error = %error,
+                        "periodic follow recovery classified as a permanent terminal refusal"
+                    );
+                    continue;
+                }
+                return Err(anyhow::anyhow!(error)).with_context(|| {
+                    format!(
+                        "periodic follow recovery {label} returned without a durable disposition"
+                    )
+                });
             }
         }
     }
@@ -2274,6 +2341,9 @@ async fn run_service_standalone(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod recovery_tests;
 
 #[cfg(test)]
 mod shutdown_mapping_tests {

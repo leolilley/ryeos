@@ -764,6 +764,7 @@ struct WritableMountResolution<'a> {
 
 struct ReadableMountResolution<'a> {
     namespace: MountNamespace<'a>,
+    project_source_handle: Option<&'a Arc<std::fs::File>>,
     app_root: Option<&'a Path>,
     app_root_authority: Option<&'a lillux::PinnedDirectory>,
     app_root_destination: Option<&'a Path>,
@@ -1391,8 +1392,10 @@ impl IsolationRuntime {
             validate_namespace_destination("app root", path)?;
         }
         let canonical_project = canonicalize_context_mount("project", &project_destination)?;
+        let mut retained_live_project_handle = None;
         let live_mask_destinations = match context.live_access {
             Some(IsolationLiveAccessAuthority::DescriptorRootedMasked {
+                root,
                 root_device_id,
                 root_inode,
                 denied_control_paths,
@@ -1407,21 +1410,45 @@ impl IsolationRuntime {
                             .to_string(),
                     ));
                 }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt as _;
-                    let metadata = std::fs::metadata(&canonical_project).map_err(|error| {
-                        refused(format!(
-                            "live project identity cannot be inspected: {error}"
-                        ))
-                    })?;
-                    if metadata.dev() != *root_device_id || metadata.ino() != *root_inode {
-                        return Err(refused(format!(
-                            "live project root identity changed before launch: {}",
-                            canonical_project.display()
-                        )));
-                    }
+                if root.path() != canonical_project {
+                    return Err(refused(format!(
+                        "live project descriptor root {} does not match requested canonical project {}",
+                        root.path().display(),
+                        canonical_project.display()
+                    )));
                 }
+                root.ensure_path_binding().map_err(|error| {
+                    refused(format!(
+                        "live project path binding changed before launch: {error}"
+                    ))
+                })?;
+                let (current_device_id, current_inode) = root.device_inode().map_err(|error| {
+                    refused(format!(
+                        "live project descriptor cannot be inspected: {error}"
+                    ))
+                })?;
+                if current_device_id != *root_device_id || current_inode != *root_inode {
+                    return Err(refused(format!(
+                        "live project descriptor identity changed before launch: {}",
+                        root.path().display()
+                    )));
+                }
+                root.open_child_directory(std::ffi::OsStr::new(crate::AI_DIR))
+                    .map_err(|error| {
+                        refused(format!(
+                            "live project .ai directory cannot be opened descriptor-relative: {error}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        refused(
+                            "live project root has no real descriptor-relative .ai directory"
+                                .to_string(),
+                        )
+                    })?;
+                retained_live_project_handle =
+                    Some(Arc::new(root.try_clone_descriptor().map_err(|error| {
+                        refused(format!("live project descriptor cannot be cloned: {error}"))
+                    })?));
                 let mut previous: Option<&Path> = None;
                 let mut destinations = Vec::with_capacity(denied_control_paths.len());
                 for relative in denied_control_paths {
@@ -1591,6 +1618,8 @@ impl IsolationRuntime {
                 ))
             })?);
             (true, Some(handle), None)
+        } else if let Some(handle) = retained_live_project_handle {
+            (false, Some(handle), None)
         } else {
             (false, None, None)
         };
@@ -1860,6 +1889,7 @@ impl IsolationRuntime {
             .transpose()?;
         let readable_resolution = ReadableMountResolution {
             namespace: mount_namespace,
+            project_source_handle: project_source_handle.as_ref(),
             app_root: self.app_root.as_deref(),
             app_root_authority: self.app_root_authority.as_deref(),
             app_root_destination: self.app_root_destination.as_deref(),
@@ -3322,7 +3352,7 @@ fn resolve_writable_mount(
             .checkpoint_source_handle
             .cloned()
             .ok_or_else(|| refused("daemon checkpoint mount has no pinned authority".to_string()))?
-    } else if configured == "{project}" && resolution.project_source_handle.is_some() {
+    } else if source.as_path() == canonical_project && resolution.project_source_handle.is_some() {
         resolution
             .project_source_handle
             .cloned()
@@ -3482,7 +3512,14 @@ fn resolve_readable_mounts(
             destination.display()
         )));
     }
-    let source_handle = pin_mount_source("readable mount", &source)?;
+    let source_handle = if source.as_path() == canonical_project {
+        match resolution.project_source_handle {
+            Some(handle) => handle.clone(),
+            None => pin_mount_source("readable mount", &source)?,
+        }
+    } else {
+        pin_mount_source("readable mount", &source)?
+    };
     Ok(vec![ReadableMount {
         destination,
         source,
@@ -3952,6 +3989,11 @@ mod tests {
             .contains("requires an explicit filesystem confinement"));
 
         let confined = IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root: Arc::new(
+                lillux::PinnedDirectory::open(app_root.path())
+                    .unwrap()
+                    .expect("app root"),
+            ),
             root_device_id: 0,
             root_inode: 0,
             denied_control_paths: vec![PathBuf::from(".ai")],
@@ -4003,6 +4045,56 @@ mod tests {
         assert!(error
             .to_string()
             .contains("durable project execution requires an enforced isolation backend"));
+    }
+
+    #[test]
+    fn live_project_mount_uses_retained_descriptor_after_path_replacement() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let retained = pin_mount_source("test live project", &project).unwrap();
+        let displaced = parent.path().join("displaced");
+        std::fs::rename(&project, &displaced).unwrap();
+        std::fs::create_dir(&project).unwrap();
+
+        let namespace = MountNamespace {
+            project_destination: &project,
+            canonical_project: &project,
+            cwd_destination: &project,
+            canonical_cwd: &project,
+        };
+        let writable_resolution = WritableMountResolution {
+            namespace,
+            checkpoint_destination: None,
+            canonical_checkpoint_dir: None,
+            checkpoint_source_handle: None,
+            project_source_handle: Some(&retained),
+        };
+        let writable = resolve_writable_mount("{project}", &writable_resolution)
+            .unwrap()
+            .unwrap();
+        assert!(same_file_identity(&retained, &writable.source_handle).unwrap());
+
+        let readable_resolution = ReadableMountResolution {
+            namespace,
+            project_source_handle: Some(&retained),
+            app_root: None,
+            app_root_authority: None,
+            app_root_destination: None,
+            daemon_socket: None,
+            requested_daemon_socket: None,
+            bundle_roots: &[],
+            node_trusted_keys_dir: None,
+            verified_code_mounts: &[],
+        };
+        let readable = resolve_readable_mounts("{project}", &readable_resolution)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert!(same_file_identity(&retained, &readable.source_handle).unwrap());
+
+        let replacement = pin_mount_source("replacement live project", &project).unwrap();
+        assert!(!same_file_identity(&retained, &replacement).unwrap());
     }
 
     #[test]

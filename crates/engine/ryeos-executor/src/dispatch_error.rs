@@ -144,6 +144,15 @@ pub enum DispatchError {
     /// an error after resolution succeeded.
     #[error("subprocess run failed for '{item_ref}': {detail}")]
     SubprocessRunFailed { item_ref: String, detail: String },
+    /// A daemon-owned restartable launch resolved only mutable node-policy
+    /// executable authority. Refuse before thread birth rather than silently
+    /// weakening its lifecycle contract.
+    #[error("execution '{item_ref}' is not restart eligible: {reason}")]
+    ExecutionNotRestartEligible {
+        item_ref: String,
+        reason: String,
+        remediation: String,
+    },
     /// Runtime binary materialization failed — the native executor
     /// could not be resolved from the bundle CAS.
     #[error("runtime materialization failed for '{executor_ref}': {detail}")]
@@ -372,6 +381,7 @@ impl DispatchError {
             | Self::UnknownTargetSite { .. }
             | Self::TargetSiteUnsupported { .. }
             | Self::TargetSiteResolutionFailed { .. } => StatusCode::BAD_REQUEST,
+            Self::ExecutionNotRestartEligible { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::LaunchPreparationFailed { classification, .. } if classification == "caller" => {
                 StatusCode::BAD_REQUEST
             }
@@ -416,6 +426,7 @@ impl DispatchError {
             Self::SubprocessExecutorMissing { .. } => "subprocess_executor_missing",
             Self::RootExecutorMissing { .. } => "root_executor_missing",
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
+            Self::ExecutionNotRestartEligible { .. } => "execution_not_restart_eligible",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
             Self::RequiredSecretMissing { .. } => "required_secret_missing",
             Self::LaunchPreparationFailed { code, .. } => code,
@@ -556,6 +567,18 @@ mod tests {
             msg.contains("core, hosted-node"),
             "must list installed bundles, got: {msg}"
         );
+    }
+
+    #[test]
+    fn restart_ineligible_execution_is_typed_and_non_retryable() {
+        let error = DispatchError::ExecutionNotRestartEligible {
+            item_ref: "tool:test/node-policy".to_string(),
+            reason: "node policy is mutable".to_string(),
+            remediation: "use verified content".to_string(),
+        };
+        assert_eq!(error.code(), "execution_not_restart_eligible");
+        assert_eq!(error.http_status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!error.retryable());
     }
 
     #[test]

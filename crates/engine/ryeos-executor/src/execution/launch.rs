@@ -237,7 +237,7 @@ impl BuildAndLaunchError {
     /// to re-drive without changing the authored execution. Keep this deliberately
     /// narrow: capability, secret, materialization, and unknown failures are
     /// deterministic until proven otherwise.
-    fn retryable_launch_interruption(&self) -> bool {
+    pub fn retryable_launch_interruption(&self) -> bool {
         match self {
             Self::Internal(error) => error.chain().any(|cause| {
                 cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
@@ -2614,6 +2614,65 @@ pub enum RecoveryLaunchOutcome {
     Skipped(&'static str),
 }
 
+/// Result of an owner-fenced permanent recovery refusal. The helper acquires
+/// the exact launch claim before writing a terminal disposition, so a competing
+/// launcher can win only by making this operation a benign `AlreadyClaimed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryRefusalOutcome {
+    Finalized,
+    AlreadyTerminal,
+    AlreadyClaimed,
+    PreservedForShutdown,
+}
+
+pub fn settle_recovery_preparation_refusal(
+    state: &AppState,
+    thread_id: &str,
+    outcome_code: &str,
+    stage: &str,
+    message: &str,
+) -> anyhow::Result<RecoveryRefusalOutcome> {
+    let claim = match ThreadLaunchClaim::acquire(state, thread_id)? {
+        ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
+        ThreadLaunchClaimOutcome::AlreadyClaimed => {
+            return Ok(RecoveryRefusalOutcome::AlreadyClaimed)
+        }
+    };
+    let launch_owner = claim.canonical_owner()?;
+    let params = ThreadFinalizeParams {
+        thread_id: thread_id.to_string(),
+        status: "failed".to_string(),
+        outcome_code: Some(outcome_code.to_string()),
+        result: None,
+        error: Some(json!({
+            "code": outcome_code,
+            "stage": stage,
+            "message": message,
+        })),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    };
+    match state
+        .threads
+        .finalize_if_nonterminal_owned(&params, &launch_owner)?
+    {
+        ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::Finalized(thread) => {
+            let chain_root_id = thread.chain_root_id.clone();
+            kick_follow_resume_if_ready(state, &chain_root_id);
+            kick_launch_window_for_terminal(state, &chain_root_id);
+            Ok(RecoveryRefusalOutcome::Finalized)
+        }
+        ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::AlreadyTerminal { .. } => {
+            Ok(RecoveryRefusalOutcome::AlreadyTerminal)
+        }
+        ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::PreservedForShutdown => {
+            Ok(RecoveryRefusalOutcome::PreservedForShutdown)
+        }
+    }
+}
+
 /// Which kind of successor launch this is — they share the claim/run machinery
 /// but differ on stimulus and capability/budget policy.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4867,6 +4926,10 @@ async fn launch_follow_resume_successor_with_claim(
                      {cleanup_error}"
                 )));
             }
+            state
+                .state_store
+                .clear_follow_waiter(follow_key)
+                .map_err(BuildAndLaunchError::Internal)?;
             Err(e)
         }
     }

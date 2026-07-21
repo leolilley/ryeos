@@ -166,7 +166,7 @@ impl ExecutionPolicy {
         Self {
             schema_version: EXECUTION_POLICY_SCHEMA_VERSION,
             ownership: ExecutionOwnership::DaemonOwned,
-            recovery: ExecutionRecovery::None,
+            recovery: ExecutionRecovery::RestartRecoverable,
             response,
             target: ExecutionTarget::Here,
             environment: ExecutionEnvironmentPolicy::ProjectOverlay {
@@ -205,13 +205,6 @@ impl ExecutionPolicy {
             if self.response == ExecutionResponse::Accepted {
                 anyhow::bail!("request-scoped execution cannot return an accepted response");
             }
-        }
-        if self.recovery == ExecutionRecovery::RestartRecoverable
-            && matches!(&self.project, ProjectExecutionPolicy::LiveDirect { .. })
-        {
-            anyhow::bail!(
-                "live-direct execution cannot be restart-recoverable; select pinned project authority for restart recovery"
-            );
         }
         if let ExecutionTarget::Site { site_id } = &self.target {
             crate::identity::validate_canonical_site_id(site_id)
@@ -421,6 +414,7 @@ pub fn resolve_offline_local_live_project_authority(
             child_policy: ChildProjectPolicy::Inherit,
         },
     };
+    policy.validate()?;
     policy.resolve_live_project_authority(
         project_path,
         live_filesystem_confinement_for_isolation(isolation.mode()),
@@ -591,23 +585,21 @@ mod policy_tests {
     use super::*;
 
     #[test]
-    fn live_async_is_daemon_owned_without_claiming_restart_recovery() {
+    fn live_async_is_daemon_owned_and_restart_recoverable() {
         let policy = ExecutionPolicy::local_live(ExecutionResponse::Accepted);
         policy.validate().unwrap();
         assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
-        assert_eq!(policy.recovery, ExecutionRecovery::None);
+        assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
         assert_eq!(policy.response, ExecutionResponse::Accepted);
     }
 
     #[test]
-    fn live_direct_cannot_claim_restart_recovery() {
-        let mut policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
-        policy.recovery = ExecutionRecovery::RestartRecoverable;
-        assert!(policy
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("select pinned project authority"));
+    fn live_wait_is_daemon_owned_and_restart_recoverable() {
+        let policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        policy.validate().unwrap();
+        assert_eq!(policy.ownership, ExecutionOwnership::DaemonOwned);
+        assert_eq!(policy.recovery, ExecutionRecovery::RestartRecoverable);
+        assert_eq!(policy.response, ExecutionResponse::Wait);
     }
 
     #[test]
@@ -646,7 +638,7 @@ mod policy_tests {
         ));
         assert_eq!(
             authority.lifecycle,
-            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE
         );
 
         assert!(matches!(

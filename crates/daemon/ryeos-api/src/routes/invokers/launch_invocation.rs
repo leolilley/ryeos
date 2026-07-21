@@ -140,10 +140,18 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "threaded dispatch preflight returned no root admission".to_string(),
             )
         })?;
+        let resolved_authority =
+            ryeos_app::execution_policy::resolve_standard_local_live_authority(
+                &project_ctx.effective_path,
+                principal_scopes.clone(),
+                &ctx.state.isolation,
+            )
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         let mut launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
             effective_project.as_path(),
             ref_bindings,
+            resolved_authority.lifecycle,
         )
         .map_err(|error| {
             RouteDispatchError::Internal(format!(
@@ -161,14 +169,6 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             item_ref_kind = item_ref.kind(),
         );
 
-        let resolved_authority =
-            ryeos_app::execution_policy::resolve_standard_local_live_authority(
-                &project_ctx.effective_path,
-                principal_scopes.clone(),
-                &ctx.state.isolation,
-            )
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
-        launch_options.lifecycle_authority = resolved_authority.lifecycle;
         let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
             project_ctx.effective_path.clone(),
             project_ctx.request_engine.clone(),
