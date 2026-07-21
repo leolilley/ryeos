@@ -415,6 +415,26 @@ impl ExecutionProvenance {
         }
     }
 
+    /// Select the durable project root for a daemon-mediated live mutation.
+    ///
+    /// `effective_path()` is an execution view and may be an ephemeral
+    /// materialization. Durable mutation authority comes only from the sealed
+    /// project authority and must remain bound to the original project
+    /// identity carried by this provenance.
+    pub fn durable_live_write_root(&self, namespace: &str) -> anyhow::Result<&Path> {
+        let root = self
+            .project_authority()
+            .authorized_live_write_root(namespace)?;
+        if root != self.original_project_path() {
+            anyhow::bail!(
+                "durable live write root {} does not match provenance project identity {}",
+                root.display(),
+                self.original_project_path().display()
+            );
+        }
+        Ok(root)
+    }
+
     pub fn advances_project_head(&self) -> bool {
         matches!(
             self.project_authority(),
@@ -1006,6 +1026,30 @@ mod tests {
         assert!(child.is_borrowed_child());
         assert_eq!(child.project_source(), ProjectSourceKind::LiveFs);
         assert_eq!(child.effective_path(), Path::new("/live"));
+    }
+
+    #[test]
+    fn durable_live_write_uses_authority_root_not_materialized_execution_view() {
+        let durable = tempfile::tempdir().unwrap();
+        let materialized = tempfile::tempdir().unwrap();
+        let authority =
+            crate::execution_policy::synthetic_test_live_project_authority(durable.path());
+        let lifeline = Arc::new(TempDirGuard::new(materialized.path().to_path_buf()));
+        let provenance = ExecutionProvenance::ChildLiveProject {
+            request_engine: engine(),
+            project_path: materialized.path().to_path_buf(),
+            original_project_path: durable.path().to_path_buf(),
+            workspace_lifeline: Some(lifeline),
+            state_root: None,
+            project_authority: authority,
+            __seal: ProvenanceSeal(()),
+        };
+
+        assert_eq!(provenance.effective_path(), materialized.path());
+        assert_eq!(
+            provenance.durable_live_write_root("project").unwrap(),
+            durable.path()
+        );
     }
 
     #[test]
