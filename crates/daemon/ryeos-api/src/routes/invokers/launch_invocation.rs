@@ -147,7 +147,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 &ctx.state.isolation,
             )
             .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
-        let mut launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
+        let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
             effective_project.as_path(),
             ref_bindings,
