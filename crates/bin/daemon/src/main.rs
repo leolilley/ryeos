@@ -305,7 +305,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
     // daemon.json is an early discovery hint.  Live lifecycle truth always
     // comes from the UDS, and started_at is process start (never ready time).
-    let build = ryeos_app::build_info::get();
+    let build = ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION"));
     let daemon_info = ryeos_node::DaemonMetadata {
         pid: Some(std::process::id()),
         uds_path: Some(config.uds_path.clone()),
@@ -675,6 +675,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
+                daemon_build: build.clone(),
                 isolation,
                 state_store,
                 engine: engine.clone(),
@@ -2266,6 +2267,7 @@ async fn run_service_standalone(
 
     let app_state = state::AppState {
         config: Arc::new(config.clone()),
+        daemon_build: ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION")),
         isolation,
         state_store,
         engine: engine.clone(),

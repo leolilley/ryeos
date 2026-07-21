@@ -11,7 +11,6 @@ use ryeos_runtime::CommandRegistry;
 use ryeos_scheduler::db::SchedulerDb;
 use ryeos_scheduler::ReloadSignal;
 
-use crate::build_info;
 use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
 use crate::config::Config;
@@ -39,6 +38,10 @@ pub struct CatalogHealth {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
+    /// Build identity of the composed daemon binary. This must be injected by
+    /// the composition root: `ryeos-app` has its own internal crate version,
+    /// which is not the externally installed `ryeosd` release version.
+    pub daemon_build: crate::build_info::BuildInfo,
     /// Node-owned isolation runtime resolved once at daemon composition.
     /// Execution paths share this immutable state instead of re-reading
     /// activation or backend policy from the general daemon config.
@@ -167,12 +170,11 @@ impl AppState {
     }
 
     pub fn status(&self) -> anyhow::Result<StatusResponse> {
-        let build = build_info::get();
         let pending_head_transitions = self.state_store.pending_head_transition_status()?;
         Ok(StatusResponse {
-            version: build.version.to_string(),
-            revision: build.revision.to_string(),
-            build_date: build.build_date.to_string(),
+            version: self.daemon_build.version.to_string(),
+            revision: self.daemon_build.revision.to_string(),
+            build_date: self.daemon_build.build_date.to_string(),
             started_at: self.started_at_iso.clone(),
             uptime_seconds: self.started_at.elapsed().as_secs(),
             bind: self.config.bind.to_string(),

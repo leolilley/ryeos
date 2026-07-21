@@ -123,6 +123,7 @@ mod tests {
         let test_auth = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
         let state = ryeos_app::state::AppState {
             config: Arc::new(config),
+            daemon_build: ryeos_app::build_info::get(),
             isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
             state_store,
             engine,

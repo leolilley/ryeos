@@ -188,7 +188,7 @@ fn report_connection_exit(joined: std::result::Result<Result<()>, tokio::task::J
 
 fn ready_lifecycle_response(state: &AppState) -> ryeos_node::LifecycleResponse {
     let ready_at = lillux::time::iso8601_now();
-    let build = ryeos_app::build_info::get();
+    let build = &state.daemon_build;
     let identity = ryeos_node::LifecycleIdentity {
         pid: std::process::id(),
         bind: state.config.bind.to_string(),
@@ -1652,6 +1652,7 @@ mod tests {
 
         let state = AppState {
             config: Arc::new(config),
+            daemon_build: ryeos_app::build_info::get(),
             isolation: Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
             state_store,
             engine,
@@ -1700,6 +1701,32 @@ mod tests {
         };
 
         (tmpdir, state)
+    }
+
+    #[test]
+    fn lifecycle_identity_uses_composed_daemon_build() {
+        let (_tmp, mut state) = setup_app_state();
+        state.daemon_build = ryeos_app::build_info::get_for_version("9.8.7");
+
+        let response = ready_lifecycle_response(&state);
+
+        assert_eq!(response.identity.version, "9.8.7");
+        assert_eq!(state.status().unwrap().version, "9.8.7");
+    }
+
+    #[tokio::test]
+    async fn public_identity_advertises_composed_daemon_build() {
+        let (_tmp, mut state) = setup_app_state();
+        state.daemon_build = ryeos_app::build_info::get_for_version("9.8.7");
+
+        let response = ryeos_api::handlers::identity_public_key::handle(
+            ryeos_api::handlers::identity_public_key::Request::default(),
+            Arc::new(state),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["version"], "9.8.7");
     }
 
     fn make_create_params(thread_id: &str, chain_root_id: &str) -> ThreadCreateParams {
