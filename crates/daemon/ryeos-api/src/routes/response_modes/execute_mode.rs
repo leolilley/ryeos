@@ -283,28 +283,18 @@ pub(crate) fn resolve_execution_contract(
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<ResolvedExecutionContract> {
     policy.validate()?;
-    if matches!(
-        &policy.project,
-        ProjectExecutionPolicy::LiveDirect {
-            access: ryeos_app::execution_policy::LiveAccess::ReadWrite,
-            ..
-        }
-    ) {
-        // Reuse the daemon's established project mutation capability.  This is
-        // the same authority required by runtime project-snapshot creation;
-        // inventing an endpoint-local capability name would make otherwise
-        // valid project principals unable to select live read-write execution.
-        const LIVE_PROJECT_WRITE_CAPABILITY: &str = "project.write";
-        state.authorizer
-            .authorize(
-                caller_scopes,
-                &AuthorizationPolicy::require(LIVE_PROJECT_WRITE_CAPABILITY),
+    if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
+        let required_capability = access.required_capability();
+        ryeos_app::execution_policy::authorize_live_project_access(
+            state.authorizer.as_ref(),
+            caller_scopes,
+            *access,
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "live project execution requires admitted capability {required_capability:?}"
             )
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "live read-write execution requires admitted capability {LIVE_PROJECT_WRITE_CAPABILITY:?}"
-                )
-            })?;
+        })?;
     }
     let source_matches_policy = match (&policy.project, project_source) {
         (ProjectExecutionPolicy::Projectless, ProjectSource::LiveFs)
@@ -515,10 +505,15 @@ fn authorize_terminal_publication(
         .authorizer
         .authorize(
             caller_scopes,
-            &AuthorizationPolicy::require("project.write"),
+            &AuthorizationPolicy::require(
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
+            ),
         )
         .map_err(|_| {
-            anyhow::anyhow!("advance-head publication requires fixed capability `project.write`")
+            anyhow::anyhow!(
+                "advance-head publication requires fixed capability `{}`",
+                ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY
+            )
         })
 }
 
@@ -528,24 +523,18 @@ pub(crate) fn preauthorize_execution_policy(
     state: &ryeos_app::state::AppState,
 ) -> anyhow::Result<()> {
     policy.validate()?;
-    if matches!(
-        &policy.project,
-        ProjectExecutionPolicy::LiveDirect {
-            access: ryeos_app::execution_policy::LiveAccess::ReadWrite,
-            ..
-        }
-    ) {
-        state
-            .authorizer
-            .authorize(
-                caller_scopes,
-                &AuthorizationPolicy::require("project.write"),
+    if let ProjectExecutionPolicy::LiveDirect { access, .. } = &policy.project {
+        let required_capability = access.required_capability();
+        ryeos_app::execution_policy::authorize_live_project_access(
+            state.authorizer.as_ref(),
+            caller_scopes,
+            *access,
+        )
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "live project execution requires admitted capability `{required_capability}`"
             )
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "live read-write execution requires admitted capability `project.write`"
-                )
-            })?;
+        })?;
     }
     if matches!(
         &policy.project,
@@ -560,11 +549,14 @@ pub(crate) fn preauthorize_execution_policy(
             .authorizer
             .authorize(
                 caller_scopes,
-                &AuthorizationPolicy::require("project.write"),
+                &AuthorizationPolicy::require(
+                    ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
+                ),
             )
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "advance-head publication requires fixed capability `project.write`"
+                    "advance-head publication requires fixed capability `{}`",
+                    ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY
                 )
             })?;
     }

@@ -1211,7 +1211,7 @@ mod tests {
         let live_dir = tempfile::tempdir().unwrap();
         let live_authority = crate::execution_policy::resolve_standard_local_live_authority(
             live_dir.path(),
-            vec!["project.write".to_string()],
+            vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
             &ryeos_engine::isolation::IsolationRuntime::default(),
         )
         .unwrap()

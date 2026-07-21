@@ -83,8 +83,8 @@ impl RuntimeProjectSnapshotService {
             bail!("snapshot callback authority does not match the running thread");
         }
         let required_capability = match request.operation.as_str() {
-            "status" | "log" | "show" => "project.read",
-            "create" => "project.write",
+            "status" | "log" | "show" => crate::execution_policy::LIVE_PROJECT_READ_CAPABILITY,
+            "create" => crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
             other => bail!("unsupported snapshot operation: {other}"),
         };
         state

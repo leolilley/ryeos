@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-11T21:47:38Z:ca3681cdcc0fb1b2d3b9a63c352e9c491bfc746db49d4eaed11ecdd7158679f9:HBluVWK9PSkcQU2IrGbezy/roHQ6J2dyr2K3yKE5EtZeYf0cEXh00tpRYMsy3oFAH3sRki2pibkpNE7MxS5OBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T07:18:25Z:3160d63ccdf7063c3e434d34172ba8607e03aea8c256dd582b3ac970c514f639:WCLyFvMHrW21PG3+mwuFYAeTjYgnKBQ8dqN12WwDlVZOfK8FOoHhjuulNkIXeoAXN+8gnGyQ+Wz/srq0D0C8Bg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
 name: "snapshot-status"
-required_caps: ["project.read"]
+required_caps: ["ryeos.read.project.live"]
 description: "Compare the project worktree with the principal's local snapshot head. The worktree scan is timeboxed by default and returns partial results (scan_complete: false) instead of blocking."
 
 config:

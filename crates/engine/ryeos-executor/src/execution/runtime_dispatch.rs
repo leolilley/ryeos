@@ -684,7 +684,7 @@ mod tests {
         std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR)).unwrap();
         let authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
             project.path(),
-            vec!["project.write".to_string()],
+            vec![ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
             &ryeos_engine::isolation::IsolationRuntime::default(),
         )
         .unwrap()
