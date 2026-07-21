@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T23:11:07Z:7b684ac61b4f38b6b0b47cc15aaeda09020c4b77da972daaf74daf791d3b684e:QmTnTU8QLsEh2DErv8MWeUiiwXZj3JIY4TkXhU9IvFJSP2ysOGNG+2Jvb+bxDXB2jneVfH4e6Svdf65QwT1jAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T08:42:53Z:7b684ac61b4f38b6b0b47cc15aaeda09020c4b77da972daaf74daf791d3b684e:GqWhNxfGYfXHSXZX9ngfQuWTp0Y1jh2bmpHib39atPk/9qgKfehjBj65e01pgYDjf/yW9FqMOfDR0OEs5hAfCw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-invite"

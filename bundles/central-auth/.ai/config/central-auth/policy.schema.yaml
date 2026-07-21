@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T03:58:05Z:9499b5ceb6586f643bf328cc74ed27b6e1915401b5f618ce5c14a735b96185b9:J6XkTU8HnGGlr7Z9LFA3vkbHgP699GbWb6eTrPBC7hlM7j+yq4iWz81br3b9maS/VnMxT3txxlYU2u1NQ4MDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T08:42:53Z:9499b5ceb6586f643bf328cc74ed27b6e1915401b5f618ce5c14a735b96185b9:V4whBdhb7MidOX7K/HpuY8bMxI3lvI7J0q0c7YT2Vs4z9C/ZSkob1l7urYoDoPpf8szn9MxgoPF5bSPkBzqgBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
 category: "central-auth"
 version: "0.1.0"
 description: "JSON-schema-style contract for central-auth realm policies."
