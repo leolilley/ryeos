@@ -367,6 +367,22 @@ pub struct StreamedBlobOutcome {
     pub created: bool,
 }
 
+/// Exact outcome of pruning interrupted streaming blob captures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BlobCapturePruneReport {
+    pub files: usize,
+    pub bytes: u64,
+}
+
+const BLOB_CAPTURE_STAGING_DIRECTORY: &str = ".staging";
+
+/// Whether one CAS namespace child is structural metadata rather than a hash
+/// shard. The CAS layer owns this layout contract; callers must not duplicate
+/// its private directory names.
+pub fn is_reserved_namespace_entry(namespace: &str, entry: &str) -> bool {
+    namespace == "blobs" && entry == BLOB_CAPTURE_STAGING_DIRECTORY
+}
+
 impl CasStore {
     pub fn new(root: PathBuf) -> Self {
         Self {
@@ -387,6 +403,64 @@ impl CasStore {
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Reclaim exact interrupted streaming-capture files.
+    ///
+    /// The caller must exclude concurrent CAS mutation for the full call. An
+    /// unknown entry fails closed rather than being treated as disposable.
+    /// Dry-run opens and validates the existing namespace without creating or
+    /// deleting anything.
+    pub fn prune_abandoned_blob_captures(&self, dry_run: bool) -> Result<BlobCapturePruneReport> {
+        let root = match self.pinned_root.as_ref() {
+            Some(root) => root.try_clone()?,
+            None => match crate::secure_fs::PinnedDirectory::open(&self.root)? {
+                Some(root) => root,
+                None => return Ok(BlobCapturePruneReport::default()),
+            },
+        };
+        let Some(blobs) = root.open_child_directory(OsStr::new("blobs"))? else {
+            return Ok(BlobCapturePruneReport::default());
+        };
+        let staging_name = OsStr::new(BLOB_CAPTURE_STAGING_DIRECTORY);
+        let Some(staging) = blobs.open_child_directory(staging_name)? else {
+            return Ok(BlobCapturePruneReport::default());
+        };
+
+        let mut report = BlobCapturePruneReport::default();
+        for name in staging.entry_names()? {
+            let text = name.to_str().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "non-UTF8 CAS blob capture staging entry under {}",
+                    staging.path().display()
+                )
+            })?;
+            if !is_blob_capture_staging_name(text) {
+                anyhow::bail!(
+                    "unexpected CAS blob capture staging entry: {}",
+                    staging.path().join(&name).display()
+                );
+            }
+            let file = staging.open_regular(&name, false)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "CAS blob capture staging entry is not a regular file: {}",
+                    staging.path().join(&name).display()
+                )
+            })?;
+            let size = file.metadata()?.len();
+            if !dry_run {
+                staging.remove_if_same(&name, &file)?;
+            }
+            report.files += 1;
+            report.bytes = report.bytes.saturating_add(size);
+        }
+        if !dry_run && !blobs.remove_empty_child_if_same(staging_name, &staging)? {
+            anyhow::bail!(
+                "CAS blob capture staging directory changed during cleanup: {}",
+                staging.path().display()
+            );
+        }
+        Ok(report)
     }
 
     /// Return whether a verified blob exists. A malformed hash is absent;
@@ -549,7 +623,8 @@ impl CasStore {
                 None => crate::secure_fs::PinnedDirectory::open_or_create(&self.root)?,
             };
             let blobs = root.open_or_create_child(OsStr::new("blobs"), 0o777)?;
-            let staging = blobs.open_or_create_child(OsStr::new(".staging"), 0o700)?;
+            let staging =
+                blobs.open_or_create_child(OsStr::new(BLOB_CAPTURE_STAGING_DIRECTORY), 0o700)?;
             let staging_name = OsString::from(format!(
                 "capture.{}.{}.tmp",
                 std::process::id(),
@@ -737,6 +812,23 @@ impl CasStore {
         )?;
         Ok(CasPutOutcome { hash, created })
     }
+}
+
+fn is_blob_capture_staging_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("capture.") else {
+        return false;
+    };
+    let Some(rest) = rest.strip_suffix(".tmp") else {
+        return false;
+    };
+    let Some((pid, sequence)) = rest.split_once('.') else {
+        return false;
+    };
+    !pid.is_empty()
+        && !sequence.is_empty()
+        && !sequence.contains('.')
+        && pid.bytes().all(|byte| byte.is_ascii_digit())
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn verify_existing_streamed_entry(

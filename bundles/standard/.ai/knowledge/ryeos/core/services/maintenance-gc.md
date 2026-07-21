@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-21T01:18:25Z:bca6ac720e1af6f542f8f138fb5a2a7fe885839928e7383d5aa103291b62f820:Ns1BY3Q/T0ketMOSr8KgG81JChmtp+ahP5MTPWNOhY2hKTN0oCZ0qBVkggH7jJ77jG32pXrqWGUBpLTkZ+YACA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T01:43:57Z:16118306c1d6a2a198ad1d5c076abe69f5717342d5a25fd02672d3bbf40f4399:nBvt9+ZWKPg8l4BB5ZfWZ38uViEPqa38H7iGvLoFnstgRfMpEMux4A6sVKRV0x8PVbCi+MNAcDS5ev3aIBA6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core/services
@@ -186,11 +186,13 @@ without extension):
 This prevents accumulation of empty directories from deleted objects.
 
 An interrupted atomic CAS publication may leave a private staging file beside
-its final hash. Sweep recognizes only the exact filename grammar emitted by the
-current atomic writer, verifies that its embedded hash belongs in that shard,
-and reclaims it while holding the exclusive CAS mutation guard. Any other leaf
-name remains a hard error; GC does not broaden this into a wildcard temp-file
-fallback.
+its final hash. Streaming file capture may likewise leave an unpublished file
+in the CAS-owned blob-capture namespace. Sweep asks the CAS layer to validate
+and reclaim the latter, skips that declared structural namespace while walking
+hash shards, and recognizes only the exact filename grammar emitted by the
+current atomic writer for the former. Embedded hashes must belong in their
+canonical shard. Any other entry remains a hard error; GC does not broaden this
+into a wildcard temp-file fallback.
 
 ## Deep Materialization Cleanup
 

@@ -426,6 +426,13 @@ pub fn run_gc_with_pinned_authority(
                 .context("retire abandoned durable CAS upload stages")?;
         }
     }
+    let capture_cleanup = cas
+        .prune_abandoned_blob_captures(params.dry_run)
+        .context("prune interrupted streaming CAS blob captures")?;
+    result.deleted_cas_staging_files = result
+        .deleted_cas_staging_files
+        .saturating_add(capture_cleanup.files);
+    result.freed_bytes = result.freed_bytes.saturating_add(capture_cleanup.bytes);
     let staged_roots = match (recovery, params.dry_run) {
         (Some(recovery), true) => recovery.inspect_staged_cas_root_hashes_read_only()?,
         (Some(recovery), false) => recovery.active_staged_cas_root_hashes()?,
@@ -571,6 +578,17 @@ fn sweep_sharded_directory(
         let shard1_text = shard1_name
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("non-UTF8 CAS shard under {}", dir.display()))?;
+        if lillux::cas::is_reserved_namespace_entry(namespace, shard1_text) {
+            namespace_dir
+                .open_child_directory(&shard1_name)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "reserved CAS namespace entry is not a directory: {}",
+                        namespace_dir.path().join(&shard1_name).display()
+                    )
+                })?;
+            continue;
+        }
         validate_cas_shard_component(shard1_text, &dir)?;
         let shard1 = namespace_dir
             .open_child_directory(&shard1_name)?
