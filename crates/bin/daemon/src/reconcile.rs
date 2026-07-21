@@ -149,11 +149,12 @@ fn is_pending_follow_child(state: &AppState, thread: &ThreadDetail) -> Result<bo
         return Ok(false);
     }
     if serde_json::to_value(sealed)? != serde_json::to_value(&slot.sealed_root_request)? {
-        anyhow::bail!(
-            "follow child {} sealed launch authority differs from waiter {} slot",
-            thread.thread_id,
-            waiter.follow_key
+        tracing::error!(
+            thread_id = %thread.thread_id,
+            follow_key = %waiter.follow_key,
+            "follow child sealed launch authority differs from waiter slot; refusing recovery relaunch"
         );
+        return Ok(false);
     }
     Ok(true)
 }
@@ -299,6 +300,7 @@ enum ActiveReconcileMode {
 /// `FinalizeExhausted` / orphan branches share identical bookkeeping.
 fn finalize_dead(
     state: &AppState,
+    mode: ActiveReconcileMode,
     thread_id: &str,
     pgid: Option<i64>,
     prior_status: &str,
@@ -309,8 +311,19 @@ fn finalize_dead(
         Some((code, val)) => (code, Some(val)),
         None => ("daemon_reconciled", None),
     };
+    let (message, recovery_mode) = match mode {
+        ActiveReconcileMode::Startup => (
+            "thread remained non-terminal across daemon restart and its process is dead",
+            "startup",
+        ),
+        ActiveReconcileMode::Live => (
+            "thread has no live process or current launch owner during periodic recovery",
+            "live",
+        ),
+    };
     let mut error_obj = serde_json::json!({
-        "message": "thread in non-terminal state after daemon restart; process is dead",
+        "message": message,
+        "recovery_mode": recovery_mode,
         "reconciled_from_status": prior_status,
         "pgid": pgid,
     });
@@ -554,6 +567,35 @@ async fn reconcile_active_threads_inner(
                     "revoked a current-daemon owner whose exact runtime remained dead past the settlement grace"
                 );
             }
+
+            // A follow-resume successor is born `created` and deliberately
+            // remains unattached while the followed child runs. Its signed
+            // continuation edge is the durable ownership proof during that
+            // interval, including the narrow window before the operational
+            // waiter records `parent_successor_thread_id`. Startup recovery may
+            // classify it after the previous daemon generation is gone; a live
+            // sweep must leave it to the follow coordinator.
+            if thread.status == ryeos_state::objects::ThreadStatus::Created.as_str()
+                && identity.is_none()
+            {
+                if let Some(upstream_id) = thread.upstream_thread_id.as_deref() {
+                    match state
+                        .state_store
+                        .is_follow_resume_successor(upstream_id, &thread.thread_id)
+                    {
+                        Ok(true) => {
+                            tracing::debug!(
+                                thread_id = %thread.thread_id,
+                                upstream_thread_id = %upstream_id,
+                                "live follow-resume successor remains owned by the follow coordinator"
+                            );
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
         }
 
         // Explicit cancellation/kill intent survives a daemon crash. Recover it
@@ -775,6 +817,7 @@ async fn reconcile_active_threads_inner(
                 state.state_store.clear_recovery_wait(&thread.thread_id)?;
                 finalize_dead(
                     state,
+                    mode,
                     &thread.thread_id,
                     pgid,
                     &thread.status,
@@ -806,6 +849,7 @@ async fn reconcile_active_threads_inner(
                     if now_ms >= wait.deadline_at_ms {
                         finalize_dead(
                             state,
+                            mode,
                             &thread.thread_id,
                             pgid,
                             &thread.status,
@@ -960,6 +1004,10 @@ async fn reconcile_active_threads_inner(
         if thread.status == ThreadStatus::Created.as_str()
             && thread.upstream_thread_id.is_none()
             && thread.runtime.pgid.is_none()
+            && state
+                .state_store
+                .get_follow_waiter_by_child_chain(&thread.chain_root_id)?
+                .is_none()
             && thread.admitted_launch_capsule_hash.is_some()
             && thread
                 .runtime
@@ -1026,6 +1074,7 @@ async fn reconcile_active_threads_inner(
                 );
                 finalize_dead(
                     state,
+                    mode,
                     &thread.thread_id,
                     pgid,
                     &thread.status,
@@ -1057,6 +1106,7 @@ async fn reconcile_active_threads_inner(
                 );
                 finalize_dead(
                     state,
+                    mode,
                     &thread.thread_id,
                     pgid,
                     &thread.status,
@@ -1075,6 +1125,7 @@ async fn reconcile_active_threads_inner(
                 );
                 finalize_dead(
                     state,
+                    mode,
                     &thread.thread_id,
                     pgid,
                     &thread.status,
@@ -1094,6 +1145,7 @@ async fn reconcile_active_threads_inner(
                 );
                 finalize_dead(
                     state,
+                    mode,
                     &thread.thread_id,
                     pgid,
                     &thread.status,
@@ -1117,6 +1169,7 @@ async fn reconcile_active_threads_inner(
                     );
                     finalize_dead(
                         state,
+                        mode,
                         &thread.thread_id,
                         pgid,
                         &thread.status,

@@ -153,12 +153,16 @@ fi
 NO_COLOR=1 TERM=xterm COLUMNS=20 RYEOS_TTY=always bash -c \
     'source "$1"; ryeos_term_init; ryeos_term_begin RUN "a deliberately long narrow-terminal label"; ryeos_term_cleanup' \
     _ "$helper" 2>"$tmp/narrow"
-assert_terminal_frames_fit "$tmp/narrow" 20 narrow
+assert_terminal_frames_fit "$tmp/narrow" 19 narrow
 
 NO_COLOR=1 TERM=xterm COLUMNS=40 RYEOS_TTY=always bash -c \
     'source "$1"; ryeos_term_init; ryeos_term_begin VERIFY "界界界界界界界界界界界界界界界界"; ryeos_term_update "界界界界界界界界界界界界界界界界" detail; ryeos_term_cleanup' \
     _ "$helper" 2>"$tmp/wide-cells"
-assert_terminal_frames_fit "$tmp/wide-cells" 40 wide
+assert_terminal_frames_fit "$tmp/wide-cells" 39 wide
+
+NO_COLOR=1 TERM=xterm RYEOS_TTY=always COLUMNS= bash -c \
+    'source "$1"; _ryeos_term_detect_columns() { printf 47; }; ryeos_term_init; [[ "$_RYEOS_TERM_WIDTH" == 46 ]]' \
+    _ "$helper"
 
 if command -v script >/dev/null 2>&1; then
     TERM=xterm RYEOS_TTY=auto script -qec \
