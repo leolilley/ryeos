@@ -2675,6 +2675,13 @@ struct PreparedSuccessorLaunch {
     thread_id: String,
     mode: SuccessorMode,
     source_thread_id: Option<String>,
+    /// Fresh successors reserve their launch owner before the state-store
+    /// birth makes the `created` row observable. The owned claim then crosses
+    /// the daemon task queue inside this carrier, so live reconciliation can
+    /// never mistake queue latency for an abandoned launch. Existing-row retry
+    /// preparations leave this empty and claim the already-published row at
+    /// launch time.
+    launch_claim: Option<ThreadLaunchClaim>,
     resume_context: ryeos_app::launch_metadata::ResumeContext,
     execution: crate::execution::runner::ExecutionParams,
     launch_metadata: ryeos_app::launch_metadata::RuntimeLaunchMetadata,
@@ -3043,6 +3050,7 @@ async fn prepare_successor_launch(
         thread_id: successor_thread_id.to_string(),
         mode,
         source_thread_id: previous_thread_id.map(str::to_owned),
+        launch_claim: None,
         resume_context: prepared_resume,
         execution,
         launch_metadata,
@@ -3070,17 +3078,20 @@ pub async fn prepare_operator_successor_launch(
         .continuation_successor_seed(resume.clone())
         .with_continuation_source(source_thread_id)
         .with_sealed_root_request(sealed);
-    Ok(PreparedOperatorSuccessorLaunch {
-        prepared: prepare_successor_launch(
-            state,
-            successor_thread_id,
-            resume,
-            SuccessorMode::Operator,
-            Some(source_thread_id),
-            Some(&successor_metadata),
-        )
-        .await?,
-    })
+    let mut prepared = prepare_successor_launch(
+        state,
+        successor_thread_id,
+        resume,
+        SuccessorMode::Operator,
+        Some(source_thread_id),
+        Some(&successor_metadata),
+    )
+    .await?;
+    prepared.launch_claim = Some(
+        ThreadLaunchClaim::acquire_fresh(state, successor_thread_id)
+            .map_err(BuildAndLaunchError::Internal)?,
+    );
+    Ok(PreparedOperatorSuccessorLaunch { prepared })
 }
 
 /// Reprepare a stranded operator successor against its actual durable ID and
@@ -3145,6 +3156,10 @@ pub async fn prepare_machine_successor_launch(
     prepared.launch_metadata =
         std::mem::take(&mut prepared.launch_metadata).with_resume_context(resume.clone());
     prepared.authority.launch_metadata = Some(prepared.launch_metadata.clone());
+    prepared.launch_claim = Some(
+        ThreadLaunchClaim::acquire_fresh(state, successor_thread_id)
+            .map_err(BuildAndLaunchError::Internal)?,
+    );
 
     Ok(PreparedMachineSuccessorLaunch { prepared })
 }
@@ -3154,15 +3169,17 @@ pub async fn prepare_machine_successor_launch(
 pub async fn launch_prepared_operator_successor(
     state: AppState,
     successor_id: &str,
-    prepared: PreparedOperatorSuccessorLaunch,
+    mut prepared: PreparedOperatorSuccessorLaunch,
     launch_handoff: &LaunchHandoff,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    let result = launch_successor_inner(
+    let prepared_claim = prepared.prepared.launch_claim.take();
+    let result = launch_successor_inner_with_claim(
         state,
         successor_id,
         SuccessorMode::Operator,
         Some(launch_handoff),
         Some(prepared.prepared),
+        prepared_claim,
     )
     .await;
     match &result {
@@ -3204,14 +3221,16 @@ pub async fn launch_prepared_operator_successor(
 pub async fn launch_prepared_machine_successor(
     state: AppState,
     successor_id: &str,
-    prepared: PreparedMachineSuccessorLaunch,
+    mut prepared: PreparedMachineSuccessorLaunch,
 ) -> Result<SuccessorLaunchOutcome, BuildAndLaunchError> {
-    launch_successor_inner(
+    let prepared_claim = prepared.prepared.launch_claim.take();
+    launch_successor_inner_with_claim(
         state,
         successor_id,
         SuccessorMode::Machine,
         None,
         Some(prepared.prepared),
+        prepared_claim,
     )
     .await
 }

@@ -157,5 +157,10 @@ bundles/*/PUBLISHER_TRUST.toml
 # Publisher coordination only: not bundle content, CAS state, or dependency locks.
 bundles/.publisher-locks/
 
+# Private sibling generations used for atomic source-bundle publication.
+# A cancelled publisher may leave the prior generation here; the next publish
+# reclaims it under the bundle's publisher lock.
+bundles/.*.publish-staging/
+
 # Local daemon state from dev/test runs
 .local/

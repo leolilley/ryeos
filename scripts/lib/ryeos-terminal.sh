@@ -57,6 +57,19 @@ _ryeos_term_elapsed() {
     fi
 }
 
+_ryeos_term_detect_columns() {
+    local detected=""
+    if [[ "${COLUMNS:-}" =~ ^[0-9]+$ ]] && (( COLUMNS >= 2 )); then
+        detected="$COLUMNS"
+    elif [[ "$_RYEOS_TERM_MODE" == tty ]] && command -v tput >/dev/null 2>&1; then
+        detected="$(tput cols 2>/dev/null || true)"
+    fi
+    if [[ ! "$detected" =~ ^[0-9]+$ ]] || (( detected < 2 )); then
+        detected=80
+    fi
+    printf '%s' "$detected"
+}
+
 _ryeos_term_stop_spinner() {
     local pid="$_RYEOS_TERM_SPINNER_PID"
     _RYEOS_TERM_SPINNER_PID=""
@@ -164,10 +177,13 @@ ryeos_term_init() {
         _RYEOS_TERM_UNICODE=0
         _RYEOS_TERM_COLOR=0
     fi
-    if [[ "${COLUMNS:-}" =~ ^[0-9]+$ ]] && (( COLUMNS >= 20 )); then
-        _RYEOS_TERM_WIDTH="$COLUMNS"
-    else
-        _RYEOS_TERM_WIDTH=80
+    _RYEOS_TERM_WIDTH="$(_ryeos_term_detect_columns)"
+    if [[ "$_RYEOS_TERM_MODE" == tty ]]; then
+        # Never paint the terminal's final cell. Printing into the last column
+        # sets autowrap on common terminals, so the next carriage-return repaint
+        # starts on a fresh physical line and every spinner frame pollutes
+        # scrollback. One reserved cell keeps the rich renderer in-place.
+        _RYEOS_TERM_WIDTH=$(( _RYEOS_TERM_WIDTH - 1 ))
     fi
     if [[ "$_RYEOS_TERM_TRAPS" == 0 ]]; then
         _ryeos_term_capture_trap EXIT _RYEOS_TERM_PREV_EXIT

@@ -870,8 +870,9 @@ fn handle_get(params: &serde_json::Value, state: &AppState) -> Result<serde_json
 ///
 /// Spawned daemon-side (NOT from the dying runtime — a lifecycle hazard) after
 /// the source is settled `continued` and the state-store write lock has dropped.
-/// The prepared launcher claims the launch lease, so a concurrent reconcile
-/// cannot double-launch the same successor.
+/// The prepared carrier already owns the launch claim reserved before the
+/// successor became visible, so queue latency cannot expose an unshielded
+/// `created` row to live reconciliation.
 fn spawn_machine_continuation_launch(
     state: &AppState,
     result: &serde_json::Value,

@@ -101,11 +101,11 @@ mod integration_tests {
         upstream: Option<&str>,
     ) -> NewThreadRecord {
         let mut thread = make_thread(thread_id, chain_root_id, kind, item_ref, upstream);
-        let project_root = std::path::PathBuf::from("/tmp/p");
+        let project_root = std::env::temp_dir();
         thread.project_root = Some(project_root.clone());
         thread.project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
-            project_root,
-            "local:/tmp/p".to_string(),
+            project_root.clone(),
+            format!("local:{}", project_root.display()),
             ryeos_state::objects::LiveProjectAccess::ReadWrite,
             ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
             ryeos_state::objects::EnvironmentAuthority::None,
@@ -299,11 +299,11 @@ mod integration_tests {
                         launch_mode: "wait".into(),
                         parameters: serde_json::json!({}),
                         project_context: ProjectContext::LocalPath {
-                            path: std::path::PathBuf::from("/tmp/p"),
+                            path: std::env::temp_dir(),
                         },
                         project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
-                            std::path::PathBuf::from("/tmp/p"),
-                            "local:/tmp/p".to_string(),
+                            std::env::temp_dir(),
+                            format!("local:{}", std::env::temp_dir().display()),
                             ryeos_state::objects::LiveProjectAccess::ReadWrite,
                             ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                             ryeos_state::objects::EnvironmentAuthority::None,
@@ -314,12 +314,61 @@ mod integration_tests {
                             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
                         stable_project_identity: Some(
                             ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                                std::path::Path::new("/tmp/p"),
+                                &std::env::temp_dir(),
                                 "site:test",
                             )
                             .unwrap(),
                         ),
-                        local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
+                        local_overlay_root: Some(std::env::temp_dir()),
+                        original_snapshot_hash: None,
+                        original_pushed_head_ref: None,
+                        state_root: None,
+                        current_site_id: "site:test".into(),
+                        origin_site_id: "site:test".into(),
+                        requested_by: EffectivePrincipal::Local(Principal {
+                            fingerprint: "fp".into(),
+                            scopes: vec![],
+                        }),
+                        execution_hints: ExecutionHints::default(),
+                        effective_caps: vec![],
+                        parent_delegation_caps: None,
+                        executor_ref: None,
+                        runtime_ref: None,
+                    }),
+            )
+            .unwrap();
+    }
+
+    fn seed_projectless_continuable(store: &StateStore, id: &str, kind: &str) {
+        use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
+        use ryeos_engine::contracts::{
+            EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+        };
+        let item_ref = match kind {
+            "directive" => "directive:test/item",
+            "graph" => "graph:test/graph",
+            other => panic!("unsupported continuable fixture kind: {other}"),
+        };
+        store.mark_thread_running(id, None).unwrap();
+        store
+            .seed_launch_metadata(
+                id,
+                &RuntimeLaunchMetadata::default()
+                    .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                    .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
+                    .with_resume_context(ResumeContext {
+                        kind: kind.into(),
+                        item_ref: item_ref.into(),
+                        ref_bindings: std::collections::BTreeMap::new(),
+                        launch_mode: "wait".into(),
+                        parameters: serde_json::json!({}),
+                        project_context: ProjectContext::None,
+                        project_authority:
+                            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+                        lifecycle_authority:
+                            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+                        stable_project_identity: None,
+                        local_overlay_root: None,
                         original_snapshot_hash: None,
                         original_pushed_head_ref: None,
                         state_root: None,
@@ -344,15 +393,9 @@ mod integration_tests {
         let (_tmp, store) = setup_state_store();
         // Running parent with captured launch identity.
         store
-            .create_thread_for_test(&make_project_thread(
-                "P",
-                "P",
-                "graph",
-                "graph:test/graph",
-                None,
-            ))
+            .create_thread_for_test(&make_thread("P", "P", "graph", "graph:test/graph", None))
             .unwrap();
-        seed_continuable(&store, "P", "graph");
+        seed_projectless_continuable(&store, "P", "graph");
 
         // The ordered spawn sequence, as the handler drives it.
         store
@@ -366,11 +409,16 @@ mod integration_tests {
         // Parent follow-resume successor: created (not launched), settles parent.
         store
             .create_follow_resume_successor(
-                &make_project_thread("S", "P", "graph", "graph:test/graph", Some("P")),
+                &make_thread("S", "P", "graph", "graph:test/graph", Some("P")),
                 "P",
                 "P",
             )
             .unwrap();
+        // The signed continuation edge is committed with successor birth,
+        // before the operational waiter is linked. Live recovery uses this as
+        // the zero-gap ownership proof while the child is still running.
+        assert!(store.is_follow_resume_successor("P", "S").unwrap());
+        assert!(store.get_follow_waiter_by_successor("S").unwrap().is_none());
         store
             .set_follow_parent_successor("P/gr-1/node-a/0", "S")
             .unwrap();
@@ -1231,6 +1279,60 @@ mod integration_tests {
     }
 
     #[test]
+    fn machine_continuation_birth_preserves_prepublication_launch_claim() {
+        let (_tmpdir, store) = setup_state_store();
+        let source_id = "T-mc-claimed-source";
+        let successor_id = "T-mc-claimed-successor";
+        store
+            .create_thread_for_test(&make_thread(
+                source_id,
+                source_id,
+                "directive",
+                "directive:test/item",
+                None,
+            ))
+            .expect("create source");
+        seed_projectless_continuable(&store, source_id, "directive");
+
+        assert_eq!(
+            store
+                .reserve_fresh_thread_launch(successor_id, "claim-before-birth", "daemon:test")
+                .expect("reserve successor launch before publication"),
+            ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
+        );
+        assert!(store
+            .get_thread(successor_id)
+            .expect("inspect unpublished successor")
+            .is_none());
+
+        store
+            .create_machine_continuation(
+                &make_thread(
+                    successor_id,
+                    source_id,
+                    "directive",
+                    "directive:test/item",
+                    Some(source_id),
+                ),
+                source_id,
+                source_id,
+                Some("turn_limit"),
+            )
+            .expect("publish claimed machine successor");
+
+        let successor = store
+            .get_thread(successor_id)
+            .expect("read successor")
+            .expect("successor was published");
+        assert_eq!(successor.status, "created");
+        let claim = store
+            .get_launch_claim(successor_id)
+            .expect("read successor claim")
+            .expect("prepublication claim survives successor birth");
+        assert_eq!(claim.claim_id, "claim-before-birth");
+    }
+
+    #[test]
     fn prepared_machine_successor_cannot_drop_source_execution_policy() {
         use ryeos_app::launch_metadata::RuntimeLaunchMetadata;
 
@@ -1415,11 +1517,11 @@ mod integration_tests {
             launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
-                path: std::path::PathBuf::from("/tmp/p"),
+                path: std::env::temp_dir(),
             },
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
-                std::path::PathBuf::from("/tmp/p"),
-                "local:/tmp/p".to_string(),
+                std::env::temp_dir(),
+                format!("local:{}", std::env::temp_dir().display()),
                 ryeos_state::objects::LiveProjectAccess::ReadWrite,
                 ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                 ryeos_state::objects::EnvironmentAuthority::None,
@@ -1430,12 +1532,12 @@ mod integration_tests {
                 ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             stable_project_identity: Some(
                 ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                    std::path::Path::new("/tmp/p"),
+                    &std::env::temp_dir(),
                     "site:test",
                 )
                 .unwrap(),
             ),
-            local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
+            local_overlay_root: Some(std::env::temp_dir()),
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -1555,11 +1657,11 @@ mod integration_tests {
             launch_mode: "wait".into(),
             parameters: serde_json::json!({}),
             project_context: ProjectContext::LocalPath {
-                path: std::path::PathBuf::from("/tmp/p"),
+                path: std::env::temp_dir(),
             },
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::live(
-                std::path::PathBuf::from("/tmp/p"),
-                "local:/tmp/p".to_string(),
+                std::env::temp_dir(),
+                format!("local:{}", std::env::temp_dir().display()),
                 ryeos_state::objects::LiveProjectAccess::ReadWrite,
                 ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                 ryeos_state::objects::EnvironmentAuthority::None,
@@ -1570,12 +1672,12 @@ mod integration_tests {
                 ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
             stable_project_identity: Some(
                 ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                    std::path::Path::new("/tmp/p"),
+                    &std::env::temp_dir(),
                     "site:test",
                 )
                 .unwrap(),
             ),
-            local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
+            local_overlay_root: Some(std::env::temp_dir()),
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,

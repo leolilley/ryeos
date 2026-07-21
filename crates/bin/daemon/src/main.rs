@@ -1550,11 +1550,18 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
         let durable_window_owner = state
             .state_store
             .launch_window_is_member(&thread.chain_root_id)?;
+        let durable_follow_resume_edge = match thread.upstream_thread_id.as_deref() {
+            Some(upstream_id) => state
+                .state_store
+                .is_follow_resume_successor(upstream_id, thread_id)?,
+            None => false,
+        };
         if status.is_terminal()
             || live_owned_process
             || state.state_store.get_launch_claim(thread_id)?.is_some()
             || thread.runtime.recovery_wait.is_some()
             || durable_follow_owner
+            || durable_follow_resume_edge
             || durable_window_owner
         {
             continue;
@@ -1567,9 +1574,9 @@ fn ensure_recovery_targets_classified(state: &AppState, targets: &BTreeSet<Strin
 }
 
 /// Drive follow reconcile actions during the periodic live sweep. Every launch
-/// is claim-guarded, so concurrent drives are benign skips; real failures are
-/// propagated to the supervised recovery task instead of becoming log-only
-/// stranded work.
+/// is claim-guarded, so concurrent drives are benign skips. A real action
+/// failure fails this pass loudly; the outer periodic loop isolates that pass
+/// from daemon availability and retries against the durable state later.
 async fn dispatch_follow_actions(
     state: &AppState,
     actions: Vec<reconcile::FollowReconcileAction>,
@@ -1622,54 +1629,63 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             _ = tick.tick() => {}
         }
 
-        ryeos_app::cascade::repair_cancelled_window_members(&state)
-            .context("periodic cancelled launch-window repair")?;
-
-        let active = reconcile::reconcile_live_threads(&state)
-            .await
-            .context("periodic active-thread reconcile")?;
-        let mut targets = active.active_thread_ids;
-        dispatch_resume_intents(&state, active.resume_intents)
-            .await
-            .context("periodic active-thread recovery dispatch")?;
-
-        let follow_actions =
-            reconcile::reconcile_follow(&state).context("periodic follow reconcile")?;
-        for action in &follow_actions {
-            match action {
-                reconcile::FollowReconcileAction::Resume { follow_key } => {
-                    let waiter = state
-                        .state_store
-                        .get_follow_waiter_by_key(follow_key)?
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("periodic follow waiter disappeared: {follow_key}")
-                        })?;
-                    if let Some(successor) = waiter.parent_successor_thread_id {
-                        targets.insert(successor);
-                    }
-                }
-                reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
-                    targets.insert(child_thread_id.clone());
-                }
-            }
-        }
-        dispatch_follow_actions(&state, follow_actions).await?;
-
-        for (child_thread_id, outcome) in
-            ryeos_executor::execution::launch::prepare_launch_window_recovery(&state)
-                .context("periodic launch-window recovery")?
-        {
-            targets.insert(child_thread_id.clone());
-            tracing::info!(
-                child_thread_id,
-                ?outcome,
-                "periodic launch-window recovery classified"
+        if let Err(error) = run_periodic_recovery_pass(&state).await {
+            tracing::error!(
+                error = %error,
+                "periodic recovery pass failed; durable recovery state preserved and daemon remains available"
             );
         }
-
-        ensure_recovery_targets_classified(&state, &targets)
-            .context("periodic recovery ownership boundary")?;
     }
+}
+
+async fn run_periodic_recovery_pass(state: &AppState) -> Result<()> {
+    ryeos_app::cascade::repair_cancelled_window_members(state)
+        .context("periodic cancelled launch-window repair")?;
+
+    let active = reconcile::reconcile_live_threads(state)
+        .await
+        .context("periodic active-thread reconcile")?;
+    let mut targets = active.active_thread_ids;
+    dispatch_resume_intents(state, active.resume_intents)
+        .await
+        .context("periodic active-thread recovery dispatch")?;
+
+    let follow_actions = reconcile::reconcile_follow(state).context("periodic follow reconcile")?;
+    for action in &follow_actions {
+        match action {
+            reconcile::FollowReconcileAction::Resume { follow_key } => {
+                let waiter = state
+                    .state_store
+                    .get_follow_waiter_by_key(follow_key)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("periodic follow waiter disappeared: {follow_key}")
+                    })?;
+                if let Some(successor) = waiter.parent_successor_thread_id {
+                    targets.insert(successor);
+                }
+            }
+            reconcile::FollowReconcileAction::RelaunchChild { child_thread_id } => {
+                targets.insert(child_thread_id.clone());
+            }
+        }
+    }
+    dispatch_follow_actions(state, follow_actions).await?;
+
+    for (child_thread_id, outcome) in
+        ryeos_executor::execution::launch::prepare_launch_window_recovery(state)
+            .context("periodic launch-window recovery")?
+    {
+        targets.insert(child_thread_id.clone());
+        tracing::info!(
+            child_thread_id,
+            ?outcome,
+            "periodic launch-window recovery classified"
+        );
+    }
+
+    ensure_recovery_targets_classified(state, &targets)
+        .context("periodic recovery ownership boundary")?;
+    Ok(())
 }
 
 async fn run_ui_hint_loop(hub: Arc<ThreadEventHub>, ui: Arc<ryeos_ui::UiState>) -> Result<()> {
