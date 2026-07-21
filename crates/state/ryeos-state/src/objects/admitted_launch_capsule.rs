@@ -1,3 +1,4 @@
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -5,7 +6,7 @@ use super::{
     ExecutionProjectAuthority, ExecutionRecoveryAuthority,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 1;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
@@ -187,6 +188,37 @@ pub struct AdmittedLaunchCapsule {
 }
 
 impl AdmittedLaunchCapsule {
+    /// Decode only the exact current CAS wire contract.
+    ///
+    /// Inspecting the outer identity first ensures a predecessor nested
+    /// authority is rejected as an old capsule, before serde interprets any
+    /// of its fields.
+    pub fn from_current_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("admitted launch capsule must be an object"))?;
+        let kind = object
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("admitted launch capsule has no string kind"))?;
+        if kind != "admitted_launch_capsule" {
+            anyhow::bail!("unexpected admitted launch capsule kind: {kind}");
+        }
+        let schema = object
+            .get("schema")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("admitted launch capsule has no numeric schema"))?;
+        if schema != u64::from(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION) {
+            anyhow::bail!(
+                "admitted launch capsule is not the exact current contract: stored schema={schema}, current schema={ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION}"
+            );
+        }
+        let capsule: Self =
+            serde_json::from_value(value).context("deserialize current admitted launch capsule")?;
+        capsule.validate()?;
+        Ok(capsule)
+    }
+
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.schema != ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
             || self.kind != "admitted_launch_capsule"
@@ -435,6 +467,56 @@ mod tests {
         });
         capsule.validate().unwrap();
         assert_eq!(capsule.content_hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn current_decoder_rejects_predecessor_epoch_before_nested_authority_decode() {
+        let mut value = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        let object = value.as_object_mut().unwrap();
+        object.insert(
+            "schema".to_string(),
+            serde_json::json!(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION - 1),
+        );
+        object.insert(
+            "project_authority".to_string(),
+            serde_json::json!({"authority": "predecessor_shape"}),
+        );
+
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            error.to_string().contains("not the exact current contract"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn current_decoder_accepts_valid_current_capsule() {
+        let expected = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+            content_hash: "f".repeat(64),
+        });
+        let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn current_decoder_requires_numeric_epoch_before_typed_decode() {
+        let mut value = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value.as_object_mut().unwrap().insert(
+            "schema".to_string(),
+            serde_json::json!(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION.to_string()),
+        );
+
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            error.to_string().contains("no numeric schema"),
+            "unexpected error: {error:#}"
+        );
     }
 
     #[test]

@@ -16,10 +16,10 @@ use crate::canonical_ref::CanonicalRef;
 use crate::error::EngineError;
 use crate::trust::TrustStore;
 use ryeos_isolation_protocol::{
-    AdapterLaunchRequest, AdapterWorkspaceRequest, AdapterWorkspaceResponse,
-    IsolationAdapterProtocolVersion, IsolationAuthority, IsolationAuthorityId,
-    IsolationAuthorityPurpose, IsolationDeviceSurface, IsolationEnvironment, IsolationMount,
-    IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPlan,
+    AdapterLaunchLifecycle, AdapterLaunchRequest, AdapterWorkspaceRequest,
+    AdapterWorkspaceResponse, IsolationAdapterProtocolVersion, IsolationAuthority,
+    IsolationAuthorityId, IsolationAuthorityPurpose, IsolationDeviceSurface, IsolationEnvironment,
+    IsolationMount, IsolationMountAccess, IsolationNetwork, IsolationPath, IsolationPlan,
     IsolationProjectWorkspace, IsolationTarget, WorkspaceLifecycleOperation,
 };
 
@@ -41,7 +41,10 @@ pub use policy::{
     ISOLATION_POLICY_VERSION,
 };
 use provenance::redacted_plan_digest;
-pub use provenance::{AppliedIsolationLaunch, IsolationLaunchProvenance};
+pub use provenance::{
+    AppliedIsolationLaunch, AppliedIsolationLaunchAwaitingAttachment, IsolationLaunchProvenance,
+    IsolationRequestAwaitingAttachment,
+};
 
 const VERIFIED_CODE_ISOLATION_ROOT: &str = "/run/ryeos/verified-code";
 
@@ -49,6 +52,17 @@ const VERIFIED_CODE_ISOLATION_ROOT: &str = "/run/ryeos/verified-code";
 enum IsolationRuntimeState {
     Disabled,
     Enforced,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedLaunchLifecycle {
+    Run,
+    AwaitAttachment,
+}
+
+struct CompiledIsolationLaunch {
+    request: lillux::SubprocessRequest,
+    provenance: IsolationLaunchProvenance,
 }
 
 /// Higher-level guard that binds a composed runtime to the exact registered
@@ -887,7 +901,7 @@ impl IsolationRuntime {
                 },
             ];
             let request = AdapterWorkspaceRequest {
-                protocol: IsolationAdapterProtocolVersion::V3,
+                protocol: IsolationAdapterProtocolVersion::V1,
                 operation,
                 workspace_id: workspace_id.to_string(),
                 launch_owner: launch_owner.to_string(),
@@ -1172,28 +1186,114 @@ impl IsolationRuntime {
         context: IsolationLaunchContext<'_>,
     ) -> Result<AppliedIsolationLaunch, EngineError> {
         self.ensure_registered_generation_current()?;
-        let applied = self.apply_with_provenance_current(request, context)?;
+        let applied =
+            self.apply_with_provenance_current(request, context, RequestedLaunchLifecycle::Run)?;
         self.ensure_registered_generation_current()?;
-        Ok(applied)
+        Ok(AppliedIsolationLaunch {
+            request: applied.request,
+            provenance: applied.provenance,
+        })
+    }
+
+    /// Compile a launch that must be durably attached before target execution.
+    ///
+    /// Even when isolation is disabled, the distinct return type preserves the
+    /// attachment requirement for Lillux's direct-process implementation.
+    pub fn apply_awaiting_attachment(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+    ) -> Result<IsolationRequestAwaitingAttachment, EngineError> {
+        self.apply_awaiting_attachment_with_provenance(request, context)
+            .map(|applied| applied.request)
+    }
+
+    pub fn apply_awaiting_attachment_with_provenance(
+        &self,
+        request: lillux::SubprocessRequest,
+        context: IsolationLaunchContext<'_>,
+    ) -> Result<AppliedIsolationLaunchAwaitingAttachment, EngineError> {
+        self.ensure_registered_generation_current()?;
+        let applied = self.apply_with_provenance_current(
+            request,
+            context,
+            RequestedLaunchLifecycle::AwaitAttachment,
+        )?;
+        self.ensure_registered_generation_current()?;
+        Ok(AppliedIsolationLaunchAwaitingAttachment {
+            request: IsolationRequestAwaitingAttachment::new(applied.request),
+            provenance: applied.provenance,
+        })
     }
 
     fn apply_with_provenance_current(
         &self,
         request: lillux::SubprocessRequest,
         context: IsolationLaunchContext<'_>,
-    ) -> Result<AppliedIsolationLaunch, EngineError> {
+        lifecycle: RequestedLaunchLifecycle,
+    ) -> Result<CompiledIsolationLaunch, EngineError> {
         if !request.timeout.is_finite() || request.timeout < 0.0 {
             return Err(refused(format!(
                 "invalid subprocess timeout {}",
                 request.timeout
             )));
         }
-        if self.state == IsolationRuntimeState::Disabled {
-            if context.live_access.is_some() {
+        match (context.project_authority, context.live_access) {
+            (IsolationProjectAuthority::External, None) => {
                 return Err(refused(
-                    "live project authority requires enforced descriptor-rooted path masking"
+                    "external live project authority requires an explicit filesystem confinement"
                         .to_string(),
                 ));
+            }
+            (
+                IsolationProjectAuthority::RuntimeWorkspace
+                | IsolationProjectAuthority::EphemeralScratch,
+                Some(_),
+            ) => {
+                return Err(refused(
+                    "runtime workspace and projectless scratch authority cannot carry live filesystem authority"
+                        .to_string(),
+                ));
+            }
+            _ => {}
+        }
+        if self.state == IsolationRuntimeState::Disabled {
+            if lifecycle == RequestedLaunchLifecycle::AwaitAttachment
+                && request.supervised_status.is_some()
+            {
+                return Err(refused(
+                    "disabled isolation attachment launches require Lillux's native direct boundary and cannot carry caller-supplied supervision"
+                        .to_string(),
+                ));
+            }
+            if let Some(authority) = context.live_access {
+                match authority {
+                    IsolationLiveAccessAuthority::DescriptorRootedMasked { .. } => {
+                        return Err(refused(
+                            "descriptor-rooted live project authority requires enforced isolation"
+                                .to_string(),
+                        ));
+                    }
+                    IsolationLiveAccessAuthority::UnconfinedHost {
+                        authorized_write_namespaces,
+                    } => {
+                        if authorized_write_namespaces.is_empty() {
+                            return Err(refused(
+                                "unconfined host live access cannot enforce read-only project authority"
+                                    .to_string(),
+                            ));
+                        }
+                        let write_enabled = !authorized_write_namespaces.is_empty();
+                        if write_enabled
+                            != (context.project_authority == IsolationProjectAuthority::External)
+                        {
+                            return Err(refused(
+                                "unconfined live project write namespaces contradict isolation project authority"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
             }
             if context.project_authority == IsolationProjectAuthority::RuntimeWorkspace {
                 return Err(refused(
@@ -1226,7 +1326,7 @@ impl IsolationRuntime {
                         }),
                 ),
             });
-            return Ok(AppliedIsolationLaunch {
+            return Ok(CompiledIsolationLaunch {
                 request,
                 provenance: self.launch_provenance(None),
             });
@@ -1292,8 +1392,13 @@ impl IsolationRuntime {
         }
         let canonical_project = canonicalize_context_mount("project", &project_destination)?;
         let live_mask_destinations = match context.live_access {
-            Some(authority) => {
-                let write_enabled = !authority.authorized_write_namespaces.is_empty();
+            Some(IsolationLiveAccessAuthority::DescriptorRootedMasked {
+                root_device_id,
+                root_inode,
+                denied_control_paths,
+                authorized_write_namespaces,
+            }) => {
+                let write_enabled = !authorized_write_namespaces.is_empty();
                 if write_enabled
                     != (context.project_authority == IsolationProjectAuthority::External)
                 {
@@ -1310,9 +1415,7 @@ impl IsolationRuntime {
                             "live project identity cannot be inspected: {error}"
                         ))
                     })?;
-                    if metadata.dev() != authority.root_device_id
-                        || metadata.ino() != authority.root_inode
-                    {
+                    if metadata.dev() != *root_device_id || metadata.ino() != *root_inode {
                         return Err(refused(format!(
                             "live project root identity changed before launch: {}",
                             canonical_project.display()
@@ -1320,8 +1423,8 @@ impl IsolationRuntime {
                     }
                 }
                 let mut previous: Option<&Path> = None;
-                let mut destinations = Vec::with_capacity(authority.denied_control_paths.len());
-                for relative in &authority.denied_control_paths {
+                let mut destinations = Vec::with_capacity(denied_control_paths.len());
+                for relative in denied_control_paths {
                     if relative.is_absolute()
                         || relative
                             .components()
@@ -1337,6 +1440,14 @@ impl IsolationRuntime {
                     destinations.push(project_destination.join(relative));
                 }
                 destinations
+            }
+            Some(IsolationLiveAccessAuthority::UnconfinedHost {
+                authorized_write_namespaces: _,
+            }) => {
+                return Err(refused(
+                    "unconfined host live project authority requires disabled isolation"
+                        .to_string(),
+                ));
             }
             None => Vec::new(),
         };
@@ -1851,29 +1962,58 @@ impl IsolationRuntime {
             )));
         }
         validate_namespace_destination("command", &command_path)?;
-        let status = lillux::supervised_launcher_gated_status_pipe().map_err(|reason| {
-            refused(format!(
-                "supervised launcher process tracking/start gate cannot be initialized: {reason}"
-            ))
-        })?;
-        let status_fd = status.writer_fd();
-        inherited_fds.push(status.writer);
-        let start_gate_reader = status.start_gate_reader.ok_or_else(|| {
-            refused("supervised launcher start-gate reader is unavailable".to_string())
-        })?;
-        let start_gate_fd = mount_fd_arg(&start_gate_reader)
-            .parse::<u32>()
-            .map_err(|error| refused(format!("invalid start-gate descriptor: {error}")))?;
-        inherited_fds.push(start_gate_reader);
-        let start_gate_keepalive_writer = status.start_gate_keepalive_writer.ok_or_else(|| {
-            refused("supervised launcher start-gate keepalive is unavailable".to_string())
-        })?;
-        let start_gate_keepalive_fd = mount_fd_arg(&start_gate_keepalive_writer)
-            .parse::<u32>()
-            .map_err(|error| {
-                refused(format!("invalid start-gate keepalive descriptor: {error}"))
-            })?;
-        inherited_fds.push(start_gate_keepalive_writer);
+        let (supervised_status, status_writer, status_fd, adapter_lifecycle) = match lifecycle {
+            RequestedLaunchLifecycle::Run => {
+                let status = lillux::supervised_launcher_status_pipe().map_err(|reason| {
+                    refused(format!(
+                        "supervised launcher process tracking cannot be initialized: {reason}"
+                    ))
+                })?;
+                let status_fd = status.writer_fd();
+                (
+                    status.reader,
+                    status.writer,
+                    status_fd,
+                    AdapterLaunchLifecycle::Run,
+                )
+            }
+            RequestedLaunchLifecycle::AwaitAttachment => {
+                let status = lillux::supervised_launcher_attachment_status_pipe().map_err(
+                    |reason| {
+                        refused(format!(
+                            "supervised launcher attachment boundary cannot be initialized: {reason}"
+                        ))
+                    },
+                )?;
+                let status_fd = status.writer_fd();
+                let release_reader = status.attachment_release_reader;
+                let release_fd = mount_fd_arg(&release_reader)
+                    .parse::<u32>()
+                    .map_err(|error| {
+                        refused(format!("invalid attachment release descriptor: {error}"))
+                    })?;
+                inherited_fds.push(release_reader);
+                let release_keepalive_writer = status.attachment_release_keepalive_writer;
+                let release_keepalive_fd = mount_fd_arg(&release_keepalive_writer)
+                    .parse::<u32>()
+                    .map_err(|error| {
+                    refused(format!(
+                        "invalid attachment release keepalive descriptor: {error}"
+                    ))
+                })?;
+                inherited_fds.push(release_keepalive_writer);
+                (
+                    status.reader,
+                    status.writer,
+                    status_fd,
+                    AdapterLaunchLifecycle::AwaitAttachment {
+                        release_fd,
+                        release_keepalive_fd,
+                    },
+                )
+            }
+        };
+        inherited_fds.push(status_writer);
         let mut authorities = Vec::new();
         let mut mounts = Vec::new();
         let mut authority_handles = Vec::new();
@@ -2132,14 +2272,13 @@ impl IsolationRuntime {
             })
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let launch_request = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V3,
+            protocol: IsolationAdapterProtocolVersion::V1,
             plan,
             authorities,
             artifacts: artifact_fds,
             status_fd: u32::try_from(status_fd)
                 .map_err(|_| refused("invalid isolation status descriptor".to_string()))?,
-            start_gate_fd,
-            start_gate_keepalive_fd,
+            lifecycle: adapter_lifecycle,
         };
         launch_request
             .validate()
@@ -2187,7 +2326,7 @@ impl IsolationRuntime {
             max_stderr_bytes: Some(effective_stderr_bytes),
         });
 
-        Ok(AppliedIsolationLaunch {
+        Ok(CompiledIsolationLaunch {
             request: lillux::SubprocessRequest {
                 cmd: format!("/proc/self/fd/{}", mount_fd_arg(&backend.adapter_handle)),
                 args: vec!["launch".to_string(), request_fd],
@@ -2199,7 +2338,7 @@ impl IsolationRuntime {
                 timeout,
                 limits,
                 inherited_fds,
-                supervised_status: Some(status.reader),
+                supervised_status: Some(supervised_status),
             },
             provenance: self.launch_provenance(Some(plan_digest)),
         })
@@ -2215,7 +2354,7 @@ impl IsolationRuntime {
             signer_fingerprint: self.inspection.backend.signer_fingerprint.clone(),
             adapter_digest: self.inspection.backend.adapter_digest.clone(),
             adapter_protocol: (self.state == IsolationRuntimeState::Enforced)
-                .then_some(IsolationAdapterProtocolVersion::V3),
+                .then_some(IsolationAdapterProtocolVersion::V1),
             payloads: self.inspection.backend.artifacts.clone(),
             effective_capabilities: self.inspection.backend.effective_capabilities.clone(),
             plan_digest,
@@ -3692,6 +3831,178 @@ mod tests {
             .is_empty());
         assert!(runtime.inspection().backend.adapter_build.is_none());
         assert!(runtime.inspection().backend.artifacts.is_empty());
+    }
+
+    #[test]
+    fn disabled_attachment_compilation_preserves_the_distinct_request_type() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let live_access = IsolationLiveAccessAuthority::UnconfinedHost {
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let context = IsolationLaunchContext {
+            project_path: app_root.path(),
+            project_authority: IsolationProjectAuthority::External,
+            live_access: Some(&live_access),
+            state_root: None,
+            checkpoint_dir: None,
+            daemon_socket_path: None,
+            bundle_roots: &[],
+            node_trusted_keys_dir: None,
+            verified_code: &[],
+            item_ref: "tool:tests/attachment",
+            thread_id: "T-attachment",
+        };
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        };
+
+        let awaiting = runtime.apply_awaiting_attachment(request, context).unwrap();
+        // The raw request deliberately cannot be recovered and routed through
+        // normal spawn; construction of this distinct type is the contract.
+        drop(awaiting);
+
+        let status = lillux::supervised_launcher_attachment_status_pipe().unwrap();
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: vec![
+                status.writer,
+                status.attachment_release_reader,
+                status.attachment_release_keepalive_writer,
+            ],
+            supervised_status: Some(status.reader),
+        };
+        let context = IsolationLaunchContext {
+            project_path: app_root.path(),
+            project_authority: IsolationProjectAuthority::External,
+            live_access: Some(&live_access),
+            state_root: None,
+            checkpoint_dir: None,
+            daemon_socket_path: None,
+            bundle_roots: &[],
+            node_trusted_keys_dir: None,
+            verified_code: &[],
+            item_ref: "tool:tests/attachment",
+            thread_id: "T-attachment",
+        };
+        let error = runtime
+            .apply_awaiting_attachment(request, context)
+            .err()
+            .expect("disabled attachment must reject caller-supplied supervision");
+        assert!(error.to_string().contains("native direct boundary"));
+    }
+
+    #[test]
+    fn disabled_runtime_accepts_only_explicit_unconfined_live_authority() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let request = || lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            args: Vec::new(),
+            cwd: None,
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        };
+        let unconfined = IsolationLiveAccessAuthority::UnconfinedHost {
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let context = |live_access| IsolationLaunchContext {
+            project_path: app_root.path(),
+            project_authority: IsolationProjectAuthority::External,
+            live_access,
+            state_root: None,
+            checkpoint_dir: None,
+            daemon_socket_path: None,
+            bundle_roots: &[],
+            node_trusted_keys_dir: None,
+            verified_code: &[],
+            item_ref: "tool:tests/live",
+            thread_id: "T-live",
+        };
+        runtime
+            .apply_with_provenance(request(), context(Some(&unconfined)))
+            .unwrap();
+
+        let error = runtime
+            .apply_with_provenance(request(), context(None))
+            .err()
+            .expect("external live authority must name its confinement");
+        assert!(error
+            .to_string()
+            .contains("requires an explicit filesystem confinement"));
+
+        let confined = IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root_device_id: 0,
+            root_inode: 0,
+            denied_control_paths: vec![PathBuf::from(".ai")],
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let error = runtime
+            .apply_with_provenance(request(), context(Some(&confined)))
+            .err()
+            .expect("descriptor-rooted authority must be rejected when isolation is disabled");
+        assert!(error
+            .to_string()
+            .contains("descriptor-rooted live project authority requires enforced isolation"));
+    }
+
+    #[test]
+    fn disabled_runtime_still_rejects_runtime_workspace_authority() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let error = runtime
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: "/bin/true".to_string(),
+                    args: Vec::new(),
+                    cwd: None,
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    project_path: app_root.path(),
+                    project_authority: IsolationProjectAuthority::RuntimeWorkspace,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &[],
+                    item_ref: "tool:tests/runtime-workspace",
+                    thread_id: "T-runtime-workspace",
+                },
+            )
+            .err()
+            .expect("runtime workspace must be rejected when isolation is disabled");
+        assert!(error
+            .to_string()
+            .contains("durable project execution requires an enforced isolation backend"));
     }
 
     #[test]

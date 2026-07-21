@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-17T00:38:08Z:f8e58a961c4be1b3bb607b28ca22bfdc142eb291d16fe4494705d9ad73553c07:O/Fo3QmBZCPU8WRirWGmZsG7fXvcc72iDQK0IE/MGvK7/RkOtFDG/uNE1A2/N0pQeRDI3Q2gVqpuHnDXiFWNBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T00:24:30Z:1ca3fce6dbb862d6a33c702f767598a9e3b2d8c133e64cccf68c2ffccfbcc590:XRwZW/EasOXP+eXcuhhIMw4k7vNEIpuqXlZ2OSDQESamQoE42P8feGXPzorOPct0imt1qCuQkdAHac75UurXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [node, isolation, security, subprocess, node-policy]
-version: "1.5.0"
+version: "1.6.0"
 description: >
   Node contract for the node-owned subprocess isolation: strict policy
   schema, startup pickup, enforcement behavior, diagnostics, and limits.
@@ -34,6 +34,8 @@ The policy has two modes:
   default and does not require the selected bundle. Node-owned stdout/stderr retention
   caps, signature, trust, authorization, and capability checks still apply,
   but there is no OS confinement or verification-to-exec path pinning.
+  Daemon-owned processes still use attachment-before-execution; Lillux supplies
+  the direct target hold without an isolation backend.
 - `mode: enforce` applies the complete policy and refuses the launch if any
   requested control cannot be enforced.
 
@@ -252,15 +254,23 @@ host mount would let a same-UID workload traverse another process's `root`,
 still use host identifiers, and the isolation does not claim PID or same-UID
 signal isolation.
 
-The adapter reports the target's host PID through the isolation protocol's
-private status channel for accounting. Lillux creates a new session before it
-executes the adapter, and the target inherits the retained wrapper's process
-group. The wrapper remains unreaped while Lillux terminates that group, which
-keeps the PGID reserved even if the initial target exits while descendants are
-still running. Timeout, cancellation, output overflow, and wait failure all use
-that stable group ownership. A descendant that deliberately creates another
-session remains outside this local process-group guarantee; hostile hosted
-workers additionally use `cgroup.kill` at the outer worker boundary.
+Process attachment is orthogonal to this isolation mode. Every daemon-owned
+launch is created awaiting attachment, its exact target identity is persisted,
+and only then is the target released to execute. In disabled mode Lillux holds
+the direct target in its native pre-exec boundary. In enforce mode the adapter
+holds its actual target and reports that target's host PID through the strict
+isolation protocol. A supervised request without the requested target hold is
+rejected; there is no fallback to wrapper identity or direct execution.
+
+Lillux creates a new session before it executes the adapter, and the target
+inherits the retained wrapper's process group. The wrapper remains unreaped
+while Lillux terminates that group, which keeps the PGID reserved even if the
+initial target exits while descendants are still running. Timeout,
+cancellation, output overflow, attachment failure, release failure, and wait
+failure all use that stable group ownership. A descendant that deliberately
+creates another session remains outside this local process-group guarantee;
+hostile hosted workers additionally use `cgroup.kill` at the outer worker
+boundary.
 
 Offline tools that inherit terminal stdin/stdout/stderr use the same Lillux
 session, target-status, timeout, group-cleanup, and refusal contract. They do
@@ -279,26 +289,32 @@ structure still change it. Non-managed infrastructure launches emit the same
 provenance to the diagnostic log surface.
 
 Managed launches pin the exact target and retained group leader before durable
-attachment. The version-1 process identity records the boot ID, numeric target
+attachment. The current process identity records the boot ID, numeric target
 and leader IDs, and both `/proc` start-time ticks. Every later target or group
 signal first opens a pidfd, proves the stored incarnation, and uses pidfd
 signalling; RyeOS never turns a stored PID/PGID into raw `kill` authority.
 Self-attaching runtimes must match their accepted UDS `SO_PEERCRED` PID and are
 pinned through that socket's `SO_PEERPIDFD`.
 
-Normal shutdown closes authoring and tears down attached identities within a
-shared node-owned grace bound. After an unclean daemon exit, the exclusive
-state lock proves that any still-live, exactly matched attachment belongs to the
-previous daemon; startup kills that group before recovery launches a
-replacement. A same-boot attachment whose leader birth identity can no longer
-be proven is quarantined rather than cleared or signalled.
+Normal shutdown first closes process release and authoring, then tears down
+attached identities within a shared node-owned grace bound. A stop that wins
+before release leaves the target held and aborts it; a stop that wins after
+release observes the exact durable identity and terminates it. After an unclean
+daemon exit, the exclusive state lock proves that any still-live, exactly
+matched attachment belongs to the previous daemon; startup kills that group
+before recovery launches a replacement. A same-boot attachment whose leader
+birth identity can no longer be proven is quarantined rather than cleared or
+signalled.
 
-One unavoidable local crash window remains between kernel process creation and
-publication of the durable attachment. An immediate daemon `SIGKILL` in that
-window can leave an untracked process group that state-based recovery cannot
-name. A hosted hostile-workload boundary must place the daemon/launch handoff
-inside an outer cgroup, VM, microVM, or dedicated worker that owns whole-workload
-teardown independently of the attachment row.
+The native pre-exec hold removes the former local spawn-to-attachment crash
+window. Parent death before durable attachment kills the still-held direct
+target; after attachment, recovery has its exact identity. Hosted deployments
+still require cgroups plus a VM, microVM, or dedicated outer worker for quotas,
+cross-session whole-workload teardown, and a hostile-tenant kernel boundary;
+those are separate guarantees, not compensation for missing local attachment.
+
+See [Attachment Before Execution](../execution/attachment-before-execution.md)
+for the complete lifecycle contract and ownership split.
 
 Configured writable binds are installed first. Read-only policy mounts, the
 verified-code authority mirror and exact artifact, and any non-system command

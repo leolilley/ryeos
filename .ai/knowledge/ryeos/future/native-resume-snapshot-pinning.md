@@ -1,4 +1,14 @@
-# Native resume snapshot pinning
+<!-- ryeos:signed:2026-07-21T00:24:56Z:4ede43df85b84b63ed214b7af8ca79d2c3cdd716d702a555773231295a4ed6be:1x+aFX0n5OvfpiWWsjGA9XKzr9Jlt2SVpKF25+F2LQtKPDqXV7kCWTLsHiAd6MC99KqmbI0jsV1hgyQpBYxAAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/future
+name: native-resume-snapshot-pinning
+title: Native Resume Snapshot Pinning
+description: Deferred extensions to snapshot-pinned native resume semantics
+entry_type: design
+version: "1.0.0"
+```
+
+# Native Resume Snapshot Pinning
 
 ## Status
 

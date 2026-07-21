@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-03T09:54:30Z:e4a02ebf14d6f0900430ea9818bf5f8a687531f8249b4c0e1f7736f9885461a5:FbcslUVcx5gj44E20ODwl/MbHQ8TXkQUtqLnJ/aUfr16dNnXVz4OHXbzR3PKaagPTDT3xWj1krO781v5xVPDAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:24:30Z:8997fef31bff96e5cd6aae2cf167ff539064c3b0a2fe9a695ebb79910484de6b:OfrKbDNbwjyiF2MwN9HPdaZAqWRuNz+IJs0FhxDokwCmxgBNaYITis5M5mymle2qe3gonA7pRyGMIxjqEE5TDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/graph"
 version: "1.0.0"
 location:
@@ -27,7 +27,7 @@ execution:
     # `allowed_actions(graph_run, running, …)` omits `interrupt` and
     # `commands/submit` refuses it (belt), and no client surfaces an interrupt
     # control for a graph (suspenders). To stop a graph, cancel or kill it. See
-    # docs/decisions/steering-graph-interrupt-and-cancel-path.md.
+    # .ai/knowledge/ryeos/development/steering-graph-interrupt-and-cancel-path.md.
     supports_interrupt: false
     # A graph self-continues by MACHINE only: when a segment-step budget is
     # exhausted the walker checkpoints the frontier and a machine successor

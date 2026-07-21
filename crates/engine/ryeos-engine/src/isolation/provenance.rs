@@ -33,6 +33,34 @@ pub struct AppliedIsolationLaunch {
     pub provenance: IsolationLaunchProvenance,
 }
 
+/// A subprocess request compiled specifically for a launch that must remain
+/// unable to execute user code until its exact process identity is durably
+/// attached.
+///
+/// The inner request is intentionally private: callers must explicitly consume
+/// this type when handing it to Lillux's attachment-aware spawn path instead of
+/// accidentally passing it to an ordinary spawn API.
+pub struct IsolationRequestAwaitingAttachment(lillux::SubprocessRequest);
+
+impl IsolationRequestAwaitingAttachment {
+    pub(super) fn new(request: lillux::SubprocessRequest) -> Self {
+        Self(request)
+    }
+
+    /// Consume the typed isolation result through Lillux's matching lifecycle
+    /// operation. The raw request is never exposed, so a disabled-isolation
+    /// direct launch cannot be silently downgraded to ordinary spawn.
+    pub fn spawn(self) -> Result<lillux::ProcessAwaitingAttachment, lillux::SubprocessResult> {
+        lillux::spawn_awaiting_attachment(self.0)
+    }
+}
+
+/// Provenance paired with an attachment-required subprocess request.
+pub struct AppliedIsolationLaunchAwaitingAttachment {
+    pub request: IsolationRequestAwaitingAttachment,
+    pub provenance: IsolationLaunchProvenance,
+}
+
 pub(super) fn redacted_plan_digest(plan: &IsolationPlan) -> Result<String, EngineError> {
     let mut value =
         serde_json::to_value(plan).map_err(|error| EngineError::IsolationPolicyRefused {

@@ -9,13 +9,12 @@ use std::time::{Duration, Instant};
 
 use ryeos_isolation_protocol::{
     from_json_slice_strict, AdapterInspectionRequest, AdapterInspectionResponse,
-    AdapterLaunchRequest, AdapterWorkspaceRequest, AdapterWorkspaceResponse, InspectedArtifact,
-    IsolationAdapterProtocolVersion,
-    IsolationArtifactRole, IsolationCapability, IsolationDiagnostic, IsolationDiagnosticCode,
-    IsolationAuthorityPurpose, IsolationMountAccess, IsolationNetwork, IsolationTargetTriple,
-    LauncherRefusalDocument, WorkspaceLifecycleOperation, WorkspaceMutation,
-    WorkspaceMutationKind, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_WORKSPACE_MUTATIONS,
-    MAX_WORKSPACE_RESPONSE_BYTES,
+    AdapterLaunchLifecycle, AdapterLaunchRequest, AdapterWorkspaceRequest,
+    AdapterWorkspaceResponse, InspectedArtifact, IsolationAdapterProtocolVersion,
+    IsolationArtifactRole, IsolationAuthorityPurpose, IsolationCapability, IsolationDiagnostic,
+    IsolationDiagnosticCode, IsolationMountAccess, IsolationNetwork, IsolationTargetTriple,
+    LauncherRefusalDocument, WorkspaceLifecycleOperation, WorkspaceMutation, WorkspaceMutationKind,
+    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_WORKSPACE_MUTATIONS, MAX_WORKSPACE_RESPONSE_BYTES,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -92,7 +91,7 @@ fn workspace(request_fd: RawFd) -> Result<AdapterWorkspaceResponse, String> {
         WorkspaceLifecycleOperation::FreezeAndDiff => scan_workspace_upper(upper)?,
     };
     let response = AdapterWorkspaceResponse {
-        protocol: IsolationAdapterProtocolVersion::V3,
+        protocol: IsolationAdapterProtocolVersion::V1,
         operation: request.operation,
         workspace_id: request.workspace_id.clone(),
         launch_owner: request.launch_owner.clone(),
@@ -197,11 +196,16 @@ fn scan_workspace_directory(
         let stat = unsafe { stat.assume_init() };
         match stat.st_mode & libc::S_IFMT {
             libc::S_IFREG => {
-                let (size, content_hash) = hash_regular_at(directory_fd, &c_name, &stat, &relative)?;
+                let (size, content_hash) =
+                    hash_regular_at(directory_fd, &c_name, &stat, &relative)?;
                 mutations.push(WorkspaceMutation {
                     path: relative,
                     kind: WorkspaceMutationKind::UpsertRegular,
-                    normalized_mode: Some(if stat.st_mode & 0o111 != 0 { 0o755 } else { 0o644 }),
+                    normalized_mode: Some(if stat.st_mode & 0o111 != 0 {
+                        0o755
+                    } else {
+                        0o644
+                    }),
                     size: Some(size),
                     content_hash: Some(content_hash),
                 });
@@ -243,9 +247,11 @@ fn scan_workspace_directory(
                 size: None,
                 content_hash: None,
             }),
-            _ => return Err(format!(
-                "workspace delta contains unsupported entry type at {relative}"
-            )),
+            _ => {
+                return Err(format!(
+                    "workspace delta contains unsupported entry type at {relative}"
+                ))
+            }
         }
     }
     Ok(())
@@ -309,7 +315,9 @@ fn hash_regular_at(
     }
     let after = verify_identity(&file)?;
     if total != u64::try_from(after.st_size).map_err(|_| "negative workspace file size")? {
-        return Err(format!("workspace mutation changed size during freeze: {relative}"));
+        return Err(format!(
+            "workspace mutation changed size during freeze: {relative}"
+        ));
     }
     Ok((total, format!("{:x}", digest.finalize())))
 }
@@ -317,14 +325,8 @@ fn hash_regular_at(
 fn directory_is_opaque_fd(fd: RawFd) -> Result<bool, String> {
     for name in [c"trusted.overlay.opaque", c"user.overlay.opaque"] {
         let mut value = [0u8; 16];
-        let read = unsafe {
-            libc::fgetxattr(
-                fd,
-                name.as_ptr(),
-                value.as_mut_ptr().cast(),
-                value.len(),
-            )
-        };
+        let read =
+            unsafe { libc::fgetxattr(fd, name.as_ptr(), value.as_mut_ptr().cast(), value.len()) };
         if read > 0 && matches!(value[0], b'y' | b'Y') {
             return Ok(true);
         }
@@ -341,9 +343,6 @@ fn directory_is_opaque_fd(fd: RawFd) -> Result<bool, String> {
 
 fn inspect(request_fd: RawFd) -> Result<AdapterInspectionResponse, String> {
     let request: AdapterInspectionRequest = read_sealed_request(request_fd)?;
-    if request.protocol != IsolationAdapterProtocolVersion::V3 {
-        return Err("unsupported isolation adapter protocol".to_string());
-    }
     validate_inspection_identity(&request)?;
     let launcher_fd = *request
         .artifacts
@@ -421,7 +420,7 @@ fn inspect(request_fd: RawFd) -> Result<AdapterInspectionResponse, String> {
 
     let digest = digest_fd(launcher_fd)?;
     Ok(AdapterInspectionResponse {
-        protocol: IsolationAdapterProtocolVersion::V3,
+        protocol: IsolationAdapterProtocolVersion::V1,
         adapter_build: ADAPTER_BUILD.to_string(),
         effective_capabilities: supported_capabilities(),
         artifacts: BTreeMap::from([(
@@ -603,16 +602,19 @@ impl NeverResultExt for Result<std::convert::Infallible, String> {
 #[derive(Debug)]
 struct PreparedLaunch {
     launcher_fd: RawFd,
-    start_gate_keepalive_fd: RawFd,
+    lifecycle: PreparedLaunchLifecycle,
     inherited_fds: BTreeSet<RawFd>,
     arguments: Vec<String>,
     retained_files: Vec<File>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreparedLaunchLifecycle {
+    Run,
+    AwaitAttachment { release_keepalive_fd: RawFd },
+}
+
 fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, String> {
-    if request.protocol != IsolationAdapterProtocolVersion::V3 {
-        return Err("unsupported isolation adapter protocol".to_string());
-    }
     let required = request
         .validate()
         .map_err(|error| format!("invalid launch request: {error}"))?;
@@ -630,11 +632,17 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
         as RawFd;
     validate_inherited_fd(launcher_fd, "launcher artifact")?;
     validate_inherited_fd(request.status_fd as RawFd, "status writer")?;
-    validate_inherited_fd(request.start_gate_fd as RawFd, "start-gate reader")?;
-    validate_inherited_fd(
-        request.start_gate_keepalive_fd as RawFd,
-        "start-gate keepalive writer",
-    )?;
+    if let AdapterLaunchLifecycle::AwaitAttachment {
+        release_fd,
+        release_keepalive_fd,
+    } = request.lifecycle
+    {
+        validate_inherited_fd(release_fd as RawFd, "attachment release reader")?;
+        validate_inherited_fd(
+            release_keepalive_fd as RawFd,
+            "attachment release keepalive writer",
+        )?;
+    }
     for authority in &request.authorities {
         validate_inherited_fd(authority.inherited_fd as RawFd, "plan authority")?;
     }
@@ -666,14 +674,24 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
     let mut arguments = vec![
         "--json-status-fd".to_string(),
         request.status_fd.to_string(),
-        "--block-fd".to_string(),
-        request.start_gate_fd.to_string(),
         "--die-with-parent".to_string(),
         "--clearenv".to_string(),
         "--unshare-user".to_string(),
         "--unshare-ipc".to_string(),
         "--unshare-uts".to_string(),
     ];
+    let lifecycle = match request.lifecycle {
+        AdapterLaunchLifecycle::Run => PreparedLaunchLifecycle::Run,
+        AdapterLaunchLifecycle::AwaitAttachment {
+            release_fd,
+            release_keepalive_fd,
+        } => {
+            arguments.splice(2..2, ["--block-fd".to_string(), release_fd.to_string()]);
+            PreparedLaunchLifecycle::AwaitAttachment {
+                release_keepalive_fd: release_keepalive_fd as RawFd,
+            }
+        }
+    };
     if request.plan.network == IsolationNetwork::Isolated {
         arguments.push("--unshare-net".to_string());
     }
@@ -683,10 +701,7 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
         // every descendant inherits this seccomp filter. The outer Lillux
         // launcher establishes the group before Bubblewrap installs it.
         let filter = create_process_group_containment_filter()?;
-        arguments.extend([
-            "--seccomp".to_string(),
-            filter.as_raw_fd().to_string(),
-        ]);
+        arguments.extend(["--seccomp".to_string(), filter.as_raw_fd().to_string()]);
         retained_files.push(filter);
     }
     arguments.extend(["--tmpfs".to_string(), "/".to_string()]);
@@ -758,21 +773,23 @@ fn prepare_launch(request: &AdapterLaunchRequest) -> Result<PreparedLaunch, Stri
     ]);
     arguments.extend(request.plan.target.arguments.iter().cloned());
 
-    let inherited_fds = request
+    let mut inherited_fds: BTreeSet<_> = request
         .authorities
         .iter()
         .map(|authority| authority.inherited_fd as RawFd)
-        .chain([
-            launcher_fd,
-            request.status_fd as RawFd,
-            request.start_gate_fd as RawFd,
-            request.start_gate_keepalive_fd as RawFd,
-        ])
+        .chain([launcher_fd, request.status_fd as RawFd])
         .chain(retained_files.iter().map(|file| file.as_raw_fd()))
         .collect();
+    if let AdapterLaunchLifecycle::AwaitAttachment {
+        release_fd,
+        release_keepalive_fd,
+    } = request.lifecycle
+    {
+        inherited_fds.extend([release_fd as RawFd, release_keepalive_fd as RawFd]);
+    }
     Ok(PreparedLaunch {
         launcher_fd,
-        start_gate_keepalive_fd: request.start_gate_keepalive_fd as RawFd,
+        lifecycle,
         inherited_fds,
         arguments,
         retained_files,
@@ -788,18 +805,21 @@ fn exec_launcher(mut prepared: PreparedLaunch) -> Result<std::convert::Infallibl
     // embedded in the sealed Bubblewrap argument vector.
     let _retained_files = prepared.retained_files;
 
-    spawn_start_gate_keepalive(prepared.start_gate_keepalive_fd)?;
-    prepared
-        .inherited_fds
-        .remove(&prepared.start_gate_keepalive_fd);
-    close_fd(prepared.start_gate_keepalive_fd);
+    if let PreparedLaunchLifecycle::AwaitAttachment {
+        release_keepalive_fd,
+    } = prepared.lifecycle
+    {
+        spawn_attachment_release_keepalive(release_keepalive_fd)?;
+        prepared.inherited_fds.remove(&release_keepalive_fd);
+        close_fd(release_keepalive_fd);
+    }
     seal_descriptor_boundary(prepared.launcher_fd, &prepared.inherited_fds)?;
 
     let error = exact_launcher_command(prepared.launcher_fd, argument_fd).exec();
     Err(format!("exec exact Bubblewrap launcher: {error}"))
 }
 
-/// Retain a child-side gate writer until Bubblewrap exits.
+/// Retain a child-side attachment-release writer until Bubblewrap exits.
 ///
 /// Bubblewrap deliberately treats EOF on `--block-fd` as a completed wait. A
 /// daemon crash must therefore not close the final writer and accidentally
@@ -807,12 +827,12 @@ fn exec_launcher(mut prepared: PreparedLaunch) -> Result<std::convert::Infallibl
 /// dies with the adapter/Bubblewrap parent, and never crosses into the target
 /// process. The backend's `--die-with-parent` independently kills the blocked
 /// sandbox child when the outer launcher dies.
-fn spawn_start_gate_keepalive(writer_fd: RawFd) -> Result<(), String> {
+fn spawn_attachment_release_keepalive(writer_fd: RawFd) -> Result<(), String> {
     let parent_pid = unsafe { libc::getpid() };
     let child = unsafe { libc::fork() };
     if child < 0 {
         return Err(format!(
-            "fork start-gate keepalive: {}",
+            "fork attachment-release keepalive: {}",
             std::io::Error::last_os_error()
         ));
     }
@@ -824,12 +844,7 @@ fn spawn_start_gate_keepalive(writer_fd: RawFd) -> Result<(), String> {
         }
         let close_before = writer_fd > 3
             && unsafe {
-                libc::syscall(
-                    libc::SYS_close_range,
-                    3_u32,
-                    (writer_fd - 1) as u32,
-                    0_u32,
-                )
+                libc::syscall(libc::SYS_close_range, 3_u32, (writer_fd - 1) as u32, 0_u32)
             } != 0;
         let close_after = unsafe {
             libc::syscall(
@@ -1192,7 +1207,7 @@ mod tests {
 
     fn valid_inspection_request() -> AdapterInspectionRequest {
         AdapterInspectionRequest {
-            protocol: IsolationAdapterProtocolVersion::V3,
+            protocol: IsolationAdapterProtocolVersion::V1,
             target: host_target().expect("adapter tests require a supported Linux GNU target"),
             backend_id: BACKEND_ID.to_string(),
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, 3)]),
@@ -1208,8 +1223,8 @@ mod tests {
             .write(true)
             .open("/dev/null")
             .unwrap();
-        let start_gate = File::open("/dev/null").unwrap();
-        let start_gate_keepalive = std::fs::OpenOptions::new()
+        let release = File::open("/dev/null").unwrap();
+        let release_keepalive = std::fs::OpenOptions::new()
             .write(true)
             .open("/dev/null")
             .unwrap();
@@ -1218,7 +1233,7 @@ mod tests {
         let project_id = IsolationAuthorityId::new("project").unwrap();
         let workspace_id = IsolationAuthorityId::new("workspace").unwrap();
         let request = AdapterLaunchRequest {
-            protocol: IsolationAdapterProtocolVersion::V3,
+            protocol: IsolationAdapterProtocolVersion::V1,
             plan: IsolationPlan {
                 target: IsolationTarget {
                     executable: target_id.clone(),
@@ -1281,8 +1296,10 @@ mod tests {
                 launcher.as_raw_fd() as u32,
             )]),
             status_fd: status.as_raw_fd() as u32,
-            start_gate_fd: start_gate.as_raw_fd() as u32,
-            start_gate_keepalive_fd: start_gate_keepalive.as_raw_fd() as u32,
+            lifecycle: AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd: release.as_raw_fd() as u32,
+                release_keepalive_fd: release_keepalive.as_raw_fd() as u32,
+            },
         };
         (
             request,
@@ -1292,8 +1309,8 @@ mod tests {
                 project,
                 workspace,
                 status,
-                start_gate,
-                start_gate_keepalive,
+                release,
+                release_keepalive,
             ],
         )
     }
@@ -1394,9 +1411,14 @@ mod tests {
             .arguments
             .windows(2)
             .any(|pair| pair == ["--tmpfs", "/tmp"]));
-        assert!(prepared.arguments.windows(2).any(|pair| {
-            pair[0] == "--block-fd" && pair[1] == request.start_gate_fd.to_string()
-        }));
+        let release_fd = match request.lifecycle {
+            AdapterLaunchLifecycle::AwaitAttachment { release_fd, .. } => release_fd,
+            AdapterLaunchLifecycle::Run => panic!("fixture must await attachment"),
+        };
+        assert!(prepared
+            .arguments
+            .windows(2)
+            .any(|pair| { pair[0] == "--block-fd" && pair[1] == release_fd.to_string() }));
         assert!(prepared
             .arguments
             .iter()
@@ -1421,6 +1443,26 @@ mod tests {
             &prepared.arguments[prepared.arguments.len() - 3..],
             ["/opt/bin/tool", "--flag", "secret-value"]
         );
+    }
+
+    #[test]
+    fn normal_launch_omits_attachment_hold_and_keeper() {
+        let (mut request, _handles) = valid_launch_request();
+        let attachment_descriptors = match request.lifecycle {
+            AdapterLaunchLifecycle::AwaitAttachment {
+                release_fd,
+                release_keepalive_fd,
+            } => [release_fd as RawFd, release_keepalive_fd as RawFd],
+            AdapterLaunchLifecycle::Run => panic!("fixture must await attachment"),
+        };
+        request.lifecycle = AdapterLaunchLifecycle::Run;
+
+        let prepared = prepare_launch(&request).unwrap();
+        assert_eq!(prepared.lifecycle, PreparedLaunchLifecycle::Run);
+        assert!(!prepared.arguments.iter().any(|value| value == "--block-fd"));
+        assert!(attachment_descriptors
+            .into_iter()
+            .all(|descriptor| !prepared.inherited_fds.contains(&descriptor)));
     }
 
     #[test]
@@ -1524,7 +1566,7 @@ mod tests {
                 .contains("not sealed")
         );
 
-        let duplicate = br#"{"protocol":"ryeos.isolation-adapter/v3","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
+        let duplicate = br#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"linux-bubblewrap","backend_id":"linux-bubblewrap","artifacts":{"launcher":3}}"#;
         let sealed_duplicate = create_sealed_memfd(c"adapter-test-duplicate", duplicate).unwrap();
         assert!(
             read_sealed_request::<AdapterInspectionRequest>(sealed_duplicate.into_raw_fd())

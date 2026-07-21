@@ -6,16 +6,17 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::validate_object_kind;
 
-/// Clean-cut current thread-snapshot format. Schema 4 makes typed project
-/// authority and the admitted launch capsule root part of every snapshot.
+/// Clean-cut current thread-snapshot format. Schema 6 carries the exact
+/// current project authority contract and admitted launch capsule root.
 /// Schema identifiers are immutable CAS wire identities; older shapes are not
 /// accepted through a compatibility reader.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -711,6 +712,37 @@ fn deserialize_btreemap<'de, D: serde::Deserializer<'de>>(
 }
 
 impl ThreadSnapshot {
+    /// Decode only the exact current CAS wire contract.
+    ///
+    /// The wire identity is inspected before typed deserialization so an
+    /// older nested authority shape is rejected at the snapshot epoch
+    /// boundary instead of surfacing as an incidental serde field error.
+    pub fn from_current_value(value: serde_json::Value) -> anyhow::Result<Self> {
+        let object = value
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("thread snapshot must be an object"))?;
+        let kind = object
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("thread snapshot has no string kind"))?;
+        if kind != "thread_snapshot" {
+            anyhow::bail!("unexpected thread snapshot kind: {kind}");
+        }
+        let schema = object
+            .get("schema")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| anyhow::anyhow!("thread snapshot has no numeric schema"))?;
+        if schema != u64::from(THREAD_SNAPSHOT_SCHEMA_VERSION) {
+            anyhow::bail!(
+                "thread snapshot is not the exact current contract: stored schema={schema}, current schema={THREAD_SNAPSHOT_SCHEMA_VERSION}"
+            );
+        }
+        let snapshot: Self =
+            serde_json::from_value(value).context("deserialize current thread snapshot")?;
+        snapshot.validate()?;
+        Ok(snapshot)
+    }
+
     /// Validate this snapshot's invariants.
     pub fn validate(&self) -> anyhow::Result<()> {
         validate_object_kind(&self.kind, "thread_snapshot")?;
@@ -1355,7 +1387,50 @@ mod tests {
     }
 
     #[test]
-    fn schema_4_requires_current_wire_fields() {
+    fn current_decoder_rejects_predecessor_epoch_before_nested_authority_decode() {
+        let mut value = child_snapshot().to_value();
+        let object = value.as_object_mut().unwrap();
+        object.insert(
+            "schema".to_string(),
+            serde_json::json!(THREAD_SNAPSHOT_SCHEMA_VERSION - 1),
+        );
+        object.insert(
+            "project_authority".to_string(),
+            serde_json::json!({"authority": "predecessor_shape"}),
+        );
+
+        let error = ThreadSnapshot::from_current_value(value).unwrap_err();
+        assert!(
+            error.to_string().contains("not the exact current contract"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn current_decoder_accepts_valid_current_snapshot() {
+        let expected = child_snapshot();
+        let decoded = ThreadSnapshot::from_current_value(expected.to_value()).unwrap();
+        assert_eq!(decoded.thread_id, expected.thread_id);
+        assert_eq!(decoded.schema, THREAD_SNAPSHOT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn current_decoder_requires_numeric_epoch_before_typed_decode() {
+        let mut value = child_snapshot().to_value();
+        value.as_object_mut().unwrap().insert(
+            "schema".to_string(),
+            serde_json::json!(THREAD_SNAPSHOT_SCHEMA_VERSION.to_string()),
+        );
+
+        let error = ThreadSnapshot::from_current_value(value).unwrap_err();
+        assert!(
+            error.to_string().contains("no numeric schema"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn schema_6_requires_current_wire_fields() {
         for field in [
             "upstream_thread_id",
             "requested_by",

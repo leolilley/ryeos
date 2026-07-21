@@ -178,6 +178,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             ryeos_app::execution_policy::resolve_standard_local_live_authority(
                 &project_ctx.effective_path,
                 principal_scopes.clone(),
+                &ctx.state.isolation,
             )
             .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(

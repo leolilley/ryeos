@@ -783,7 +783,7 @@ impl Engine {
         &self,
         ctx: &EngineContext,
         plan: &ExecutionPlan,
-    ) -> Result<crate::dispatch::SpawnedExecution, EngineError> {
+    ) -> Result<crate::dispatch::SpawnedExecutionAwaitingAttachment, EngineError> {
         self.checked_bundle_generation(|| {
             tracing::debug!(plan_id = %plan.plan_id, "spawning plan");
             crate::dispatch::spawn_plan(plan, ctx)

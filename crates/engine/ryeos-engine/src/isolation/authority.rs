@@ -3,11 +3,30 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IsolationLiveAccessAuthority {
-    pub root_device_id: u64,
-    pub root_inode: u64,
-    pub denied_control_paths: Vec<PathBuf>,
-    pub authorized_write_namespaces: Vec<String>,
+pub enum IsolationLiveAccessAuthority {
+    DescriptorRootedMasked {
+        root_device_id: u64,
+        root_inode: u64,
+        denied_control_paths: Vec<PathBuf>,
+        authorized_write_namespaces: Vec<String>,
+    },
+    UnconfinedHost {
+        authorized_write_namespaces: Vec<String>,
+    },
+}
+
+impl IsolationLiveAccessAuthority {
+    pub fn authorized_write_namespaces(&self) -> &[String] {
+        match self {
+            Self::DescriptorRootedMasked {
+                authorized_write_namespaces,
+                ..
+            }
+            | Self::UnconfinedHost {
+                authorized_write_namespaces,
+            } => authorized_write_namespaces,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

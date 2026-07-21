@@ -1,4 +1,14 @@
-# Project `.ai` deployable surface registry
+<!-- ryeos:signed:2026-07-21T00:24:56Z:086427b6f697daa14f51fc072d4691382754004ca2258052c6582fdc2786807b:qYvfM3mdVdD9fIpMStdtB9U5ZmogZkEbh2yPfcxT+Skuu4KDBbhM3E+T3GmPBfwd8heBI8IAW3h1jtoJziiLCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/future
+name: project-ai-surface-registry
+title: Project `.ai` Deployable Surface Registry
+description: Deferred signed registry for project-authored deployable AI surfaces
+entry_type: design
+version: "1.0.0"
+```
+
+# Project `.ai` Deployable Surface Registry
 
 ## Status
 

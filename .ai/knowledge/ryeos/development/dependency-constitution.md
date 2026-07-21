@@ -1,4 +1,14 @@
-# Workspace dependency constitution
+<!-- ryeos:signed:2026-07-21T00:24:55Z:d00aad6730438b4aa98020a3f15cb005393aa3639fd35a332b5c759ab4aa59f2:uXAdcqN20W0XPxtqdKveVSjpz0u2wW4Fx3hSmsIF5dt+iZ+LXuq9D/rvNERTYsRQW38fjZA2ZM2GL1bUtjREAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/development
+name: dependency-constitution
+title: Workspace Dependency Constitution
+description: Required dependency direction and layer ownership across the RyeOS workspace
+entry_type: reference
+version: "1.0.0"
+```
+
+# Workspace Dependency Constitution
 
 RyeOS dependencies point from orchestration toward primitives. Lower layers
 must not import authority, transport, or process orchestration from higher

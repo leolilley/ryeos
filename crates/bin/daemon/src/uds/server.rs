@@ -1450,10 +1450,9 @@ mod tests {
             canonical_root: project_path.clone(),
             live_access: ryeos_state::objects::LiveAccessAuthority {
                 access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
-                denied_control_paths:
-                    ryeos_state::project_sync::live_execution_denied_control_paths(),
                 authorized_write_namespaces: vec!["project".to_string()],
-                symlink_policy: ryeos_state::objects::LiveSymlinkPolicy::DescriptorRootedNoEscape,
+                confinement:
+                    ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
             },
             environment: ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
                 project_authority_id: authority_id,

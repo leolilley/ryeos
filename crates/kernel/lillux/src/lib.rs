@@ -9,12 +9,14 @@ pub mod signature;
 pub mod time;
 pub mod vault;
 
+pub use exec::retain_fork_sensitive_descriptors;
 pub use exec::{
     configure_inherited_fds, configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
-    supervised_launcher_gated_status_pipe, supervised_launcher_status_pipe,
-    validate_subprocess_limits, OutputLimitExceeded, ProcessStartGate, RunningProcess, SpawnResult,
-    SubprocessLimits, SubprocessRequest, SubprocessResult, SupervisedLauncherStatusPipe,
-    SupervisedProcessStatus,
+    supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
+    validate_subprocess_limits, AbortedProcess, AttachmentAbortError, AttachmentReleaseError,
+    ForkSensitiveDescriptorLease, OutputLimitExceeded, ProcessAwaitingAttachment, RunningProcess,
+    SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
+    SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe, SupervisedProcessStatus,
 };
 
 pub use atomic_fs::{
@@ -45,6 +47,12 @@ pub fn run(request: SubprocessRequest) -> SubprocessResult {
 
 pub fn spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
     exec::lib_spawn(request)
+}
+
+pub fn spawn_awaiting_attachment(
+    request: SubprocessRequest,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    exec::lib_spawn_awaiting_attachment(request)
 }
 
 pub fn run_inherited_stdio(request: SubprocessRequest) -> SubprocessResult {

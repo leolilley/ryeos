@@ -2291,16 +2291,10 @@ async fn run_claimed_thread_row_inner(
 
     // 9. Spawn runtime (env vars + stdin envelope)
     //
-    // `spawn_runtime` calls `lillux::run` which is a fully synchronous
-    // subprocess wait (std::process + blocking pipe drains). Calling
-    // it directly inside an async fn pins the current Tokio worker
-    // for the entire runtime lifetime — and the runtime's first action
-    // is a `runtime.mark_running` UDS callback. If the daemon's UDS
-    // server task is scheduled on the same worker, the runtime
-    // deadlocks waiting for a response that never comes (oracle review
-    // of P3b.2 hang). `spawn_blocking` moves the wait onto Tokio's
-    // dedicated blocking pool so async workers stay free to service
-    // UDS callbacks.
+    // Process preparation, attachment, release, and result handling use
+    // blocking process and pipe operations. Keep their owner on Tokio's
+    // blocking pool so async workers remain free to service runtime UDS
+    // callbacks.
     let materialized_binary_path = materialized_binary.path;
     let binary_path = materialized_binary_path
         .to_str()
@@ -2381,6 +2375,7 @@ async fn run_claimed_thread_row_inner(
     let state_root_for_spawn = runtime_state_root.to_path_buf();
     let identity_for_spawn = state.identity.clone();
     let state_for_spawn = (*state).clone();
+    let launch_owner_owned = launch_owner.to_string();
 
     let spawn_handle = tokio::task::spawn_blocking(move || {
         if let Err(e) = super::thread_meta::write_thread_meta(
@@ -2410,6 +2405,7 @@ async fn run_claimed_thread_row_inner(
             timeout_secs: duration,
             callback: &callback_owned,
             thread_id: &thread_id_owned,
+            launch_owner: &launch_owner_owned,
             vault_bindings: &vault_owned,
             thread_auth_token: &tat_owned,
             roots: runtime_roots,

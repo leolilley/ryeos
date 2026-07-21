@@ -7,7 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::launch_metadata::{RuntimeLaunchMetadata, LAUNCH_METADATA_SCHEMA_VERSION};
@@ -323,27 +323,13 @@ fn decode_detached_spawn_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Det
         child_thread_id: row.get(3)?,
         child_project_authority: row
             .get::<_, Option<String>>(4)?
-            .map(|raw| serde_json::from_str(&raw))
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?,
+            .map(|raw| decode_current_project_authority_column(4, &raw))
+            .transpose()?,
         admitted_launch_capsule_hash: row.get(5)?,
         launch_metadata: row
             .get::<_, Option<String>>(6)?
-            .map(|raw| serde_json::from_str(&raw))
-            .transpose()
-            .map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    6,
-                    rusqlite::types::Type::Text,
-                    Box::new(error),
-                )
-            })?,
+            .map(|raw| decode_current_launch_metadata_column(6, &raw))
+            .transpose()?,
         initial_events: row
             .get::<_, Option<String>>(7)?
             .map(|raw| serde_json::from_str(&raw))
@@ -1675,7 +1661,83 @@ fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
     Ok(tables)
 }
 
-fn validate_current_launch_metadata(raw: &str) -> Result<()> {
+const PROJECT_AUTHORITY_ENVELOPE_KIND: &str = "execution_project_authority";
+const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedProjectAuthorityEnvelope {
+    kind: String,
+    schema_epoch: u32,
+    authority: ryeos_state::objects::ExecutionProjectAuthority,
+}
+
+fn decode_current_project_authority(
+    raw: &str,
+) -> Result<ryeos_state::objects::ExecutionProjectAuthority> {
+    let value: Value = serde_json::from_str(raw).context("decode stored project authority")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow!("stored project authority envelope must be an object"))?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("stored project authority envelope has no string kind"))?;
+    if kind != PROJECT_AUTHORITY_ENVELOPE_KIND {
+        bail!(
+            "stored project authority is not the exact current contract: stored kind={kind:?}, current kind={PROJECT_AUTHORITY_ENVELOPE_KIND:?}"
+        );
+    }
+    let schema_epoch = object
+        .get("schema_epoch")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("stored project authority envelope has no numeric schema_epoch"))?;
+    if schema_epoch != u64::from(PROJECT_AUTHORITY_SCHEMA_EPOCH) {
+        bail!(
+            "stored project authority is not the exact current contract: stored schema_epoch={schema_epoch}, current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
+        );
+    }
+    let decoded: PersistedProjectAuthorityEnvelope =
+        serde_json::from_value(value.clone()).context("validate current project authority")?;
+    decoded.authority.validate()?;
+    let canonical =
+        lillux::canonical_json(&value).context("canonicalize current project authority")?;
+    if canonical != raw {
+        bail!("stored project authority is not canonical under the exact current contract");
+    }
+    Ok(decoded.authority)
+}
+
+fn decode_current_project_authority_column(
+    column: usize,
+    raw: &str,
+) -> rusqlite::Result<ryeos_state::objects::ExecutionProjectAuthority> {
+    decode_current_project_authority(raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{error:#}"),
+            )),
+        )
+    })
+}
+
+fn encode_current_project_authority(
+    authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> Result<String> {
+    authority.validate()?;
+    let envelope = PersistedProjectAuthorityEnvelope {
+        kind: PROJECT_AUTHORITY_ENVELOPE_KIND.to_string(),
+        schema_epoch: PROJECT_AUTHORITY_SCHEMA_EPOCH,
+        authority: authority.clone(),
+    };
+    let value = serde_json::to_value(envelope).context("encode current project authority")?;
+    lillux::canonical_json(&value).context("canonicalize current project authority")
+}
+
+fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
     let value: Value = serde_json::from_str(raw).context("decode stored launch metadata")?;
     let object = value
         .as_object()
@@ -1686,7 +1748,7 @@ fn validate_current_launch_metadata(raw: &str) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
     if schema_version != u64::from(LAUNCH_METADATA_SCHEMA_VERSION) {
         bail!(
-            "stored launch metadata schema_version `{schema_version}` is unsupported by the strict v{LAUNCH_METADATA_SCHEMA_VERSION} execution model; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting"
+            "stored launch metadata is not the exact current contract: stored schema_version={schema_version}, current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting"
         );
     }
     let decoded: RuntimeLaunchMetadata =
@@ -1695,11 +1757,25 @@ fn validate_current_launch_metadata(raw: &str) -> Result<()> {
     let canonical =
         lillux::canonical_json(&value).context("canonicalize current launch metadata")?;
     if canonical != raw {
-        bail!(
-            "stored launch metadata is not canonical under the strict v{LAUNCH_METADATA_SCHEMA_VERSION} execution model"
-        );
+        bail!("stored launch metadata is not canonical under the exact current contract");
     }
-    Ok(())
+    Ok(decoded)
+}
+
+fn decode_current_launch_metadata_column(
+    column: usize,
+    raw: &str,
+) -> rusqlite::Result<RuntimeLaunchMetadata> {
+    decode_current_launch_metadata(raw).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{error:#}"),
+            )),
+        )
+    })
 }
 
 fn encode_current_launch_metadata(metadata: &RuntimeLaunchMetadata) -> Result<String> {
@@ -1724,19 +1800,49 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
     assert_current_runtime_schema(&tx, path)?;
     let rows = {
         let mut statement = tx.prepare(
-            "SELECT thread_id,launch_metadata FROM thread_runtime
-             WHERE launch_metadata IS NOT NULL",
+            "SELECT 'thread_runtime', thread_id, launch_metadata
+               FROM thread_runtime WHERE launch_metadata IS NOT NULL
+             UNION ALL
+             SELECT 'detached_spawn_intent', operation_id, launch_metadata
+               FROM detached_spawn_intent WHERE launch_metadata IS NOT NULL",
         )?;
         let rows = statement
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
-    for (thread_id, raw) in rows {
-        validate_current_launch_metadata(&raw)
-            .with_context(|| format!("validate launch metadata for thread `{thread_id}`"))?;
+    for (owner, owner_id, raw) in rows {
+        decode_current_launch_metadata(&raw)
+            .with_context(|| format!("validate launch metadata for {owner} row `{owner_id}`"))?;
+    }
+    let authorities = {
+        let mut statement = tx.prepare(
+            "SELECT 'detached_spawn_intent', operation_id, child_project_authority
+               FROM detached_spawn_intent WHERE child_project_authority IS NOT NULL
+             UNION ALL
+             SELECT 'follow_waiter', follow_key, child_project_authority
+               FROM follow_waiter WHERE child_project_authority IS NOT NULL",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (owner, owner_id, raw) in authorities {
+        decode_current_project_authority(&raw)
+            .with_context(|| format!("validate project authority for {owner} row `{owner_id}`"))?;
     }
     tx.commit()
         .context("finish atomic runtime schema/data validation")
@@ -2268,7 +2374,7 @@ impl RuntimeDb {
                 request_hash,
                 proposed_child_thread_id,
                 child_project_authority
-                    .map(serde_json::to_string)
+                    .map(encode_current_project_authority)
                     .transpose()?,
                 lillux::time::timestamp_millis(),
             ],
@@ -2291,7 +2397,7 @@ impl RuntimeDb {
         }
         let stored_authority = stored_authority
             .as_deref()
-            .map(serde_json::from_str)
+            .map(decode_current_project_authority)
             .transpose()?;
         if child_project_authority.is_some() && stored_authority.as_ref() != child_project_authority
         {
@@ -2314,8 +2420,7 @@ impl RuntimeDb {
         operation_id: &str,
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<()> {
-        child_project_authority.validate()?;
-        let encoded = serde_json::to_string(child_project_authority)?;
+        let encoded = encode_current_project_authority(child_project_authority)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let changed = tx.execute(
             "UPDATE detached_spawn_intent
@@ -2333,7 +2438,7 @@ impl RuntimeDb {
             .ok_or_else(|| anyhow!("detached operation `{operation_id}` is not reserved"))?;
         let stored: ryeos_state::objects::ExecutionProjectAuthority = stored
             .as_deref()
-            .map(serde_json::from_str)
+            .map(decode_current_project_authority)
             .transpose()?
             .ok_or_else(|| {
                 anyhow!("detached operation `{operation_id}` project authority was not bound")
@@ -2369,8 +2474,8 @@ impl RuntimeDb {
                 "detached admitted capsule hash mismatch: expected {expected_capsule_hash}, got {admitted_launch_capsule_hash}"
             );
         }
-        let authority = serde_json::to_string(child_project_authority)?;
-        let metadata = serde_json::to_string(launch_metadata)?;
+        let authority = encode_current_project_authority(child_project_authority)?;
+        let metadata = encode_current_launch_metadata(launch_metadata)?;
         let events = serde_json::to_string(initial_events)?;
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         tx.execute(
@@ -2400,7 +2505,7 @@ impl RuntimeDb {
         if persisted
             .child_project_authority
             .as_ref()
-            .map(serde_json::to_string)
+            .map(encode_current_project_authority)
             .transpose()?
             .as_deref()
             != Some(authority.as_str())
@@ -2409,7 +2514,7 @@ impl RuntimeDb {
             || persisted
                 .launch_metadata
                 .as_ref()
-                .map(serde_json::to_string)
+                .map(encode_current_launch_metadata)
                 .transpose()?
                 .as_deref()
                 != Some(metadata.as_str())
@@ -3451,6 +3556,47 @@ impl RuntimeDb {
         process_identity: &ExecutionProcessIdentity,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
+        self.attach_process_with_mode(
+            thread_id,
+            pid,
+            pgid,
+            process_identity,
+            launch_metadata,
+            false,
+        )
+    }
+
+    /// Attach an identity at an attachment-before-execution boundary.
+    /// Unlike runtime self-attachment, an exact repeat is an invariant
+    /// violation here: target code has not been released and therefore could
+    /// not have authored a legitimate prior attachment.
+    pub fn attach_new_process(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        process_identity: &ExecutionProcessIdentity,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        self.attach_process_with_mode(
+            thread_id,
+            pid,
+            pgid,
+            process_identity,
+            launch_metadata,
+            true,
+        )
+    }
+
+    fn attach_process_with_mode(
+        &self,
+        thread_id: &str,
+        pid: i64,
+        pgid: i64,
+        process_identity: &ExecutionProcessIdentity,
+        launch_metadata: &RuntimeLaunchMetadata,
+        require_empty: bool,
+    ) -> Result<()> {
         if process_identity.schema_version != PROCESS_IDENTITY_SCHEMA_VERSION
             || process_identity.target_pid != pid
             || process_identity.group_leader_pid != pgid
@@ -3489,11 +3635,7 @@ impl RuntimeDb {
             existing_launch_metadata,
         ) = existing;
         let existing_launch_metadata = existing_launch_metadata
-            .map(|raw| {
-                validate_current_launch_metadata(&raw)?;
-                serde_json::from_str::<RuntimeLaunchMetadata>(&raw)
-                    .context("decode authoritative launch metadata during process attach")
-            })
+            .map(|raw| decode_current_launch_metadata(&raw))
             .transpose()?;
         let merged_launch_metadata = match existing_launch_metadata {
             Some(authoritative) if launch_metadata.is_empty() => Some(authoritative),
@@ -3505,6 +3647,11 @@ impl RuntimeDb {
             }
         };
         if let Some(existing_identity) = existing_identity {
+            if require_empty {
+                bail!(
+                    "refusing pre-release attachment for thread {thread_id}: process identity is already attached"
+                );
+            }
             let existing_identity =
                 serde_json::from_str::<ExecutionProcessIdentity>(&existing_identity)
                     .context("failed to decode existing process_identity during attach")?;
@@ -3720,37 +3867,16 @@ impl RuntimeDb {
         else {
             return Ok(None);
         };
-        let launch_metadata = match lm_text.as_deref() {
-            None => None,
-            Some(s) => match serde_json::from_str::<RuntimeLaunchMetadata>(s) {
-                Ok(m) => {
-                    if m.schema_version != LAUNCH_METADATA_SCHEMA_VERSION {
-                        bail!(
-                            "launch_metadata schema_version mismatch for thread {thread_id}: \
-                             persisted={}; expected={}; payload_len={}. \
-                             Refusing to operate on stale schema. Stop the daemon and run the \
-                             explicit confirmed thread-history/project-HEAD reset.",
-                            m.schema_version,
-                            LAUNCH_METADATA_SCHEMA_VERSION,
-                            s.len(),
-                        );
-                    } else {
-                        Some(m)
-                    }
-                }
-                Err(err) => {
-                    // Do NOT log raw payload — ResumeContext.parameters
-                    // can contain user/tool params that may include secrets.
-                    bail!(
-                        "failed to decode launch_metadata for thread {thread_id}: {err:#} \
-                         (payload_len={}). Corrupt or foreign row. \
-                         Preserve runtime state or run the explicit confirmed \
-                         thread-history/project-HEAD reset.",
-                        s.len(),
-                    );
-                }
-            },
-        };
+        let launch_metadata = lm_text
+            .as_deref()
+            .map(decode_current_launch_metadata)
+            .transpose()
+            .with_context(|| {
+                format!(
+                    "failed to decode launch_metadata for thread {thread_id} (payload_len={})",
+                    lm_text.as_deref().map_or(0, str::len)
+                )
+            })?;
         let process_identity = match identity_text.as_deref() {
             None => None,
             Some(value) => {
@@ -4302,12 +4428,8 @@ impl RuntimeDb {
         let launch_metadata_json = launch_metadata_json.ok_or_else(|| {
             anyhow::anyhow!("thread {thread_id} has no launch metadata for frozen workspace")
         })?;
-        let mut launch_metadata: RuntimeLaunchMetadata =
-            serde_json::from_str(&launch_metadata_json)
-                .context("decode launch metadata while binding frozen workspace")?;
-        if launch_metadata.schema_version != LAUNCH_METADATA_SCHEMA_VERSION {
-            bail!("launch metadata schema mismatch while binding frozen workspace");
-        }
+        let mut launch_metadata = decode_current_launch_metadata(&launch_metadata_json)
+            .context("decode launch metadata while binding frozen workspace")?;
         let resume = launch_metadata.resume_context.as_mut().ok_or_else(|| {
             anyhow::anyhow!("thread {thread_id} has no ResumeContext for frozen workspace")
         })?;
@@ -4946,7 +5068,7 @@ impl RuntimeDb {
                 seed.expected_children,
                 seed.child_project_authority
                     .as_ref()
-                    .map(serde_json::to_string)
+                    .map(encode_current_project_authority)
                     .transpose()?,
                 now,
             ],
@@ -4976,8 +5098,7 @@ impl RuntimeDb {
         follow_key: &str,
         authority: &ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<()> {
-        authority.validate()?;
-        let encoded = serde_json::to_string(authority)?;
+        let encoded = encode_current_project_authority(authority)?;
         self.conn.execute(
             "UPDATE follow_waiter SET child_project_authority=?2, updated_at_ms=?3
              WHERE follow_key=?1 AND child_project_authority IS NULL",
@@ -5824,15 +5945,8 @@ const FOLLOW_WAITER_SUMMARY_COLUMNS: &str = "fw.follow_key, fw.parent_thread_id,
 fn read_follow_waiter_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FollowWaiter> {
     let child_project_authority = row
         .get::<_, Option<String>>(10)?
-        .map(|raw| serde_json::from_str(&raw))
-        .transpose()
-        .map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                10,
-                rusqlite::types::Type::Text,
-                Box::new(error),
-            )
-        })?;
+        .map(|raw| decode_current_project_authority_column(10, &raw))
+        .transpose()?;
     Ok(FollowWaiter {
         follow_key: row.get(0)?,
         parent_thread_id: row.get(1)?,
@@ -6019,6 +6133,74 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let db = RuntimeDb::open(&tmp.path().join("runtime.db")).unwrap();
         (tmp, db)
+    }
+
+    #[test]
+    fn project_authority_envelope_roundtrips_exact_current_contract() {
+        let authority = ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS;
+        let raw = encode_current_project_authority(&authority).unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["kind"], PROJECT_AUTHORITY_ENVELOPE_KIND);
+        assert_eq!(
+            value["schema_epoch"],
+            Value::from(PROJECT_AUTHORITY_SCHEMA_EPOCH)
+        );
+        assert_eq!(decode_current_project_authority(&raw).unwrap(), authority);
+    }
+
+    #[test]
+    fn project_authority_envelope_rejects_epoch_before_nested_decode() {
+        let raw = lillux::canonical_json(&serde_json::json!({
+            "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
+            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH + 1,
+            "authority": {
+                "kind": "live_project",
+                "live_access": {
+                    "denied_control_paths": [".ai"],
+                    "symlink_policy": "descriptor_rooted_no_escape"
+                }
+            }
+        }))
+        .unwrap();
+        let error = decode_current_project_authority(&raw).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("stored project authority is not the exact current contract"));
+        assert!(message.contains(&format!(
+            "current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
+        )));
+        assert!(!message.contains("missing field `confinement`"));
+    }
+
+    #[test]
+    fn predecessor_launch_contract_is_rejected_before_nested_authority_decode() {
+        let raw = lillux::canonical_json(&serde_json::json!({
+            "schema_version": LAUNCH_METADATA_SCHEMA_VERSION - 1,
+            "resume_context": {
+                "project_authority": {
+                    "kind": "live_project",
+                    "live_access": {
+                        "access": "read_write",
+                        "authorized_write_namespaces": ["project"],
+                        "denied_control_paths": [".ai"],
+                        "symlink_policy": "descriptor_rooted_no_escape"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let error = decode_current_launch_metadata(&raw).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("not the exact current contract"));
+        assert!(message.contains(&format!(
+            "stored schema_version={}",
+            LAUNCH_METADATA_SCHEMA_VERSION - 1
+        )));
+        assert!(message.contains(&format!(
+            "current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
+        )));
+        assert!(!message.contains("missing field `confinement`"));
+        assert!(!message.contains("unknown field"));
     }
 
     #[test]
@@ -6916,6 +7098,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_installed_schema_with_unset_authority_columns_remains_current() {
+        let (tmp, db) = fresh_db();
+        let path = tmp.path().join("runtime.db");
+        for table in ["detached_spawn_intent", "follow_waiter"] {
+            let mut statement = db
+                .conn
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .unwrap();
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert!(columns
+                .iter()
+                .any(|column| column == "child_project_authority"));
+        }
+        drop(db);
+        let reopened = RuntimeDb::open(&path).unwrap();
+        assert!(!reopened.requires_explicit_history_reset());
+    }
+
+    #[test]
     fn launch_window_admits_to_width_then_queues_fifo() {
         let (_tmp, db) = fresh_db();
         db.launch_window_insert("c1", "P:gr:fan", 2, 1).unwrap();
@@ -7083,7 +7288,7 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_pre_v4_runtime_metadata_without_mutating_owned_state() {
+    fn open_rejects_predecessor_runtime_schema_without_mutating_owned_state() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -7092,7 +7297,7 @@ mod tests {
 
         let error = RuntimeDb::open(&path)
             .err()
-            .expect("pre-v4 launch authority must require the explicit reset action");
+            .expect("predecessor launch authority must require the explicit reset action");
         assert!(error.to_string().contains("--discard-thread-history"));
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let child_links: i64 = conn
@@ -7124,32 +7329,147 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_old_launch_metadata_when_sqlite_schema_is_current() {
+    fn unwrapped_detached_project_authority_requires_reset_without_mutation() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
-        let mut legacy = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
-        let legacy = legacy.as_object_mut().unwrap();
-        legacy.insert("schema_version".to_string(), Value::from(1));
-        legacy.remove("isolation");
+        let predecessor = lillux::canonical_json(&serde_json::json!({
+            "kind": "projectless",
+            "environment": { "kind": "none" }
+        }))
+        .unwrap();
         db.conn
             .execute(
-                "INSERT INTO thread_runtime (
-                     thread_id, chain_root_id, launch_metadata
-                 ) VALUES (?1, ?2, ?3)",
-                params![
-                    "T-pre-isolation",
-                    "T-pre-isolation",
-                    serde_json::to_string(legacy).unwrap()
-                ],
+                "INSERT INTO detached_spawn_intent(
+                     operation_id, parent_thread_id, request_hash, child_thread_id,
+                     child_project_authority, created_at_ms
+                 ) VALUES ('op-former', 'T-parent', 'request', 'T-child', ?1, 1)",
+                params![predecessor],
             )
             .unwrap();
         drop(db);
 
         let error = RuntimeDb::open(&path)
             .err()
-            .expect("old launch metadata must not be assigned invented v4 authority");
-        assert!(error.to_string().contains("--discard-thread-history"));
+            .expect("unwrapped detached authority must require explicit reset");
+        let message = format!("{error:#}");
+        assert!(message.contains("explicit no-backcompat reset"));
+        assert!(message.contains("stored project authority is not the exact current contract"));
+        assert!(message.contains("stored kind=\"projectless\""));
+        assert!(!message.contains("missing field `authority`"));
+
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let retained: String = conn
+            .query_row(
+                "SELECT child_project_authority FROM detached_spawn_intent WHERE operation_id='op-former'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, predecessor);
+    }
+
+    #[test]
+    fn unwrapped_follow_project_authority_requires_reset_without_mutation() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        let predecessor = lillux::canonical_json(&serde_json::json!({
+            "kind": "projectless",
+            "environment": { "kind": "none" }
+        }))
+        .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO follow_waiter(
+                     follow_key, parent_thread_id, parent_chain_root_id, follow_node,
+                     graph_run_id, step_count, phase, created_at_ms, updated_at_ms,
+                     child_project_authority
+                 ) VALUES ('follow-former', 'T-parent', 'T-parent', 'node',
+                           'run', 1, 'reserved', 1, 1, ?1)",
+                params![predecessor],
+            )
+            .unwrap();
+        drop(db);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("unwrapped follow authority must require explicit reset");
+        let message = format!("{error:#}");
+        assert!(message.contains("explicit no-backcompat reset"));
+        assert!(message.contains("stored project authority is not the exact current contract"));
+        assert!(message.contains("stored kind=\"projectless\""));
+        assert!(!message.contains("missing field `authority`"));
+
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let retained: String = conn
+            .query_row(
+                "SELECT child_project_authority FROM follow_waiter WHERE follow_key='follow-former'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, predecessor);
+    }
+
+    #[test]
+    fn open_rejects_former_authority_shape_at_launch_epoch_without_mutation() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        let mut predecessor = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
+        predecessor["schema_version"] = Value::from(LAUNCH_METADATA_SCHEMA_VERSION - 1);
+        predecessor["admitted_project_authority"] = serde_json::json!({
+            "kind": "live_project",
+            "authority_id": "former-authority",
+            "authored_project_identity": "local:/tmp/project",
+            "canonical_root": "/tmp/project",
+            "live_access": {
+                "access": "read_write",
+                "authorized_write_namespaces": ["project"],
+                "denied_control_paths": [".ai"],
+                "symlink_policy": "descriptor_rooted_no_escape"
+            },
+            "environment": { "kind": "none" },
+            "capability_ceiling": [],
+            "child_policy": { "kind": "inherit" }
+        });
+        let predecessor = lillux::canonical_json(&predecessor).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO thread_runtime (
+                     thread_id, chain_root_id, launch_metadata
+                 ) VALUES (?1, ?2, ?3)",
+                params!["T-pre-isolation", "T-pre-isolation", predecessor],
+            )
+            .unwrap();
+        drop(db);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("former launch authority must require the explicit reset action");
+        let message = format!("{error:#}");
+        assert!(message.contains("stored launch metadata is not the exact current contract"));
+        assert!(message.contains(&format!(
+            "stored schema_version={}",
+            LAUNCH_METADATA_SCHEMA_VERSION - 1
+        )));
+        assert!(message.contains(&format!(
+            "current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
+        )));
+        assert!(message.contains("--discard-thread-history"));
+        assert!(!message.contains("missing field `confinement`"));
+        assert!(!message.contains("unknown field `denied_control_paths`"));
+
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let retained: String = conn
+            .query_row(
+                "SELECT launch_metadata FROM thread_runtime WHERE thread_id='T-pre-isolation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained, predecessor);
     }
 
     #[test]
@@ -7206,6 +7526,16 @@ mod tests {
             0
         );
         assert!(reset.open_workspaces().unwrap().is_empty());
+        drop(reset);
+        drop(RuntimeDb::open(&path).unwrap());
+        let reopened = RuntimeDb::open_existing_current(&path).unwrap();
+        assert_eq!(
+            reopened
+                .discard_all_thread_history(true)
+                .unwrap()
+                .total_rows(),
+            0
+        );
     }
 
     #[test]
@@ -7573,7 +7903,7 @@ mod tests {
             .get_runtime_info("t1")
             .expect_err("schema version mismatch must error");
         assert!(
-            err.to_string().contains("schema_version mismatch"),
+            format!("{err:#}").contains("stored launch metadata is not the exact current contract"),
             "expected schema mismatch error, got: {err}"
         );
     }

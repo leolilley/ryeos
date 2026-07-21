@@ -325,30 +325,60 @@ fn result_reports_failure(parsed: &Value) -> bool {
         .is_some_and(|a| !a.is_empty())
 }
 
-/// A spawned but not-yet-completed execution.
-/// The daemon can inspect the supervised command's host PID and retained PGID
-/// before calling `wait()`. Under enforced isolation, `pid` is the adapter-reported
-/// command while `pgid` is the retained wrapper-led workload group. The daemon
-/// captures an exact durable control identity before attaching either target.
-pub struct SpawnedExecution {
-    pub pid: u32,
-    pub pgid: i64,
-    running: lillux::RunningProcess,
-    /// Present only under `--debug-raw`; consumed in [`wait`](Self::wait) to
-    /// build the debug block once the process result is available.
+/// A spawned execution whose exact target exists but cannot execute user code
+/// until the daemon durably attaches it.
+pub struct SpawnedExecutionAwaitingAttachment {
+    pending: lillux::ProcessAwaitingAttachment,
+    /// Present only under `--debug-raw`; transferred to the running state and
+    /// consumed when the attached process is waited.
     debug: Option<DebugCapture>,
 }
 
-impl SpawnedExecution {
-    /// Release the isolation backend's one-shot pre-exec barrier after the
-    /// daemon has durably attached this exact process identity.
-    ///
-    /// `false` means isolation is explicitly disabled and no backend gate was
-    /// installed; enforced launches always return `true`.
-    pub fn release_start_gate(&mut self) -> Result<bool, EngineError> {
-        self.running
-            .release_start_gate()
-            .map_err(|reason| EngineError::ExecutionFailed { reason })
+impl SpawnedExecutionAwaitingAttachment {
+    pub fn pid(&self) -> u32 {
+        self.pending.pid()
+    }
+
+    pub fn pgid(&self) -> i64 {
+        self.pending.pgid()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn pidfd(&self) -> std::os::fd::BorrowedFd<'_> {
+        self.pending.pidfd()
+    }
+
+    pub fn abort_and_reap(self) -> Result<lillux::AbortedProcess, EngineError> {
+        self.pending
+            .abort_and_reap()
+            .map_err(|error| EngineError::ExecutionFailed {
+                reason: error.to_string(),
+            })
+    }
+
+    pub fn release_after_attachment(self) -> Result<RunningExecution, EngineError> {
+        let running = self.pending.release_after_attachment().map_err(|error| {
+            EngineError::ExecutionFailed {
+                reason: error.to_string(),
+            }
+        })?;
+        Ok(RunningExecution {
+            running,
+            debug: self.debug,
+        })
+    }
+}
+
+/// A durably attached execution that has crossed its one-shot release
+/// boundary and can now be waited on.
+pub struct RunningExecution {
+    running: lillux::RunningProcess,
+    debug: Option<DebugCapture>,
+}
+
+impl RunningExecution {
+    pub fn abort(self) {
+        self.running.abort();
     }
 
     /// Block until the subprocess completes and return the completion.
@@ -363,13 +393,12 @@ impl SpawnedExecution {
     }
 }
 
-/// Spawn a plan's subprocess without waiting for completion.
-/// Returns the SpawnedExecution handle after any trusted-launcher status
-/// handshake, with the supervised command pid/pgid accessible immediately.
+/// Spawn a plan's subprocess at its attachment boundary without permitting
+/// target execution. The exact identity is accessible for durable attachment.
 pub fn spawn_plan(
     plan: &ExecutionPlan,
     ctx: &EngineContext,
-) -> Result<SpawnedExecution, EngineError> {
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
     if let Some(node) = plan.nodes.first() {
         match node {
             PlanNode::DispatchSubprocess { spec, .. } => {
@@ -390,21 +419,12 @@ fn spawn_subprocess(
     debug_raw: bool,
     item_ref: &str,
     ctx: &EngineContext,
-) -> Result<SpawnedExecution, EngineError> {
-    let request = isolation_plan_request(spec, item_ref, ctx)?;
+) -> Result<SpawnedExecutionAwaitingAttachment, EngineError> {
+    let request = isolation_plan_request_awaiting_attachment(spec, item_ref, ctx)?;
     let debug = debug_raw.then(|| DebugCapture::from_spec(spec));
 
-    match lillux::spawn(request) {
-        Ok(running) => {
-            let pid = running.pid;
-            let pgid = running.pgid;
-            Ok(SpawnedExecution {
-                pid,
-                pgid,
-                running,
-                debug,
-            })
-        }
+    match request.spawn() {
+        Ok(pending) => Ok(SpawnedExecutionAwaitingAttachment { pending, debug }),
         Err(err_result) => Err(EngineError::ExecutionFailed {
             reason: format!("subprocess spawn failed: {}", err_result.stderr),
         }),
@@ -416,6 +436,60 @@ fn isolation_plan_request(
     item_ref: &str,
     ctx: &EngineContext,
 ) -> Result<lillux::SubprocessRequest, EngineError> {
+    let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
+    ctx.isolation.apply(
+        request,
+        crate::isolation::IsolationLaunchContext {
+            project_path,
+            project_authority: ctx.isolation_project_authority,
+            live_access: ctx.isolation_live_access_authority.as_ref(),
+            state_root: ctx.isolation_state_root.as_deref(),
+            checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
+            daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
+            bundle_roots: &ctx.isolation_bundle_roots,
+            node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
+            verified_code: &verified_code,
+            item_ref,
+            thread_id: &ctx.thread_id,
+        },
+    )
+}
+
+fn isolation_plan_request_awaiting_attachment(
+    spec: &PlanSubprocessSpec,
+    item_ref: &str,
+    ctx: &EngineContext,
+) -> Result<crate::isolation::IsolationRequestAwaitingAttachment, EngineError> {
+    let (request, project_path, verified_code) = isolation_plan_request_parts(spec, ctx)?;
+    ctx.isolation.apply_awaiting_attachment(
+        request,
+        crate::isolation::IsolationLaunchContext {
+            project_path,
+            project_authority: ctx.isolation_project_authority,
+            live_access: ctx.isolation_live_access_authority.as_ref(),
+            state_root: ctx.isolation_state_root.as_deref(),
+            checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
+            daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
+            bundle_roots: &ctx.isolation_bundle_roots,
+            node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
+            verified_code: &verified_code,
+            item_ref,
+            thread_id: &ctx.thread_id,
+        },
+    )
+}
+
+fn isolation_plan_request_parts<'a>(
+    spec: &'a PlanSubprocessSpec,
+    ctx: &'a EngineContext,
+) -> Result<
+    (
+        lillux::SubprocessRequest,
+        &'a std::path::Path,
+        Vec<crate::isolation::IsolationVerifiedCode>,
+    ),
+    EngineError,
+> {
     let request = spec_to_request(spec)?;
     let mut verified_code = ctx.isolation_verified_code.clone();
     if let Some(command) = &spec.verified_command {
@@ -444,22 +518,7 @@ fn isolation_plan_request(
             });
         }
     };
-    ctx.isolation.apply(
-        request,
-        crate::isolation::IsolationLaunchContext {
-            project_path,
-            project_authority: ctx.isolation_project_authority,
-            live_access: None,
-            state_root: ctx.isolation_state_root.as_deref(),
-            checkpoint_dir: ctx.isolation_checkpoint_dir.as_deref(),
-            daemon_socket_path: ctx.isolation_daemon_socket_path.as_deref(),
-            bundle_roots: &ctx.isolation_bundle_roots,
-            node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
-            verified_code: &verified_code,
-            item_ref,
-            thread_id: &ctx.thread_id,
-        },
-    )
+    Ok((request, project_path, verified_code))
 }
 
 /// Truncate a string for inclusion in error payloads.
@@ -542,6 +601,7 @@ mod tests {
             app_root,
             isolation,
             isolation_project_authority: crate::isolation::IsolationProjectAuthority::External,
+            isolation_live_access_authority: None,
             isolation_state_root: None,
             isolation_checkpoint_dir: None,
             isolation_daemon_socket_path: None,

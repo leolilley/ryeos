@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-17T00:28:22Z:58e88e343c56b799f50e39ce1c5d5e33b21e927f6be3a33b4d87f422504e6627:D2JC9FgunkSQ0oJP/UjemFeazYJFblcFBycV158ixdm2e/tDKHWDigNcr6fvDuUXnVjPh+WyaAdvGDMrmgLVBQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-21T00:24:56Z:f287ce7c0875d77584e369fb08d640b00943874ca7fc1a44671876687ea2f8c5:HzronJ/foOjSp/S/cMXv0Jcna4hKN5InmodrZ8Z5+vwX9hwo0v1tdnHqnAsVe7NtMdlPKbFWQiQ0xiFdddbQAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: ryeos/future
 name: distributed-substrate-deferred-advanced
@@ -99,9 +99,10 @@ Host PIDs and same-UID signals are not isolated by the current inner isolation.
 The outer worker design must remove that shared authority rather than claiming
 an inner isolation backend alone solved it. Durable job records should therefore carry an
 explicit isolation class and worker/cgroup identity once this path is activated.
-That outer identity also closes the spawn-to-durable-attachment crash window:
-if a node dies after creating a process but before committing its exact birth
-tuple, the worker/cgroup remains an independently nameable teardown boundary.
+The local attachment-before-execution contract already closes the
+spawn-to-durable-attachment crash window. The outer worker identity instead
+provides independently nameable quota and teardown authority across sessions,
+hostile descendants, and failure of the whole node/worker boundary.
 The backend and capability-matching contract is specified in
 `ryeos/core/node/execution-isolation`.
 

@@ -37,6 +37,7 @@ pub struct EngineContext {
     pub app_root: PathBuf,
     pub isolation: Arc<crate::isolation::IsolationRuntime>,
     pub isolation_project_authority: crate::isolation::IsolationProjectAuthority,
+    pub isolation_live_access_authority: Option<crate::isolation::IsolationLiveAccessAuthority>,
     pub isolation_state_root: Option<PathBuf>,
     pub isolation_checkpoint_dir: Option<PathBuf>,
     /// Typed callback-socket fact paired with this plan's daemon callback env.

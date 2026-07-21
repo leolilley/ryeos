@@ -1164,11 +1164,10 @@ fn release_snapshot_publication(
     }
 }
 
-/// Attach a freshly-spawned process to the daemon's runtime ledger.
-/// On failure, hard-kill the spawned process group and settle the durable
-/// lifecycle intent. Explicit Cancel/Kill and daemon shutdown must not be
-/// overwritten by a generic attachment failure.
-struct AttachOrKillParams<'a> {
+/// Attach a held process to the runtime ledger and activate any workspace.
+/// This helper never kills or settles lifecycle state: its caller still owns
+/// the pending process and must prove abort/reap before terminal settlement.
+struct PendingAttachParams<'a> {
     state: &'a AppState,
     thread_id: &'a str,
     spawned_pid: u32,
@@ -1179,10 +1178,18 @@ struct AttachOrKillParams<'a> {
     launch_owner: &'a str,
 }
 
-fn attach_or_kill(
-    params: AttachOrKillParams<'_>,
-) -> std::result::Result<(), ExecutionCleanupFailure> {
-    let AttachOrKillParams {
+#[derive(Debug)]
+struct PendingAttachFailure {
+    operation: &'static str,
+    outcome_code: String,
+    process_attached: bool,
+    error: anyhow::Error,
+}
+
+fn attach_pending_process(
+    params: PendingAttachParams<'_>,
+) -> std::result::Result<(), PendingAttachFailure> {
+    let PendingAttachParams {
         state,
         thread_id,
         spawned_pid,
@@ -1192,7 +1199,7 @@ fn attach_or_kill(
         failed_outcome_code,
         launch_owner,
     } = params;
-    if let Err(err) = state.threads.attach_process_owned(
+    if let Err(err) = state.threads.attach_new_process_owned(
         &ThreadAttachProcessParams {
             thread_id: thread_id.to_string(),
             pid: spawned_pid as i64,
@@ -1203,42 +1210,11 @@ fn attach_or_kill(
         },
         launch_owner,
     ) {
-        tracing::error!(
-            thread_id,
-            pgid = spawned_pgid,
-            error = %err,
-            outcome_code = failed_outcome_code,
-            "attach_process failed after spawn — killing child PG and finalizing thread"
-        );
-        let kill = ryeos_app::process::kill_by_action(
-            process_identity,
-            ryeos_app::process::ShutdownAction::Hard,
-        );
-        if !kill.success {
-            return Err(ExecutionCleanupFailure {
-                operation: "attach process",
-                operation_error: err,
-                cleanup: Err(anyhow::anyhow!(
-                    "identity-verified hard kill did not confirm process-group exit ({})",
-                    kill.method
-                )),
-            });
-        }
-        if let Err(clear_error) = state.state_store.clear_thread_process_if_matches_owned(
-            thread_id,
-            process_identity,
-            launch_owner,
-        ) {
-            tracing::error!(
-                thread_id,
-                error = %clear_error,
-                "failed to compare-clear process identity after confirmed attach-failure kill"
-            );
-        }
-        return Err(ExecutionCleanupFailure {
+        return Err(PendingAttachFailure {
             operation: "attach process",
-            operation_error: err,
-            cleanup: fail_thread_static_owned(state, thread_id, failed_outcome_code, launch_owner),
+            outcome_code: failed_outcome_code.to_string(),
+            process_attached: false,
+            error: err,
         });
     }
     let workspace_activation = (|| -> Result<()> {
@@ -1276,40 +1252,64 @@ fn attach_or_kill(
         )
     })();
     if let Err(error) = workspace_activation {
-        let kill = ryeos_app::process::kill_by_action(
-            process_identity,
-            ryeos_app::process::ShutdownAction::Hard,
-        );
-        let clear = kill.success.then(|| {
-            state.state_store.clear_thread_process_if_matches_owned(
-                thread_id,
-                process_identity,
-                launch_owner,
-            )
-        });
-        return Err(ExecutionCleanupFailure {
+        return Err(PendingAttachFailure {
             operation: "activate workspace",
-            operation_error: error,
-            cleanup: match clear {
-                Some(Ok(true)) => fail_thread_static_owned(
-                    state,
-                    thread_id,
-                    "workspace_activation_failed",
-                    launch_owner,
-                ),
-                Some(Ok(false)) => Err(anyhow::anyhow!(
-                    "workspace activation failed and exact process attachment changed"
-                )),
-                Some(Err(error)) => Err(error
-                    .context("workspace activation failed and process compare-clear also failed")),
-                None => Err(anyhow::anyhow!(
-                    "workspace activation failed and exact process kill was unconfirmed ({})",
-                    kill.method
-                )),
-            },
+            outcome_code: "workspace_activation_failed".to_string(),
+            process_attached: true,
+            error,
         });
     }
     Ok(())
+}
+
+fn abort_and_settle_pending_attach_failure(
+    state: &AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    spawned: ryeos_app::thread_lifecycle::SpawnedItemAwaitingAttachment,
+    failure: PendingAttachFailure,
+) -> ExecutionCleanupFailure {
+    let identity = spawned.process_identity.clone();
+    let cleanup = match spawned.abort_and_reap() {
+        Err(error) => {
+            Err(error
+                .context("abort and reap attachment-pending process before lifecycle settlement"))
+        }
+        Ok(()) => {
+            if failure.process_attached {
+                match state.state_store.clear_thread_process_if_matches_owned(
+                    thread_id,
+                    &identity,
+                    launch_owner,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return ExecutionCleanupFailure {
+                            operation: failure.operation,
+                            operation_error: failure.error,
+                            cleanup: Err(anyhow::anyhow!(
+                                "attachment changed before dead pending process could be compare-cleared"
+                            )),
+                        };
+                    }
+                    Err(error) => {
+                        return ExecutionCleanupFailure {
+                            operation: failure.operation,
+                            operation_error: failure.error,
+                            cleanup: Err(error
+                                .context("compare-clear dead attachment-pending process identity")),
+                        };
+                    }
+                }
+            }
+            fail_thread_static_owned(state, thread_id, &failure.outcome_code, launch_owner)
+        }
+    };
+    ExecutionCleanupFailure {
+        operation: failure.operation,
+        operation_error: failure.error,
+        cleanup,
+    }
 }
 
 fn clear_finished_process(
@@ -1870,6 +1870,8 @@ pub async fn run_and_wait(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let wait_isolation_project_authority = params.provenance.isolation_project_authority();
+    let wait_isolation_live_access_authority =
+        params.provenance.isolation_live_access_authority()?;
     let wait_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
@@ -1890,6 +1892,7 @@ pub async fn run_and_wait(
             roots: wait_roots,
             isolation: wait_isolation,
             isolation_project_authority: wait_isolation_project_authority,
+            isolation_live_access_authority: wait_isolation_live_access_authority,
             isolation_daemon_socket_path: wait_isolation_daemon_socket_path.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume: false,
@@ -1926,10 +1929,15 @@ pub async fn run_and_wait(
         Ok(metadata) => metadata,
         Err(error) => {
             tracing::error!(%error, "spawn attempt contradicted admitted waiting launch metadata");
-            drop(spawned);
+            let pending_cleanup = spawned.abort_and_reap();
             guard.fail_thread("launch_metadata_conflict");
             guard.cleanup();
-            return Err(error);
+            return match pending_cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => {
+                    Err(error.context(format!("pending-process reap failed: {cleanup}")))
+                }
+            };
         }
     };
 
@@ -1948,11 +1956,7 @@ pub async fn run_and_wait(
             Ok(None) => None,
             Err(err) => {
                 tracing::error!(error = %err, "native-resume project authority validation failed");
-                // `SpawnedExecution` owns a fail-safe RunningProcess Drop that
-                // terminates and reaps every supervised group. Drop it before
-                // terminalizing so the lifecycle never claims a live child is
-                // settled merely because a separate signal attempt returned.
-                drop(spawned);
+                let pending_cleanup = spawned.abort_and_reap();
                 let failure = ExecutionCleanupFailure {
                     operation: "validate native-resume project authority",
                     operation_error: err,
@@ -1967,15 +1971,19 @@ pub async fn run_and_wait(
                     guard.mark_finalized();
                 }
                 guard.cleanup();
-                return Err(anyhow::Error::new(failure));
+                return match pending_cleanup {
+                    Ok(()) => Err(anyhow::Error::new(failure)),
+                    Err(cleanup) => Err(anyhow::Error::new(failure)
+                        .context(format!("pending-process reap failed: {cleanup}"))),
+                };
             }
         }
     } else {
         None
     };
 
-    // Attach process — on failure, kill the child + finalize.
-    if let Err(failure) = attach_or_kill(AttachOrKillParams {
+    // Attach the held process. Failure is settled only after checked abort/reap.
+    if let Err(failure) = attach_pending_process(PendingAttachParams {
         state: &state,
         thread_id: &created.thread_id,
         spawned_pid: spawned.pid,
@@ -1985,6 +1993,13 @@ pub async fn run_and_wait(
         failed_outcome_code: "attach_failed",
         launch_owner: &wait_launch_owner,
     }) {
+        let failure = abort_and_settle_pending_attach_failure(
+            &state,
+            &created.thread_id,
+            &wait_launch_owner,
+            spawned,
+            failure,
+        );
         if failure.cleanup_disarms_guard() {
             guard.mark_finalized();
         }
@@ -1995,7 +2010,7 @@ pub async fn run_and_wait(
         Ok(running) => running,
         Err(error) => {
             let failed_identity = spawned.process_identity.clone();
-            drop(spawned);
+            let pending_cleanup = spawned.abort_and_reap();
             clear_finished_process(
                 &state,
                 &created.thread_id,
@@ -2017,38 +2032,76 @@ pub async fn run_and_wait(
             }
             guard.mark_finalized();
             guard.cleanup();
-            return Err(anyhow::anyhow!(
+            let error = anyhow::anyhow!(
                 "transition attached waiting execution {} to running: {error}",
                 created.thread_id
-            ));
+            );
+            return match pending_cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup) => {
+                    Err(error.context(format!("pending-process reap failed: {cleanup}")))
+                }
+            };
         }
     };
-    if let Err(error) = spawned.release_start_gate() {
+    if let Err(error) = state.threads.authorize_process_release_owned(
+        &created.thread_id,
+        &spawned.process_identity,
+        &wait_launch_owner,
+    ) {
         let failed_identity = spawned.process_identity.clone();
-        drop(spawned);
+        let pending_cleanup = spawned.abort_and_reap();
         clear_finished_process(
             &state,
             &created.thread_id,
             &failed_identity,
             &wait_launch_owner,
         );
-        let cleanup = fail_thread_static_owned(
+        let lifecycle_cleanup = fail_thread_static_owned(
             &state,
             &created.thread_id,
-            "launch_start_gate_failed",
+            "launch_release_not_authorized",
             &wait_launch_owner,
         );
-        if let Err(cleanup_error) = cleanup {
-            tracing::error!(
-                thread_id = %created.thread_id,
-                error = %cleanup_error,
-                "waiting execution start-gate failure cleanup did not settle"
-            );
-        }
         guard.mark_finalized();
         guard.cleanup();
-        return Err(error.context("release waiting execution after durable attachment"));
+        let mut error = error.context("authorize waiting execution release after attachment");
+        if let Err(cleanup) = pending_cleanup {
+            error = error.context(format!("pending-process reap failed: {cleanup}"));
+        }
+        if let Err(cleanup) = lifecycle_cleanup {
+            error = error.context(format!("lifecycle cleanup failed: {cleanup:#}"));
+        }
+        return Err(error);
     }
+    let release_identity = spawned.process_identity.clone();
+    let spawned = match spawned.release_after_attachment() {
+        Ok(running) => running,
+        Err(error) => {
+            clear_finished_process(
+                &state,
+                &created.thread_id,
+                &release_identity,
+                &wait_launch_owner,
+            );
+            let cleanup = fail_thread_static_owned(
+                &state,
+                &created.thread_id,
+                "launch_release_after_attachment_failed",
+                &wait_launch_owner,
+            );
+            if let Err(cleanup_error) = cleanup {
+                tracing::error!(
+                    thread_id = %created.thread_id,
+                    error = %cleanup_error,
+                    "waiting execution release failure cleanup did not settle"
+                );
+            }
+            guard.mark_finalized();
+            guard.cleanup();
+            return Err(error.context("release waiting execution after durable attachment"));
+        }
+    };
     release_snapshot_publication(snapshot_publication, "waiting launch metadata attachment");
     release_tree_publication(
         tree_publication.take(),
@@ -2464,6 +2517,7 @@ pub async fn run_detached(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let bg_isolation_project_authority = params.provenance.isolation_project_authority();
+    let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -2484,6 +2538,7 @@ pub async fn run_detached(
         bg_project_authority,
         bg_state_root,
         bg_isolation_project_authority,
+        bg_isolation_live_access_authority,
         isolation_daemon_socket_path,
         bg_temp_dir,
         bg_skip_resume_snapshot_pin,
@@ -2599,6 +2654,9 @@ async fn dispatch_detached_bg_task(
     bg_project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     bg_state_root: Option<PathBuf>,
     bg_isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority,
+    bg_isolation_live_access_authority: Option<
+        ryeos_engine::isolation::IsolationLiveAccessAuthority,
+    >,
     bg_isolation_daemon_socket_path: Option<PathBuf>,
     mut bg_temp_dir: Option<Arc<TempDirGuard>>,
     bg_skip_resume_snapshot_pin: bool,
@@ -2690,6 +2748,7 @@ async fn dispatch_detached_bg_task(
             roots,
             isolation: isolation_for_spawn,
             isolation_project_authority: bg_isolation_project_authority,
+            isolation_live_access_authority: bg_isolation_live_access_authority,
             isolation_daemon_socket_path: isolation_daemon_socket_path_for_spawn.as_deref(),
             thread_state_dir: Some(thread_state_dir.as_path()),
             is_resume,
@@ -2758,7 +2817,14 @@ async fn dispatch_detached_bg_task(
                 %error,
                 "load admitted launch metadata before process attach"
             );
-            drop(spawned);
+            if let Err(cleanup) = spawned.abort_and_reap() {
+                tracing::error!(
+                    phase = log_phase,
+                    thread_id = %bg_thread_id,
+                    error = %cleanup,
+                    "failed to reap attachment-pending process after missing launch metadata"
+                );
+            }
             if let Err(cleanup_error) = fail_thread_static_owned(
                 &bg_state,
                 &bg_thread_id,
@@ -2786,7 +2852,14 @@ async fn dispatch_detached_bg_task(
                     %error,
                     "spawn attempt contradicted admitted launch metadata"
                 );
-                drop(spawned);
+                if let Err(cleanup) = spawned.abort_and_reap() {
+                    tracing::error!(
+                        phase = log_phase,
+                        thread_id = %bg_thread_id,
+                        error = %cleanup,
+                        "failed to reap attachment-pending process after launch metadata conflict"
+                    );
+                }
                 if let Err(cleanup_error) = fail_thread_static_owned(
                     &bg_state,
                     &bg_thread_id,
@@ -2823,9 +2896,14 @@ async fn dispatch_detached_bg_task(
                     error = %err,
                     "native-resume project authority validation failed"
                 );
-                // Explicit drop invokes the supervised process handle's
-                // terminate-and-reap fallback before lifecycle settlement.
-                drop(spawned);
+                if let Err(cleanup) = spawned.abort_and_reap() {
+                    tracing::error!(
+                        phase = log_phase,
+                        thread_id = %bg_thread_id,
+                        error = %cleanup,
+                        "failed to reap attachment-pending process after resume authority refusal"
+                    );
+                }
                 let cleanup = fail_thread_static_owned(
                     &bg_state,
                     &bg_thread_id,
@@ -2848,8 +2926,8 @@ async fn dispatch_detached_bg_task(
         None
     };
 
-    // Attach process — on failure, kill the child + finalize.
-    if let Err(failure) = attach_or_kill(AttachOrKillParams {
+    // Attach the held process. Failure is settled only after checked abort/reap.
+    if let Err(failure) = attach_pending_process(PendingAttachParams {
         state: &bg_state,
         thread_id: &bg_thread_id,
         spawned_pid: spawned.pid,
@@ -2859,6 +2937,13 @@ async fn dispatch_detached_bg_task(
         failed_outcome_code: attach_outcome_code,
         launch_owner: &launch_owner,
     }) {
+        let failure = abort_and_settle_pending_attach_failure(
+            &bg_state,
+            &bg_thread_id,
+            &launch_owner,
+            spawned,
+            failure,
+        );
         tracing::error!(
             phase = log_phase,
             thread_id = %bg_thread_id,
@@ -2886,7 +2971,14 @@ async fn dispatch_detached_bg_task(
                 "failed to transition recovered created thread to running; terminating its process"
             );
             let failed_identity = spawned.process_identity.clone();
-            drop(spawned);
+            if let Err(cleanup) = spawned.abort_and_reap() {
+                tracing::error!(
+                    phase = log_phase,
+                    thread_id = %bg_thread_id,
+                    error = %cleanup,
+                    "failed to reap attachment-pending process after running-transition refusal"
+                );
+            }
             clear_finished_process(&bg_state, &bg_thread_id, &failed_identity, &launch_owner);
             if let Err(cleanup_error) = fail_thread_static_owned(
                 &bg_state,
@@ -2906,32 +2998,72 @@ async fn dispatch_detached_bg_task(
         }
     }
 
-    if let Err(error) = spawned.release_start_gate() {
+    if let Err(error) = bg_state.threads.authorize_process_release_owned(
+        &bg_thread_id,
+        &spawned.process_identity,
+        &launch_owner,
+    ) {
         tracing::error!(
             phase = log_phase,
             thread_id = %bg_thread_id,
             %error,
-            "failed to release detached execution after durable attachment"
+            "detached execution release was not authorized after attachment"
         );
         let failed_identity = spawned.process_identity.clone();
-        drop(spawned);
+        if let Err(cleanup) = spawned.abort_and_reap() {
+            tracing::error!(
+                phase = log_phase,
+                thread_id = %bg_thread_id,
+                error = %cleanup,
+                "failed to reap attachment-pending process after release refusal"
+            );
+        }
         clear_finished_process(&bg_state, &bg_thread_id, &failed_identity, &launch_owner);
         if let Err(cleanup_error) = fail_thread_static_owned(
             &bg_state,
             &bg_thread_id,
-            "launch_start_gate_failed",
+            "launch_release_not_authorized",
             &launch_owner,
         ) {
             tracing::error!(
                 phase = log_phase,
                 thread_id = %bg_thread_id,
                 error = %cleanup_error,
-                "detached start-gate failure cleanup did not settle"
+                "detached release-refusal cleanup did not settle"
             );
         }
         drop(bg_temp_dir.take());
         return;
     }
+
+    let release_identity = spawned.process_identity.clone();
+    let spawned = match spawned.release_after_attachment() {
+        Ok(running) => running,
+        Err(error) => {
+            tracing::error!(
+                phase = log_phase,
+                thread_id = %bg_thread_id,
+                %error,
+                "failed to release detached execution after durable attachment"
+            );
+            clear_finished_process(&bg_state, &bg_thread_id, &release_identity, &launch_owner);
+            if let Err(cleanup_error) = fail_thread_static_owned(
+                &bg_state,
+                &bg_thread_id,
+                "launch_release_after_attachment_failed",
+                &launch_owner,
+            ) {
+                tracing::error!(
+                    phase = log_phase,
+                    thread_id = %bg_thread_id,
+                    error = %cleanup_error,
+                    "detached release failure cleanup did not settle"
+                );
+            }
+            drop(bg_temp_dir.take());
+            return;
+        }
+    };
 
     let wait_workspace_lifeline = bg_temp_dir.clone();
     let waited_identity = spawned.process_identity.clone();
@@ -3594,7 +3726,7 @@ pub fn execution_params_from_sealed_root_request(
 /// subprocess writes a checkpoint but before the next checkpoint
 /// flushes, work between the last checkpoint and crash will replay.
 /// Resume promises *bounded* duplicates after crash, NOT exactly-once
-/// semantics. See `docs/future/native-resume-snapshot-pinning.md`
+/// semantics. See `.ai/knowledge/ryeos/future/native-resume-snapshot-pinning.md`
 /// (Evolution 2 — supervisor side-car) for the trade-off discussion.
 #[tracing::instrument(
     name = "thread:resume",
@@ -3901,6 +4033,7 @@ async fn run_existing_recovered_thread(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let bg_isolation_project_authority = params.provenance.isolation_project_authority();
+    let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -3921,6 +4054,7 @@ async fn run_existing_recovered_thread(
         bg_project_authority,
         bg_state_root,
         bg_isolation_project_authority,
+        bg_isolation_live_access_authority,
         isolation_daemon_socket_path,
         bg_temp_dir,
         bg_skip_resume_snapshot_pin,
@@ -3962,6 +4096,7 @@ mod tests {
                 root.clone(),
                 format!("local:{}", root.display()),
                 ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
                 ryeos_state::objects::EnvironmentAuthority::None,
                 Vec::new(),
             )

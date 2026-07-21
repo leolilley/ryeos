@@ -485,7 +485,7 @@ pub enum TerminatorDecl {
 
 /// Closed enum of named in-process handler registries. Single variant in V5.3
 /// — additional registries (parsers, composers) are deferred per
-/// docs/future/resolution-pipeline-advanced.md.
+/// .ai/knowledge/ryeos/future/resolution-pipeline-advanced.md.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum InProcessRegistryKind {

@@ -709,21 +709,39 @@ impl ExecutionProvenance {
         self.project_authority()
             .live_access()
             .map(|authority| {
-                let root = self
-                    .project_authority()
-                    .open_environment_root()?
-                    .ok_or_else(|| anyhow::anyhow!("live project authority lost its root"))?;
-                let (root_device_id, root_inode) = root.device_inode()?;
-                Ok(ryeos_engine::isolation::IsolationLiveAccessAuthority {
-                    root_device_id,
-                    root_inode,
-                    denied_control_paths: authority
-                        .denied_control_paths
-                        .iter()
-                        .map(PathBuf::from)
-                        .collect(),
-                    authorized_write_namespaces: authority.authorized_write_namespaces.clone(),
-                })
+                match &authority.confinement {
+                    ryeos_state::objects::LiveFilesystemConfinement::DescriptorRootedMasked {
+                        denied_control_paths,
+                        symlink_policy:
+                            ryeos_state::objects::LiveSymlinkPolicy::DescriptorRootedNoEscape,
+                    } => {
+                        let root = self
+                            .project_authority()
+                            .open_environment_root()?
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("live project authority lost its root")
+                            })?;
+                        let (root_device_id, root_inode) = root.device_inode()?;
+                        Ok(ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedMasked {
+                            root_device_id,
+                            root_inode,
+                            denied_control_paths: denied_control_paths
+                                .iter()
+                                .map(PathBuf::from)
+                                .collect(),
+                            authorized_write_namespaces: authority
+                                .authorized_write_namespaces
+                                .clone(),
+                        })
+                    }
+                    ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost => {
+                        Ok(ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
+                            authorized_write_namespaces: authority
+                                .authorized_write_namespaces
+                                .clone(),
+                        })
+                    }
+                }
             })
             .transpose()
     }

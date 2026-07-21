@@ -1,9 +1,15 @@
+use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
+use std::marker::PhantomData;
 use std::process::{self, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsFd as _, AsRawFd as _, BorrowedFd, FromRawFd as _, OwnedFd};
 
 use clap::Subcommand;
 
@@ -85,23 +91,28 @@ impl OutputLimitExceeded {
 /// `{"child-pid": <u32>}` JSON document. The target must remain in the
 /// launcher's Lillux-owned process group. Retaining the outer child then keeps
 /// that PGID owned until Lillux has terminated every remaining group member.
-pub struct SupervisedProcessStatus {
-    reader: std::fs::File,
-    /// Parent-owned release end of the launch barrier installed by the
-    /// trusted launcher. When present, the supervised target has been created
-    /// and reported but cannot exec user code until the daemon explicitly
-    /// releases this gate after durable process attachment.
-    start_gate: Option<ProcessStartGate>,
+pub enum SupervisedProcessStatus {
+    Run {
+        reader: std::fs::File,
+    },
+    AwaitingAttachment {
+        reader: std::fs::File,
+        /// Parent-owned release end of the attachment boundary installed by
+        /// the trusted launcher. The supervised target has been created and
+        /// reported but cannot exec user code until the daemon explicitly
+        /// releases this authority after durable process attachment.
+        attachment_release: ProcessAttachmentRelease,
+    },
 }
 
-/// Parent-owned release end of a trusted launcher's pre-exec start barrier.
+/// Parent-owned release end of a trusted launcher's attachment boundary.
 ///
 /// The read end is inherited by the trusted launcher and consumed by its
 /// backend immediately before target exec. Dropping this value without
 /// release closes the pipe; [`RunningProcess::drop`] then terminates the whole
 /// supervised group, so a failed durable attachment can never leak a runnable
 /// target.
-pub struct ProcessStartGate {
+pub struct ProcessAttachmentRelease {
     writer: Option<std::fs::File>,
 }
 
@@ -109,12 +120,20 @@ pub struct ProcessStartGate {
 pub struct SupervisedLauncherStatusPipe {
     pub reader: SupervisedProcessStatus,
     pub writer: Arc<std::fs::File>,
-    /// Read end to inherit into the trusted launcher and bind to its pre-exec
-    /// barrier. Present only for the gated factory.
-    pub start_gate_reader: Option<Arc<std::fs::File>>,
-    /// Child-side duplicate of the gate writer. The trusted launcher keeps it
-    /// open while blocked so parent death cannot turn pipe EOF into a release.
-    pub start_gate_keepalive_writer: Option<Arc<std::fs::File>>,
+}
+
+/// Exact status and release authorities for a supervised target that must
+/// remain blocked until durable process attachment.
+pub struct SupervisedLauncherAttachmentStatusPipe {
+    pub reader: SupervisedProcessStatus,
+    pub writer: Arc<std::fs::File>,
+    /// Read end inherited by the trusted launcher and bound to its final
+    /// target-exec boundary.
+    pub attachment_release_reader: Arc<std::fs::File>,
+    /// Child-side duplicate of the release writer. The trusted launcher keeps
+    /// it open while blocked so parent death cannot turn pipe EOF into a
+    /// release.
+    pub attachment_release_keepalive_writer: Arc<std::fs::File>,
 }
 
 impl SupervisedLauncherStatusPipe {
@@ -130,6 +149,20 @@ impl SupervisedLauncherStatusPipe {
         // Construction fails on non-Linux platforms, so this value is never
         // handed to a child. Keeping the method in the cross-platform API lets
         // shared launcher plumbing compile without platform-specific branches.
+        -1
+    }
+}
+
+impl SupervisedLauncherAttachmentStatusPipe {
+    /// Raw status descriptor to pass to the trusted launcher.
+    #[cfg(unix)]
+    pub fn writer_fd(&self) -> std::os::fd::RawFd {
+        use std::os::fd::AsRawFd as _;
+        self.writer.as_raw_fd()
+    }
+
+    #[cfg(not(unix))]
+    pub fn writer_fd(&self) -> i32 {
         -1
     }
 }
@@ -155,13 +188,8 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
     let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     Ok(SupervisedLauncherStatusPipe {
-        reader: SupervisedProcessStatus {
-            reader,
-            start_gate: None,
-        },
+        reader: SupervisedProcessStatus::Run { reader },
         writer: Arc::new(writer),
-        start_gate_reader: None,
-        start_gate_keepalive_writer: None,
     })
 }
 
@@ -170,15 +198,16 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
     Err("supervised-launcher status is supported only on Linux".to_string())
 }
 
-/// Create the target-status channel together with an explicit pre-exec start
-/// barrier for a trusted launcher.
+/// Create the target-status channel together with an explicit pre-exec
+/// attachment boundary for a trusted launcher.
 ///
-/// Unlike stopping in `pre_exec`, the backend-owned barrier does not deadlock
+/// Unlike stopping in `pre_exec`, the backend-owned boundary does not deadlock
 /// `Command::spawn`: the launcher execs normally, creates and reports its
 /// target, and that target blocks at the final backend boundary until the
 /// parent releases the writer retained in [`SupervisedProcessStatus`].
 #[cfg(target_os = "linux")]
-pub fn supervised_launcher_gated_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
+pub fn supervised_launcher_attachment_status_pipe(
+) -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
     let mut status_fds = [-1; 2];
@@ -195,7 +224,9 @@ pub fn supervised_launcher_gated_status_pipe() -> Result<SupervisedLauncherStatu
             libc::close(status_fds[0]);
             libc::close(status_fds[1]);
         }
-        return Err(format!("create supervised-launcher start gate: {error}"));
+        return Err(format!(
+            "create supervised-launcher attachment boundary: {error}"
+        ));
     }
 
     // SAFETY: both pipe2 calls initialized uniquely owned descriptors. Each is
@@ -204,25 +235,27 @@ pub fn supervised_launcher_gated_status_pipe() -> Result<SupervisedLauncherStatu
     let status_writer = unsafe { std::fs::File::from_raw_fd(status_fds[1]) };
     let gate_reader = unsafe { std::fs::File::from_raw_fd(gate_fds[0]) };
     let gate_writer = unsafe { std::fs::File::from_raw_fd(gate_fds[1]) };
-    let gate_keepalive_writer = gate_writer
-        .try_clone()
-        .map_err(|error| format!("duplicate supervised-launcher gate keepalive: {error}"))?;
-    Ok(SupervisedLauncherStatusPipe {
-        reader: SupervisedProcessStatus {
+    let gate_keepalive_writer =
+        Arc::new(gate_writer.try_clone().map_err(|error| {
+            format!("duplicate supervised-launcher attachment keepalive: {error}")
+        })?);
+    Ok(SupervisedLauncherAttachmentStatusPipe {
+        reader: SupervisedProcessStatus::AwaitingAttachment {
             reader: status_reader,
-            start_gate: Some(ProcessStartGate {
+            attachment_release: ProcessAttachmentRelease {
                 writer: Some(gate_writer),
-            }),
+            },
         },
         writer: Arc::new(status_writer),
-        start_gate_reader: Some(Arc::new(gate_reader)),
-        start_gate_keepalive_writer: Some(Arc::new(gate_keepalive_writer)),
+        attachment_release_reader: Arc::new(gate_reader),
+        attachment_release_keepalive_writer: gate_keepalive_writer,
     })
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn supervised_launcher_gated_status_pipe() -> Result<SupervisedLauncherStatusPipe, String> {
-    Err("supervised-launcher start gates are supported only on Linux".to_string())
+pub fn supervised_launcher_attachment_status_pipe(
+) -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
+    Err("supervised-launcher attachment boundaries are supported only on Linux".to_string())
 }
 
 /// Create an immutable, rewound anonymous file for descriptor-backed protocol
@@ -460,7 +493,283 @@ const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const POST_STOP_DRAIN_READS: usize = 1024;
 const SUPERVISED_STATUS_SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+const ATTACHMENT_ABORT_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 const SUPERVISED_STATUS_MAX_LINE_BYTES: usize = 64 * 1024;
+const ATTACHMENT_READY_MAGIC: [u8; 4] = *b"LAR1";
+const ATTACHMENT_READY_RECORD_BYTES: usize = 16;
+const ATTACHMENT_IDENTITY_PHASE: u32 = 1;
+const ATTACHMENT_READY_PHASE: u32 = 2;
+const ATTACHMENT_RELEASE_TOKEN: u8 = 1;
+
+/// Process-wide lease for descriptors whose inherited open-file descriptions
+/// carry authority across `fork(2)` (notably advisory file locks).
+///
+/// A direct attachment launch deliberately remains between fork and exec while
+/// RyeOS persists its exact identity. `FD_CLOEXEC` cannot help during that
+/// interval: the child has not executed yet. Callers that hold fork-sensitive
+/// descriptor authority retain this shared lease for the same lexical scope.
+/// Lillux takes the exclusive side only across the direct fork/readiness
+/// window, proving that a held child did not inherit one of those transient
+/// authorities. The lease is released before durable attachment, target
+/// release, or the runtime's lifetime, so independent executions remain
+/// concurrent.
+static DIRECT_ATTACHMENT_FORK_BARRIER: OnceLock<DescriptorForkBarrier> = OnceLock::new();
+
+#[derive(Default)]
+struct DescriptorForkBarrierState {
+    retained_scopes: usize,
+    retained_scope_owners: HashMap<thread::ThreadId, usize>,
+    waiting_forks: usize,
+    fork_quiesced: bool,
+    pending_fork_control_fds: BTreeSet<i32>,
+}
+
+struct DescriptorForkBarrier {
+    state: Mutex<DescriptorForkBarrierState>,
+    changed: Condvar,
+    waiting_control_closers: AtomicUsize,
+}
+
+fn direct_attachment_fork_barrier() -> &'static DescriptorForkBarrier {
+    DIRECT_ATTACHMENT_FORK_BARRIER.get_or_init(|| DescriptorForkBarrier {
+        state: Mutex::new(DescriptorForkBarrierState::default()),
+        changed: Condvar::new(),
+        waiting_control_closers: AtomicUsize::new(0),
+    })
+}
+
+/// Shared proof that the current scope may own descriptor-backed authority
+/// which a pre-exec attachment child must not inherit.
+pub struct ForkSensitiveDescriptorLease {
+    owner: thread::ThreadId,
+    retained: bool,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+/// Retain the process-wide fork-sensitive descriptor lease.
+///
+/// Acquire this before opening or locking descriptor-backed authority and keep
+/// it until those descriptors/locks have been released. Acquisition is
+/// intentionally infallible after poisoning: the barrier protects process
+/// topology, not data whose consistency could be invalidated by a panic.
+pub fn retain_fork_sensitive_descriptors() -> ForkSensitiveDescriptorLease {
+    let barrier = direct_attachment_fork_barrier();
+    let owner = thread::current().id();
+    let mut state = barrier
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while state.fork_quiesced
+        || (state.waiting_forks != 0 && !state.retained_scope_owners.contains_key(&owner))
+    {
+        state = barrier
+            .changed
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    state.retained_scopes = state
+        .retained_scopes
+        .checked_add(1)
+        .expect("fork-sensitive descriptor lease count overflow");
+    let owner_scopes = state.retained_scope_owners.entry(owner).or_default();
+    *owner_scopes = owner_scopes
+        .checked_add(1)
+        .expect("fork-sensitive descriptor owner count overflow");
+    ForkSensitiveDescriptorLease {
+        owner,
+        retained: true,
+        _not_send: PhantomData,
+    }
+}
+
+impl Drop for ForkSensitiveDescriptorLease {
+    fn drop(&mut self) {
+        if !self.retained {
+            return;
+        }
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.retained_scopes = state
+            .retained_scopes
+            .checked_sub(1)
+            .expect("fork-sensitive descriptor lease count underflow");
+        let owner_scopes = state
+            .retained_scope_owners
+            .get_mut(&self.owner)
+            .expect("fork-sensitive descriptor owner was not registered");
+        *owner_scopes = owner_scopes
+            .checked_sub(1)
+            .expect("fork-sensitive descriptor owner count underflow");
+        if *owner_scopes == 0 {
+            state.retained_scope_owners.remove(&self.owner);
+        }
+        self.retained = false;
+        if state.retained_scopes == 0 {
+            barrier.changed.notify_all();
+        }
+    }
+}
+
+struct QuiescedForkSensitiveDescriptors;
+
+impl QuiescedForkSensitiveDescriptors {
+    fn pending_fork_control_fds(&self) -> Vec<i32> {
+        let barrier = direct_attachment_fork_barrier();
+        let state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(state.fork_quiesced);
+        state.pending_fork_control_fds.iter().copied().collect()
+    }
+
+    fn register_pending_fork_control(
+        &self,
+        release_writer: std::fs::File,
+    ) -> PendingForkControlDescriptor {
+        debug_assert!(
+            direct_attachment_fork_barrier()
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .fork_quiesced
+        );
+        register_pending_fork_control_file(release_writer)
+    }
+}
+
+struct PendingForkControlDescriptor {
+    fd: i32,
+    writer: Option<std::fs::File>,
+}
+
+impl PendingForkControlDescriptor {
+    fn write_release(&mut self) -> std::io::Result<()> {
+        self.writer
+            .as_mut()
+            .expect("pending fork-control descriptor is present")
+            .write_all(&[ATTACHMENT_RELEASE_TOKEN])
+    }
+}
+
+impl Drop for PendingForkControlDescriptor {
+    fn drop(&mut self) {
+        let barrier = direct_attachment_fork_barrier();
+        barrier
+            .waiting_control_closers
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_add(1)
+            })
+            .expect("pending fork-control closer count overflow");
+        let mut state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while state.fork_quiesced {
+            state = barrier
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(
+            state.pending_fork_control_fds.remove(&self.fd),
+            "pending fork-control descriptor was not registered"
+        );
+        // Close while the barrier state remains locked. A new fork cannot
+        // observe the descriptor absent from the registry while it is still
+        // open in the parent and therefore inheritable.
+        drop(self.writer.take());
+        let previous_closers = barrier
+            .waiting_control_closers
+            .fetch_sub(1, Ordering::SeqCst);
+        assert_ne!(
+            previous_closers, 0,
+            "pending fork-control closer count underflow"
+        );
+        barrier.changed.notify_all();
+    }
+}
+
+fn register_pending_fork_control_file(file: std::fs::File) -> PendingForkControlDescriptor {
+    let fd = file.as_raw_fd();
+    let barrier = direct_attachment_fork_barrier();
+    let mut state = barrier
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(
+        state.pending_fork_control_fds.insert(fd),
+        "pending fork-control descriptor was already registered"
+    );
+    PendingForkControlDescriptor {
+        fd,
+        writer: Some(file),
+    }
+}
+
+impl Drop for QuiescedForkSensitiveDescriptors {
+    fn drop(&mut self) {
+        let barrier = direct_attachment_fork_barrier();
+        let mut state = barrier
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        debug_assert!(state.fork_quiesced);
+        state.fork_quiesced = false;
+        barrier.changed.notify_all();
+    }
+}
+
+fn quiesce_fork_sensitive_descriptors() -> Result<QuiescedForkSensitiveDescriptors, String> {
+    let barrier = direct_attachment_fork_barrier();
+    let owner = thread::current().id();
+    let mut state = barrier
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if state.retained_scope_owners.contains_key(&owner) {
+        return Err(
+            "direct attachment fork requested while the calling thread retains fork-sensitive descriptor authority"
+                .to_string(),
+        );
+    }
+    state.waiting_forks = state
+        .waiting_forks
+        .checked_add(1)
+        .expect("fork-sensitive descriptor waiter count overflow");
+    while state.fork_quiesced
+        || state.retained_scopes != 0
+        || barrier.waiting_control_closers.load(Ordering::SeqCst) != 0
+    {
+        state = barrier
+            .changed
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    state.waiting_forks = state
+        .waiting_forks
+        .checked_sub(1)
+        .expect("fork-sensitive descriptor waiter count underflow");
+    state.fork_quiesced = true;
+    Ok(QuiescedForkSensitiveDescriptors)
+}
+#[cfg(unix)]
+const ATTACHMENT_ABORT_SIGNAL: i32 = libc::SIGKILL;
+#[cfg(not(unix))]
+const ATTACHMENT_ABORT_SIGNAL: i32 = 9;
+
+#[cfg(target_os = "linux")]
+struct AttachmentWorkerGate {
+    status_writer: std::fs::File,
+    release_reader: std::fs::File,
+    cwd_directory: Option<std::fs::File>,
+    child_status_reader_fd: i32,
+    child_release_writer_fd: i32,
+    inherited_pending_control_fds: Vec<i32>,
+}
 
 /// A running subprocess that can be waited on later.
 pub struct RunningProcess {
@@ -489,32 +798,459 @@ pub struct RunningProcess {
     /// Present only for a trusted-launcher spawn whose target is blocked at
     /// the backend's final pre-exec boundary. Authoritative lifecycle callers
     /// release it only after persisting the exact reported process identity.
-    start_gate: Option<ProcessStartGate>,
+    attachment_release: Option<ProcessAttachmentRelease>,
     groups_terminated: bool,
     wrapper_reaped: bool,
 }
 
+/// A subprocess whose exact target identity exists, but whose target program
+/// cannot execute until the caller durably attaches that identity.
+///
+/// This is a linear lifecycle state. It deliberately exposes neither `wait`
+/// nor the underlying child handle. Callers must consume it by releasing only
+/// after attachment, or by explicitly aborting and reaping it.
+pub struct ProcessAwaitingAttachment {
+    pid: u32,
+    pgid: i64,
+    owner: Option<AttachmentPendingOwner>,
+    #[cfg(target_os = "linux")]
+    pidfd: OwnedFd,
+    request_deadline: Option<Instant>,
+}
+
+enum AttachmentPendingOwner {
+    Direct {
+        worker: thread::JoinHandle<Result<RunningProcess, SubprocessResult>>,
+        release_registration: PendingForkControlDescriptor,
+    },
+    Supervised {
+        running: Box<RunningProcess>,
+    },
+}
+
+/// Proof that an attachment-pending process was explicitly aborted and its
+/// `Command::spawn` worker settled without allowing target execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AbortedProcess {
+    pub pid: u32,
+    pub pgid: i64,
+}
+
+/// Failure while crossing the attachment-to-running lifecycle boundary.
+///
+/// Before this is returned, the pending process and its process group are
+/// proved quiescent and the exact child is reaped. No live process authority
+/// is hidden inside the error.
+#[derive(Debug)]
+pub struct AttachmentReleaseError {
+    pub phase: &'static str,
+    pub result: SubprocessResult,
+}
+
+impl std::fmt::Display for AttachmentReleaseError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}: {}", self.phase, self.result.stderr)
+    }
+}
+
+impl std::error::Error for AttachmentReleaseError {}
+
+/// Failure of the caller-owned cleanup attempt. This error is returned only
+/// after the attachment boundary has been revoked and exact cleanup has been
+/// proved synchronously.
+#[derive(Debug)]
+pub struct AttachmentAbortError {
+    pub pid: u32,
+    pub detail: String,
+}
+
+impl std::fmt::Display for AttachmentAbortError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "abort process {} awaiting attachment: {}",
+            self.pid, self.detail
+        )
+    }
+}
+
+impl std::error::Error for AttachmentAbortError {}
+
+impl ProcessAwaitingAttachment {
+    /// Exact PID reported while the child was held after session creation.
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Exact process group, proved to be led by [`Self::pid`].
+    pub fn pgid(&self) -> i64 {
+        self.pgid
+    }
+
+    /// Borrow the already-pinned exact process identity. Durable lifecycle
+    /// code must capture identity through this descriptor rather than reopen a
+    /// potentially recycled numeric PID.
+    #[cfg(target_os = "linux")]
+    pub fn pidfd(&self) -> BorrowedFd<'_> {
+        self.pidfd.as_fd()
+    }
+
+    /// Release the child only after its exact identity has been durably
+    /// attached, then recover the ordinary `RunningProcess` produced by
+    /// `Command::spawn` after exec crosses Rust's normal error boundary.
+    pub fn release_after_attachment(mut self) -> Result<RunningProcess, AttachmentReleaseError> {
+        if self
+            .request_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            let cleanup = self
+                .abort_and_reap_inner()
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let cleanup = self.cleanup_failure_detail(cleanup);
+            let result = spawn_failure(
+                Instant::now(),
+                format!(
+                    "release after attachment refused: request deadline expired before release{cleanup}",
+                ),
+            );
+            return Err(AttachmentReleaseError {
+                phase: "release after attachment",
+                result,
+            });
+        }
+        if let Err(error) = self.check_exact_process_alive() {
+            let cleanup = self
+                .abort_and_reap_inner()
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let cleanup = self.cleanup_failure_detail(cleanup);
+            let result = spawn_failure(
+                Instant::now(),
+                format!("release after attachment refused: {error}{cleanup}"),
+            );
+            return Err(AttachmentReleaseError {
+                phase: "release after attachment",
+                result,
+            });
+        }
+
+        let owner = self.owner.take().expect("attachment owner is present");
+        match owner {
+            AttachmentPendingOwner::Direct {
+                worker,
+                mut release_registration,
+            } => {
+                if let Err(error) = release_registration.write_release() {
+                    drop(release_registration);
+                    let settlement = prove_attachment_cleanup(
+                        self.pidfd.as_raw_fd(),
+                        settle_direct_attachment_worker(self.pid, worker),
+                    );
+                    let detail = self.cleanup_failure_detail(settlement);
+                    return Err(AttachmentReleaseError {
+                        phase: "release after attachment",
+                        result: spawn_failure(
+                            Instant::now(),
+                            format!("release after attachment failed: {error}{detail}"),
+                        ),
+                    });
+                }
+                drop(release_registration);
+                match worker.join() {
+                    Ok(Ok(running)) => Ok(running),
+                    Ok(Err(result)) => {
+                        let cleanup = wait_pidfd_exit(
+                            self.pidfd.as_raw_fd(),
+                            ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+                        );
+                        let detail = self.cleanup_failure_detail(cleanup);
+                        Err(AttachmentReleaseError {
+                            phase: "exec after attachment release",
+                            result: if detail.is_empty() {
+                                result
+                            } else {
+                                spawn_failure(Instant::now(), format!("{}{detail}", result.stderr))
+                            },
+                        })
+                    }
+                    Err(_) => {
+                        let cleanup = cleanup_direct_after_release_worker_panic(
+                            self.pid,
+                            self.pgid,
+                            self.pidfd.as_raw_fd(),
+                        );
+                        let detail = self.cleanup_failure_detail(cleanup);
+                        Err(AttachmentReleaseError {
+                            phase: "exec after attachment release",
+                            result: spawn_failure(
+                                Instant::now(),
+                                format!("attachment spawn worker panicked after release{detail}"),
+                            ),
+                        })
+                    }
+                }
+            }
+            AttachmentPendingOwner::Supervised { mut running } => {
+                if let Err(error) = running.validate_attachment_release_ready() {
+                    let cleanup = prove_attachment_cleanup(
+                        self.pidfd.as_raw_fd(),
+                        running.abort_and_reap_checked(),
+                    );
+                    let detail = self.cleanup_failure_detail(cleanup);
+                    return Err(AttachmentReleaseError {
+                        phase: "release after attachment",
+                        result: spawn_failure(
+                            Instant::now(),
+                            format!(
+                                "supervised target was not releasable after attachment: {error}{detail}",
+                            ),
+                        ),
+                    });
+                }
+                match running.release_attachment_boundary() {
+                    Ok(()) => Ok(*running),
+                    Err(error) => {
+                        let cleanup = prove_attachment_cleanup(
+                            self.pidfd.as_raw_fd(),
+                            running.abort_and_reap_checked(),
+                        );
+                        let detail = self.cleanup_failure_detail(cleanup);
+                        Err(AttachmentReleaseError {
+                            phase: "release after attachment",
+                            result: spawn_failure(
+                                Instant::now(),
+                                format!(
+                                    "release supervised target after attachment: {error}{detail}",
+                                ),
+                            ),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fail closed, terminate the exact held child through its pidfd, and join
+    /// the spawn worker so no child or zombie remains owned by this handle.
+    pub fn abort_and_reap(mut self) -> Result<AbortedProcess, AttachmentAbortError> {
+        match self.abort_and_reap_inner() {
+            Ok(aborted) => Ok(aborted),
+            Err(_error) => {
+                #[cfg(target_os = "linux")]
+                {
+                    // Do not unwind into a durable lifecycle owner while an
+                    // exact process can still be live. Keeping this call
+                    // synchronous also keeps the caller's durable attachment
+                    // row authoritative if the daemon dies during cleanup.
+                    complete_attachment_cleanup(self.pidfd.as_raw_fd(), self.pgid);
+                    Ok(AbortedProcess {
+                        pid: self.pid,
+                        pgid: self.pgid,
+                    })
+                }
+                #[cfg(not(target_os = "linux"))]
+                Err(_error)
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_failure_detail(&self, cleanup: Result<(), String>) -> String {
+        match cleanup {
+            Ok(()) => String::new(),
+            Err(error) => {
+                // A release error may escape only after exact cleanup proof;
+                // otherwise RyeOS could compare-clear the durable attachment
+                // while this process remained live.
+                complete_attachment_cleanup(self.pidfd.as_raw_fd(), self.pgid);
+                format!("; initial cleanup proof failed: {error}; cleanup completed synchronously")
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn cleanup_failure_detail(&self, cleanup: Result<(), String>) -> String {
+        cleanup
+            .err()
+            .map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+    }
+
+    fn abort_and_reap_inner(&mut self) -> Result<AbortedProcess, AttachmentAbortError> {
+        let Some(owner) = self.owner.take() else {
+            return Ok(AbortedProcess {
+                pid: self.pid,
+                pgid: self.pgid,
+            });
+        };
+        let mut cleanup_errors = Vec::new();
+        if let Err(error) = self.signal_exact_process(ATTACHMENT_ABORT_SIGNAL) {
+            cleanup_errors.push(error);
+        }
+        let result = match owner {
+            AttachmentPendingOwner::Direct {
+                worker,
+                release_registration,
+            } => {
+                // EOF is refusal, never release. Closing this authority also
+                // wakes a child that raced with the exact signal.
+                drop(release_registration);
+                settle_direct_attachment_worker(self.pid, worker)
+            }
+            AttachmentPendingOwner::Supervised { running } => running.abort_and_reap_checked(),
+        };
+        match result {
+            Ok(()) => {
+                // The structured owner proves both group quiescence and
+                // leader reaping. A preceding signal error is immaterial
+                // once that stronger proof exists, and retrying by numeric
+                // PGID after reap would itself be unsafe.
+                return Ok(AbortedProcess {
+                    pid: self.pid,
+                    pgid: self.pgid,
+                });
+            }
+            Err(error) => cleanup_errors.push(error),
+        }
+        #[cfg(target_os = "linux")]
+        match force_attachment_cleanup(
+            self.pgid,
+            self.pidfd.as_raw_fd(),
+            ATTACHMENT_ABORT_SETTLE_TIMEOUT,
+        ) {
+            Ok(()) => {
+                return Ok(AbortedProcess {
+                    pid: self.pid,
+                    pgid: self.pgid,
+                });
+            }
+            Err(error) => cleanup_errors.push(error),
+        }
+        #[cfg(not(target_os = "linux"))]
+        if cleanup_errors.is_empty() {
+            return Ok(AbortedProcess {
+                pid: self.pid,
+                pgid: self.pgid,
+            });
+        }
+        if !cleanup_errors.is_empty() {
+            return Err(AttachmentAbortError {
+                pid: self.pid,
+                detail: cleanup_errors.join("; "),
+            });
+        }
+        Ok(AbortedProcess {
+            pid: self.pid,
+            pgid: self.pgid,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn check_exact_process_alive(&self) -> Result<(), String> {
+        pidfd_send_signal(self.pidfd.as_raw_fd(), 0)?;
+        let pid = i32::try_from(self.pid).map_err(|_| "PID exceeds pid_t".to_string())?;
+        let observed_pgid = unsafe { libc::getpgid(pid) };
+        if observed_pgid < 0 {
+            return Err(format!(
+                "inspect attachment process group: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if observed_pgid as i64 != self.pgid {
+            return Err(format!(
+                "process {} escaped retained attachment group {} (observed {observed_pgid})",
+                self.pid, self.pgid
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn check_exact_process_alive(&self) -> Result<(), String> {
+        Err("attachment-before-execution is supported only on Linux".to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn signal_exact_process(&self, signal: i32) -> Result<(), String> {
+        match pidfd_send_signal_io(self.pidfd.as_raw_fd(), signal) {
+            Ok(()) => Ok(()),
+            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+            Err(error) => Err(format!("pidfd_send_signal({signal}): {error}")),
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn signal_exact_process(&self, _signal: i32) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl Drop for ProcessAwaitingAttachment {
+    fn drop(&mut self) {
+        if self.abort_and_reap_inner().is_err() {
+            #[cfg(target_os = "linux")]
+            {
+                // Drop is also a linear lifecycle boundary. Never let an
+                // attached-process guard clear durable ownership while exact
+                // cleanup is merely outstanding in another in-process task.
+                complete_attachment_cleanup(self.pidfd.as_raw_fd(), self.pgid);
+            }
+        }
+    }
+}
+
 impl RunningProcess {
+    fn validate_attachment_release_ready(&mut self) -> Result<(), String> {
+        let stdout_truncated = self
+            .stdout_capture
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .truncated;
+        let stderr_truncated = self
+            .stderr_capture
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .truncated;
+        if stdout_truncated || stderr_truncated || self.output_overflow_rx.try_recv().is_ok() {
+            return Err(
+                "launcher output exceeded its configured bound while the target awaited attachment"
+                    .to_string(),
+            );
+        }
+        match poll_wrapper(&mut self.child) {
+            Ok(WrapperPoll::Running) => Ok(()),
+            Ok(WrapperPoll::ExitedUnreaped) => {
+                Err("supervised launcher exited before target release".to_string())
+            }
+            #[cfg(not(target_os = "linux"))]
+            Ok(WrapperPoll::ExitedReaped(_)) => {
+                self.wrapper_reaped = true;
+                Err("supervised launcher exited before target release".to_string())
+            }
+            Err(error) => Err(format!(
+                "inspect supervised launcher before target release: {error}"
+            )),
+        }
+    }
+
     /// Release a trusted launcher's target after durable process attachment.
     ///
-    /// Returns `Ok(true)` when a configured barrier was released and
-    /// `Ok(false)` for an explicitly ungated spawn (including isolation-
-    /// disabled development fixtures). A failed write leaves the process
-    /// fail-closed; the caller must abort or drop this handle.
-    pub fn release_start_gate(&mut self) -> Result<bool, String> {
-        let Some(mut gate) = self.start_gate.take() else {
-            return Ok(false);
-        };
-        let Some(mut writer) = gate.writer.take() else {
-            return Err("supervised process start gate was already consumed".to_string());
+    /// A failed write leaves the process fail-closed; the caller must abort or
+    /// drop this handle.
+    fn release_attachment_boundary(&mut self) -> Result<(), String> {
+        let mut boundary = self.attachment_release.take().ok_or_else(|| {
+            "supervised target attachment authority disappeared before release".to_string()
+        })?;
+        let Some(mut writer) = boundary.writer.take() else {
+            return Err("supervised target attachment authority was already consumed".to_string());
         };
         writer
-            .write_all(&[1])
-            .map_err(|error| format!("release supervised process start gate: {error}"))?;
+            .write_all(&[ATTACHMENT_RELEASE_TOKEN])
+            .map_err(|error| format!("release supervised target after attachment: {error}"))?;
         // Closing the descriptor makes the one-shot boundary explicit and
         // prevents a retained writer from hiding backend failure.
         drop(writer);
-        Ok(true)
+        Ok(())
     }
 
     /// Terminate every supervised process group and reap the outer child.
@@ -523,12 +1259,19 @@ impl RunningProcess {
     /// publish an execution after aborting it. Dropping a handle without
     /// calling either `wait` or `abort` performs the same fail-safe cleanup.
     pub fn abort(mut self) {
-        self.abort_and_reap();
+        let _ = self.abort_and_reap_inner();
+    }
+
+    /// Abort and prove that the retained wrapper child was reaped. Lifecycle
+    /// state machines use this checked form when cleanup is part of a durable
+    /// transition rather than a best-effort drop backstop.
+    pub fn abort_and_reap_checked(mut self) -> Result<(), String> {
+        self.abort_and_reap_inner()
     }
 
     /// Wait for the process to finish (or time out) and return the result.
     pub fn wait(mut self) -> SubprocessResult {
-        if self.start_gate.is_some() {
+        if self.attachment_release.is_some() {
             self.kill_supervised_processes();
             self.reap_wrapper();
             let (out, err) = self.finish_drains();
@@ -537,7 +1280,7 @@ impl RunningProcess {
                 stdout: String::from_utf8_lossy(&out.bytes).into_owned(),
                 stderr: append_diagnostic(
                     &String::from_utf8_lossy(&err.bytes),
-                    "Refused to wait: supervised process start gate was not released after durable attachment",
+                    "Refused to wait: supervised target was not released after durable attachment",
                 ),
                 exit_code: -1,
                 duration_ms: self.start.elapsed().as_secs_f64() * 1000.0,
@@ -680,10 +1423,74 @@ impl RunningProcess {
         }
     }
 
-    fn abort_and_reap(&mut self) {
+    fn abort_and_reap_inner(&mut self) -> Result<(), String> {
         self.kill_supervised_processes();
-        self.reap_wrapper();
+        #[cfg(target_os = "linux")]
+        let group_result = self.settle_owned_group_before_wrapper_reap();
+        #[cfg(not(target_os = "linux"))]
+        let group_result = Ok(());
+        // The unreaped wrapper is the process-group identity fence. Reaping
+        // it before group quiescence is proved would leave only a numeric
+        // PGID, which may later be reused. Keep it owned across retries.
+        let reap_result = match &group_result {
+            Ok(()) => self.reap_wrapper_checked(),
+            Err(_) => Ok(()),
+        };
         let _ = self.finish_drains();
+        match (group_result, reap_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(group), Ok(())) => Err(group),
+            (Ok(()), Err(reap)) => Err(reap),
+            (Err(group), Err(reap)) => Err(format!("{group}; {reap}")),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn settle_owned_group_before_wrapper_reap(&mut self) -> Result<(), String> {
+        let deadline = Instant::now()
+            .checked_add(ATTACHMENT_ABORT_SETTLE_TIMEOUT)
+            .ok_or_else(|| "process-group cleanup deadline overflow".to_string())?;
+        loop {
+            match poll_wrapper(&mut self.child) {
+                Ok(WrapperPoll::ExitedUnreaped) => break,
+                Ok(WrapperPoll::Running) => {
+                    if Instant::now() >= deadline {
+                        return Err(format!(
+                            "wrapper {} did not exit before cleanup deadline",
+                            self.wrapper_pid
+                        ));
+                    }
+                    thread::sleep(PROCESS_POLL_INTERVAL);
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "observe wrapper {} exit before reap: {error}",
+                        self.wrapper_pid
+                    ));
+                }
+            }
+        }
+        wait_owned_process_group_quiescent(
+            self.wrapper_pgid,
+            self.wrapper_pid,
+            deadline.saturating_duration_since(Instant::now()),
+        )
+    }
+
+    fn reap_wrapper_checked(&mut self) -> Result<(), String> {
+        if self.wrapper_reaped {
+            return Ok(());
+        }
+        match self.child.wait() {
+            Ok(_) => {
+                self.wrapper_reaped = true;
+                Ok(())
+            }
+            Err(error) => Err(format!(
+                "reap supervised wrapper process {}: {error}",
+                self.wrapper_pid
+            )),
+        }
     }
 
     fn finish_drains(&mut self) -> (BoundedCapture, BoundedCapture) {
@@ -760,7 +1567,7 @@ impl RunningProcess {
 
 impl Drop for RunningProcess {
     fn drop(&mut self) {
-        self.abort_and_reap();
+        let _ = self.abort_and_reap_inner();
     }
 }
 
@@ -804,7 +1611,17 @@ fn poll_wrapper(child: &mut process::Child) -> std::io::Result<WrapperPoll> {
 
 /// Spawn a subprocess and return a handle that can be waited on later.
 pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, SubprocessResult> {
-    lib_spawn_with_stdio(request, false)
+    if request
+        .supervised_status
+        .as_ref()
+        .is_some_and(|status| matches!(status, SupervisedProcessStatus::AwaitingAttachment { .. }))
+    {
+        return Err(spawn_failure(
+            Instant::now(),
+            "Failed to spawn: attachment-bearing supervision requires spawn_awaiting_attachment",
+        ));
+    }
+    lib_spawn_with_stdio(request, false, None)
 }
 
 /// Spawn with inherited terminal stdio while retaining the same session,
@@ -813,12 +1630,297 @@ pub fn lib_spawn(request: SubprocessRequest) -> Result<RunningProcess, Subproces
 pub fn lib_spawn_inherited_stdio(
     request: SubprocessRequest,
 ) -> Result<RunningProcess, SubprocessResult> {
-    lib_spawn_with_stdio(request, true)
+    if request
+        .supervised_status
+        .as_ref()
+        .is_some_and(|status| matches!(status, SupervisedProcessStatus::AwaitingAttachment { .. }))
+    {
+        return Err(spawn_failure(
+            Instant::now(),
+            "Failed to spawn: attachment-bearing supervision requires spawn_awaiting_attachment",
+        ));
+    }
+    lib_spawn_with_stdio(request, true, None)
+}
+
+/// Spawn a Linux subprocess whose final trusted setup completes before the
+/// exact target PID/PGID is returned, while its target program remains unable
+/// to execute until [`ProcessAwaitingAttachment::release_after_attachment`].
+///
+/// Normal [`lib_spawn`] semantics are unchanged. This explicit operation is
+/// reserved for daemon-owned executions that must durably persist process
+/// ownership before any target code can run.
+#[cfg(target_os = "linux")]
+pub fn lib_spawn_awaiting_attachment(
+    mut request: SubprocessRequest,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    let start = Instant::now();
+    if let Some(status) = request.supervised_status.as_ref() {
+        if !matches!(status, SupervisedProcessStatus::AwaitingAttachment { .. }) {
+            return Err(spawn_failure(
+                start,
+                "Failed to spawn awaiting attachment: supervised backend omitted its required target attachment boundary",
+            ));
+        }
+        let timeout = request.timeout;
+        let running = lib_spawn_with_stdio(request, false, None)?;
+        if running.attachment_release.is_none() {
+            let error = spawn_failure(
+                start,
+                "Failed to spawn awaiting attachment: supervised target attachment boundary disappeared",
+            );
+            running.abort_and_reap_checked().map_err(|cleanup| {
+                spawn_failure(
+                    start,
+                    format!("{}; cleanup failed: {cleanup}", error.stderr),
+                )
+            })?;
+            return Err(error);
+        }
+        let observed_birth = match read_linux_process_birth(running.pid) {
+            Ok(birth) => birth,
+            Err(error) => {
+                let cleanup = running.abort_and_reap_checked().err();
+                return Err(spawn_failure(
+                    start,
+                    format!(
+                        "Failed to inspect supervised target awaiting attachment: {error}{}",
+                        cleanup
+                            .map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                    ),
+                ));
+            }
+        };
+        let pidfd = match open_pidfd(running.pid) {
+            Ok(pidfd) => pidfd,
+            Err(error) => {
+                let cleanup = running.abort_and_reap_checked().err();
+                return Err(spawn_failure(
+                    start,
+                    format!(
+                        "Failed to pin supervised target awaiting attachment: {error}{}",
+                        cleanup
+                            .map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                    ),
+                ));
+            }
+        };
+        if let Err(error) = validate_pinned_process_birth(
+            running.pid,
+            running.pgid,
+            None,
+            &observed_birth,
+            pidfd.as_raw_fd(),
+        )
+        .and_then(|_| {
+            validate_supervised_attachment_target(running.pid, running.pgid, pidfd.as_raw_fd())
+        }) {
+            let cleanup = running.abort_and_reap_checked().err();
+            return Err(spawn_failure(
+                start,
+                format!(
+                    "Invalid supervised target awaiting attachment: {error}{}",
+                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                ),
+            ));
+        }
+        return Ok(ProcessAwaitingAttachment {
+            pid: running.pid,
+            pgid: running.pgid,
+            owner: Some(AttachmentPendingOwner::Supervised {
+                running: Box::new(running),
+            }),
+            pidfd,
+            request_deadline: request_timeout_duration(timeout)
+                .and_then(|duration| start.checked_add(duration)),
+        });
+    }
+    let timeout = request.timeout;
+    let cwd_directory = match request.cwd.take() {
+        Some(path) => Some(open_attachment_cwd(&path, start)?),
+        None => None,
+    };
+    // No other direct child may fork while these control pipes are created.
+    // Snapshot the control descriptors of already-held children so the new
+    // child can close only those known authorities at its final setup hook.
+    let fork_sensitive_descriptors = quiesce_fork_sensitive_descriptors().map_err(|error| {
+        spawn_failure(
+            start,
+            format!("Failed to spawn awaiting attachment: {error}"),
+        )
+    })?;
+    let inherited_pending_control_fds = fork_sensitive_descriptors.pending_fork_control_fds();
+    let (status_reader, status_writer) = attachment_pipe("readiness", start)?;
+    let (release_reader, release_writer) = attachment_pipe("release", start)?;
+    let child_status_reader_fd = status_reader.as_raw_fd();
+    let child_release_writer_fd = release_writer.as_raw_fd();
+    let gate = AttachmentWorkerGate {
+        status_writer,
+        release_reader,
+        cwd_directory,
+        child_status_reader_fd,
+        child_release_writer_fd,
+        inherited_pending_control_fds,
+    };
+
+    // A child held before exec retains every CLOEXEC descriptor inherited at
+    // fork. Quiesce scopes which own descriptor-backed authority until the
+    // worker reports the final hold boundary; otherwise a concurrent child can
+    // inherit an advisory lock and deadlock the owner's durable attach path.
+    let worker = thread::Builder::new()
+        .name("lillux-attachment-spawn".to_string())
+        .spawn(move || lib_spawn_with_stdio(request, false, Some(gate)))
+        .map_err(|error| {
+            spawn_failure(
+                start,
+                format!("Failed to spawn awaiting attachment worker: {error}"),
+            )
+        })?;
+
+    let setup_deadline = supervised_setup_deadline(start, timeout);
+    let identity =
+        match read_attachment_ready(&status_reader, setup_deadline, ATTACHMENT_IDENTITY_PHASE) {
+            Ok(identity) => identity,
+            Err(error) => {
+                drop(release_writer);
+                let worker_detail = match worker.join() {
+                    Ok(Err(result)) if !result.stderr.is_empty() => format!("; {}", result.stderr),
+                    Ok(Ok(running)) => {
+                        running.abort();
+                        String::new()
+                    }
+                    Ok(Err(_)) => String::new(),
+                    Err(_) => "; attachment spawn worker panicked".to_string(),
+                };
+                return Err(spawn_failure(
+                    start,
+                    format!("Failed to spawn awaiting attachment: {error}{worker_detail}"),
+                ));
+            }
+        };
+    if let Err(error) = validate_direct_attachment_identity(identity.pid, identity.pgid) {
+        drop(release_writer);
+        let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+        return Err(spawn_failure(
+            start,
+            format!(
+                "Failed to spawn awaiting attachment: {error}{}",
+                cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+            ),
+        ));
+    }
+    let observed_birth = match read_linux_process_birth(identity.pid) {
+        Ok(birth) => birth,
+        Err(error) => {
+            drop(release_writer);
+            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            return Err(spawn_failure(
+                start,
+                format!(
+                    "Failed to inspect process awaiting attachment: {error}{}",
+                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                ),
+            ));
+        }
+    };
+    let pidfd = match open_pidfd(identity.pid) {
+        Ok(pidfd) => pidfd,
+        Err(error) => {
+            drop(release_writer);
+            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            return Err(spawn_failure(
+                start,
+                format!(
+                    "Failed to pin process awaiting attachment: {error}{}",
+                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                ),
+            ));
+        }
+    };
+    if let Err(error) = validate_pinned_process_birth(
+        identity.pid,
+        identity.pgid,
+        Some(process::id()),
+        &observed_birth,
+        pidfd.as_raw_fd(),
+    ) {
+        drop(release_writer);
+        let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+        return Err(spawn_failure(
+            start,
+            format!(
+                "Process identity changed while awaiting attachment: {error}{}",
+                cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+            ),
+        ));
+    }
+    let ready = match read_attachment_ready(&status_reader, setup_deadline, ATTACHMENT_READY_PHASE)
+    {
+        Ok(ready) if ready.pid == identity.pid && ready.pgid == identity.pgid => ready,
+        Ok(ready) => {
+            drop(release_writer);
+            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            return Err(spawn_failure(
+                start,
+                format!(
+                    "Failed to spawn awaiting attachment: readiness identity changed from {}/{} to {}/{}{}",
+                    identity.pid,
+                    identity.pgid,
+                    ready.pid,
+                    ready.pgid,
+                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                ),
+            ));
+        }
+        Err(error) => {
+            let _ = pidfd_send_signal(pidfd.as_raw_fd(), ATTACHMENT_ABORT_SIGNAL);
+            drop(release_writer);
+            let cleanup = settle_direct_attachment_worker(identity.pid, worker).err();
+            return Err(spawn_failure(
+                start,
+                format!(
+                    "Failed to reach final attachment boundary: {error}{}",
+                    cleanup.map_or_else(String::new, |error| format!("; cleanup failed: {error}"))
+                ),
+            ));
+        }
+    };
+    // Register the one-shot parent release authority before reopening the fork
+    // window. Later direct children close this exact known descriptor in their
+    // own pre-exec hook, without touching Rust's private exec-error channel or
+    // any caller-declared inherited descriptor.
+    let release_registration =
+        fork_sensitive_descriptors.register_pending_fork_control(release_writer);
+    drop(fork_sensitive_descriptors);
+
+    Ok(ProcessAwaitingAttachment {
+        pid: ready.pid,
+        pgid: ready.pgid,
+        owner: Some(AttachmentPendingOwner::Direct {
+            worker,
+            release_registration,
+        }),
+        pidfd,
+        request_deadline: request_timeout_duration(timeout)
+            .and_then(|duration| start.checked_add(duration)),
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn lib_spawn_awaiting_attachment(
+    _request: SubprocessRequest,
+) -> Result<ProcessAwaitingAttachment, SubprocessResult> {
+    Err(spawn_failure(
+        Instant::now(),
+        "Failed to spawn awaiting attachment: supported only on Linux",
+    ))
 }
 
 fn lib_spawn_with_stdio(
     request: SubprocessRequest,
     inherit_stdio: bool,
+    #[cfg(target_os = "linux")] attachment_gate: Option<AttachmentWorkerGate>,
+    #[cfg(not(target_os = "linux"))] _attachment_gate: Option<()>,
 ) -> Result<RunningProcess, SubprocessResult> {
     let start = Instant::now();
     let SubprocessRequest {
@@ -930,7 +2032,52 @@ fn lib_spawn_with_stdio(
     // inheritable only in the forked child, preventing unrelated concurrent
     // spawns from receiving them.
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let attachment_setup = attachment_gate.as_ref().map(|gate| {
+            (
+                gate.status_writer.as_raw_fd(),
+                gate.child_status_reader_fd,
+                gate.child_release_writer_fd,
+                gate.cwd_directory
+                    .as_ref()
+                    .map(|directory| directory.as_raw_fd()),
+                gate.inherited_pending_control_fds.clone(),
+            )
+        });
+        unsafe {
+            command.pre_exec(move || {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                for fd in &raw_inherited_fds {
+                    let flags = libc::fcntl(*fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                if let Some((
+                    status_writer,
+                    status_reader,
+                    release_writer,
+                    cwd_directory,
+                    pending_control_fds,
+                )) = &attachment_setup
+                {
+                    direct_attachment_identity_pre_exec(
+                        *status_writer,
+                        *status_reader,
+                        *release_writer,
+                        *cwd_directory,
+                        pending_control_fds,
+                    )?;
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         use std::os::unix::process::CommandExt;
         unsafe {
@@ -956,10 +2103,30 @@ fn lib_spawn_with_stdio(
         ));
     }
 
+    // This hook is deliberately registered last. The child has already
+    // completed session creation, inherited-descriptor setup, cwd/env/stdio
+    // setup performed by Command, and every configured resource-limit hook.
+    // It performs only bounded libc syscalls before returning to Rust's
+    // existing exec implementation.
+    #[cfg(target_os = "linux")]
+    if let Some(gate) = attachment_gate.as_ref() {
+        use std::os::unix::process::CommandExt as _;
+
+        let status_writer_fd = gate.status_writer.as_raw_fd();
+        let release_reader_fd = gate.release_reader.as_raw_fd();
+        unsafe {
+            command.pre_exec(move || {
+                direct_attachment_hold_pre_exec(status_writer_fd, release_reader_fd)
+            });
+        }
+    }
+
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => return Err(spawn_failure(start, format!("Failed to spawn: {e}"))),
     };
+    #[cfg(target_os = "linux")]
+    drop(attachment_gate);
     // The forked child now owns its inherited descriptor copies. Close the
     // request-owned parent copies promptly: in particular, keeping the status
     // writer open here would hide a launcher's pre-target EOF and force every
@@ -1045,14 +2212,17 @@ fn lib_spawn_with_stdio(
             }
         };
 
-    let (identity, status_thread, start_gate) = if let Some(status) = supervised_status {
-        let SupervisedProcessStatus { reader, start_gate } = status;
+    let (identity, status_thread, attachment_release) = if let Some(status) = supervised_status {
+        let (reader, attachment_release) = match status {
+            SupervisedProcessStatus::Run { reader } => (reader, None),
+            SupervisedProcessStatus::AwaitingAttachment {
+                reader,
+                attachment_release,
+            } => (reader, Some(attachment_release)),
+        };
         let (status_tx, status_rx) = std::sync::mpsc::channel();
         let status_thread = match spawn_supervised_launcher_status_reader(
-            SupervisedProcessStatus {
-                reader,
-                start_gate: None,
-            },
+            reader,
             status_tx,
             Arc::clone(&drain_stop),
         ) {
@@ -1163,7 +2333,7 @@ fn lib_spawn_with_stdio(
                 ));
             }
         };
-        (identity, Some(status_thread), start_gate)
+        (identity, Some(status_thread), attachment_release)
     } else {
         (
             ProcessIdentity {
@@ -1191,7 +2361,7 @@ fn lib_spawn_with_stdio(
         output_overflow_rx,
         start,
         timeout,
-        start_gate,
+        attachment_release,
         groups_terminated: false,
         wrapper_reaped: false,
     })
@@ -1317,11 +2487,11 @@ fn configure_nonblocking_fd<T>(_reader: &mut T) -> Result<(), String> {
 }
 
 fn spawn_supervised_launcher_status_reader(
-    mut status: SupervisedProcessStatus,
+    mut reader: std::fs::File,
     initial_tx: std::sync::mpsc::Sender<Result<InitialLauncherStatus, String>>,
     stop: Arc<AtomicBool>,
 ) -> Result<thread::JoinHandle<()>, String> {
-    configure_nonblocking_fd(&mut status.reader)
+    configure_nonblocking_fd(&mut reader)
         .map_err(|error| format!("configure nonblocking status channel: {error}"))?;
     Ok(thread::spawn(move || {
         let mut initial_tx = Some(initial_tx);
@@ -1332,7 +2502,7 @@ fn spawn_supervised_launcher_status_reader(
             if stop.load(Ordering::Acquire) {
                 break;
             }
-            match status.reader.read(&mut buffer) {
+            match reader.read(&mut buffer) {
                 Ok(0) => {
                     if !pending.is_empty() && initial_tx.is_some() {
                         report_supervised_launcher_status_line(&pending, &mut initial_tx);
@@ -1574,6 +2744,705 @@ fn supervised_setup_deadline(start: Instant, timeout: f64) -> Instant {
         .map_or(status_deadline, |request_deadline| {
             std::cmp::min(status_deadline, request_deadline)
         })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy)]
+struct AttachmentReady {
+    pid: u32,
+    pgid: i64,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LinuxProcessBirth {
+    state: char,
+    parent_pid: u32,
+    process_group: i64,
+    start_time_ticks: u64,
+}
+
+#[cfg(target_os = "linux")]
+fn attachment_pipe(
+    label: &str,
+    start: Instant,
+) -> Result<(std::fs::File, std::fs::File), SubprocessResult> {
+    let mut fds = [-1; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(spawn_failure(
+            start,
+            format!(
+                "Failed to create attachment {label} pipe: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    // SAFETY: pipe2 returned two new uniquely-owned descriptors.
+    Ok(unsafe {
+        (
+            std::fs::File::from_raw_fd(fds[0]),
+            std::fs::File::from_raw_fd(fds[1]),
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn open_attachment_cwd(path: &str, start: Instant) -> Result<std::fs::File, SubprocessResult> {
+    let path = std::ffi::CString::new(path).map_err(|_| {
+        spawn_failure(
+            start,
+            "Failed to spawn awaiting attachment: cwd contains an interior NUL byte",
+        )
+    })?;
+    let fd = unsafe {
+        libc::open(
+            path.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(spawn_failure(
+            start,
+            format!(
+                "Failed to spawn awaiting attachment: open cwd: {}",
+                std::io::Error::last_os_error()
+            ),
+        ));
+    }
+    // SAFETY: open returned a new uniquely-owned descriptor.
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+/// Final post-fork child hook for a direct attachment-prepared launch.
+///
+/// Keep this function allocation-free and syscall-only. It executes in the
+/// forked child of a multithreaded daemon before Rust's normal exec path.
+#[cfg(target_os = "linux")]
+fn direct_attachment_identity_pre_exec(
+    status_writer_fd: i32,
+    status_reader_fd: i32,
+    release_writer_fd: i32,
+    cwd_directory_fd: Option<i32>,
+    inherited_pending_control_fds: &[i32],
+) -> std::io::Result<()> {
+    unsafe {
+        libc::close(status_reader_fd);
+        libc::close(release_writer_fd);
+        for fd in inherited_pending_control_fds {
+            libc::close(*fd);
+        }
+
+        let parent_pid = libc::getppid();
+        if parent_pid <= 1 {
+            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+        }
+        if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // The parent can die between getppid and prctl. Rechecking closes that
+        // window before readiness is published.
+        if libc::getppid() != parent_pid {
+            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+        }
+
+        let pid = libc::getpid();
+        let pgid = libc::getpgrp();
+        if pid <= 1 || pgid != pid {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        write_attachment_record(
+            status_writer_fd,
+            ATTACHMENT_IDENTITY_PHASE,
+            pid as u32,
+            pgid,
+        )?;
+        if let Some(cwd_directory_fd) = cwd_directory_fd {
+            if libc::fchdir(cwd_directory_fd) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::close(cwd_directory_fd);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn direct_attachment_hold_pre_exec(
+    status_writer_fd: i32,
+    release_reader_fd: i32,
+) -> std::io::Result<()> {
+    unsafe {
+        let pid = libc::getpid();
+        let pgid = libc::getpgrp();
+        if pid <= 1 || pgid != pid {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        write_attachment_record(status_writer_fd, ATTACHMENT_READY_PHASE, pid as u32, pgid)?;
+
+        let mut token = 0u8;
+        loop {
+            let count = libc::read(release_reader_fd, (&mut token as *mut u8).cast(), 1);
+            if count == 1 {
+                break;
+            }
+            if count == 0 {
+                return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
+            }
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(error);
+        }
+        if token != ATTACHMENT_RELEASE_TOKEN {
+            return Err(std::io::Error::from_raw_os_error(libc::ECANCELED));
+        }
+        if libc::prctl(libc::PR_SET_PDEATHSIG, 0, 0, 0, 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        libc::close(status_writer_fd);
+        libc::close(release_reader_fd);
+        Ok(())
+    }
+}
+
+/// Write one fixed-width phase record without allocation or buffered I/O.
+#[cfg(target_os = "linux")]
+unsafe fn write_attachment_record(
+    status_writer_fd: i32,
+    phase: u32,
+    pid: u32,
+    pgid: i32,
+) -> std::io::Result<()> {
+    let record = [
+        u32::from_ne_bytes(ATTACHMENT_READY_MAGIC).to_ne_bytes(),
+        phase.to_ne_bytes(),
+        pid.to_ne_bytes(),
+        pgid.to_ne_bytes(),
+    ];
+    let record_ptr = record.as_ptr().cast::<u8>();
+    let mut written = 0usize;
+    while written < ATTACHMENT_READY_RECORD_BYTES {
+        let count = unsafe {
+            libc::write(
+                status_writer_fd,
+                record_ptr.add(written).cast(),
+                ATTACHMENT_READY_RECORD_BYTES - written,
+            )
+        };
+        if count > 0 {
+            written += count as usize;
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if count < 0 && error.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_attachment_ready(
+    reader: &std::fs::File,
+    deadline: Instant,
+    expected_phase: u32,
+) -> Result<AttachmentReady, String> {
+    let fd = reader.as_raw_fd();
+    let mut bytes = [0u8; ATTACHMENT_READY_RECORD_BYTES];
+    let mut read = 0usize;
+    while read < bytes.len() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("child setup did not reach the attachment boundary before the bounded setup/request deadline".to_string());
+        }
+        let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut pollfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            revents: 0,
+        };
+        let poll_result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if poll_result == 0 {
+            return Err("child setup did not reach the attachment boundary before the bounded setup/request deadline".to_string());
+        }
+        if poll_result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            return Err(format!("read attachment readiness: {error}"));
+        }
+        let count =
+            unsafe { libc::read(fd, bytes[read..].as_mut_ptr().cast(), bytes.len() - read) };
+        if count > 0 {
+            read += count as usize;
+            continue;
+        }
+        if count == 0 {
+            return Err("child setup failed before publishing attachment readiness".to_string());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(format!("read attachment readiness: {error}"));
+        }
+    }
+
+    if bytes[0..4] != ATTACHMENT_READY_MAGIC {
+        return Err("child published malformed attachment readiness magic".to_string());
+    }
+    let phase = u32::from_ne_bytes(bytes[4..8].try_into().expect("fixed slice"));
+    if phase != expected_phase {
+        return Err(format!(
+            "child published attachment phase {phase}, expected {expected_phase}"
+        ));
+    }
+    let pid = u32::from_ne_bytes(bytes[8..12].try_into().expect("fixed slice"));
+    let pgid = i32::from_ne_bytes(bytes[12..16].try_into().expect("fixed slice")) as i64;
+    Ok(AttachmentReady { pid, pgid })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_direct_attachment_identity(pid: u32, pgid: i64) -> Result<(), String> {
+    let pid_i32 = i32::try_from(pid).map_err(|_| format!("child PID {pid} exceeds pid_t"))?;
+    if pid_i32 <= 1 || pid == process::id() || pgid != pid as i64 {
+        return Err(format!(
+            "unsafe direct attachment identity PID {pid}, PGID {pgid}"
+        ));
+    }
+    let observed_pgid = unsafe { libc::getpgid(pid_i32) };
+    if observed_pgid < 0 {
+        return Err(format!(
+            "inspect direct attachment process group: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if observed_pgid as i64 != pgid {
+        return Err(format!(
+            "direct attachment child {pid} changed process groups (expected {pgid}, observed {observed_pgid})"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_process_birth(pid: u32) -> Result<LinuxProcessBirth, String> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .map_err(|error| format!("read /proc/{pid}/stat: {error}"))?;
+    let close = raw
+        .rfind(')')
+        .ok_or_else(|| format!("malformed /proc/{pid}/stat comm"))?;
+    let fields: Vec<_> = raw[close + 1..].split_whitespace().collect();
+    let state = fields
+        .first()
+        .and_then(|value| value.chars().next())
+        .ok_or_else(|| format!("missing /proc/{pid}/stat state"))?;
+    let parent_pid = fields
+        .get(1)
+        .ok_or_else(|| format!("missing /proc/{pid}/stat parent pid"))?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid /proc/{pid}/stat parent pid: {error}"))?;
+    let process_group = fields
+        .get(2)
+        .ok_or_else(|| format!("missing /proc/{pid}/stat process group"))?
+        .parse::<i64>()
+        .map_err(|error| format!("invalid /proc/{pid}/stat process group: {error}"))?;
+    let start_time_ticks = fields
+        .get(19)
+        .ok_or_else(|| format!("missing /proc/{pid}/stat start time"))?
+        .parse::<u64>()
+        .map_err(|error| format!("invalid /proc/{pid}/stat start time: {error}"))?;
+    if start_time_ticks == 0 {
+        return Err(format!("invalid zero /proc/{pid}/stat start time"));
+    }
+    Ok(LinuxProcessBirth {
+        state,
+        parent_pid,
+        process_group,
+        start_time_ticks,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn validate_pinned_process_birth(
+    pid: u32,
+    pgid: i64,
+    expected_parent: Option<u32>,
+    observed_before_pin: &LinuxProcessBirth,
+    pidfd: i32,
+) -> Result<(), String> {
+    pidfd_send_signal(pidfd, 0)?;
+    let observed_after_pin = read_linux_process_birth(pid)?;
+    if observed_after_pin.parent_pid != observed_before_pin.parent_pid
+        || observed_after_pin.process_group != observed_before_pin.process_group
+        || observed_after_pin.start_time_ticks != observed_before_pin.start_time_ticks
+    {
+        return Err(format!(
+            "process {pid} birth identity changed while its pidfd was opened"
+        ));
+    }
+    if observed_after_pin.process_group != pgid {
+        return Err(format!(
+            "process {pid} escaped retained process group {pgid} (observed {})",
+            observed_after_pin.process_group
+        ));
+    }
+    if let Some(expected_parent) = expected_parent {
+        if observed_after_pin.parent_pid != expected_parent {
+            return Err(format!(
+                "process {pid} parent changed before identity pin (expected {expected_parent}, observed {})",
+                observed_after_pin.parent_pid
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_supervised_attachment_target(pid: u32, pgid: i64, pidfd: i32) -> Result<(), String> {
+    pidfd_send_signal(pidfd, 0)?;
+    let pid_i32 = i32::try_from(pid).map_err(|_| format!("target PID {pid} exceeds pid_t"))?;
+    let observed_pgid = unsafe { libc::getpgid(pid_i32) };
+    if observed_pgid < 0 {
+        return Err(format!(
+            "inspect supervised attachment target process group: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if observed_pgid as i64 != pgid {
+        return Err(format!(
+            "supervised attachment target {pid} escaped retained process group {pgid} (observed {observed_pgid})"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: u32) -> Result<OwnedFd, String> {
+    let pid = i32::try_from(pid).map_err(|_| "PID exceeds pid_t".to_string())?;
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) } as i32;
+    if fd < 0 {
+        return Err(format!(
+            "pidfd_open({pid}): {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: pidfd_open returned a new uniquely-owned descriptor.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_send_signal(pidfd: i32, signal: i32) -> Result<(), String> {
+    pidfd_send_signal_io(pidfd, signal)
+        .map_err(|error| format!("pidfd_send_signal({signal}): {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn pidfd_send_signal_io(pidfd: i32, signal: i32) -> std::io::Result<()> {
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd,
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0u32,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_pidfd_exit(pidfd: i32, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "pidfd exit deadline overflow".to_string())?;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("exact process did not exit before cleanup deadline".to_string());
+        }
+        let timeout_ms = remaining.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut pollfd = libc::pollfd {
+            fd: pidfd,
+            events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+            revents: 0,
+        };
+        let result = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+        if result > 0 {
+            if pollfd.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                return Ok(());
+            }
+            return Err(format!(
+                "pidfd reported unexpected cleanup events {:#x}",
+                pollfd.revents
+            ));
+        }
+        if result == 0 {
+            return Err("exact process did not exit before cleanup deadline".to_string());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EINTR) {
+            return Err(format!("poll exact process pidfd for exit: {error}"));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn prove_attachment_cleanup(pidfd: i32, cleanup: Result<(), String>) -> Result<(), String> {
+    let exit = wait_pidfd_exit(pidfd, ATTACHMENT_ABORT_SETTLE_TIMEOUT);
+    match (cleanup, exit) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(cleanup), Ok(())) => Err(cleanup),
+        (Ok(()), Err(exit)) => Err(exit),
+        (Err(cleanup), Err(exit)) => Err(format!("{cleanup}; exact-exit proof failed: {exit}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_owned_process_group_quiescent(
+    pgid: i64,
+    retained_leader_pid: u32,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "process-group quiescence deadline overflow".to_string())?;
+    loop {
+        let mut live_member = None;
+        let entries = std::fs::read_dir("/proc")
+            .map_err(|error| format!("enumerate /proc for process-group cleanup: {error}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("enumerate /proc process entry: {error}"))?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == retained_leader_pid {
+                continue;
+            }
+            match read_linux_process_birth(pid) {
+                Ok(stat) if stat.process_group == pgid && !matches!(stat.state, 'Z' | 'X') => {
+                    live_member = Some(pid);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if error.contains("No such file or directory") => {}
+                Err(error) => {
+                    return Err(format!(
+                        "inspect process-group member {pid} during cleanup: {error}"
+                    ));
+                }
+            }
+        }
+        if live_member.is_none() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "process group {pgid} retained live member {} after termination",
+                live_member.expect("checked Some")
+            ));
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn reap_exact_child_pid(pid: u32) -> Result<(), String> {
+    let pid = i32::try_from(pid).map_err(|_| "PID exceeds pid_t".to_string())?;
+    let mut status = 0i32;
+    loop {
+        let result = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if result == pid {
+            return Ok(());
+        }
+        if result < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::EINTR) {
+                continue;
+            }
+            // ECHILD means Command::spawn or RunningProcess already reaped the
+            // exact child, which is also a successful settlement proof.
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                return Ok(());
+            }
+            return Err(format!("waitpid({pid}): {error}"));
+        }
+    }
+}
+
+fn settle_direct_attachment_worker(
+    pid: u32,
+    worker: thread::JoinHandle<Result<RunningProcess, SubprocessResult>>,
+) -> Result<(), String> {
+    match worker.join() {
+        Ok(Ok(running)) => running.abort_and_reap_checked(),
+        Ok(Err(_)) => reap_exact_child_pid(pid),
+        Err(_) => reap_exact_child_pid(pid)
+            .map_err(|error| format!("attachment worker panicked; {error}")),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_direct_after_release_worker_panic(
+    pid: u32,
+    pgid: i64,
+    pidfd: i32,
+) -> Result<(), String> {
+    kill_owned_process_group(pid, pgid, true);
+    let signal = match pidfd_send_signal_io(pidfd, ATTACHMENT_ABORT_SIGNAL) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        Err(error) => Err(format!(
+            "pidfd_send_signal({ATTACHMENT_ABORT_SIGNAL}): {error}"
+        )),
+    };
+    let exit = wait_pidfd_exit(pidfd, ATTACHMENT_ABORT_SETTLE_TIMEOUT);
+    let group = wait_owned_process_group_quiescent(pgid, pid, ATTACHMENT_ABORT_SETTLE_TIMEOUT);
+    let mut failures = Vec::new();
+    if exit.is_ok() && group.is_ok() {
+        if let Err(error) = reap_exact_child_pid(pid) {
+            failures.push(error);
+        }
+    } else {
+        if let Err(error) = signal {
+            failures.push(error);
+        }
+        if let Err(error) = exit {
+            failures.push(error);
+        }
+        if let Err(error) = group {
+            failures.push(error);
+        }
+    }
+    if !failures.is_empty() {
+        return Err(failures.join("; "));
+    }
+    Ok(())
+}
+
+/// Last-resort cleanup proof used after the structured owner has completed or
+/// reported an error. The release authority has already been closed, so
+/// repeated termination cannot make the target runnable. The retained target
+/// pidfd and unreaped group leader keep both numeric identities fenced while
+/// the exact process, every same-group member, and the wrapper are settled.
+#[cfg(target_os = "linux")]
+fn force_attachment_cleanup(pgid: i64, pidfd: i32, timeout: Duration) -> Result<(), String> {
+    let group_leader = u32::try_from(pgid)
+        .map_err(|_| "attachment process-group leader exceeds pid_t".to_string())?;
+    let signal = match pidfd_send_signal_io(pidfd, ATTACHMENT_ABORT_SIGNAL) {
+        Ok(()) => Ok(()),
+        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(()),
+        Err(error) => Err(format!(
+            "pidfd_send_signal({ATTACHMENT_ABORT_SIGNAL}) during final attachment cleanup: {error}"
+        )),
+    };
+    kill_owned_process_group(group_leader, pgid, true);
+    let exit = wait_pidfd_exit(pidfd, timeout);
+    let group = wait_owned_process_group_quiescent(pgid, group_leader, timeout);
+    let leader_exit = wait_exact_child_exit_unreaped(group_leader, timeout);
+    let mut failures = Vec::new();
+    match (&exit, &group, &leader_exit) {
+        (Ok(()), Ok(()), Ok(())) => {
+            // Only now may the leader be reaped. Until this point its
+            // unreaped identity is what makes negative-PGID signalling safe
+            // across cleanup retries.
+            if let Err(error) = reap_exact_child_pid(group_leader) {
+                failures.push(error);
+            }
+        }
+        _ => {
+            if let Err(error) = signal {
+                failures.push(error);
+            }
+            if let Err(error) = exit {
+                failures.push(error);
+            }
+            if let Err(error) = group {
+                failures.push(error);
+            }
+            if let Err(error) = leader_exit {
+                failures.push(error);
+            }
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "final attachment cleanup proof failed: {}",
+            failures.join("; ")
+        ));
+    }
+    Ok(())
+}
+
+/// Observe an owned child exit without reaping it. Keeping the zombie owned
+/// reserves its PID and process-group identity until all same-group members
+/// have been proved quiescent.
+#[cfg(target_os = "linux")]
+fn wait_exact_child_exit_unreaped(pid: u32, timeout: Duration) -> Result<(), String> {
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| "child-exit observation deadline overflow".to_string())?;
+    let pid = i32::try_from(pid).map_err(|_| "PID exceeds pid_t".to_string())?;
+    loop {
+        let mut status: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut status,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            if unsafe { status.si_pid() } != 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "process-group leader {pid} did not exit before cleanup deadline"
+                ));
+            }
+            thread::sleep(PROCESS_POLL_INTERVAL);
+            continue;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        // All structured cleanup paths reap only after proving group
+        // quiescence. ECHILD therefore means an earlier attempt already
+        // completed the stronger proof and reaped the leader.
+        if error.raw_os_error() == Some(libc::ECHILD) {
+            return Ok(());
+        }
+        return Err(format!(
+            "observe process-group leader {pid} before reap: {error}"
+        ));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn complete_attachment_cleanup(pidfd: i32, pgid: i64) {
+    loop {
+        if force_attachment_cleanup(pgid, pidfd, ATTACHMENT_ABORT_SETTLE_TIMEOUT).is_ok() {
+            return;
+        }
+        thread::sleep(PROCESS_POLL_INTERVAL);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn reap_exact_child_pid(_pid: u32) -> Result<(), String> {
+    Err("exact child reaping is supported only on Linux".to_string())
 }
 
 fn request_timeout_duration(timeout: f64) -> Option<Duration> {

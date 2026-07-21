@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T07:49:08Z:1eb5488fd5ea3ed7f1cda4a16818889b71c6596ff6c30d87b77cb73c2f61dad9:qH7Y7lBJvzRUsDlNID5SeY1rwyfkb0qrDCgAziJoleMFeW4DYxRlslJ0SQDCVEtF+zxT3hLMXzuXCrLMhspMAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:24:29Z:a8d181cb8465baebfe81645d55976eeb334c2c0c4a4bbc517b17e6796ee2ff12:qD0n8ucFSg9x3MBdsZlJgWbBi0Xy/ckE6XpfDxzL/OUpoS30AAvFC6KdwMtew01V0cFyRJaKaUPopfXbJX6lDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: protocol
 name: runtime
 category: ryeos/core
@@ -16,7 +16,7 @@ env_injections:
   - { name: RYEOSD_PROJECT_PATH, source: callback_project_path }
   - { name: RYEOSD_THREAD_AUTH_TOKEN, source: thread_auth_token }
 capabilities:
-  allows_pushed_head: false
+  allows_pushed_head: true
   allows_target_site: false
   allows_detached: false
 lifecycle:

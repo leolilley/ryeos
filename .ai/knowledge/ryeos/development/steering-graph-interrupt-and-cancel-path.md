@@ -1,9 +1,18 @@
-# Steering decisions: graph interrupt & the one cancel path
+<!-- ryeos:signed:2026-07-21T00:24:55Z:2a98551f12464ef8a59fb03ca921a8480f911d0cb10c091e4e6edb7aa0368111:xYfgTbT/O9oq7A6AbnSJ25BihP5uS3zENvoC9E9cNQZ3k8e+s3nGISLajnjv97j9yDLUZoRZHSuSwC68/qPaCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+```yaml
+category: ryeos/development
+name: steering-graph-interrupt-and-cancel-path
+title: Steering Decisions — Graph Interrupt and the One Cancel Path
+description: Decision record for graph interrupt support and authoritative cancellation routing
+entry_type: decision
+version: "1.0.0"
+```
 
-Decision record for the two steering-maturity items in
-`.tmp/implementation/05-frontend-buildout.md` §5c.2 and §5c.3. Written on the
-`steering` branch (Wave 2). These are design decisions, not a feature; the code
-that enacts them is small and lives beside this doc.
+# Steering Decisions: Graph Interrupt and the One Cancel Path
+
+This is the durable decision record for graph interruption semantics and the
+single operator-facing cancellation path. The enforcing code lives in the kind
+profile, command service, and UI descriptors named below.
 
 ## 1. Graph interrupt semantics (§5c.2)
 

@@ -237,6 +237,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
         app_root,
         isolation,
         isolation_project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+        isolation_live_access_authority: None,
         isolation_state_root: None,
         isolation_checkpoint_dir: None,
         isolation_daemon_socket_path: None,

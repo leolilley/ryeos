@@ -42,9 +42,10 @@ pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use execution_project_authority::{
     ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
     ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionOwnershipAuthority,
-    ExecutionProjectAuthority, ExecutionRecoveryAuthority, LiveAccessAuthority, LiveProjectAccess,
-    LiveSymlinkPolicy, OperationalProjectAuthorityTransition, PinnedChildProjectRealization,
-    PinnedProjectRealization, PinnedTerminalPublication,
+    ExecutionProjectAuthority, ExecutionRecoveryAuthority, LiveAccessAuthority,
+    LiveFilesystemConfinement, LiveProjectAccess, LiveSymlinkPolicy,
+    OperationalProjectAuthorityTransition, PinnedChildProjectRealization, PinnedProjectRealization,
+    PinnedTerminalPublication,
 };
 pub use item_source::ItemSource;
 pub use live_input::{LiveInput, LiveInputIntent};

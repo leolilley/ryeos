@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-16T02:18:46Z:25939e60fa1d54424d3c34fdb494f9a6594ca87028854b5003d7e86c48e1196e:AQhl5VZNUa9I4FB7RQ3bcrwyrCb4XYaDgoUeXEURxntcimjvXHNfalsiJBFXYS2HBL+sF3pjETdyUUCQv81iDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-21T00:24:55Z:7cb4de829b5b2e50e9b0d9f030f8b580f9126b3dc775a938b65685b94f1a3d80:z1QqGj+z5Iw20Wq5fqGLdb9O32VFqRc9godugHlL85a3ISXNDdfcYcBUBuFd83XcMu4uWU8lu9G49ouO1fxxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ```yaml
 category: "ryeos/development"
 name: "architecture"
 title: "Architecture Map"
 description: "Short orientation for crates, bundles, execution flow, and trust boundaries"
 entry_type: reference
-version: "1.3.0"
+version: "1.4.0"
 ```
 
 # Architecture Map
@@ -17,7 +17,7 @@ full design document.
 
 | Area | Path | Owns |
 |---|---|---|
-| Crypto | `crates/kernel/lillux/` | Ed25519/X25519/SHA primitives and signatures |
+| Kernel primitives | `crates/kernel/lillux/` | process lifecycle/type state, durable filesystem/CAS operations, Ed25519/X25519/SHA primitives |
 | Engine | `crates/engine/ryeos-engine/` | item resolution, trust verification, composition, plans, immutable node isolation policy |
 | App | `crates/daemon/ryeos-app/` | daemon/app config, engine boot, node-config loading |
 | State | `crates/state/ryeos-state/` | SQLite state, CAS objects, thread state |
@@ -62,7 +62,9 @@ ryeos CLI
   -> engine resolves project -> user -> system
   -> engine verifies trust and composes effective item
   -> plan/handler/protocol selects runtime or tool binary
-  -> node isolation snapshot optionally wraps the executable request
+  -> node isolation snapshot optionally narrows the executable request
+  -> Lillux creates the exact target awaiting durable attachment
+  -> daemon persists process ownership and authorizes release
   -> subprocess runs and may call back to daemon
   -> daemon records state and returns result
 ```
@@ -82,8 +84,9 @@ generic composed dispatch fields. Avoid kind-specific CLI descriptor parsing.
 - Isolation activation and OS controls come only from
   `<app-root>/.ai/node/isolation.yaml`; items cannot override the node snapshot.
 
-See `knowledge:ryeos/development/isolation-runtime` for the pickup and launch
-coverage map.
+See `knowledge:ryeos/core/node/execution-isolation` for node-owned confinement
+and `knowledge:ryeos/core/execution/attachment-before-execution` for the
+orthogonal durable process lifecycle.
 
 ## Project AI deployable surfaces
 
