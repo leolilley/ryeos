@@ -218,6 +218,14 @@ mod tests {
         assert!(validate_scope_pattern("ryeos.execute.service.vault/set").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.bundle/install").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.remote/admin").is_ok());
+        assert!(
+            validate_scope_pattern(ryeos_app::execution_policy::LIVE_PROJECT_READ_CAPABILITY)
+                .is_ok()
+        );
+        assert!(
+            validate_scope_pattern(ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -227,6 +235,8 @@ mod tests {
         assert!(validate_scope_pattern("bundle.install").is_err());
         assert!(validate_scope_pattern("remote.admin").is_err());
         assert!(validate_scope_pattern("execute").is_err());
+        assert!(validate_scope_pattern("project.read").is_err());
+        assert!(validate_scope_pattern("project.write").is_err());
     }
 
     // ── Wildcard delegation: handler rejects wildcard grants, grammar permits them ──

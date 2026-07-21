@@ -2,6 +2,8 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 pub const EXECUTION_POLICY_SCHEMA_VERSION: u32 = 2;
+pub const LIVE_PROJECT_READ_CAPABILITY: &str = "ryeos.read.project.live";
+pub const LIVE_PROJECT_WRITE_CAPABILITY: &str = "ryeos.write.project.live";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,6 +67,15 @@ pub enum ExecutionEnvironmentPolicy {
 pub enum LiveAccess {
     ReadOnly,
     ReadWrite,
+}
+
+impl LiveAccess {
+    pub const fn required_capability(self) -> &'static str {
+        match self {
+            Self::ReadOnly => LIVE_PROJECT_READ_CAPABILITY,
+            Self::ReadWrite => LIVE_PROJECT_WRITE_CAPABILITY,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,7 +414,7 @@ pub fn resolve_standard_local_live_authority(
 ///
 /// This boundary is deliberately request-scoped and non-recoverable: no daemon
 /// owns the child after the command exits. The local operator invocation keeps
-/// the historical mutable-project contract explicit through `project.write`,
+/// the mutable-project contract explicit through its canonical capability,
 /// while filesystem confinement still follows the installed isolation mode.
 pub fn resolve_offline_local_live_project_authority(
     project_path: &std::path::Path,
@@ -424,7 +435,7 @@ pub fn resolve_offline_local_live_project_authority(
     policy.resolve_live_project_authority(
         project_path,
         live_filesystem_confinement_for_isolation(isolation.mode()),
-        vec!["project.write".to_string()],
+        vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
     )
 }
 
@@ -444,15 +455,30 @@ pub fn live_filesystem_confinement_for_isolation(
 /// Authorize the standard read-write live profile before any project capture,
 /// checkout, or other filesystem/CAS work begins.
 pub fn authorize_standard_local_live_execution(capabilities: &[String]) -> anyhow::Result<()> {
-    ryeos_runtime::authorizer::Authorizer::new()
+    authorize_live_project_access(
+        &ryeos_runtime::authorizer::Authorizer::new(),
+        capabilities,
+        LiveAccess::ReadWrite,
+    )
+}
+
+/// Authorize one exact live-project access mode through the shared capability
+/// evaluator. Write authority is intentionally not treated as an alias for the
+/// distinct read capability: callers must request and hold the authority for
+/// the operation they are performing.
+pub fn authorize_live_project_access(
+    authorizer: &ryeos_runtime::authorizer::Authorizer,
+    capabilities: &[String],
+    access: LiveAccess,
+) -> anyhow::Result<()> {
+    let required = access.required_capability();
+    authorizer
         .authorize(
             capabilities,
-            &ryeos_runtime::authorizer::AuthorizationPolicy::require("project.write"),
+            &ryeos_runtime::authorizer::AuthorizationPolicy::require(required),
         )
         .map_err(|_| {
-            anyhow::anyhow!(
-                "standard local-live execution requires explicit project.write authority"
-            )
+            anyhow::anyhow!("live project {access:?} access requires explicit {required} authority")
         })
 }
 
@@ -618,19 +644,61 @@ mod policy_tests {
     }
 
     #[test]
-    fn standard_live_authority_requires_project_write_and_resolves_both_halves() {
-        let project = tempfile::tempdir().unwrap();
-        let error = resolve_standard_local_live_authority(
-            project.path(),
-            vec!["project.read".to_string()],
-            &ryeos_engine::isolation::IsolationRuntime::default(),
+    fn live_access_capabilities_are_canonical_and_distinct() {
+        let read = LiveAccess::ReadOnly.required_capability();
+        let write = LiveAccess::ReadWrite.required_capability();
+        assert_ne!(read, write);
+        assert!(ryeos_runtime::authorizer::Capability::parse(read).is_ok());
+        assert!(ryeos_runtime::authorizer::Capability::parse(write).is_ok());
+    }
+
+    #[test]
+    fn live_access_authorization_is_exact_and_wildcard_aware() {
+        let authorizer = ryeos_runtime::authorizer::Authorizer::new();
+        for (access, capability) in [
+            (LiveAccess::ReadOnly, LIVE_PROJECT_READ_CAPABILITY),
+            (LiveAccess::ReadWrite, LIVE_PROJECT_WRITE_CAPABILITY),
+        ] {
+            authorize_live_project_access(&authorizer, &[capability.to_string()], access).unwrap();
+            authorize_live_project_access(&authorizer, &["*".to_string()], access).unwrap();
+        }
+
+        assert!(authorize_live_project_access(
+            &authorizer,
+            &[LIVE_PROJECT_READ_CAPABILITY.to_string()],
+            LiveAccess::ReadWrite,
         )
-        .unwrap_err();
-        assert!(error.to_string().contains("project.write"));
+        .is_err());
+        assert!(authorize_live_project_access(
+            &authorizer,
+            &[LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+            LiveAccess::ReadOnly,
+        )
+        .is_err());
+        assert!(authorize_live_project_access(
+            &authorizer,
+            &["project.write".to_string()],
+            LiveAccess::ReadWrite,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn standard_live_authority_requires_canonical_project_write_and_resolves_both_halves() {
+        let project = tempfile::tempdir().unwrap();
+        for insufficient in ["project.write", LIVE_PROJECT_READ_CAPABILITY] {
+            let error = resolve_standard_local_live_authority(
+                project.path(),
+                vec![insufficient.to_string()],
+                &ryeos_engine::isolation::IsolationRuntime::default(),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(LIVE_PROJECT_WRITE_CAPABILITY));
+        }
 
         let authority = resolve_standard_local_live_authority(
             project.path(),
-            vec!["*".to_string()],
+            vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
             &ryeos_engine::isolation::IsolationRuntime::default(),
         )
         .unwrap();
@@ -644,6 +712,13 @@ mod policy_tests {
                 ..
             }
         ));
+
+        resolve_standard_local_live_authority(
+            project.path(),
+            vec!["*".to_string()],
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+        )
+        .expect("node-local wildcard authority remains valid");
         assert_eq!(
             authority.lifecycle,
             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE
@@ -658,7 +733,7 @@ mod policy_tests {
     }
 
     #[test]
-    fn offline_live_authority_is_explicitly_request_scoped_project_write() {
+    fn offline_live_authority_is_explicitly_request_scoped_canonical_project_write() {
         let project = tempfile::tempdir().unwrap();
         let authority = resolve_offline_local_live_project_authority(
             project.path(),
@@ -678,7 +753,7 @@ mod policy_tests {
                 capability_ceiling,
                 ..
             } if authorized_write_namespaces == vec!["project".to_string()]
-                && capability_ceiling == vec!["project.write".to_string()]
+                && capability_ceiling == vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()]
         ));
     }
 }

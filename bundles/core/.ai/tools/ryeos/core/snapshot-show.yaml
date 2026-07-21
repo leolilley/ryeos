@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-07T05:18:56Z:f3e701d1385f2fc22d6a34f1177ff15756e355cb3d0beb320b38c7758fdb10c4:WZwm2Rrw4zvQQNprQ/G9D/UyKfd08N01MEEurCFH0L2H0VjsXX7yNvRvba7dRd5eoOPm0nntuy7e65djW9REAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T07:18:25Z:14be4dece23011f0538475b6bdc81c389a79a4703508ed1ca584db556a7bc534:11HTj5kkkCAXVAYaOo8F7qsDGmFeczUbFgDCQcw+1VARcX8Ll/eP0BZ0++M0TLktbMO9pQuUfCjq7g2nxybxAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
 name: "snapshot-show"
-required_caps: ["project.read"]
+required_caps: ["ryeos.read.project.live"]
 description: "Show metadata for a local snapshot object."
 
 config:

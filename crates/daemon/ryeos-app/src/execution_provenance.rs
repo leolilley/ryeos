@@ -945,7 +945,7 @@ mod tests {
             .resolve_live_project_authority(
                 project.path(),
                 ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
-                vec!["project.write".to_string()],
+                vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
             )
             .unwrap();
 
