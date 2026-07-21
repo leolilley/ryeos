@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-21T03:33:05Z:7f14fb7d24ee556f8095957e9a2ec998e93459b6318453802f0ce3321a00e94c:r6WGwteGe1G4QDY1Ck9aVtJIo5wrSCWRL+mgVUZqr2svhskPf749A8JR4g4533eWwvyN9afGrTZnbmGcUgz3Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:52:25Z:7337c40314151b6078e5fbb581983aa8ad349c08d6f538a4be7d6c12e7f298c4:Kaw0xElr3UmGkJP568rddM5TELpRI4YQ91UF+5DevtY/SsDtGFu5JAzKQjthxDeGkpe+ZqOg9PsQV1CCxpOiBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 # Offline/eval target: a local OpenAI-compatible server (vLLM, llama.cpp,

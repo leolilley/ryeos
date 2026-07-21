@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-11T21:03:05Z:45fd53591f81e9bf204a7b120077e000a2257b58b5c417307e1c8d8c157393dd:A6cTSydzXvrruZq38LY79/M47UpUhBzPz7YkZJEwPscUJ8rNi1aY7Kx2BfrBsHTmUeqNBC2wFXY6OpL9+Fa2Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T00:52:25Z:8312ce8d2ae556fb530c2bcb797335ac429faba51c7a3ad794a65d3a272dea0c:7vr9dVuR7rivHhTmr+S1AyGONrtR04g2ECyTXqKecWvnsofO0bxwLEwvD1+CO6Ag9qREO9M8jBGHUkUFocHQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://opencode.ai/zen/v1"
