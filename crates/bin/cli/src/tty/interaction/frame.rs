@@ -1,8 +1,8 @@
 use std::io::{self, Write};
 
-use crossterm::cursor::{MoveToColumn, MoveUp};
+use crossterm::cursor::{MoveDown, MoveToColumn, MoveUp};
+use crossterm::queue;
 use crossterm::terminal::{Clear, ClearType};
-use crossterm::{execute, queue};
 
 /// Incrementally repaints only the lines emitted by the active command flow.
 pub(crate) struct Frame<W: Write> {
@@ -66,12 +66,17 @@ impl<W: Write> Frame<W> {
 
     fn erase(&mut self) -> io::Result<()> {
         if self.rendered_lines > 0 {
-            execute!(
-                self.output,
-                MoveUp(self.rendered_lines),
-                MoveToColumn(0),
-                Clear(ClearType::FromCursorDown)
-            )?;
+            queue!(self.output, MoveUp(self.rendered_lines), MoveToColumn(0))?;
+            for line in 0..self.rendered_lines {
+                queue!(self.output, Clear(ClearType::CurrentLine))?;
+                if line + 1 < self.rendered_lines {
+                    queue!(self.output, MoveDown(1), MoveToColumn(0))?;
+                }
+            }
+            if self.rendered_lines > 1 {
+                queue!(self.output, MoveUp(self.rendered_lines - 1))?;
+            }
+            queue!(self.output, MoveToColumn(0))?;
             self.rendered_lines = 0;
         }
         Ok(())
@@ -90,7 +95,8 @@ mod tests {
         let bytes = frame.into_inner();
         let rendered = String::from_utf8(bytes).unwrap();
         assert!(rendered.starts_with("\u{1b}[1Gone\r\n\u{1b}[1Gtwo\r\n"));
-        assert!(rendered.contains("\u{1b}[2A\u{1b}[1G\u{1b}[0J"));
+        assert!(rendered.contains("\u{1b}[2A\u{1b}[1G\u{1b}[2K"));
+        assert!(!rendered.contains("\u{1b}[0J"));
         assert!(rendered.ends_with("\u{1b}[1Gthree\r\n"));
     }
 

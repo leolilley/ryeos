@@ -13,7 +13,7 @@ mod pager;
 mod terminal_guard;
 mod text_input;
 
-pub(crate) use event::{Event, EventReader, Key, KeyEvent, Modifiers};
+pub(crate) use event::{Event, EventReader, Key, KeyEvent};
 pub(crate) use frame::Frame;
 pub(crate) use list::{ListItem, ListState};
 pub(crate) use pager::Pager;

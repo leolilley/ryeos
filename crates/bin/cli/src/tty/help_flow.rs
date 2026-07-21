@@ -17,6 +17,8 @@ use crate::help::{CachedHelpRow, DescriptorHelpRow, ResolvedCommandHelp};
 
 const MINIMUM_WIDTH: u16 = 40;
 const MINIMUM_HEIGHT: u16 = 12;
+const MAXIMUM_INDEX_ROWS: usize = 8;
+const MAXIMUM_DETAIL_ROWS: usize = 10;
 const EVENT_TICK: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone)]
@@ -179,27 +181,32 @@ pub(crate) async fn run(
     }
 
     let interaction_result: Result<(), CliError> = async {
+        let mut dirty = true;
         loop {
-        render(
-            &mut frame,
-            console,
-            view,
-            &list,
-            &filter,
-            filtering,
-            legend,
-            &node_status,
-            &verification_status,
-            detail.as_ref(),
-            width,
-        )?;
+            if dirty {
+                render(
+                    &mut frame,
+                    console,
+                    view,
+                    &list,
+                    &filter,
+                    filtering,
+                    legend,
+                    &node_status,
+                    &verification_status,
+                    detail.as_ref(),
+                    width,
+                )?;
+            }
 
-        let event = events.next().await?;
-        if matches!(event, Event::Tick) {
+            let event = events.next().await?;
+            if matches!(event, Event::Tick) {
+                dirty = false;
             if discovery_task
                 .as_ref()
                 .is_some_and(tokio::task::JoinHandle::is_finished)
             {
+                dirty = true;
                 let outcome = discovery_task.take().expect("finished task present").await;
                 match outcome {
                     Ok(Ok(discovery)) => {
@@ -274,6 +281,7 @@ pub(crate) async fn run(
                 .as_ref()
                 .is_some_and(tokio::task::JoinHandle::is_finished)
             {
+                dirty = true;
                 node_status = match status_task.take().expect("finished task present").await {
                     Ok(status) => status,
                     Err(error) => format!("status error: {error}"),
@@ -283,6 +291,7 @@ pub(crate) async fn run(
                 .as_ref()
                 .is_some_and(tokio::task::JoinHandle::is_finished)
             {
+                dirty = true;
                 let outcome = resolution_task.take().expect("finished task present").await;
                 if let Some(detail) = detail.as_mut() {
                     detail.enrichment = match outcome {
@@ -299,10 +308,10 @@ pub(crate) async fn run(
                         .replace_source(format!("{}{}", detail.base, detail.enrichment));
                 }
             }
-            continue;
-        }
+                continue;
+            }
 
-        match event {
+            match event {
             Event::Terminate => {
                 return Err(CliError::Local {
                     detail: "interactive help terminated by signal".to_string(),
@@ -383,7 +392,8 @@ pub(crate) async fn run(
                 }
             }
             Event::Tick => unreachable!("ticks are handled before input dispatch"),
-        }
+            }
+            dirty = true;
         }
         Ok(())
     }
@@ -576,8 +586,12 @@ fn render(
     String::new()];
     match view {
         View::Index => {
-            let marker = if filtering { ">" } else { "/" };
-            lines.push(format!("  {marker} {}", filter.value()));
+            let filter_prompt = if filtering || !filter.is_empty() {
+                format!("/ {}", filter.value())
+            } else {
+                "/ search commands…".to_string()
+            };
+            lines.push(format!("  {filter_prompt}"));
             lines.push(String::new());
             let token_width = usize::from(width).saturating_sub(22).clamp(12, 28);
             if list.visible_len() == 0 {
@@ -611,9 +625,9 @@ fn render(
             }
             lines.push(String::new());
             lines.push(if legend {
-                "  ↑/↓ or j/k move · PgUp/PgDn page · / filter · enter open · q quit".to_string()
+                "  ↑/↓ move · ctrl-u/ctrl-d page · / filter · enter open · q quit".to_string()
             } else {
-                "  enter open  ·  / filter  ·  j/k move  ·  ? keys  ·  q quit".to_string()
+                "  ↑/↓ move  ·  enter open  ·  / filter  ·  ? keys  ·  q quit".to_string()
             });
         }
         View::Detail => {
@@ -628,11 +642,11 @@ fn render(
                 lines.push(String::new());
                 lines.push(if legend {
                     format!(
-                        "  {} · ↑/↓ or j/k scroll · PgUp/PgDn page · esc/← back · q quit",
+                        "  {} · ↑/↓ scroll · ctrl-u/ctrl-d page · esc/← back · q quit",
                         detail.entry.tokens()
                     )
                 } else {
-                    "  scroll j/k  ·  back esc/←  ·  ? keys  ·  q quit".to_string()
+                    "  ↑/↓ scroll  ·  back esc/←  ·  ? keys  ·  q quit".to_string()
                 });
             }
         }
@@ -866,11 +880,15 @@ fn terminal_geometry(console: &Console) -> (u16, u16) {
 }
 
 fn list_rows(height: u16) -> usize {
-    usize::from(height).saturating_sub(8).max(1)
+    usize::from(height)
+        .saturating_sub(8)
+        .clamp(1, MAXIMUM_INDEX_ROWS)
 }
 
 fn pager_rows(height: u16) -> usize {
-    usize::from(height).saturating_sub(6).max(1)
+    usize::from(height)
+        .saturating_sub(6)
+        .clamp(1, MAXIMUM_DETAIL_ROWS)
 }
 
 fn argument_kind(kind: CommandArgumentKind) -> &'static str {
@@ -888,5 +906,22 @@ fn availability_label(availability: CommandAvailability) -> &'static str {
         CommandAvailability::Daemon => "daemon required",
         CommandAvailability::Offline => "offline",
         CommandAvailability::Both => "offline or daemon",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn help_viewports_stay_compact_on_tall_terminals() {
+        assert_eq!(list_rows(200), MAXIMUM_INDEX_ROWS);
+        assert_eq!(pager_rows(200), MAXIMUM_DETAIL_ROWS);
+    }
+
+    #[test]
+    fn help_viewports_still_fit_the_minimum_terminal() {
+        assert_eq!(list_rows(MINIMUM_HEIGHT), 4);
+        assert_eq!(pager_rows(MINIMUM_HEIGHT), 6);
     }
 }

@@ -37,6 +37,7 @@ pub(crate) struct KeyEvent {
 }
 
 impl KeyEvent {
+    #[cfg(test)]
     pub(crate) const fn plain(key: Key) -> Self {
         Self {
             key,
