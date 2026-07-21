@@ -247,6 +247,33 @@ impl SharedFileLock {
             .map(|_guard| Self { _guard })
     }
 
+    /// Acquire a shared lock with a bounded wait and holder diagnostics.
+    /// Read-only composition uses this at availability-critical standalone
+    /// boundaries while remaining compatible with other generation readers.
+    pub fn acquire_with_timeout(target: &Path, timeout: std::time::Duration) -> Result<Self> {
+        #[cfg(unix)]
+        {
+            let parent_path = target.parent().unwrap_or_else(|| Path::new("."));
+            let parent = open_directory_no_follow(parent_path, true)?;
+            let file_name = target
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("lock target has no file name"))?;
+            FileLockGuard::acquire_with_parent_timeout(
+                parent,
+                file_name,
+                true,
+                FileLockMode::Shared,
+                timeout,
+            )
+            .map(|_guard| Self { _guard })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (target, timeout);
+            anyhow::bail!("interprocess file locking is unavailable on this platform")
+        }
+    }
+
     pub fn acquire_existing(target: &Path) -> Result<Self> {
         FileLockGuard::acquire_inner(target, false, FileLockMode::Shared)
             .map(|_guard| Self { _guard })

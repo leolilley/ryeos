@@ -213,7 +213,7 @@ pub async fn handle(
                 &isolation,
                 ryeos_engine::isolation::IsolationLaunchContext {
                     project_path: &project_path,
-                    project_authority: ryeos_engine::isolation::IsolationProjectAuthority::External,
+                    project_authority: ryeos_engine::isolation::IsolationProjectAuthority::ReadOnly,
                     live_access: None,
                     state_root: None,
                     checkpoint_dir: None,

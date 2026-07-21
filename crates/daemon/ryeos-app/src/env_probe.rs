@@ -310,7 +310,7 @@ mod tests {
             &isolation,
             IsolationLaunchContext {
                 project_path: project,
-                project_authority: IsolationProjectAuthority::External,
+                project_authority: IsolationProjectAuthority::ReadOnly,
                 live_access: None,
                 state_root: None,
                 checkpoint_dir: None,

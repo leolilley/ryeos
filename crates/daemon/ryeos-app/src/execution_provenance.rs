@@ -118,6 +118,81 @@ pub enum ExecutionProvenance {
     },
 }
 
+/// Compile durable project authority into the engine's filesystem authority
+/// without requiring callers to manufacture an `ExecutionProvenance` solely
+/// for an immediate local launch.
+pub fn isolation_project_authority_for_project(
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> ryeos_engine::isolation::IsolationProjectAuthority {
+    match project_authority {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
+            ryeos_engine::isolation::IsolationProjectAuthority::EphemeralScratch
+        }
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+            live_access:
+                ryeos_state::objects::LiveAccessAuthority {
+                    access: ryeos_state::objects::LiveProjectAccess::ReadOnly,
+                    ..
+                },
+            ..
+        }
+        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            ..
+        } => ryeos_engine::isolation::IsolationProjectAuthority::ReadOnly,
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
+            live_access:
+                ryeos_state::objects::LiveAccessAuthority {
+                    access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                    ..
+                },
+            ..
+        } => ryeos_engine::isolation::IsolationProjectAuthority::External,
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
+            realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
+            ..
+        } => ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace,
+    }
+}
+
+/// Translate a resolved live-project confinement into the exact launch
+/// authority consumed by the isolation runtime. Descriptor-rooted authority
+/// is bound to the current canonical directory identity before launch.
+pub fn isolation_live_access_authority_for_project(
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> anyhow::Result<Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>> {
+    project_authority
+        .live_access()
+        .map(|authority| match &authority.confinement {
+            ryeos_state::objects::LiveFilesystemConfinement::DescriptorRootedMasked {
+                denied_control_paths,
+                symlink_policy: ryeos_state::objects::LiveSymlinkPolicy::DescriptorRootedNoEscape,
+            } => {
+                let root = project_authority
+                    .open_environment_root()?
+                    .ok_or_else(|| anyhow::anyhow!("live project authority lost its root"))?;
+                let (root_device_id, root_inode) = root.device_inode()?;
+                Ok(
+                    ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedMasked {
+                        root_device_id,
+                        root_inode,
+                        denied_control_paths: denied_control_paths
+                            .iter()
+                            .map(PathBuf::from)
+                            .collect(),
+                        authorized_write_namespaces: authority.authorized_write_namespaces.clone(),
+                    },
+                )
+            }
+            ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost => Ok(
+                ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
+                    authorized_write_namespaces: authority.authorized_write_namespaces.clone(),
+                },
+            ),
+        })
+        .transpose()
+}
+
 impl ExecutionProvenance {
     pub fn execution_project_authority(
         &self,
@@ -692,78 +767,13 @@ impl ExecutionProvenance {
     pub fn isolation_project_authority(
         &self,
     ) -> ryeos_engine::isolation::IsolationProjectAuthority {
-        match self.project_authority() {
-            ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
-                ryeos_engine::isolation::IsolationProjectAuthority::EphemeralScratch
-            }
-            ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
-                live_access:
-                    ryeos_state::objects::LiveAccessAuthority {
-                        access: ryeos_state::objects::LiveProjectAccess::ReadOnly,
-                        ..
-                    },
-                ..
-            }
-            | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
-                realization: ryeos_state::objects::PinnedProjectRealization::ReadOnly,
-                ..
-            } => ryeos_engine::isolation::IsolationProjectAuthority::ReadOnly,
-            ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
-                live_access:
-                    ryeos_state::objects::LiveAccessAuthority {
-                        access: ryeos_state::objects::LiveProjectAccess::ReadWrite,
-                        ..
-                    },
-                ..
-            } => ryeos_engine::isolation::IsolationProjectAuthority::External,
-            ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
-                realization: ryeos_state::objects::PinnedProjectRealization::Cow { .. },
-                ..
-            } => ryeos_engine::isolation::IsolationProjectAuthority::RuntimeWorkspace,
-        }
+        isolation_project_authority_for_project(self.project_authority())
     }
 
     pub fn isolation_live_access_authority(
         &self,
     ) -> anyhow::Result<Option<ryeos_engine::isolation::IsolationLiveAccessAuthority>> {
-        self.project_authority()
-            .live_access()
-            .map(|authority| {
-                match &authority.confinement {
-                    ryeos_state::objects::LiveFilesystemConfinement::DescriptorRootedMasked {
-                        denied_control_paths,
-                        symlink_policy:
-                            ryeos_state::objects::LiveSymlinkPolicy::DescriptorRootedNoEscape,
-                    } => {
-                        let root = self
-                            .project_authority()
-                            .open_environment_root()?
-                            .ok_or_else(|| {
-                                anyhow::anyhow!("live project authority lost its root")
-                            })?;
-                        let (root_device_id, root_inode) = root.device_inode()?;
-                        Ok(ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedMasked {
-                            root_device_id,
-                            root_inode,
-                            denied_control_paths: denied_control_paths
-                                .iter()
-                                .map(PathBuf::from)
-                                .collect(),
-                            authorized_write_namespaces: authority
-                                .authorized_write_namespaces
-                                .clone(),
-                        })
-                    }
-                    ryeos_state::objects::LiveFilesystemConfinement::UnconfinedHost => {
-                        Ok(ryeos_engine::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
-                            authorized_write_namespaces: authority
-                                .authorized_write_namespaces
-                                .clone(),
-                        })
-                    }
-                }
-            })
-            .transpose()
+        isolation_live_access_authority_for_project(self.project_authority())
     }
 
     /// Clone the ephemeral workspace lifeline, when this execution owns one.
@@ -923,6 +933,50 @@ mod tests {
         assert!(matches!(p, ExecutionProvenance::RootLiveProject { .. }));
         assert_eq!(p.project_source(), ProjectSourceKind::LiveFs);
         assert!(!p.is_borrowed_child());
+    }
+
+    #[test]
+    fn descriptor_rooted_live_authority_preserves_root_identity_and_masks() {
+        let project = tempfile::tempdir().unwrap();
+        let policy = crate::execution_policy::ExecutionPolicy::local_live(
+            crate::execution_policy::ExecutionResponse::Wait,
+        );
+        let project_authority = policy
+            .resolve_live_project_authority(
+                project.path(),
+                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                vec!["project.write".to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            isolation_project_authority_for_project(&project_authority),
+            ryeos_engine::isolation::IsolationProjectAuthority::External
+        );
+        let live_access = isolation_live_access_authority_for_project(&project_authority)
+            .unwrap()
+            .expect("live authority");
+        let ryeos_engine::isolation::IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root_device_id,
+            root_inode,
+            denied_control_paths,
+            authorized_write_namespaces,
+        } = live_access
+        else {
+            panic!("expected descriptor-rooted confinement");
+        };
+        let root = lillux::secure_fs::PinnedDirectory::open(project.path())
+            .unwrap()
+            .expect("project root");
+        assert_eq!((root_device_id, root_inode), root.device_inode().unwrap());
+        assert_eq!(
+            denied_control_paths,
+            ryeos_state::project_sync::live_execution_denied_control_paths()
+                .into_iter()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(authorized_write_namespaces, vec!["project".to_string()]);
     }
 
     #[test]
