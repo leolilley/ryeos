@@ -117,7 +117,10 @@ pub(crate) fn read_cached_descriptor_rows(app_root: &Path) -> Vec<CachedHelpRow>
         Ok(metadata)
             if metadata.file_type().is_file()
                 && !metadata.file_type().is_symlink()
-                && metadata.len() <= HELP_CACHE_MAX_BYTES => metadata,
+                && metadata.len() <= HELP_CACHE_MAX_BYTES =>
+        {
+            metadata
+        }
         _ => return Vec::new(),
     };
     if metadata.len() == 0 {
@@ -266,7 +269,12 @@ pub fn print_quick_help(console: &crate::tty::Console) -> std::io::Result<()> {
     let mut lifecycle = crate::tty::Section::named("lifecycle");
     lifecycle.rows = crate::lifecycle_commands::local_command_descriptors()
         .iter()
-        .filter(|descriptor| !matches!(descriptor.tokens, ["help"] | ["help", "--all"] | ["commands"]))
+        .filter(|descriptor| {
+            !matches!(
+                descriptor.tokens,
+                ["help"] | ["help", "--all"] | ["commands"]
+            )
+        })
         .map(|descriptor| {
             crate::tty::Row::key_value(descriptor.tokens.join(" "), descriptor.summary)
         })

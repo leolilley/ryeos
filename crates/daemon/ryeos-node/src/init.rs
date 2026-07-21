@@ -54,8 +54,8 @@ use base64::Engine as _;
 use lillux::crypto::{
     DecodePrivateKey, EncodePrivateKey, Signature, Signer, SigningKey, Verifier, VerifyingKey,
 };
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -295,7 +295,7 @@ fn run_init_internal(
         .and_then(|ceremony| ceremony.entropy_contribution.take());
     let (user_key, user_key_created, contribution_digest) =
         load_or_create_operator_key(&user_key_path, contribution)
-        .with_context(|| format!("user key at {}", user_key_path.display()))?;
+            .with_context(|| format!("user key at {}", user_key_path.display()))?;
     let user_fp = compute_fingerprint(&user_key.verifying_key());
     ensure_operator_genesis(
         &opts.app_root,
@@ -643,7 +643,10 @@ fn run_init_internal(
     let vault_sk = lillux::with_exclusive_file_lock(&vault_secret_path, || {
         match fs::symlink_metadata(&vault_secret_path) {
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                bail!("refusing unsafe vault key path {}", vault_secret_path.display())
+                bail!(
+                    "refusing unsafe vault key path {}",
+                    vault_secret_path.display()
+                )
             }
             Ok(_) => lillux::vault::read_secret_key(&vault_secret_path)
                 .with_context(|| format!("load vault key {}", vault_secret_path.display())),
@@ -660,7 +663,10 @@ fn run_init_internal(
     .with_context(|| format!("initialize vault key {}", vault_secret_path.display()))?;
     if let Ok(metadata) = fs::symlink_metadata(&vault_public_path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("refusing unsafe vault public key path {}", vault_public_path.display());
+            bail!(
+                "refusing unsafe vault public key path {}",
+                vault_public_path.display()
+            );
         }
     }
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
@@ -726,9 +732,7 @@ fn init_completion_path(app_root: &Path) -> PathBuf {
 }
 
 fn registration_digests(app_root: &Path) -> Result<BTreeMap<String, String>> {
-    let directory = app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("node/bundles");
+    let directory = app_root.join(ryeos_engine::AI_DIR).join("node/bundles");
     let paths = lillux::collect_regular_files_no_follow(&directory, false)?
         .ok_or_else(|| anyhow!("bundle registration directory is absent"))?;
     let mut digests = BTreeMap::new();
@@ -821,9 +825,8 @@ pub fn verify_init_completion(app_root: &Path) -> Result<Option<InitCompletionRe
         .signature
         .strip_prefix("ed25519:")
         .ok_or_else(|| anyhow!("init completion signature has an invalid encoding"))?;
-    let signature = Signature::from_slice(
-        &base64::engine::general_purpose::STANDARD.decode(signature)?,
-    )?;
+    let signature =
+        Signature::from_slice(&base64::engine::general_purpose::STANDARD.decode(signature)?)?;
     let canonical = lillux::canonical_json(&serde_json::to_value(&document.body)?)?;
     operator_key
         .verifying_key()
@@ -1324,9 +1327,7 @@ fn load_or_create_key_locked(path: &Path, force: bool) -> Result<SigningKey> {
         }
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error).with_context(|| format!("inspect key {}", path.display()))
-        }
+        Err(error) => return Err(error).with_context(|| format!("inspect key {}", path.display())),
     };
     if force && existing {
         fs::remove_file(path).with_context(|| format!("remove old key {}", path.display()))?;
@@ -1389,10 +1390,8 @@ fn load_or_create_operator_key(
         if let Some(digest) = &contribution_digest {
             input.extend_from_slice(digest.as_slice());
         }
-        let hkdf = hkdf::Hkdf::<Sha256>::new(
-            Some(b"ryeos/operator-ed25519-seed/v1"),
-            input.as_slice(),
-        );
+        let hkdf =
+            hkdf::Hkdf::<Sha256>::new(Some(b"ryeos/operator-ed25519-seed/v1"), input.as_slice());
         let mut seed = Zeroizing::new([0_u8; 32]);
         hkdf.expand(b"ed25519 signing seed", &mut *seed)
             .map_err(|_| anyhow!("derive operator signing seed"))?;
@@ -1402,11 +1401,7 @@ fn load_or_create_operator_key(
             .map_err(|error| anyhow!("encode generated operator key: {error}"))?;
         lillux::atomic_write_private(path, pem.as_bytes())
             .map_err(|error| anyhow!("write generated operator key {}: {error}", path.display()))?;
-        Ok((
-            signing_key,
-            true,
-            contribution_digest.map(hex::encode),
-        ))
+        Ok((signing_key, true, contribution_digest.map(hex::encode)))
     })
 }
 
@@ -1452,7 +1447,7 @@ fn ensure_operator_genesis_locked(
                 path,
                 64 * 1024,
             )?)
-                .with_context(|| format!("read operator genesis {}", path.display()))?;
+            .with_context(|| format!("read operator genesis {}", path.display()))?;
             let mut value: serde_json::Value = serde_json::from_str(&source)
                 .with_context(|| format!("parse operator genesis {}", path.display()))?;
             let object = value
@@ -1482,14 +1477,18 @@ fn ensure_operator_genesis_locked(
             {
                 bail!("operator genesis has an invalid v1 schema");
             }
-            if object.get("display_name").and_then(serde_json::Value::as_str).is_some_and(
-                |value| value.chars().count() > 80 || value.chars().any(char::is_control),
-            ) || object
-                .get("identity_statement")
+            if object
+                .get("display_name")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|value| {
-                    value.chars().count() > 280 || value.chars().any(char::is_control)
+                    value.chars().count() > 80 || value.chars().any(char::is_control)
                 })
+                || object
+                    .get("identity_statement")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| {
+                        value.chars().count() > 280 || value.chars().any(char::is_control)
+                    })
             {
                 bail!("operator genesis contains unsafe semantic identity fields");
             }
@@ -1537,7 +1536,10 @@ fn ensure_operator_genesis_locked(
         "created_at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "ceremony_version": "1",
     });
-    if let Some(display_name) = profile.display_name.filter(|value| !value.trim().is_empty()) {
+    if let Some(display_name) = profile
+        .display_name
+        .filter(|value| !value.trim().is_empty())
+    {
         document["display_name"] = serde_json::Value::String(display_name);
     }
     if let Some(statement) = profile
@@ -1565,18 +1567,19 @@ fn ensure_operator_genesis_locked(
 }
 
 fn validate_operator_ceremony(ceremony: &InitOperatorCeremony) -> Result<()> {
-    if ceremony.profile.display_name.as_deref().is_some_and(|value| {
-        value.chars().count() > 80 || value.chars().any(char::is_control)
-    }) {
+    if ceremony
+        .profile
+        .display_name
+        .as_deref()
+        .is_some_and(|value| value.chars().count() > 80 || value.chars().any(char::is_control))
+    {
         bail!("operator display name exceeds 80 characters or contains control characters");
     }
     if ceremony
         .profile
         .identity_statement
         .as_deref()
-        .is_some_and(|value| {
-            value.chars().count() > 280 || value.chars().any(char::is_control)
-        })
+        .is_some_and(|value| value.chars().count() > 280 || value.chars().any(char::is_control))
     {
         bail!("operator identity statement exceeds 280 characters or contains control characters");
     }

@@ -42,7 +42,10 @@ pub(crate) async fn run(console: &Console, options: OnboardingOptions) -> Result
 
     if !already_initialized {
         let welcome = page(&spec.pages, "welcome")?;
-        if !ui.document(welcome, Some(&options.init), &reconciliation).await? {
+        if !ui
+            .document(welcome, Some(&options.init), &reconciliation)
+            .await?
+        {
             return cancelled(ui, console, &journal, "No state was changed.");
         }
         journal.mark(Phase::WelcomeSeen);
@@ -240,7 +243,12 @@ async fn run_core_initialization(
     let mut detail = None;
     let mut terminated = false;
     loop {
-        ui.progress("Initialize RyeOS", &current, detail.as_deref(), cancelled.load(Ordering::Acquire))?;
+        ui.progress(
+            "Initialize RyeOS",
+            &current,
+            detail.as_deref(),
+            cancelled.load(Ordering::Acquire),
+        )?;
         tokio::select! {
             result = &mut task => {
                 return match result {
@@ -322,15 +330,21 @@ async fn configure_provider(
     journal.mark(Phase::NodeStarted);
     journal.save(app_root)?;
 
-    ui.progress("Provider setup", "loading verified provider catalog", None, false)?;
+    ui.progress(
+        "Provider setup",
+        "loading verified provider catalog",
+        None,
+        false,
+    )?;
     let root = app_root.to_path_buf();
-    let mut catalog_task = tokio::task::spawn_blocking(move || crate::setup::discover_verified_providers(&root));
+    let mut catalog_task =
+        tokio::task::spawn_blocking(move || crate::setup::discover_verified_providers(&root));
     let Some(catalog_result) = ui.await_cancellable(&mut catalog_task).await? else {
         catalog_task.abort();
         return Ok(None);
     };
-    let catalog = catalog_result
-        .map_err(|error| anyhow!("provider discovery task failed: {error}"))??;
+    let catalog =
+        catalog_result.map_err(|error| anyhow!("provider discovery task failed: {error}"))??;
     if catalog.providers.is_empty() {
         ui.message(
             "No verified setup providers",
@@ -367,7 +381,9 @@ async fn configure_provider(
         journal.save(app_root)?;
 
         if let Some(credential) = &provider.credential {
-            let configured = configured_keys.iter().any(|key| key == &credential.secret_name);
+            let configured = configured_keys
+                .iter()
+                .any(|key| key == &credential.secret_name);
             if configured
                 && !ui
                     .confirm(
@@ -421,7 +437,14 @@ async fn configure_provider(
                     )
                     .await?;
             if save_model {
-                persist_model_selection(ui, app_root, provider, model.as_ref().expect("model present"), journal).await?;
+                persist_model_selection(
+                    ui,
+                    app_root,
+                    provider,
+                    model.as_ref().expect("model present"),
+                    journal,
+                )
+                .await?;
             }
             journal.unmark(Phase::ProviderValidated);
             journal.save(app_root)?;
@@ -436,17 +459,22 @@ async fn configure_provider(
             ui.progress(
                 "Provider validation",
                 &format!("checking {}", provider.display_name),
-                provider
-                    .validation
-                    .as_ref()
-                    .map(|validation| if validation.may_incur_cost { "declared probe may incur provider cost" } else { "provider-native metadata probe" }),
+                provider.validation.as_ref().map(|validation| {
+                    if validation.may_incur_cost {
+                        "declared probe may incur provider cost"
+                    } else {
+                        "provider-native metadata probe"
+                    }
+                }),
                 false,
             )?;
             let Some(validation_result) = ui
-                .await_cancellable(client.validate_provider(
-                    provider,
-                    model.as_ref().map(|model| model.name.as_str()),
-                ))
+                .await_cancellable(
+                    client.validate_provider(
+                        provider,
+                        model.as_ref().map(|model| model.name.as_str()),
+                    ),
+                )
                 .await?
             else {
                 return Ok(None);
@@ -497,7 +525,14 @@ async fn configure_provider(
                                 )
                                 .await?;
                         if save_model {
-                            persist_model_selection(ui, app_root, provider, model.as_ref().expect("model present"), journal).await?;
+                            persist_model_selection(
+                                ui,
+                                app_root,
+                                provider,
+                                model.as_ref().expect("model present"),
+                                journal,
+                            )
+                            .await?;
                         }
                         journal.unmark(Phase::ProviderValidated);
                         journal.save(app_root)?;
@@ -521,9 +556,8 @@ async fn persist_model_selection(
     journal: &mut Journal,
 ) -> Result<()> {
     let root = app_root.to_path_buf();
-    let mut verification_task = tokio::task::spawn_blocking(move || {
-        crate::setup::discover_verified_providers(&root)
-    });
+    let mut verification_task =
+        tokio::task::spawn_blocking(move || crate::setup::discover_verified_providers(&root));
     let Some(verified_result) = ui.await_cancellable(&mut verification_task).await? else {
         verification_task.abort();
         bail!("model route save cancelled");
@@ -539,7 +573,9 @@ async fn persist_model_selection(
         .models
         .iter()
         .find(|candidate| candidate.name == model.name)
-        .ok_or_else(|| anyhow!("selected model is no longer present in the verified provider definition"))?;
+        .ok_or_else(|| {
+            anyhow!("selected model is no longer present in the verified provider definition")
+        })?;
     let context_window = verified_model.context_window.ok_or_else(|| {
         anyhow!(
             "verified setup model '{}' does not declare context_window",
@@ -634,7 +670,10 @@ impl FlowUi {
     ) -> Result<bool> {
         loop {
             let mut lines = self.header(&page.title, page.art);
-            lines.extend(wrap_indented(&page.body, usize::from(self.width).saturating_sub(6)));
+            lines.extend(wrap_indented(
+                &page.body,
+                usize::from(self.width).saturating_sub(6),
+            ));
             if let Some(init) = init {
                 lines.push(String::new());
                 lines.push(format!(
@@ -657,7 +696,9 @@ impl FlowUi {
             self.frame.render(&lines)?;
             match self.events.next().await? {
                 Event::Key(key) if key.key == Key::Enter => return Ok(true),
-                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => return Ok(false),
+                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
+                    return Ok(false)
+                }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
                 _ => {}
@@ -669,7 +710,10 @@ impl FlowUi {
         let mut input = TextInput::new(max);
         loop {
             let mut lines = self.header(title, None);
-            lines.extend(wrap_indented(help, usize::from(self.width).saturating_sub(6)));
+            lines.extend(wrap_indented(
+                help,
+                usize::from(self.width).saturating_sub(6),
+            ));
             lines.push(String::new());
             lines.push(format!("  > {}", input.value()));
             lines.push(String::new());
@@ -702,7 +746,10 @@ impl FlowUi {
         let mut input = SecretInput::new(max);
         loop {
             let mut lines = self.header(title, None);
-            lines.extend(wrap_indented(help, usize::from(self.width).saturating_sub(6)));
+            lines.extend(wrap_indented(
+                help,
+                usize::from(self.width).saturating_sub(6),
+            ));
             lines.push(String::new());
             lines.push(format!(
                 "  > {}",
@@ -713,7 +760,9 @@ impl FlowUi {
             self.frame.render(&lines)?;
             match self.events.next().await? {
                 Event::Key(key) => match input.handle_key(key) {
-                    InputAction::Submit if allow_empty || !input.is_empty() => return Ok(Some(input)),
+                    InputAction::Submit if allow_empty || !input.is_empty() => {
+                        return Ok(Some(input))
+                    }
                     InputAction::Cancel => return Ok(None),
                     _ if key.is_control('c') => return Ok(None),
                     _ => {}
@@ -732,13 +781,22 @@ impl FlowUi {
     async fn confirm(&mut self, title: &str, body: &str) -> Result<bool> {
         loop {
             let mut lines = self.header(title, None);
-            lines.extend(wrap_indented(body, usize::from(self.width).saturating_sub(6)));
+            lines.extend(wrap_indented(
+                body,
+                usize::from(self.width).saturating_sub(6),
+            ));
             lines.push(String::new());
             lines.push("  y confirm  ·  n/esc no".to_string());
             self.frame.render(&lines)?;
             match self.events.next().await? {
-                Event::Key(key) if key.key == Key::Char('y') || key.key == Key::Enter => return Ok(true),
-                Event::Key(key) if matches!(key.key, Key::Char('n') | Key::Escape) || key.is_control('c') => return Ok(false),
+                Event::Key(key) if key.key == Key::Char('y') || key.key == Key::Enter => {
+                    return Ok(true)
+                }
+                Event::Key(key)
+                    if matches!(key.key, Key::Char('n') | Key::Escape) || key.is_control('c') =>
+                {
+                    return Ok(false)
+                }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
                 _ => {}
@@ -749,9 +807,24 @@ impl FlowUi {
     async fn identity_reveal(&mut self, journal: &Journal) -> Result<bool> {
         loop {
             let mut lines = self.header("Identity reveal", Some(ArtVariant::PrismCompact));
-            push_wrapped_value(&mut lines, "operator", &fingerprint(journal.operator_fingerprint.as_deref()), self.width);
-            push_wrapped_value(&mut lines, "node", &fingerprint(journal.node_fingerprint.as_deref()), self.width);
-            push_wrapped_value(&mut lines, "vault", &fingerprint(journal.vault_fingerprint.as_deref()), self.width);
+            push_wrapped_value(
+                &mut lines,
+                "operator",
+                &fingerprint(journal.operator_fingerprint.as_deref()),
+                self.width,
+            );
+            push_wrapped_value(
+                &mut lines,
+                "node",
+                &fingerprint(journal.node_fingerprint.as_deref()),
+                self.width,
+            );
+            push_wrapped_value(
+                &mut lines,
+                "vault",
+                &fingerprint(journal.vault_fingerprint.as_deref()),
+                self.width,
+            );
             lines.push(String::new());
             lines.push("  These keys have distinct roles and are not interchangeable.".to_string());
             lines.push(String::new());
@@ -759,7 +832,9 @@ impl FlowUi {
             self.frame.render(&lines)?;
             match self.events.next().await? {
                 Event::Key(key) if key.key == Key::Enter => return Ok(true),
-                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => return Ok(false),
+                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
+                    return Ok(false)
+                }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
                 _ => {}
@@ -785,15 +860,30 @@ impl FlowUi {
                 ListItem::new(
                     &provider.provider_id,
                     format!("{} {}", provider.provider_id, provider.display_name),
-                    (index, format!(
-                        "{}{}",
-                        if provider.recommended { "recommended · " } else { "" },
-                        if configured { "configured" } else { "credential needed" }
-                    )),
+                    (
+                        index,
+                        format!(
+                            "{}{}",
+                            if provider.recommended {
+                                "recommended · "
+                            } else {
+                                ""
+                            },
+                            if configured {
+                                "configured"
+                            } else {
+                                "credential needed"
+                            }
+                        ),
+                    ),
                 )
             })
             .collect::<Vec<_>>();
-        items.push(ListItem::new("skip", "skip later", (usize::MAX, "finish without a provider".to_string())));
+        items.push(ListItem::new(
+            "skip",
+            "skip later",
+            (usize::MAX, "finish without a provider".to_string()),
+        ));
         let mut list = ListState::new(items, usize::from(self.height).saturating_sub(8).max(1));
         loop {
             let mut lines = self.header("Connect a model provider", None);
@@ -821,12 +911,13 @@ impl FlowUi {
                         .saturating_sub(super::visible_width(&prefix) + 1)
                         .max(1),
                 );
-                lines.push(format!(
-                    "{prefix}{status}"
-                ));
+                lines.push(format!("{prefix}{status}"));
             }
             if !warnings.is_empty() {
-                lines.push(format!("  {} invalid provider definition(s) omitted", warnings.len()));
+                lines.push(format!(
+                    "  {} invalid provider definition(s) omitted",
+                    warnings.len()
+                ));
             }
             lines.push(String::new());
             lines.push("  enter select  ·  j/k move  ·  esc skip".to_string());
@@ -834,12 +925,18 @@ impl FlowUi {
             match self.events.next().await? {
                 Event::Key(key) if matches!(key.key, Key::Down | Key::Char('j')) => list.next(),
                 Event::Key(key) if matches!(key.key, Key::Up | Key::Char('k')) => list.previous(),
-                Event::Key(key) if key.key == Key::PageDown || key.is_control('d') => list.page_down(),
+                Event::Key(key) if key.key == Key::PageDown || key.is_control('d') => {
+                    list.page_down()
+                }
                 Event::Key(key) if key.key == Key::PageUp || key.is_control('u') => list.page_up(),
                 Event::Key(key) if key.key == Key::Enter => {
-                    return Ok(list.selected().and_then(|item| (item.value.0 != usize::MAX).then_some(item.value.0)));
+                    return Ok(list
+                        .selected()
+                        .and_then(|item| (item.value.0 != usize::MAX).then_some(item.value.0)));
                 }
-                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => return Ok(None),
+                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
+                    return Ok(None)
+                }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => {
                     self.resize(width, height);
@@ -878,7 +975,10 @@ impl FlowUi {
             for (visible, item) in list.visible_window() {
                 let selected = Some(visible) == list.selected_visible_index();
                 if item.value == usize::MAX {
-                    lines.push(format!("  {} Skip model selection", if selected { ">" } else { " " }));
+                    lines.push(format!(
+                        "  {} Skip model selection",
+                        if selected { ">" } else { " " }
+                    ));
                     continue;
                 }
                 let model = &provider.models[item.value];
@@ -886,9 +986,16 @@ impl FlowUi {
                     .context_window
                     .map(|value| format!("{}k ctx", value / 1000))
                     .unwrap_or_else(|| "context not declared".to_string());
-                let pricing = model.pricing.as_ref().map(|pricing| {
-                    format!(" · ${:.2}/${:.2} per M", pricing.input_per_million, pricing.output_per_million)
-                }).unwrap_or_default();
+                let pricing = model
+                    .pricing
+                    .as_ref()
+                    .map(|pricing| {
+                        format!(
+                            " · ${:.2}/${:.2} per M",
+                            pricing.input_per_million, pricing.output_per_million
+                        )
+                    })
+                    .unwrap_or_default();
                 let name_width = usize::from(self.width).saturating_sub(20).clamp(10, 30);
                 let model_name = super::clamp_visible(
                     &super::sanitize_terminal_inline(&model.display_name),
@@ -900,7 +1007,11 @@ impl FlowUi {
                 );
                 let metadata = format!(
                     "{context}{pricing}{}",
-                    if model.recommended { " · recommended" } else { "" }
+                    if model.recommended {
+                        " · recommended"
+                    } else {
+                        ""
+                    }
                 );
                 let metadata = super::clamp_visible(
                     &metadata,
@@ -921,7 +1032,9 @@ impl FlowUi {
                         (item.value != usize::MAX).then(|| provider.models[item.value].clone())
                     }));
                 }
-                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => return Ok(None),
+                Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
+                    return Ok(None)
+                }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
                 _ => {}
@@ -944,17 +1057,28 @@ impl FlowUi {
                     .map(|line| format!("  {}", super::sanitize_terminal_inline(line))),
             );
             lines.push(String::new());
-            lines.push("  r retry · c change credential · p change provider · s skip · j/k scroll".to_string());
+            lines.push(
+                "  r retry · c change credential · p change provider · s skip · j/k scroll"
+                    .to_string(),
+            );
             self.frame.render(&lines)?;
             match self.events.next().await? {
                 Event::Key(key) if key.is_control('c') => return Ok(ValidationChoice::Skip),
                 Event::Key(key) if key.key == Key::Char('r') => return Ok(ValidationChoice::Retry),
-                Event::Key(key) if key.key == Key::Char('c') => return Ok(ValidationChoice::Credential),
-                Event::Key(key) if key.key == Key::Char('p') => return Ok(ValidationChoice::Provider),
-                Event::Key(key) if key.key == Key::Char('s') || key.key == Key::Escape => return Ok(ValidationChoice::Skip),
+                Event::Key(key) if key.key == Key::Char('c') => {
+                    return Ok(ValidationChoice::Credential)
+                }
+                Event::Key(key) if key.key == Key::Char('p') => {
+                    return Ok(ValidationChoice::Provider)
+                }
+                Event::Key(key) if key.key == Key::Char('s') || key.key == Key::Escape => {
+                    return Ok(ValidationChoice::Skip)
+                }
                 Event::Key(key) if matches!(key.key, Key::Down | Key::Char('j')) => pager.down(),
                 Event::Key(key) if matches!(key.key, Key::Up | Key::Char('k')) => pager.up(),
-                Event::Key(key) if key.key == Key::PageDown || key.is_control('d') => pager.page_down(),
+                Event::Key(key) if key.key == Key::PageDown || key.is_control('d') => {
+                    pager.page_down()
+                }
                 Event::Key(key) if key.key == Key::PageUp || key.is_control('u') => pager.page_up(),
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => {
@@ -969,15 +1093,36 @@ impl FlowUi {
         }
     }
 
-    async fn completion(&mut self, journal: &Journal, setup: Option<&SetupOutcome>) -> Result<bool> {
+    async fn completion(
+        &mut self,
+        journal: &Journal,
+        setup: Option<&SetupOutcome>,
+    ) -> Result<bool> {
         loop {
             let mut lines = self.header("RyeOS initialized", Some(ArtVariant::PrismCompact));
-            push_wrapped_value(&mut lines, "operator", &fingerprint(journal.operator_fingerprint.as_deref()), self.width);
-            push_wrapped_value(&mut lines, "node", &fingerprint(journal.node_fingerprint.as_deref()), self.width);
-            push_wrapped_value(&mut lines, "vault", &fingerprint(journal.vault_fingerprint.as_deref()), self.width);
+            push_wrapped_value(
+                &mut lines,
+                "operator",
+                &fingerprint(journal.operator_fingerprint.as_deref()),
+                self.width,
+            );
+            push_wrapped_value(
+                &mut lines,
+                "node",
+                &fingerprint(journal.node_fingerprint.as_deref()),
+                self.width,
+            );
+            push_wrapped_value(
+                &mut lines,
+                "vault",
+                &fingerprint(journal.vault_fingerprint.as_deref()),
+                self.width,
+            );
             lines.push(format!(
                 "  provider  {}",
-                setup.map(|setup| setup.provider.as_str()).unwrap_or("not configured")
+                setup
+                    .map(|setup| setup.provider.as_str())
+                    .unwrap_or("not configured")
             ));
             lines.push(format!(
                 "  bundles   {} verified",
@@ -985,14 +1130,20 @@ impl FlowUi {
             ));
             lines.push(format!(
                 "  model     {}",
-                setup.and_then(|setup| setup.model.as_deref()).unwrap_or("not selected")
+                setup
+                    .and_then(|setup| setup.model.as_deref())
+                    .unwrap_or("not selected")
             ));
             lines.push(String::new());
             lines.push("  t open RyeOS TUI  ·  enter return to shell".to_string());
             self.frame.render(&lines)?;
             match self.events.next().await? {
                 Event::Key(key) if key.key == Key::Char('t') => return Ok(true),
-                Event::Key(key) if key.key == Key::Enter || key.key == Key::Escape || key.is_control('c') => return Ok(false),
+                Event::Key(key)
+                    if key.key == Key::Enter || key.key == Key::Escape || key.is_control('c') =>
+                {
+                    return Ok(false)
+                }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
                 _ => {}
@@ -1003,12 +1154,19 @@ impl FlowUi {
     async fn message(&mut self, title: &str, body: &str) -> Result<()> {
         loop {
             let mut lines = self.header(title, None);
-            lines.extend(wrap_indented(body, usize::from(self.width).saturating_sub(6)));
+            lines.extend(wrap_indented(
+                body,
+                usize::from(self.width).saturating_sub(6),
+            ));
             lines.push(String::new());
             lines.push("  enter continue".to_string());
             self.frame.render(&lines)?;
             match self.events.next().await? {
-                Event::Key(key) if key.key == Key::Enter || key.key == Key::Escape || key.is_control('c') => return Ok(()),
+                Event::Key(key)
+                    if key.key == Key::Enter || key.key == Key::Escape || key.is_control('c') =>
+                {
+                    return Ok(())
+                }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
                 _ => {}
@@ -1016,11 +1174,20 @@ impl FlowUi {
         }
     }
 
-    fn progress(&mut self, title: &str, status: &str, detail: Option<&str>, cancelling: bool) -> Result<()> {
+    fn progress(
+        &mut self,
+        title: &str,
+        status: &str,
+        detail: Option<&str>,
+        cancelling: bool,
+    ) -> Result<()> {
         let mut lines = self.header(title, None);
         lines.push(format!("  {} {status}", if cancelling { "▲" } else { "◆" }));
         if let Some(detail) = detail {
-            lines.extend(wrap_indented(detail, usize::from(self.width).saturating_sub(6)));
+            lines.extend(wrap_indented(
+                detail,
+                usize::from(self.width).saturating_sub(6),
+            ));
         }
         lines.push(String::new());
         lines.push(if cancelling {
@@ -1055,17 +1222,14 @@ impl Drop for FlowUi {
     }
 }
 
-fn cancelled(
-    ui: FlowUi,
-    console: &Console,
-    journal: &Journal,
-    detail: &str,
-) -> Result<()> {
+fn cancelled(ui: FlowUi, console: &Console, journal: &Journal, detail: &str) -> Result<()> {
     ui.finish()?;
     let mut status = StatusBanner::new(Tone::Warning, "INITIALIZATION CANCELLED");
     status.detail = Some(detail.to_string());
     if let Some(fingerprint) = &journal.operator_fingerprint {
-        status.rows.push(Row::key_value("operator preserved", fingerprint));
+        status
+            .rows
+            .push(Row::key_value("operator preserved", fingerprint));
     }
     console.status(&status)?;
     Ok(())
@@ -1078,7 +1242,10 @@ fn render_completion(
 ) -> Result<()> {
     let mut status = StatusBanner::new(Tone::Success, "RYEOS INITIALIZED");
     status.rows = vec![
-        Row::key_value("operator", fingerprint(journal.operator_fingerprint.as_deref())),
+        Row::key_value(
+            "operator",
+            fingerprint(journal.operator_fingerprint.as_deref()),
+        ),
         Row::key_value("node", fingerprint(journal.node_fingerprint.as_deref())),
         Row::key_value("vault", fingerprint(journal.vault_fingerprint.as_deref())),
         Row::key_value(
@@ -1092,7 +1259,11 @@ fn render_completion(
                     format!(
                         "{} · {}",
                         setup.provider,
-                        if setup.connected { "connected" } else { "not validated" }
+                        if setup.connected {
+                            "connected"
+                        } else {
+                            "not validated"
+                        }
                     )
                 })
                 .unwrap_or_else(|| "not configured".to_string()),

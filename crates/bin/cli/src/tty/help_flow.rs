@@ -143,9 +143,11 @@ pub(crate) async fn run(
     let mut discovery_task = Some(tokio::task::spawn_blocking(move || {
         let snapshot = crate::node_descriptors::load_verified_snapshot(&discovery_root)?;
         let descriptor_rows = crate::help::descriptor_rows(&snapshot);
-        if let Err(error) =
-            crate::help::write_verified_descriptor_cache(&discovery_root, &snapshot, &descriptor_rows)
-        {
+        if let Err(error) = crate::help::write_verified_descriptor_cache(
+            &discovery_root,
+            &snapshot,
+            &descriptor_rows,
+        ) {
             tracing::debug!(error = %error, "could not refresh help descriptor cache");
         }
         let entries = descriptor_rows
@@ -609,16 +611,18 @@ fn render(
     let capabilities = console.capabilities();
     let node_status = super::sanitize_terminal_inline(node_status);
     let verification_status = super::sanitize_terminal_inline(verification_status);
-    let mut lines = vec![format!(
-        "  {}                                      {}",
-        theme::style("RYEOS HELP", Tone::Neutral, capabilities.color),
-        theme::style(&node_status, Tone::Secondary, capabilities.color)
-    ),
-    format!(
-        "  {}",
-        theme::style(&verification_status, Tone::Secondary, capabilities.color)
-    ),
-    String::new()];
+    let mut lines = vec![
+        format!(
+            "  {}                                      {}",
+            theme::style("RYEOS HELP", Tone::Neutral, capabilities.color),
+            theme::style(&node_status, Tone::Secondary, capabilities.color)
+        ),
+        format!(
+            "  {}",
+            theme::style(&verification_status, Tone::Secondary, capabilities.color)
+        ),
+        String::new(),
+    ];
     match view {
         View::Index => {
             let filter_prompt = if filtering || !filter.is_empty() {
@@ -781,10 +785,7 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
         .unwrap_or("none");
     output.push_str(&format!("project  {project}\n"));
     if let Some(availability) = row.availability {
-        output.push_str(&format!(
-            "node     {}\n",
-            availability_label(availability)
-        ));
+        output.push_str(&format!("node     {}\n", availability_label(availability)));
     }
     if let Some(help) = &command.help {
         if !help.examples.is_empty() {

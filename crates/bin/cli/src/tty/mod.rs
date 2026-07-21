@@ -23,9 +23,9 @@ mod diagnostic;
 mod document;
 pub(crate) mod help_flow;
 pub(crate) mod interaction;
-pub(crate) mod onboarding_spec;
-pub(crate) mod onboarding_journal;
 pub(crate) mod onboarding_flow;
+pub(crate) mod onboarding_journal;
+pub(crate) mod onboarding_spec;
 mod progress;
 mod result;
 mod theme;
@@ -41,7 +41,13 @@ pub use theme::Tone;
 pub(crate) fn sanitize_terminal_inline(value: &str) -> String {
     value
         .chars()
-        .map(|character| if character.is_control() { '�' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                '�'
+            } else {
+                character
+            }
+        })
         .collect()
 }
 
