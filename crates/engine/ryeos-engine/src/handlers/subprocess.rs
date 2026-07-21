@@ -96,6 +96,7 @@ pub(crate) fn run_handler_subprocess(
 
     let req = lillux::exec::SubprocessRequest {
         cmd: binary_path.display().to_string(),
+        argv0: None,
         args: vec![],
         cwd: Some(bundle_root.display().to_string()),
         envs: vec![],

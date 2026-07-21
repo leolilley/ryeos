@@ -7368,6 +7368,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let pending = lillux::spawn_awaiting_attachment(lillux::SubprocessRequest {
                 cmd: "/bin/sh".to_string(),
+                argv0: None,
                 args: vec!["-c".to_string(), "exit 0".to_string()],
                 cwd: None,
                 envs: Vec::new(),

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-08T03:48:05Z:5680f72ee77a19c6509ac25a01a0c9b08366bb2d04534673bd75e339a995ac6f:cDLHsM8JYAQYNYC9gUbapNtVb0rB+PMbKHn4Kdqa+C0KVDnFVGSFfuDIPQrxRN4NYCRn0xGT5rZafQZhya3MAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T11:36:37Z:e462f743d0fbb73a1d2ca5b4ff389712ba18852f8606bc211e879cdfdb30d85f:j+gD1QfXFnvUYRy4z7aiaQn8u/dUtfteM/QNe9OZjenQZh1R9qTEDu6pcIxQGe26pBaIilbXHl5clgwEOkgYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -36,7 +36,7 @@ config:
     - "-u"
     - "-c"
     - |
-      import runpy, sys
+      import hashlib, json, os, sys
       from pathlib import Path
 
       def prepend(path):
@@ -44,7 +44,16 @@ config:
           if value and value not in sys.path:
               sys.path.insert(0, value)
 
-      tool_path = Path(sys.argv[1]).resolve()
+      sealed_path = sys.argv[1]
+      handoff = json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP", "null"))
+      entry = handoff.get("entries", dict()).get(sealed_path) if isinstance(handoff, dict) else None
+      if not isinstance(handoff, dict) or handoff.get("version") != 1 or not entry:
+          raise SystemExit("RyeOS Python runtime: missing sealed tool identity")
+      tool_path = Path(entry["logical_path"])
+      source = Path(sealed_path).read_bytes()
+      actual_hash = hashlib.sha256(source).hexdigest()
+      if actual_hash != entry["content_hash"]:
+          raise SystemExit("RyeOS Python runtime: sealed tool digest mismatch")
       runtime_lib = Path(sys.argv[2]).resolve()
       project_path = sys.argv[3]
 
@@ -67,7 +76,14 @@ config:
           prepend(path)
 
       sys.argv = [str(tool_path), "--project-path", project_path]
-      runpy.run_path(str(tool_path), run_name="__main__")
+      globals_dict = dict(
+          __name__="__main__",
+          __file__=str(tool_path),
+          __package__=None,
+          __cached__=None,
+          __spec__=None,
+      )
+      exec(compile(source, str(tool_path), "exec"), globals_dict)
     - "{tool_path}"
     - "{runtime_dir}/lib"
     - "{project_path}"

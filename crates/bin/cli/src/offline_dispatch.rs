@@ -626,20 +626,22 @@ fn exec_tool(
         }
     }
 
+    let verified_command = ryeos_engine::isolation::IsolationVerifiedCode {
+        source_path: resolved.absolute_path.clone(),
+        content_hash: resolved.content_hash.clone(),
+    };
     let isolation_verified_code = [
         ryeos_engine::isolation::IsolationVerifiedCode {
             source_path: item.source.path.clone(),
             content_hash: item.source.content_hash.clone(),
         },
-        ryeos_engine::isolation::IsolationVerifiedCode {
-            source_path: resolved.absolute_path.clone(),
-            content_hash: resolved.content_hash.clone(),
-        },
+        verified_command.clone(),
     ];
     let mut request = isolation
         .apply(
             lillux::SubprocessRequest {
                 cmd: resolved.absolute_path.to_string_lossy().into_owned(),
+                argv0: None,
                 args,
                 cwd,
                 envs,
@@ -663,7 +665,7 @@ fn exec_tool(
                         .join("config/keys/trusted"),
                 ),
                 verified_code: &isolation_verified_code,
-                verified_command: Some(&isolation_verified_code[0]),
+                verified_command: Some(&verified_command),
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
             },
@@ -950,6 +952,7 @@ mod tests {
 
         let result = lillux::run_inherited_stdio(lillux::SubprocessRequest {
             cmd: "unused".to_string(),
+            argv0: None,
             args: Vec::new(),
             cwd: None,
             envs: Vec::new(),

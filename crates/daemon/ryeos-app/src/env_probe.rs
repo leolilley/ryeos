@@ -176,6 +176,7 @@ fn run_probe(
 ) -> Value {
     let request = lillux::SubprocessRequest {
         cmd: interpreter.to_string(),
+        argv0: None,
         args,
         cwd,
         envs,

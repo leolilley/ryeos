@@ -5118,11 +5118,6 @@ pub fn prepare_item_plan(
     if lifecycle_authority.recovery
         == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
     {
-        if !isolation.is_enforced() {
-            bail!(
-                "restartable verified-content execution requires enforced isolation; disabled isolation has no descriptor-backed immutable exec boundary"
-            );
-        }
         let spec = match plan.nodes.first_mut() {
             Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec,
             Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {

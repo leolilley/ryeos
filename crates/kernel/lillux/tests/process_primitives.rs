@@ -21,6 +21,7 @@ use lillux::{
 fn sh(args: &[&str]) -> SubprocessRequest {
     SubprocessRequest {
         cmd: "/bin/sh".to_string(),
+        argv0: None,
         args: args.iter().map(|s| s.to_string()).collect(),
         cwd: None,
         envs: vec![],
@@ -46,6 +47,17 @@ fn run_captures_stdout_and_zero_exit() {
     assert_eq!(r.exit_code, 0);
     assert_eq!(r.stdout, "hello");
     assert!(!r.timed_out);
+}
+
+#[test]
+fn run_can_preserve_argv0_while_executing_another_path() {
+    let mut request = sh(&["-c", "printf %s \"$0\""]);
+    request.argv0 = Some("/project/.venv/bin/python".to_string());
+
+    let result = run(request);
+
+    assert!(result.success, "stderr: {}", result.stderr);
+    assert_eq!(result.stdout, "/project/.venv/bin/python");
 }
 
 #[test]

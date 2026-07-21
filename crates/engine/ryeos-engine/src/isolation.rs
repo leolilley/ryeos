@@ -47,6 +47,10 @@ pub use provenance::{
 };
 
 const VERIFIED_CODE_ISOLATION_ROOT: &str = "/run/ryeos/verified-code";
+/// Engine-owned handoff from sealed descriptor paths to their verified logical
+/// identities. Runtime loaders may use the logical path for import layout and
+/// diagnostics, but must read executable bytes only from the descriptor path.
+pub const VERIFIED_CODE_MAP_ENV: &str = "RYEOS_VERIFIED_CODE_MAP";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IsolationRuntimeState {
@@ -924,6 +928,7 @@ impl IsolationRuntime {
                     .map_err(|error| refused(format!("seal workspace request: {error}")))?;
             let result = lillux::run(lillux::SubprocessRequest {
                 cmd: format!("/proc/self/fd/{}", backend.adapter_handle.as_raw_fd()),
+                argv0: None,
                 args: vec![
                     "workspace".to_string(),
                     request_handle.as_raw_fd().to_string(),
@@ -1177,12 +1182,6 @@ impl IsolationRuntime {
         project_root: Option<&Path>,
         live_access: Option<&IsolationLiveAccessAuthority>,
     ) -> Result<IsolationVerifiedCode, EngineError> {
-        if self.state != IsolationRuntimeState::Enforced {
-            return Err(refused(
-                "restartable verified-content execution requires enforced isolation; disabled isolation has no descriptor-backed immutable exec boundary"
-                    .to_string(),
-            ));
-        }
         if !command.is_absolute() {
             return Err(refused(format!(
                 "captured command path must be absolute: {}",
@@ -1200,10 +1199,7 @@ impl IsolationRuntime {
                 command.display()
             )));
         }
-        let artifacts = self
-            .verified_artifacts
-            .as_deref()
-            .expect("enforced isolation runtime has a verified artifact store");
+        let max_file_bytes = self.inspection.limits.verified_artifact_file_bytes;
         let canonical_project = project_root
             .map(|root| canonicalize_context_mount("project", root))
             .transpose()?;
@@ -1217,14 +1213,29 @@ impl IsolationRuntime {
             let canonical_project = canonical_project
                 .as_ref()
                 .expect("project command classification requires a project root");
+            let opened_root = match live_access {
+                Some(IsolationLiveAccessAuthority::DescriptorRootedMasked { .. }) => None,
+                Some(IsolationLiveAccessAuthority::UnconfinedHost { .. }) | None => Some(
+                    lillux::PinnedDirectory::open(canonical_project)
+                        .map_err(|error| {
+                            refused(format!(
+                                "live project root cannot be pinned for command capture: {error}"
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            refused(
+                                "live project root disappeared during command capture".to_string(),
+                            )
+                        })?,
+                ),
+            };
             let root = match live_access {
-                Some(IsolationLiveAccessAuthority::DescriptorRootedMasked { root, .. }) => root,
-                _ => {
-                    return Err(refused(format!(
-                        "project-local command {} requires descriptor-rooted live authority",
-                        command.display()
-                    )))
+                Some(IsolationLiveAccessAuthority::DescriptorRootedMasked { root, .. }) => {
+                    root.as_ref()
                 }
+                Some(IsolationLiveAccessAuthority::UnconfinedHost { .. }) | None => opened_root
+                    .as_ref()
+                    .expect("unconfined capture opened a project descriptor"),
             };
             if root.path() != canonical_project {
                 return Err(refused(format!(
@@ -1254,11 +1265,7 @@ impl IsolationRuntime {
                                 canonical_command.display()
                             ))
                         })?;
-                read_descriptor_relative_regular_file_limited(
-                    root,
-                    relative,
-                    artifacts.max_file_bytes,
-                )?
+                read_descriptor_relative_regular_file_limited(root, relative, max_file_bytes)?
             } else {
                 if !is_on_system_runtime_surface(&canonical_command) {
                     return Err(refused(format!(
@@ -1267,7 +1274,11 @@ impl IsolationRuntime {
                         canonical_command.display()
                     )));
                 }
-                artifacts.read_source("captured command", &canonical_command)?
+                read_regular_file_bytes_limited(
+                    "captured command",
+                    &canonical_command,
+                    max_file_bytes,
+                )?
             };
             root.ensure_path_binding().map_err(|error| {
                 refused(format!(
@@ -1282,7 +1293,7 @@ impl IsolationRuntime {
                     command.display(), canonical_command.display()
                 )));
             }
-            artifacts.read_source("captured command", &canonical_command)?
+            read_regular_file_bytes_limited("captured command", &canonical_command, max_file_bytes)?
         };
 
         #[cfg(unix)]
@@ -1304,16 +1315,24 @@ impl IsolationRuntime {
             )));
         }
         if lexical_project_command {
-            match live_access {
-                Some(IsolationLiveAccessAuthority::DescriptorRootedMasked { root, .. }) => {
-                    root.ensure_path_binding().map_err(|error| {
-                        refused(format!(
-                            "live project path binding changed after command capture: {error}"
-                        ))
-                    })?
-                }
-                _ => unreachable!("project command capture validated descriptor authority"),
-            }
+            let root = lillux::PinnedDirectory::open(
+                canonical_project
+                    .as_ref()
+                    .expect("project command classification requires a project root"),
+            )
+            .map_err(|error| {
+                refused(format!(
+                    "live project root cannot be repinned after command capture: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                refused("live project root disappeared after command capture".to_string())
+            })?;
+            root.ensure_path_binding().map_err(|error| {
+                refused(format!(
+                    "live project path binding changed after command capture: {error}"
+                ))
+            })?;
         }
         Ok(IsolationVerifiedCode {
             source_path: canonical_command,
@@ -1388,6 +1407,12 @@ impl IsolationRuntime {
         context: IsolationLaunchContext<'_>,
         lifecycle: RequestedLaunchLifecycle,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
+        if request.argv0.is_some() {
+            return Err(refused(
+                "caller-supplied subprocess argv[0] is not admitted by isolation policy"
+                    .to_string(),
+            ));
+        }
         if !request.timeout.is_finite() || request.timeout < 0.0 {
             return Err(refused(format!(
                 "invalid subprocess timeout {}",
@@ -1457,10 +1482,91 @@ impl IsolationRuntime {
                         .to_string(),
                 ));
             }
+            if request
+                .envs
+                .iter()
+                .any(|(name, _)| name == VERIFIED_CODE_MAP_ENV)
+            {
+                return Err(refused(format!(
+                    "caller cannot provide protected environment variable {VERIFIED_CODE_MAP_ENV}"
+                )));
+            }
             // Opt-out disables OS confinement, not daemon-memory
             // safety. Retained output remains bounded by the immutable node
             // policy, with any lower caller limit preserved.
             let mut request = request;
+            if !context.verified_code.is_empty() || context.verified_command.is_some() {
+                use std::os::fd::AsRawFd as _;
+
+                let lexical_command = context
+                    .verified_command
+                    .map(|admitted| {
+                        let lexical_command = PathBuf::from(&request.cmd);
+                        if !lexical_command.is_absolute() {
+                            return Err(refused(format!(
+                                "command path must be absolute: {}",
+                                lexical_command.display()
+                            )));
+                        }
+                        let canonical_command =
+                            canonicalize_context_mount("command", &lexical_command)?;
+                        let canonical_admitted =
+                            canonicalize_context_mount("admitted command", &admitted.source_path)?;
+                        if canonical_command != canonical_admitted {
+                            return Err(refused(format!(
+                                "command {} no longer matches its admitted verified identity {}",
+                                lexical_command.display(),
+                                admitted.source_path.display()
+                            )));
+                        }
+                        Ok(lexical_command)
+                    })
+                    .transpose()?;
+
+                let mut verified = context.verified_code.iter().collect::<Vec<_>>();
+                if let Some(admitted) = context.verified_command {
+                    if !verified.iter().any(|candidate| *candidate == admitted) {
+                        verified.push(admitted);
+                    }
+                }
+                let mut sealed_command = None;
+                let mut sealed_code_map = BTreeMap::new();
+                for identity in verified {
+                    let is_command = context
+                        .verified_command
+                        .is_some_and(|admitted| identity == admitted);
+                    let (canonical_source, handle) =
+                        self.seal_verified_code_for_disabled(identity, is_command)?;
+                    let destination =
+                        PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
+                    rewrite_verified_code_references(
+                        &mut request.args,
+                        &mut request.envs,
+                        &identity.source_path,
+                        &canonical_source,
+                        &destination,
+                    )?;
+                    insert_verified_code_handoff_entry(
+                        &mut sealed_code_map,
+                        &destination,
+                        &canonical_source,
+                        &identity.content_hash,
+                    )?;
+                    if is_command {
+                        sealed_command = Some(destination.to_string_lossy().into_owned());
+                    }
+                    request.inherited_fds.push(handle);
+                }
+                push_verified_code_handoff(&mut request.envs, sealed_code_map)?;
+                if let Some(lexical_command) = lexical_command {
+                    request.cmd = sealed_command.ok_or_else(|| {
+                        refused(
+                            "admitted command was not sealed for disabled isolation".to_string(),
+                        )
+                    })?;
+                    request.argv0 = Some(lexical_command.to_string_lossy().into_owned());
+                }
+            }
             let requested = request.limits.unwrap_or_default();
             request.limits = Some(lillux::SubprocessLimits {
                 // `mode: disabled` is an OS-confinement opt-out. Preserve a
@@ -1513,6 +1619,7 @@ impl IsolationRuntime {
 
         let lillux::SubprocessRequest {
             cmd,
+            argv0: _,
             mut args,
             cwd,
             mut envs,
@@ -1523,6 +1630,11 @@ impl IsolationRuntime {
             supervised_status,
         } = request;
         debug_assert!(supervised_status.is_none());
+        if envs.iter().any(|(name, _)| name == VERIFIED_CODE_MAP_ENV) {
+            return Err(refused(format!(
+                "caller cannot provide protected environment variable {VERIFIED_CODE_MAP_ENV}"
+            )));
+        }
 
         let project_destination = context.project_path.to_path_buf();
         let cwd_destination = cwd
@@ -1924,6 +2036,7 @@ impl IsolationRuntime {
             bundle_roots: context.bundle_roots,
         };
         let mut prepared_code = Vec::with_capacity(context.verified_code.len() + 1);
+        let mut verified_code_handoff = BTreeMap::new();
         for verified in context.verified_code {
             let require_executable = context.verified_command == Some(verified);
             let prepared =
@@ -1935,8 +2048,15 @@ impl IsolationRuntime {
                 &prepared.canonical_source,
                 &prepared.artifact.destination,
             )?;
+            insert_verified_code_handoff_entry(
+                &mut verified_code_handoff,
+                &prepared.artifact.destination,
+                &prepared.canonical_source,
+                &verified.content_hash,
+            )?;
             prepared_code.push(prepared);
         }
+        push_verified_code_handoff(&mut envs, verified_code_handoff)?;
 
         let lexical_command = PathBuf::from(&cmd);
         if !lexical_command.is_absolute() {
@@ -2535,6 +2655,7 @@ impl IsolationRuntime {
         Ok(CompiledIsolationLaunch {
             request: lillux::SubprocessRequest {
                 cmd: format!("/proc/self/fd/{}", mount_fd_arg(&backend.adapter_handle)),
+                argv0: None,
                 args: vec!["launch".to_string(), request_fd],
                 cwd: Some(canonical_cwd.to_string_lossy().into_owned()),
                 // The adapter receives only the sealed plan. It constructs the
@@ -2812,6 +2933,75 @@ impl IsolationRuntime {
         )
     }
 
+    /// Revalidate admitted code and copy the exact bytes into a kernel-sealed
+    /// anonymous file. Disabled isolation deliberately provides no filesystem
+    /// confinement, so a regular cache inode is not an immutable boundary
+    /// against another same-UID workload. Memfd seals make the bytes immutable
+    /// even after the descriptor is inherited by that workload.
+    fn seal_verified_code_for_disabled(
+        &self,
+        verified: &IsolationVerifiedCode,
+        executable: bool,
+    ) -> Result<(PathBuf, Arc<std::fs::File>), EngineError> {
+        if !verified.source_path.is_absolute() {
+            return Err(refused(format!(
+                "verified code path must be absolute: {}",
+                verified.source_path.display()
+            )));
+        }
+        if verified.content_hash.len() != 64
+            || !verified
+                .content_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(refused(format!(
+                "verified code has invalid SHA-256 digest `{}`",
+                verified.content_hash
+            )));
+        }
+        let canonical_source = canonicalize_context_mount("verified code", &verified.source_path)?;
+        let (content, metadata) = read_regular_file_bytes_limited(
+            "verified code",
+            &canonical_source,
+            self.inspection.limits.verified_artifact_file_bytes,
+        )?;
+        #[cfg(unix)]
+        if executable {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(refused(format!(
+                    "verified code {} is not executable",
+                    canonical_source.display()
+                )));
+            }
+        }
+        let actual_hash = lillux::cas::sha256_hex(&content);
+        if actual_hash != verified.content_hash {
+            return Err(refused(format!(
+                "verified code {} changed after verification (expected {}, got {})",
+                canonical_source.display(),
+                verified.content_hash,
+                actual_hash
+            )));
+        }
+        let observed_source = canonicalize_context_mount("verified code", &verified.source_path)?;
+        if observed_source != canonical_source {
+            return Err(refused(format!(
+                "verified code {} changed filesystem identity while its bytes were captured",
+                verified.source_path.display()
+            )));
+        }
+        let handle = if executable {
+            lillux::sealed_executable_memfd(c"ryeos-verified-command", &content)
+        } else {
+            lillux::sealed_memfd(c"ryeos-verified-code", &content)
+        }
+        .map_err(|error| refused(format!("seal verified code content: {error}")))?;
+        Ok((canonical_source, handle))
+    }
+
     fn prepare_current_command(
         &self,
         command: &Path,
@@ -3006,6 +3196,59 @@ fn environment_name_allowed(policy: &IsolationEnvironmentPolicy, name: &str) -> 
                 .strip_suffix('*')
                 .is_some_and(|prefix| name.starts_with(prefix))
     })
+}
+
+type VerifiedCodeHandoffMap = BTreeMap<String, BTreeMap<String, String>>;
+
+fn insert_verified_code_handoff_entry(
+    entries: &mut VerifiedCodeHandoffMap,
+    execution_path: &Path,
+    logical_path: &Path,
+    content_hash: &str,
+) -> Result<(), EngineError> {
+    let execution_path = execution_path.to_str().ok_or_else(|| {
+        refused(format!(
+            "verified code execution path is not valid UTF-8: {}",
+            execution_path.display()
+        ))
+    })?;
+    let logical_path = logical_path.to_str().ok_or_else(|| {
+        refused(format!(
+            "verified code logical path is not valid UTF-8: {}",
+            logical_path.display()
+        ))
+    })?;
+    let mut entry = BTreeMap::new();
+    entry.insert("content_hash".to_string(), content_hash.to_string());
+    entry.insert("logical_path".to_string(), logical_path.to_string());
+    if entries.insert(execution_path.to_string(), entry).is_some() {
+        return Err(refused(format!(
+            "duplicate verified code execution path in runtime handoff: {execution_path}"
+        )));
+    }
+    Ok(())
+}
+
+fn push_verified_code_handoff(
+    envs: &mut Vec<(String, String)>,
+    entries: VerifiedCodeHandoffMap,
+) -> Result<(), EngineError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut handoff = BTreeMap::new();
+    handoff.insert(
+        "entries",
+        serde_json::to_value(entries)
+            .map_err(|error| refused(format!("encode verified-code entries: {error}")))?,
+    );
+    handoff.insert("version", serde_json::json!(1));
+    envs.push((
+        VERIFIED_CODE_MAP_ENV.to_string(),
+        serde_json::to_string(&handoff)
+            .map_err(|error| refused(format!("encode verified-code handoff: {error}")))?,
+    ));
+    Ok(())
 }
 
 fn rewrite_verified_code_references(
@@ -4256,15 +4499,278 @@ mod tests {
     }
 
     #[test]
-    fn disabled_runtime_refuses_restartable_command_capture() {
+    fn disabled_runtime_executes_restartable_command_through_pinned_descriptor() {
+        use std::io::Write as _;
+
         let app_root = tempfile::tempdir().unwrap();
         write_policy(app_root.path(), &IsolationPolicy::default_disabled());
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let captured = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .expect("disabled isolation still retains an executable-integrity store");
+        let request = lillux::SubprocessRequest {
+            cmd: "/bin/true".to_string(),
+            argv0: None,
+            args: Vec::new(),
+            cwd: Some(app_root.path().to_string_lossy().into_owned()),
+            envs: Vec::new(),
+            stdin_data: None,
+            timeout: 1.0,
+            limits: None,
+            inherited_fds: Vec::new(),
+            supervised_status: None,
+        };
+        let applied = runtime
+            .apply_with_provenance(
+                request,
+                IsolationLaunchContext {
+                    project_path: app_root.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: std::slice::from_ref(&captured),
+                    verified_command: Some(&captured),
+                    item_ref: "tool:tests/verified-command",
+                    thread_id: "T-verified-command",
+                },
+            )
+            .unwrap();
+        assert!(applied.request.cmd.starts_with("/proc/self/fd/"));
+        assert_eq!(applied.request.argv0.as_deref(), Some("/bin/true"));
+        assert_eq!(applied.request.inherited_fds.len(), 1);
+        let mut attempted_writer = applied.request.inherited_fds[0].try_clone().unwrap();
+        assert!(attempted_writer.write_all(b"mutate").is_err());
+        assert!(lillux::run(applied.request).success);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabled_runtime_seals_and_rewrites_all_verified_code_before_exec() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".ai")).unwrap();
+        let tool = project.path().join("tool.sh");
+        std::fs::write(&tool, b"printf admitted").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tool_identity = IsolationVerifiedCode {
+            source_path: tool.clone(),
+            content_hash: lillux::cas::sha256_hex(b"printf admitted"),
+        };
+        let command = runtime
+            .capture_verified_command(Path::new("/bin/sh"), None, None)
+            .unwrap();
+        let verified_code = [tool_identity, command.clone()];
+        let applied = runtime
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: "/bin/sh".to_string(),
+                    argv0: None,
+                    args: vec![tool.to_string_lossy().into_owned()],
+                    cwd: Some(project.path().to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: &verified_code,
+                    verified_command: Some(&command),
+                    item_ref: "tool:tests/sealed-code",
+                    thread_id: "T-sealed-code",
+                },
+            )
+            .unwrap();
+        assert!(applied.request.args[0].starts_with("/proc/self/fd/"));
+        assert_eq!(applied.request.inherited_fds.len(), 2);
+
+        std::fs::write(&tool, b"printf mutated").unwrap();
+        for handle in &applied.request.inherited_fds {
+            let mut attempted_writer = handle.try_clone().unwrap();
+            assert!(attempted_writer.write_all(b"mutate").is_err());
+        }
+        let result = lillux::run(applied.request);
+        assert!(result.success, "stderr: {}", result.stderr);
+        assert_eq!(result.stdout, "admitted");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn enforced_runtime_hands_verified_code_identity_to_runtime_loader() {
+        use std::io::{Read as _, Seek as _};
+
+        let app_root = tempfile::tempdir().unwrap();
+        let mut policy = IsolationPolicy::default_disabled();
+        policy.mode = IsolationMode::Enforce;
+        policy.backend = Some(resolved_backend().selection.clone());
+        policy.filesystem.readable = vec!["{verified_code}".to_string()];
+        policy.filesystem.writable = vec!["{project}".to_string()];
+        write_policy(app_root.path(), &policy);
+
+        let mut backend = resolved_backend();
+        backend.effective_capabilities = BTreeSet::from([
+            IsolationCapability::FilesystemPrivateRoot,
+            IsolationCapability::FilesystemFdReadOnly,
+            IsolationCapability::FilesystemFdWritable,
+            IsolationCapability::FilesystemOrderedOverlays,
+            IsolationCapability::FilesystemPrivateTmp,
+            IsolationCapability::DevicesMinimal,
+            IsolationCapability::EnvironmentExact,
+            IsolationCapability::NetworkIsolated,
+            IsolationCapability::NetworkHost,
+            IsolationCapability::ProcessHostPidNamespace,
+            IsolationCapability::ProcessTargetPidReporting,
+            IsolationCapability::LifecycleSharedProcessGroup,
+        ]);
+        backend.declaration.capabilities = backend.effective_capabilities.clone();
+        let runtime =
+            IsolationRuntime::load_with_backend(app_root.path(), Some(Arc::new(backend))).unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let tool = project.path().join(".ai/tools/probe/tool.py");
+        std::fs::create_dir_all(tool.parent().unwrap()).unwrap();
+        std::fs::write(&tool, b"print('sealed')\n").unwrap();
+        let verified = IsolationVerifiedCode {
+            source_path: tool.clone(),
+            content_hash: lillux::cas::sha256_hex(b"print('sealed')\n"),
+        };
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let live_access = IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root: Arc::new(root),
+            root_device_id,
+            root_inode,
+            denied_control_paths: Vec::new(),
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let applied = runtime
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: "/bin/true".to_string(),
+                    argv0: None,
+                    args: vec![tool.to_string_lossy().into_owned()],
+                    cwd: Some(project.path().to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::External,
+                    live_access: Some(&live_access),
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: std::slice::from_ref(&verified),
+                    verified_command: None,
+                    item_ref: "tool:tests/enforced-handoff",
+                    thread_id: "T-enforced-handoff",
+                },
+            )
+            .unwrap();
+
+        let mut request_handle = applied
+            .request
+            .inherited_fds
+            .last()
+            .unwrap()
+            .try_clone()
+            .unwrap();
+        request_handle.rewind().unwrap();
+        let mut request_bytes = Vec::new();
+        request_handle.read_to_end(&mut request_bytes).unwrap();
+        let request: serde_json::Value = serde_json::from_slice(&request_bytes).unwrap();
+        let handoff = request["plan"]["environment"]["values"][VERIFIED_CODE_MAP_ENV]
+            .as_str()
+            .expect("enforced plan carries verified-code loader handoff");
+        let handoff: serde_json::Value = serde_json::from_str(handoff).unwrap();
+        assert_eq!(handoff["version"], 1);
+        let entries = handoff["entries"].as_object().unwrap();
+        assert_eq!(entries.len(), 1);
+        let (execution_path, identity) = entries.iter().next().unwrap();
+        assert!(execution_path.starts_with(VERIFIED_CODE_ISOLATION_ROOT));
+        assert_eq!(identity["logical_path"], tool.to_string_lossy().as_ref());
+        assert_eq!(identity["content_hash"], verified.content_hash);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disabled_runtime_rejects_command_mutation_after_admission() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir(project.path().join(".ai")).unwrap();
+        let command = project.path().join("runner");
+        std::fs::write(&command, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let live_access = IsolationLiveAccessAuthority::UnconfinedHost {
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+        let captured = runtime
+            .capture_verified_command(&command, Some(project.path()), Some(&live_access))
+            .unwrap();
+        std::fs::write(&command, b"#!/bin/sh\nexit 9\n").unwrap();
+
         let error = runtime
-            .capture_verified_command(Path::new("/bin/true"), Some(app_root.path()), None)
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: command.to_string_lossy().into_owned(),
+                    argv0: None,
+                    args: Vec::new(),
+                    cwd: Some(project.path().to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    project_path: project.path(),
+                    project_authority: IsolationProjectAuthority::External,
+                    live_access: Some(&live_access),
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: std::slice::from_ref(&captured),
+                    verified_command: Some(&captured),
+                    item_ref: "tool:tests/mutated-command",
+                    thread_id: "T-mutated-command",
+                },
+            )
             .err()
-            .expect("disabled restartable command capture must be refused");
-        assert!(error.to_string().contains("requires enforced isolation"));
+            .expect("mutated admitted command must be refused");
+        assert!(error.to_string().contains("changed after verification"));
     }
 
     #[test]
@@ -4352,6 +4858,7 @@ mod tests {
         };
         let request = lillux::SubprocessRequest {
             cmd: "/bin/true".to_string(),
+            argv0: None,
             args: Vec::new(),
             cwd: None,
             envs: Vec::new(),
@@ -4370,6 +4877,7 @@ mod tests {
         let status = lillux::supervised_launcher_attachment_status_pipe().unwrap();
         let request = lillux::SubprocessRequest {
             cmd: "/bin/true".to_string(),
+            argv0: None,
             args: Vec::new(),
             cwd: None,
             envs: Vec::new(),
@@ -4411,6 +4919,7 @@ mod tests {
         let runtime = IsolationRuntime::load(app_root.path()).unwrap();
         let request = || lillux::SubprocessRequest {
             cmd: "/bin/true".to_string(),
+            argv0: None,
             args: Vec::new(),
             cwd: None,
             envs: Vec::new(),
@@ -4478,6 +4987,7 @@ mod tests {
             .apply_with_provenance(
                 lillux::SubprocessRequest {
                     cmd: "/bin/true".to_string(),
+                    argv0: None,
                     args: Vec::new(),
                     cwd: None,
                     envs: Vec::new(),

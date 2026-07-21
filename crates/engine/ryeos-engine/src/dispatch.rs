@@ -152,6 +152,7 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
 
     Ok(lillux::SubprocessRequest {
         cmd: spec.cmd.clone(),
+        argv0: None,
         args: spec.args.clone(),
         cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,

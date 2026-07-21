@@ -790,6 +790,7 @@ async fn dispatch_streaming_subprocess(
 
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
+            argv0: None,
             args: vec![],
             cwd: Some(project_path_str),
             envs,
