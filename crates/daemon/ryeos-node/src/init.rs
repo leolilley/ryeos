@@ -1805,8 +1805,6 @@ mod tests {
         let user = tmp.path().join("home");
         let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
-        let genesis_path = state.join(".ai/config/identity/operator-genesis.json");
-        let genesis = fs::read(&genesis_path).expect("operator genesis #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(
             r1.vault_pubkey_fingerprint, r2.vault_pubkey_fingerprint,
@@ -1821,6 +1819,8 @@ mod tests {
         let user = tmp.path().join("home");
         let opts = make_opts(&state, &user);
         let r1 = run_init(&opts).expect("init #1");
+        let genesis_path = state.join(".ai/config/identity/operator-genesis.json");
+        let genesis = fs::read(&genesis_path).expect("operator genesis #1");
         let r2 = run_init(&opts).expect("init #2");
         assert_eq!(r1.user_key_fingerprint, r2.user_key_fingerprint);
         assert_eq!(r1.node_key_fingerprint, r2.node_key_fingerprint);
