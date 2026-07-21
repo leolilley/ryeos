@@ -482,6 +482,41 @@ fn handle_index_key(
         *filtering = false;
         return;
     }
+    match key.key {
+        Key::Up => {
+            list.previous();
+            return;
+        }
+        Key::Down => {
+            list.next();
+            return;
+        }
+        Key::PageUp => {
+            list.page_up();
+            return;
+        }
+        Key::PageDown => {
+            list.page_down();
+            return;
+        }
+        Key::Home => {
+            list.first();
+            return;
+        }
+        Key::End => {
+            list.last();
+            return;
+        }
+        _ if key.is_control('u') => {
+            list.page_up();
+            return;
+        }
+        _ if key.is_control('d') => {
+            list.page_down();
+            return;
+        }
+        _ => {}
+    }
     match filter.handle_key(key) {
         InputAction::Changed => list.set_filter(filter.value()),
         InputAction::Submit => *filtering = false,
@@ -913,6 +948,21 @@ fn availability_label(availability: CommandAvailability) -> &'static str {
 mod tests {
     use super::*;
 
+    fn filter_navigation_fixture() -> Vec<HelpEntry> {
+        vec![
+            HelpEntry::Local {
+                tokens: "node status".to_string(),
+                description: "Show node status".to_string(),
+                category: "node".to_string(),
+            },
+            HelpEntry::Local {
+                tokens: "node doctor".to_string(),
+                description: "Diagnose the node".to_string(),
+                category: "node".to_string(),
+            },
+        ]
+    }
+
     #[test]
     fn help_viewports_stay_compact_on_tall_terminals() {
         assert_eq!(list_rows(200), MAXIMUM_INDEX_ROWS);
@@ -923,5 +973,27 @@ mod tests {
     fn help_viewports_still_fit_the_minimum_terminal() {
         assert_eq!(list_rows(MINIMUM_HEIGHT), 4);
         assert_eq!(pager_rows(MINIMUM_HEIGHT), 6);
+    }
+
+    #[test]
+    fn arrow_keys_navigate_results_while_filtering() {
+        let mut list = ListState::new(to_list_items(filter_navigation_fixture()), 2);
+        let mut filter = TextInput::new(120);
+        assert_eq!(filter.paste("node"), InputAction::Changed);
+        list.set_filter(filter.value());
+        let mut filtering = true;
+        let mut legend = false;
+
+        handle_index_key(
+            KeyEvent::plain(Key::Down),
+            &mut list,
+            &mut filter,
+            &mut filtering,
+            &mut legend,
+        );
+
+        assert_eq!(list.selected_visible_index(), Some(1));
+        assert_eq!(filter.value(), "node");
+        assert!(filtering);
     }
 }
