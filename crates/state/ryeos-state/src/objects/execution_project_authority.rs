@@ -650,6 +650,41 @@ impl ExecutionProjectAuthority {
         }
     }
 
+    /// Resolve a durable live-project write namespace to the canonical root
+    /// that actually owns it.
+    ///
+    /// Execution workspaces and materialized snapshot views are deliberately
+    /// not accepted here. A caller asking to mutate durable project state must
+    /// hold live read-write authority for the named namespace; pinned and
+    /// projectless authorities fail closed instead of redirecting the write to
+    /// whichever directory happens to be the current execution cwd.
+    pub fn authorized_live_write_root(&self, namespace: &str) -> anyhow::Result<&Path> {
+        validate_trimmed_control_free("live write namespace", namespace, false)?;
+        let Self::LiveProject {
+            canonical_root,
+            live_access,
+            ..
+        } = self
+        else {
+            anyhow::bail!(
+                "durable live-project write namespace `{namespace}` requires live project authority"
+            );
+        };
+        if live_access.access != LiveProjectAccess::ReadWrite {
+            anyhow::bail!(
+                "durable live-project write namespace `{namespace}` requires read-write project authority"
+            );
+        }
+        if live_access
+            .authorized_write_namespaces
+            .binary_search_by(|candidate| candidate.as_str().cmp(namespace))
+            .is_err()
+        {
+            anyhow::bail!("live project authority does not grant write namespace `{namespace}`");
+        }
+        Ok(canonical_root)
+    }
+
     /// Open the local root used by an environment overlay through a
     /// descriptor and revalidate the persisted live-root fence against that
     /// same descriptor before any child file is read.
@@ -798,6 +833,21 @@ fn validate_capability_ceiling(capabilities: &[String]) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn live_authority(root: &Path, access: LiveProjectAccess) -> ExecutionProjectAuthority {
+        ExecutionProjectAuthority::live(
+            root.to_path_buf(),
+            "test-project".to_string(),
+            access,
+            LiveFilesystemConfinement::DescriptorRootedMasked {
+                denied_control_paths: Vec::new(),
+                symlink_policy: LiveSymlinkPolicy::DescriptorRootedNoEscape,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn live_access_schema_requires_explicit_confinement() {
         let missing = serde_json::json!({
@@ -843,5 +893,32 @@ mod tests {
             confinement: LiveFilesystemConfinement::UnconfinedHost,
         };
         assert!(false_read_only.validate().is_err());
+    }
+
+    #[test]
+    fn durable_write_root_comes_only_from_live_read_write_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let writable = live_authority(root.path(), LiveProjectAccess::ReadWrite);
+        assert_eq!(
+            writable.authorized_live_write_root("project").unwrap(),
+            root.path()
+        );
+        assert!(writable.authorized_live_write_root("other").is_err());
+
+        let read_only = live_authority(root.path(), LiveProjectAccess::ReadOnly);
+        assert!(read_only.authorized_live_write_root("project").is_err());
+
+        let pinned = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            Some(root.path().to_path_buf()),
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(pinned.authorized_live_write_root("project").is_err());
     }
 }

@@ -7,9 +7,10 @@
 //! trusted identity, and atomically writes the normal project-space item.
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
+use std::io::{Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
@@ -20,7 +21,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
-use crate::execution_provenance::ProjectSourceKind;
 use crate::identity::NodeIdentity;
 
 const PROVENANCE_MARKER: &str = "ryeos:authored:";
@@ -71,9 +71,10 @@ impl RuntimeItemAuthorService {
         thread_auth: &ThreadAuthState,
         params: RuntimeAuthorItemParams,
     ) -> Result<RuntimeAuthorItemResponse> {
-        if cap.provenance.project_source() != ProjectSourceKind::LiveFs {
-            bail!("runtime item authoring only supports live filesystem project provenance in v1");
-        }
+        let project_root = cap
+            .provenance
+            .durable_live_write_root("project")
+            .context("runtime item authoring requires durable live-project write authority")?;
         if params.content.contains(PROVENANCE_MARKER) {
             bail!("runtime-authored item content must not contain `{PROVENANCE_MARKER}`");
         }
@@ -105,16 +106,12 @@ impl RuntimeItemAuthorService {
                 canonical.kind
             )
         })?;
-        let project_root = cap.provenance.effective_path();
-        let ai_root = project_root.join(ryeos_engine::AI_DIR);
-        let canonical_ai_root = ai_root
-            .canonicalize()
-            .with_context(|| format!("canonicalize ai root {}", ai_root.display()))?;
+        let canonical_ai_root = open_author_ai_root(project_root)?;
         let canonical_kind_dir =
-            ensure_relative_dir_no_symlinks(&canonical_ai_root, Path::new(&kind_schema.directory))?;
+            ensure_relative_dir_no_symlinks(canonical_ai_root, Path::new(&kind_schema.directory))?;
         let bare_path = Path::new(&canonical.bare_id);
         let bare_parent = bare_path.parent().unwrap_or_else(|| Path::new(""));
-        let canonical_parent = ensure_relative_dir_no_symlinks(&canonical_kind_dir, bare_parent)?;
+        let canonical_parent = ensure_relative_dir_no_symlinks(canonical_kind_dir, bare_parent)?;
         let stem_name = bare_path
             .file_name()
             .and_then(|n| n.to_str())
@@ -124,7 +121,17 @@ impl RuntimeItemAuthorService {
                     canonical.bare_id
                 )
             })?;
-        let (ext, target) = resolve_author_target(
+        // Lock the canonical ref, not the eventual extension-specific target.
+        // Two concurrent creates choosing different declared extensions must
+        // not both pass the duplicate-ref check.
+        let author_lock_key = project_root
+            .join(ryeos_engine::AI_DIR)
+            .join(&kind_schema.directory)
+            .join(&canonical.bare_id);
+        let target_lock = author_target_lock(&author_lock_key);
+        let _commit_guard = target_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        let (ext, target_name, target) = resolve_author_target(
             kind_schema,
             &canonical,
             &canonical_parent,
@@ -161,7 +168,7 @@ impl RuntimeItemAuthorService {
             &parsed,
             &kind_schema.extraction_rules,
             &kind_schema.directory,
-            &canonical_ai_root,
+            &canonical_parent.ai_root,
             &target,
         )
         .map_err(|e| {
@@ -208,24 +215,27 @@ impl RuntimeItemAuthorService {
             &final_parsed,
             &kind_schema.extraction_rules,
             &kind_schema.directory,
-            &canonical_ai_root,
+            &canonical_parent.ai_root,
             &target,
         )
         .map_err(|e| {
             anyhow!("path-anchoring validator refused final authored item `{canonical}`: {e}")
         })?;
 
-        // Per-target critical section: read-incumbent → compare → commit must be
-        // atomic against a concurrent author of the same item, or the CAS guard is
-        // a TOCTOU. The lock is keyed by the canonicalized target path and serializes
-        // author calls within this daemon process (the sole item writer under the
-        // live-fs v1 contract). See `author_target_lock`.
-        let target_lock = author_target_lock(&target);
-        let _commit_guard = target_lock.lock().unwrap_or_else(|e| e.into_inner());
-
+        let mut incumbent = canonical_parent
+            .directory
+            .open_regular(&target_name, false)
+            .with_context(|| format!("open incumbent authored item {}", target.display()))?;
+        if params.mode == AuthorMode::Create && incumbent.is_some() {
+            bail!(
+                "item already exists for canonical ref {canonical}: {}",
+                target.display()
+            );
+        }
         if params.mode == AuthorMode::Upsert {
             if let Some(expected) = params.expected_digest.as_deref() {
-                enforce_expected_digest(
+                enforce_expected_digest_from_file(
+                    incumbent.as_mut(),
                     &target,
                     expected,
                     &source_format.signature.prefix,
@@ -234,7 +244,14 @@ impl RuntimeItemAuthorService {
             }
         }
 
-        write_atomic(&target, &signed, params.mode)?;
+        write_atomic(
+            &canonical_parent.directory,
+            &target_name,
+            &target,
+            &signed,
+            params.mode,
+            incumbent.as_ref(),
+        )?;
 
         Ok(RuntimeAuthorItemResponse {
             item_ref: canonical.to_string(),
@@ -267,11 +284,11 @@ fn validate_extension(
 fn resolve_author_target(
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
     canonical: &CanonicalRef,
-    canonical_parent: &Path,
+    canonical_parent: &AuthorDirectory,
     stem_name: &str,
     requested_ext: Option<&str>,
     mode: AuthorMode,
-) -> Result<(String, PathBuf)> {
+) -> Result<(String, OsString, PathBuf)> {
     if let Some(ext) = requested_ext {
         validate_extension(kind_schema, ext)?;
     }
@@ -293,9 +310,11 @@ fn resolve_author_target(
                     kind_schema.extension_strs()
                 )
             })?;
+            let name = OsString::from(format!("{stem_name}{ext}"));
             Ok((
                 ext.to_string(),
-                canonical_parent.join(format!("{stem_name}{ext}")),
+                name.clone(),
+                canonical_parent.path.join(name),
             ))
         }
         AuthorMode::Upsert => match requested_ext {
@@ -309,13 +328,15 @@ fn resolve_author_target(
                         other.path.display()
                     );
                 }
+                let name = OsString::from(format!("{stem_name}{ext}"));
                 Ok((
                     ext.to_string(),
-                    canonical_parent.join(format!("{stem_name}{ext}")),
+                    name.clone(),
+                    canonical_parent.path.join(name),
                 ))
             }
             None => match existing.as_slice() {
-                [item] => Ok((item.ext.clone(), item.path.clone())),
+                [item] => Ok((item.ext.clone(), item.name.clone(), item.path.clone())),
                 [] => bail!(
                     "format_ext is required when upserting new item {}; declared extensions: {:?}",
                     canonical,
@@ -334,38 +355,60 @@ fn resolve_author_target(
 #[derive(Debug)]
 struct ExistingItemFile {
     ext: String,
+    name: OsString,
     path: PathBuf,
+}
+
+struct AuthorDirectory {
+    directory: lillux::secure_fs::PinnedDirectory,
+    path: PathBuf,
+    ai_root: PathBuf,
+}
+
+fn open_author_ai_root(project_root: &Path) -> Result<AuthorDirectory> {
+    let project = lillux::secure_fs::PinnedDirectory::open(project_root)?.ok_or_else(|| {
+        anyhow!(
+            "authorized project root disappeared: {}",
+            project_root.display()
+        )
+    })?;
+    let ai_name = OsStr::new(ryeos_engine::AI_DIR);
+    let directory = project.open_child_directory(ai_name)?.ok_or_else(|| {
+        anyhow!(
+            "authorized project has no {} directory",
+            ryeos_engine::AI_DIR
+        )
+    })?;
+    let ai_root = project_root.join(ryeos_engine::AI_DIR);
+    Ok(AuthorDirectory {
+        directory,
+        path: ai_root.clone(),
+        ai_root,
+    })
 }
 
 fn existing_canonical_item_files(
     kind_schema: &ryeos_engine::kind_registry::KindSchema,
-    canonical_parent: &Path,
+    canonical_parent: &AuthorDirectory,
     stem_name: &str,
 ) -> Result<Vec<ExistingItemFile>> {
     let mut existing = Vec::new();
     for spec in &kind_schema.extensions {
-        let path = canonical_parent.join(format!("{}{}", stem_name, spec.ext));
-        match std::fs::symlink_metadata(&path) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    bail!(
-                        "refusing to author item through symlink: {}",
-                        path.display()
-                    );
-                }
-                if !meta.is_file() {
-                    bail!(
-                        "refusing to author over non-file item path: {}",
-                        path.display()
-                    );
-                }
+        let name = OsString::from(format!("{}{}", stem_name, spec.ext));
+        let path = canonical_parent.path.join(&name);
+        match canonical_parent.directory.open_entry(&name, false)? {
+            Some(lillux::secure_fs::PinnedDirectoryEntry::Regular(_)) => {
                 existing.push(ExistingItemFile {
                     ext: spec.ext.clone(),
+                    name,
                     path,
                 });
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("stat {}", path.display())),
+            Some(lillux::secure_fs::PinnedDirectoryEntry::Directory(_)) => bail!(
+                "refusing to author over non-file item path: {}",
+                path.display()
+            ),
+            None => {}
         }
     }
     Ok(existing)
@@ -379,8 +422,11 @@ fn existing_paths(existing: &[ExistingItemFile]) -> String {
         .join(", ")
 }
 
-fn ensure_relative_dir_no_symlinks(root: &Path, relative: &Path) -> Result<PathBuf> {
-    let mut current = root.to_path_buf();
+fn ensure_relative_dir_no_symlinks(
+    root: AuthorDirectory,
+    relative: &Path,
+) -> Result<AuthorDirectory> {
+    let mut current = root;
     for component in relative.components() {
         let Component::Normal(segment) = component else {
             bail!(
@@ -388,37 +434,21 @@ fn ensure_relative_dir_no_symlinks(root: &Path, relative: &Path) -> Result<PathB
                 relative.display()
             );
         };
-        let next = current.join(segment);
-        match std::fs::symlink_metadata(&next) {
-            Ok(meta) => {
-                if meta.file_type().is_symlink() {
-                    bail!(
-                        "refusing to create authored item directory through symlink: {}",
-                        next.display()
-                    );
-                }
-                if !meta.is_dir() {
-                    bail!(
-                        "refusing to create authored item directory over non-directory: {}",
-                        next.display()
-                    );
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::create_dir(&next)
-                    .with_context(|| format!("create dir {}", next.display()))?;
-                let meta = std::fs::symlink_metadata(&next)
-                    .with_context(|| format!("stat created dir {}", next.display()))?;
-                if meta.file_type().is_symlink() || !meta.is_dir() {
-                    bail!(
-                        "created authored item path is not a plain directory: {}",
-                        next.display()
-                    );
-                }
-            }
-            Err(e) => return Err(e).with_context(|| format!("stat {}", next.display())),
-        }
-        current = next;
+        let next_path = current.path.join(segment);
+        let next = current
+            .directory
+            .open_or_create_child(segment, 0o755)
+            .with_context(|| {
+                format!(
+                    "open or create authored item directory {}",
+                    next_path.display()
+                )
+            })?;
+        current = AuthorDirectory {
+            directory: next,
+            path: next_path,
+            ai_root: current.ai_root,
+        };
     }
     Ok(current)
 }
@@ -458,70 +488,38 @@ fn contains_signature_line(content: &str, prefix: &str, suffix: Option<&str>) ->
     })
 }
 
-fn write_atomic(target: &Path, content: &str, mode: AuthorMode) -> Result<()> {
-    // The target was derived from a canonicalized kind-directory parent. This
-    // v1 live-filesystem path treats local runtimes as capability-restricted
-    // callers, not as concurrent filesystem adversaries that can swap checked
-    // parent directories between validation and commit. A fully adversarial
-    // filesystem boundary should replace this path-based commit with an
-    // openat/renameat style directory-fd implementation.
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow!("target path has no parent: {}", target.display()))?;
-    let file_name = target
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or_else(|| anyhow!("target filename is not valid unicode: {}", target.display()))?;
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp: PathBuf = parent.join(format!(
-        ".{file_name}.authoring.tmp.{}.{}",
-        std::process::id(),
-        nonce
-    ));
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .and_then(|mut f| {
-            use std::io::Write;
-            f.write_all(content.as_bytes())?;
-            f.sync_all()
-        })
-        .with_context(|| format!("write tmp {}", tmp.display()))?;
-    let commit_result = match mode {
-        AuthorMode::Create => std::fs::hard_link(&tmp, target)
-            .with_context(|| format!("link {} -> {}", tmp.display(), target.display()))
-            .map(|_| {
-                let _ = std::fs::remove_file(&tmp);
-            }),
-        AuthorMode::Upsert => std::fs::rename(&tmp, target)
-            .with_context(|| format!("rename {} -> {}", tmp.display(), target.display())),
-    };
-    if let Err(err) = commit_result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
+fn write_atomic(
+    parent: &lillux::secure_fs::PinnedDirectory,
+    target_name: &OsStr,
+    target: &Path,
+    content: &str,
+    mode: AuthorMode,
+    incumbent: Option<&std::fs::File>,
+) -> Result<()> {
+    if mode == AuthorMode::Create && incumbent.is_some() {
+        bail!(
+            "refusing to replace existing authored item {}",
+            target.display()
+        );
     }
-    Ok(())
+    parent
+        .atomic_write_if_same(target_name, incumbent, content.as_bytes(), 0o644)
+        .with_context(|| format!("atomically publish authored item {}", target.display()))
 }
 
 /// Per-target keyed lock registry for the author read-compare-commit critical
 /// section.
 ///
 /// **Design note (deliberate — not drift):** a process-scoped keyed lock map,
-/// keyed by canonicalized target path. The daemon is the sole item writer under
-/// the live-fs v1 contract (`author` bails on non-live-fs provenance and is
-/// capability-gated), so serializing within this process is sufficient. If an
-/// out-of-process writer is ever introduced, switch to an advisory `flock`, or
-/// hang this registry off `AppState`. The map grows one entry per distinct
-/// target ever authored — acceptable for v1.
-fn author_target_lock(target: &Path) -> Arc<Mutex<()>> {
+/// keyed by durable project + canonical ref. Descriptor-relative publication
+/// independently refuses an unexpected incumbent inode, while this lock keeps
+/// two daemon callbacks from selecting different extensions for one ref. The
+/// map grows one entry per distinct ref authored during the daemon lifetime.
+fn author_target_lock(canonical_ref_key: &Path) -> Arc<Mutex<()>> {
     static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
     let mut map = LOCKS.lock().unwrap_or_else(|e| e.into_inner());
-    map.entry(target.to_path_buf())
+    map.entry(canonical_ref_key.to_path_buf())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
 }
@@ -543,13 +541,14 @@ enum IncumbentState {
 /// Reject an upsert whose incumbent's authored `content_digest` does not match
 /// the caller's `expected_digest`. All three cases fail loudly as a conflict:
 /// missing target, missing/malformed incumbent provenance, digest mismatch.
-fn enforce_expected_digest(
+fn enforce_expected_digest_from_file(
+    incumbent: Option<&mut std::fs::File>,
     target: &Path,
     expected: &str,
     prefix: &str,
     suffix: Option<&str>,
 ) -> Result<()> {
-    match read_incumbent_state(target, prefix, suffix)? {
+    match read_incumbent_state_from_file(incumbent, target, prefix, suffix)? {
         IncumbentState::Missing => bail!(
             "author_item conflict: expected_digest {expected} but no incumbent item exists at {}",
             target.display()
@@ -583,18 +582,22 @@ fn enforce_expected_digest(
 /// item format's signature comment envelope (prefix/suffix) — NOT a naïve line
 /// scan. Read-only; never mutates the file. A malformed provenance payload
 /// resolves to `Present { content_digest: None, .. }` (→ conflict), not an error.
-fn read_incumbent_state(
+fn read_incumbent_state_from_file(
+    incumbent: Option<&mut std::fs::File>,
     target: &Path,
     prefix: &str,
     suffix: Option<&str>,
 ) -> Result<IncumbentState> {
-    let content = match std::fs::read_to_string(target) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(IncumbentState::Missing),
-        Err(e) => {
-            return Err(e).with_context(|| format!("read incumbent item {}", target.display()))
-        }
+    let Some(incumbent) = incumbent else {
+        return Ok(IncumbentState::Missing);
     };
+    incumbent
+        .rewind()
+        .with_context(|| format!("seek incumbent item {}", target.display()))?;
+    let mut content = String::new();
+    incumbent
+        .read_to_string(&mut content)
+        .with_context(|| format!("read incumbent item {}", target.display()))?;
     for line in content.lines() {
         let trimmed = line.trim();
         let Some(after_prefix) = trimmed.strip_prefix(prefix).map(str::trim_start) else {
@@ -637,6 +640,39 @@ fn read_incumbent_state(
 }
 
 #[cfg(test)]
+fn read_incumbent_state(
+    target: &Path,
+    prefix: &str,
+    suffix: Option<&str>,
+) -> Result<IncumbentState> {
+    let mut incumbent = match std::fs::File::open(target) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("open incumbent item {}", target.display()))
+        }
+    };
+    read_incumbent_state_from_file(incumbent.as_mut(), target, prefix, suffix)
+}
+
+#[cfg(test)]
+fn enforce_expected_digest(
+    target: &Path,
+    expected: &str,
+    prefix: &str,
+    suffix: Option<&str>,
+) -> Result<()> {
+    let mut incumbent = match std::fs::File::open(target) {
+        Ok(file) => Some(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("open incumbent item {}", target.display()))
+        }
+    };
+    enforce_expected_digest_from_file(incumbent.as_mut(), target, expected, prefix, suffix)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -653,6 +689,48 @@ mod tests {
             "authored_at": "2026-07-03T00:00:00Z",
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn descriptor_publication_writes_only_the_selected_durable_root() {
+        let durable = tempfile::tempdir().unwrap();
+        let disposable = tempfile::tempdir().unwrap();
+        std::fs::create_dir(durable.path().join(ryeos_engine::AI_DIR)).unwrap();
+        std::fs::create_dir(disposable.path().join(ryeos_engine::AI_DIR)).unwrap();
+
+        let parent = ensure_relative_dir_no_symlinks(
+            open_author_ai_root(durable.path()).unwrap(),
+            Path::new("knowledge/arc/games/test"),
+        )
+        .unwrap();
+        let name = OsStr::new("model.md");
+        let target = parent.path.join(name);
+        write_atomic(
+            &parent.directory,
+            name,
+            &target,
+            "first",
+            AuthorMode::Create,
+            None,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "first");
+        assert!(!disposable
+            .path()
+            .join(".ai/knowledge/arc/games/test/model.md")
+            .exists());
+
+        let incumbent = parent.directory.open_regular(name, false).unwrap().unwrap();
+        write_atomic(
+            &parent.directory,
+            name,
+            &target,
+            "second",
+            AuthorMode::Upsert,
+            Some(&incumbent),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "second");
     }
 
     #[test]
