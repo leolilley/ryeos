@@ -29,7 +29,7 @@ enum HelpEntry {
         category: String,
     },
     Cached(CachedHelpRow),
-    Installed(DescriptorHelpRow),
+    Installed(Box<DescriptorHelpRow>),
 }
 
 impl HelpEntry {
@@ -96,6 +96,27 @@ struct DetailState {
     pager: Pager,
 }
 
+struct DetailContext<'a> {
+    snapshot: &'a Option<NodeConfigSnapshot>,
+    app_root: &'a Path,
+    project_path: &'a str,
+    width: u16,
+    height: u16,
+    resolution_cache: &'a HashMap<String, ResolutionResult>,
+}
+
+struct RenderContext<'a> {
+    view: View,
+    list: &'a ListState<HelpEntry>,
+    filter: &'a TextInput,
+    filtering: bool,
+    legend: bool,
+    node_status: &'a str,
+    verification_status: &'a str,
+    detail: Option<&'a DetailState>,
+    width: u16,
+}
+
 type ResolutionResult = Result<ResolvedCommandHelp, String>;
 type ResolutionTask = tokio::task::JoinHandle<(String, ResolutionResult)>;
 
@@ -152,7 +173,7 @@ pub(crate) async fn run(
         }
         let entries = descriptor_rows
             .into_iter()
-            .map(HelpEntry::Installed)
+            .map(|row| HelpEntry::Installed(Box::new(row)))
             .collect();
         Ok::<_, anyhow::Error>(Discovery { snapshot, entries })
     }));
@@ -169,14 +190,16 @@ pub(crate) async fn run(
         {
             open_detail(
                 entry,
-                &snapshot,
-                app_root,
-                project_path,
-                width,
-                height,
+                &DetailContext {
+                    snapshot: &snapshot,
+                    app_root,
+                    project_path,
+                    width,
+                    height,
+                    resolution_cache: &resolution_cache,
+                },
                 &mut detail,
                 &mut resolution_task,
-                &resolution_cache,
             );
             view = View::Detail;
         }
@@ -189,15 +212,17 @@ pub(crate) async fn run(
                 render(
                     &mut frame,
                     console,
-                    view,
-                    &list,
-                    &filter,
-                    filtering,
-                    legend,
-                    &node_status,
-                    &verification_status,
-                    detail.as_ref(),
-                    width,
+                    &RenderContext {
+                        view,
+                        list: &list,
+                        filter: &filter,
+                        filtering,
+                        legend,
+                        node_status: &node_status,
+                        verification_status: &verification_status,
+                        detail: detail.as_ref(),
+                        width,
+                    },
                 )?;
             }
 
@@ -232,14 +257,16 @@ pub(crate) async fn run(
                             {
                                 open_detail(
                                     entry,
-                                    &snapshot,
-                                    app_root,
-                                    project_path,
-                                    width,
-                                    height,
+                                    &DetailContext {
+                                        snapshot: &snapshot,
+                                        app_root,
+                                        project_path,
+                                        width,
+                                        height,
+                                        resolution_cache: &resolution_cache,
+                                    },
                                     &mut detail,
                                     &mut resolution_task,
-                                    &resolution_cache,
                                 );
                                 view = View::Detail;
                             } else if detail
@@ -352,14 +379,16 @@ pub(crate) async fn run(
                     if let Some(entry) = list.selected().map(|item| item.value.clone()) {
                         open_detail(
                             entry,
-                            &snapshot,
-                            app_root,
-                            project_path,
-                            width,
-                            height,
+                            &DetailContext {
+                                snapshot: &snapshot,
+                                app_root,
+                                project_path,
+                                width,
+                                height,
+                                resolution_cache: &resolution_cache,
+                            },
                             &mut detail,
                             &mut resolution_task,
-                            &resolution_cache,
                         );
                         view = View::Detail;
                         filtering = false;
@@ -543,35 +572,31 @@ fn handle_pager_key(key: KeyEvent, pager: &mut Pager) {
 
 fn open_detail(
     entry: HelpEntry,
-    snapshot: &Option<NodeConfigSnapshot>,
-    app_root: &Path,
-    project_path: &str,
-    width: u16,
-    height: u16,
+    context: &DetailContext<'_>,
     detail: &mut Option<DetailState>,
     resolution_task: &mut Option<ResolutionTask>,
-    resolution_cache: &HashMap<String, ResolutionResult>,
 ) {
     if let Some(task) = resolution_task.take() {
         task.abort();
     }
     let base = descriptor_detail(&entry);
-    let enrichment = resolution_cache
+    let enrichment = context
+        .resolution_cache
         .get(entry.tokens())
         .map(resolution_detail)
         .unwrap_or_default();
     let pager = Pager::new(
         format!("{base}{enrichment}"),
-        usize::from(width).saturating_sub(4).max(1),
-        pager_rows(height),
+        usize::from(context.width).saturating_sub(4).max(1),
+        pager_rows(context.height),
     );
-    if !resolution_cache.contains_key(entry.tokens()) {
-        if let (HelpEntry::Installed(row), Some(snapshot)) = (&entry, snapshot) {
+    if !context.resolution_cache.contains_key(entry.tokens()) {
+        if let (HelpEntry::Installed(row), Some(snapshot)) = (&entry, context.snapshot) {
             if row.descriptor.execute_ref().is_some() {
                 let descriptor = row.descriptor.clone();
                 let snapshot = snapshot.clone();
-                let app_root = PathBuf::from(app_root);
-                let project_path = project_path.to_string();
+                let app_root = PathBuf::from(context.app_root);
+                let project_path = context.project_path.to_string();
                 let tokens = entry.tokens().to_string();
                 *resolution_task = Some(tokio::task::spawn_blocking(move || {
                     (
@@ -598,19 +623,11 @@ fn open_detail(
 fn render(
     frame: &mut Frame<std::io::Stdout>,
     console: &Console,
-    view: View,
-    list: &ListState<HelpEntry>,
-    filter: &TextInput,
-    filtering: bool,
-    legend: bool,
-    node_status: &str,
-    verification_status: &str,
-    detail: Option<&DetailState>,
-    width: u16,
+    context: &RenderContext<'_>,
 ) -> std::io::Result<()> {
     let capabilities = console.capabilities();
-    let node_status = super::sanitize_terminal_inline(node_status);
-    let verification_status = super::sanitize_terminal_inline(verification_status);
+    let node_status = super::sanitize_terminal_inline(context.node_status);
+    let verification_status = super::sanitize_terminal_inline(context.verification_status);
     let mut lines = vec![
         format!(
             "  {}                                      {}",
@@ -623,28 +640,28 @@ fn render(
         ),
         String::new(),
     ];
-    match view {
+    match context.view {
         View::Index => {
-            let filter_prompt = if filtering || !filter.is_empty() {
-                format!("/ {}", filter.value())
+            let filter_prompt = if context.filtering || !context.filter.is_empty() {
+                format!("/ {}", context.filter.value())
             } else {
                 "/ search commands…".to_string()
             };
             lines.push(format!("  {filter_prompt}"));
             lines.push(String::new());
-            let token_width = usize::from(width).saturating_sub(22).clamp(12, 28);
-            if list.visible_len() == 0 {
+            let token_width = usize::from(context.width).saturating_sub(22).clamp(12, 28);
+            if context.list.visible_len() == 0 {
                 lines.push("    no matching commands".to_string());
             } else {
-                for (visible_index, item) in list.visible_window() {
-                    let selected = Some(visible_index) == list.selected_visible_index();
+                for (visible_index, item) in context.list.visible_window() {
+                    let selected = Some(visible_index) == context.list.selected_visible_index();
                     let marker = if selected { ">" } else { " " };
                     let tokens = super::clamp_visible(
                         &super::sanitize_terminal_inline(item.value.tokens()),
                         token_width,
                     );
                     let prefix = format!("  {marker} {tokens:token_width$}  ");
-                    let available = usize::from(width)
+                    let available = usize::from(context.width)
                         .saturating_sub(super::visible_width(&prefix) + 1)
                         .max(1);
                     let description = super::clamp_visible(
@@ -663,14 +680,14 @@ fn render(
                 }
             }
             lines.push(String::new());
-            lines.push(if legend {
+            lines.push(if context.legend {
                 "  ↑/↓ move · ctrl-u/ctrl-d page · / filter · enter open · q quit".to_string()
             } else {
                 "  ↑/↓ move  ·  enter open  ·  / filter  ·  ? keys  ·  q quit".to_string()
             });
         }
         View::Detail => {
-            if let Some(detail) = detail {
+            if let Some(detail) = context.detail {
                 lines.extend(
                     detail
                         .pager
@@ -679,7 +696,7 @@ fn render(
                         .map(|line| format!("  {}", super::sanitize_terminal_inline(line))),
                 );
                 lines.push(String::new());
-                lines.push(if legend {
+                lines.push(if context.legend {
                     format!(
                         "  {} · ↑/↓ scroll · ctrl-u/ctrl-d page · esc/← back · q quit",
                         detail.entry.tokens()
