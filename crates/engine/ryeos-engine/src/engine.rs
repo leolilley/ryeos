@@ -1076,7 +1076,7 @@ formats:
         assert!(!ordinary
             .ordered
             .iter()
-            .any(|root| root.ai_root == PathBuf::from("/operator/.ai")));
+            .any(|root| root.ai_root == Path::new("/operator/.ai")));
 
         let launch = engine.launch_config_roots(&ordinary);
         assert_eq!(launch.ordered[0].label, "project");
