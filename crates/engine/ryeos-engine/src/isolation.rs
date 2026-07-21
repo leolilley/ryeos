@@ -1166,6 +1166,161 @@ impl IsolationRuntime {
         self.state == IsolationRuntimeState::Enforced
     }
 
+    /// Capture the exact executable selected by a fully compiled direct plan.
+    /// Project-local regular files are read through the retained live-project
+    /// descriptor; virtualenv symlinks may resolve only onto the authorized
+    /// system runtime surface. The returned identity is suitable for sealing
+    /// into the plan before durable thread birth.
+    pub fn capture_verified_command(
+        &self,
+        command: &Path,
+        project_root: Option<&Path>,
+        live_access: Option<&IsolationLiveAccessAuthority>,
+    ) -> Result<IsolationVerifiedCode, EngineError> {
+        if self.state != IsolationRuntimeState::Enforced {
+            return Err(refused(
+                "restartable verified-content execution requires enforced isolation; disabled isolation has no descriptor-backed immutable exec boundary"
+                    .to_string(),
+            ));
+        }
+        if !command.is_absolute() {
+            return Err(refused(format!(
+                "captured command path must be absolute: {}",
+                command.display()
+            )));
+        }
+        if command.components().enumerate().any(|(index, component)| {
+            !matches!(
+                (index, component),
+                (0, std::path::Component::RootDir) | (_, std::path::Component::Normal(_))
+            )
+        }) {
+            return Err(refused(format!(
+                "captured command path is not lexically normalized: {}",
+                command.display()
+            )));
+        }
+        let artifacts = self
+            .verified_artifacts
+            .as_deref()
+            .expect("enforced isolation runtime has a verified artifact store");
+        let canonical_project = project_root
+            .map(|root| canonicalize_context_mount("project", root))
+            .transpose()?;
+        let canonical_command = canonicalize_context_mount("command", command)?;
+
+        let lexical_project_command = canonical_project
+            .as_ref()
+            .is_some_and(|project| command.starts_with(project));
+        let lexical_system_command = is_lexically_on_system_runtime_surface(command);
+        let (content, metadata) = if lexical_project_command {
+            let canonical_project = canonical_project
+                .as_ref()
+                .expect("project command classification requires a project root");
+            let root = match live_access {
+                Some(IsolationLiveAccessAuthority::DescriptorRootedMasked { root, .. }) => root,
+                _ => {
+                    return Err(refused(format!(
+                        "project-local command {} requires descriptor-rooted live authority",
+                        command.display()
+                    )))
+                }
+            };
+            if root.path() != canonical_project {
+                return Err(refused(format!(
+                    "live project descriptor root {} does not match captured command project {}",
+                    root.path().display(),
+                    canonical_project.display()
+                )));
+            }
+            root.ensure_path_binding().map_err(|error| {
+                refused(format!(
+                    "live project path binding changed before command capture: {error}"
+                ))
+            })?;
+            let captured = if canonical_command.starts_with(&canonical_project) {
+                if command != canonical_command {
+                    return Err(refused(format!(
+                        "project-local command symlink is not descriptor-rooted: {}",
+                        command.display()
+                    )));
+                }
+                let relative =
+                    canonical_command
+                        .strip_prefix(&canonical_project)
+                        .map_err(|_| {
+                            refused(format!(
+                                "project command escaped its descriptor root: {}",
+                                canonical_command.display()
+                            ))
+                        })?;
+                read_descriptor_relative_regular_file_limited(
+                    root,
+                    relative,
+                    artifacts.max_file_bytes,
+                )?
+            } else {
+                if !is_on_system_runtime_surface(&canonical_command) {
+                    return Err(refused(format!(
+                        "project-local command symlink escapes the authorized runtime surface: {} -> {}",
+                        command.display(),
+                        canonical_command.display()
+                    )));
+                }
+                artifacts.read_source("captured command", &canonical_command)?
+            };
+            root.ensure_path_binding().map_err(|error| {
+                refused(format!(
+                    "live project path binding changed during command capture: {error}"
+                ))
+            })?;
+            captured
+        } else {
+            if !lexical_system_command || !is_on_system_runtime_surface(&canonical_command) {
+                return Err(refused(format!(
+                    "restartable command lexical origin is outside the live project and authorized system runtime surfaces: {} -> {}",
+                    command.display(), canonical_command.display()
+                )));
+            }
+            artifacts.read_source("captured command", &canonical_command)?
+        };
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.permissions().mode() & 0o111 == 0 {
+                return Err(refused(format!(
+                    "captured command {} is not executable",
+                    canonical_command.display()
+                )));
+            }
+        }
+        let content_hash = lillux::cas::sha256_hex(&content);
+        let observed = canonicalize_context_mount("command", command)?;
+        if observed != canonical_command {
+            return Err(refused(format!(
+                "command {} changed filesystem identity while its bytes were captured",
+                command.display()
+            )));
+        }
+        if lexical_project_command {
+            match live_access {
+                Some(IsolationLiveAccessAuthority::DescriptorRootedMasked { root, .. }) => {
+                    root.ensure_path_binding().map_err(|error| {
+                        refused(format!(
+                            "live project path binding changed after command capture: {error}"
+                        ))
+                    })?
+                }
+                _ => unreachable!("project command capture validated descriptor authority"),
+            }
+        }
+        Ok(IsolationVerifiedCode {
+            source_path: canonical_command,
+            content_hash,
+        })
+    }
+
     /// Apply this immutable policy snapshot to one executable request.
     pub fn apply(
         &self,
@@ -1770,7 +1925,9 @@ impl IsolationRuntime {
         };
         let mut prepared_code = Vec::with_capacity(context.verified_code.len() + 1);
         for verified in context.verified_code {
-            let prepared = self.prepare_verified_code(verified, code_namespace)?;
+            let require_executable = context.verified_command == Some(verified);
+            let prepared =
+                self.prepare_verified_code(verified, code_namespace, require_executable)?;
             rewrite_verified_code_references(
                 &mut args,
                 &mut envs,
@@ -1793,12 +1950,31 @@ impl IsolationRuntime {
         // a symlink. This retains virtual-environment launcher semantics while
         // the executable itself comes from the already-resolved target.
         let command_argv0 = (lexical_command != canonical_command).then(|| cmd.clone());
-        let verified_command = prepared_code.iter().find(|prepared| {
-            lexical_command == prepared.original || canonical_command == prepared.canonical_source
-        });
+        let verified_command = match context.verified_command {
+            Some(admitted) => prepared_code.iter().find(|prepared| {
+                admitted_verified_command_matches(
+                    &admitted.source_path,
+                    &prepared.original,
+                    &prepared.canonical_source,
+                    &lexical_command,
+                    &canonical_command,
+                )
+            }),
+            None => prepared_code.iter().find(|prepared| {
+                lexical_command == prepared.original
+                    || canonical_command == prepared.canonical_source
+            }),
+        };
         let command_path = if let Some(prepared) = verified_command {
             prepared.artifact.destination.clone()
         } else {
+            if let Some(admitted) = context.verified_command {
+                return Err(refused(format!(
+                    "command {} no longer matches its admitted verified identity {}",
+                    lexical_command.display(),
+                    admitted.source_path.display()
+                )));
+            }
             let on_system_surface = is_lexically_on_system_runtime_surface(&lexical_command)
                 && is_on_system_runtime_surface(&canonical_command);
             if on_system_surface {
@@ -2566,6 +2742,7 @@ impl IsolationRuntime {
         &self,
         verified: &IsolationVerifiedCode,
         namespace: CodeNamespace<'_>,
+        require_executable: bool,
     ) -> Result<PreparedVerifiedCode, EngineError> {
         if !verified.source_path.is_absolute() {
             return Err(refused(format!(
@@ -2589,17 +2766,17 @@ impl IsolationRuntime {
             .as_deref()
             .expect("enforced isolation runtime has a verified artifact store");
         let canonical_source = canonicalize_context_mount("code source", &verified.source_path)?;
-        if let Some(artifact) =
-            artifacts.existing(&verified.content_hash, &verified.content_hash)?
+        let (content, metadata) = artifacts.read_source("verified code", &verified.source_path)?;
+        #[cfg(unix)]
         {
-            return self.finish_prepared_code(
-                &verified.source_path,
-                canonical_source,
-                artifact,
-                namespace,
-            );
+            use std::os::unix::fs::PermissionsExt as _;
+            if require_executable && metadata.permissions().mode() & 0o111 == 0 {
+                return Err(refused(format!(
+                    "verified code {} is not executable",
+                    verified.source_path.display()
+                )));
+            }
         }
-        let (content, _) = artifacts.read_source("verified code", &verified.source_path)?;
         let actual_hash = lillux::cas::sha256_hex(&content);
         if actual_hash != verified.content_hash {
             return Err(refused(format!(
@@ -2615,6 +2792,16 @@ impl IsolationRuntime {
                 "verified code {} changed filesystem identity while its bytes were captured",
                 verified.source_path.display()
             )));
+        }
+        if let Some(artifact) =
+            artifacts.existing(&verified.content_hash, &verified.content_hash)?
+        {
+            return self.finish_prepared_code(
+                &verified.source_path,
+                canonical_source,
+                artifact,
+                namespace,
+            );
         }
         self.prepare_code_bytes(
             &verified.source_path,
@@ -2980,6 +3167,17 @@ fn is_lexically_on_system_runtime_surface(path: &Path) -> bool {
         .any(|root| path.starts_with(root))
 }
 
+fn admitted_verified_command_matches(
+    admitted_source: &Path,
+    prepared_original: &Path,
+    prepared_canonical: &Path,
+    lexical_command: &Path,
+    canonical_command: &Path,
+) -> bool {
+    prepared_original == admitted_source
+        && (lexical_command == prepared_original || canonical_command == prepared_canonical)
+}
+
 fn code_namespace_layout(
     original: &Path,
     canonical_source: &Path,
@@ -3044,6 +3242,67 @@ fn code_namespace_layout(
         }),
         namespace_root.join(relative),
     ))
+}
+
+fn read_descriptor_relative_regular_file_limited(
+    root: &lillux::PinnedDirectory,
+    relative: &Path,
+    max_bytes: u64,
+) -> Result<(Vec<u8>, std::fs::Metadata), EngineError> {
+    let components = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => Ok(name.to_os_string()),
+            _ => Err(refused(format!(
+                "captured command has unsafe descriptor-relative path: {}",
+                relative.display()
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (file_name, parents) = components.split_last().ok_or_else(|| {
+        refused("captured command path is empty relative to its project root".to_string())
+    })?;
+    let mut directory = root.try_clone().map_err(|error| {
+        refused(format!(
+            "duplicate live project descriptor for command capture: {error}"
+        ))
+    })?;
+    for component in parents {
+        directory = directory
+            .open_child_directory(component)
+            .map_err(|error| {
+                refused(format!(
+                    "open descriptor-relative command directory {}: {error}",
+                    component.to_string_lossy()
+                ))
+            })?
+            .ok_or_else(|| {
+                refused(format!(
+                    "descriptor-relative command directory disappeared: {}",
+                    component.to_string_lossy()
+                ))
+            })?;
+    }
+    let file = directory
+        .open_regular(file_name, false)
+        .map_err(|error| {
+            refused(format!(
+                "open descriptor-relative command {}: {error}",
+                relative.display()
+            ))
+        })?
+        .ok_or_else(|| {
+            refused(format!(
+                "descriptor-relative command disappeared: {}",
+                relative.display()
+            ))
+        })?;
+    read_regular_file_handle_limited(
+        "captured command",
+        &root.path().join(relative),
+        file,
+        max_bytes,
+    )
 }
 
 fn read_regular_file_bytes_limited(
@@ -3841,6 +4100,205 @@ mod tests {
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn verified_code_cache_hit_still_revalidates_mutable_source() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        runtime.state = IsolationRuntimeState::Enforced;
+
+        let project = tempfile::tempdir().unwrap();
+        let command = project.path().join("python");
+        std::fs::write(&command, b"first").unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let verified = IsolationVerifiedCode {
+            source_path: command.clone(),
+            content_hash: lillux::cas::sha256_hex(b"first"),
+        };
+        let namespace = CodeNamespace {
+            project_destination: project.path(),
+            canonical_project: project.path(),
+            bundle_roots: &[],
+        };
+        runtime
+            .prepare_verified_code(&verified, namespace, true)
+            .unwrap();
+
+        std::fs::write(&command, b"second").unwrap();
+        let error = runtime
+            .prepare_verified_code(&verified, namespace, true)
+            .unwrap_err();
+        assert!(error.to_string().contains("changed after verification"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_command_capture_is_descriptor_rooted_and_content_identified() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        runtime.state = IsolationRuntimeState::Enforced;
+
+        let project = tempfile::tempdir().unwrap();
+        let command_dir = project.path().join(".venv/bin");
+        std::fs::create_dir_all(&command_dir).unwrap();
+        let command = command_dir.join("python");
+        std::fs::write(&command, b"descriptor-rooted-python").unwrap();
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = lillux::PinnedDirectory::open(project.path())
+            .unwrap()
+            .unwrap();
+        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let live_access = IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root: Arc::new(root),
+            root_device_id,
+            root_inode,
+            denied_control_paths: Vec::new(),
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+
+        let captured = runtime
+            .capture_verified_command(&command, Some(project.path()), Some(&live_access))
+            .unwrap();
+        assert_eq!(captured.source_path, command);
+        assert_eq!(
+            captured.content_hash,
+            lillux::cas::sha256_hex(b"descriptor-rooted-python")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn external_symlink_to_system_runtime_is_not_an_admitted_lexical_origin() {
+        use std::os::unix::fs::symlink;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        runtime.state = IsolationRuntimeState::Enforced;
+        let project = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let command = external.path().join("python");
+        symlink("/bin/true", &command).unwrap();
+
+        let error = runtime
+            .capture_verified_command(&command, Some(project.path()), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("lexical origin is outside"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_components_cannot_bypass_project_or_system_lexical_origins() {
+        use std::os::unix::fs::symlink;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        runtime.state = IsolationRuntimeState::Enforced;
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        let external = parent.path().join("external");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        symlink("/bin/true", external.join("python")).unwrap();
+
+        let project_escape = project.join("../external/python");
+        let error = runtime
+            .capture_verified_command(&project_escape, Some(&project), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("not lexically normalized"));
+
+        let system_escape = PathBuf::from("/usr/../../tmp/python");
+        let error = runtime
+            .capture_verified_command(&system_escape, Some(&project), None)
+            .unwrap_err();
+        assert!(error.to_string().contains("not lexically normalized"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_runtime_symlink_refuses_replaced_root_binding() {
+        use std::os::unix::fs::symlink;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        runtime.state = IsolationRuntimeState::Enforced;
+
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let root = lillux::PinnedDirectory::open(&project).unwrap().unwrap();
+        let (root_device_id, root_inode) = root.device_inode().unwrap();
+        let live_access = IsolationLiveAccessAuthority::DescriptorRootedMasked {
+            root: Arc::new(root),
+            root_device_id,
+            root_inode,
+            denied_control_paths: Vec::new(),
+            authorized_write_namespaces: vec!["project".to_string()],
+        };
+
+        std::fs::rename(&project, parent.path().join("original-project")).unwrap();
+        std::fs::create_dir_all(project.join(".venv/bin")).unwrap();
+        let command = project.join(".venv/bin/python");
+        symlink("/bin/true", &command).unwrap();
+
+        let error = runtime
+            .capture_verified_command(&command, Some(&project), Some(&live_access))
+            .unwrap_err();
+        assert!(error.to_string().contains("path binding changed"));
+    }
+
+    #[test]
+    fn disabled_runtime_refuses_restartable_command_capture() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let error = runtime
+            .capture_verified_command(Path::new("/bin/true"), Some(app_root.path()), None)
+            .err()
+            .expect("disabled restartable command capture must be refused");
+        assert!(error.to_string().contains("requires enforced isolation"));
+    }
+
+    #[test]
+    fn projectless_restartable_command_can_capture_the_system_runtime_surface() {
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let mut runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        runtime.state = IsolationRuntimeState::Enforced;
+
+        let captured = runtime
+            .capture_verified_command(Path::new("/bin/true"), None, None)
+            .expect("projectless system executable should be capturable");
+        assert!(is_on_system_runtime_surface(&captured.source_path));
+        assert!(!captured.content_hash.is_empty());
+    }
+
+    #[test]
+    fn admitted_command_cannot_fall_through_to_another_verified_file() {
+        assert!(admitted_verified_command_matches(
+            Path::new("/usr/bin/python3.14"),
+            Path::new("/usr/bin/python3.14"),
+            Path::new("/usr/bin/python3.14"),
+            Path::new("/project/.venv/bin/python"),
+            Path::new("/usr/bin/python3.14"),
+        ));
+        assert!(!admitted_verified_command_matches(
+            Path::new("/usr/bin/python3.14"),
+            Path::new("/project/.ai/tools/task.py"),
+            Path::new("/project/.ai/tools/task.py"),
+            Path::new("/project/.ai/tools/task.py"),
+            Path::new("/project/.ai/tools/task.py"),
+        ));
+    }
+
     #[test]
     fn disabled_runtime_retains_policy_identity_without_capturing_a_backend() {
         let app_root = tempfile::tempdir().unwrap();
@@ -3888,6 +4346,7 @@ mod tests {
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
+            verified_command: None,
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
         };
@@ -3934,6 +4393,7 @@ mod tests {
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
+            verified_command: None,
             item_ref: "tool:tests/attachment",
             thread_id: "T-attachment",
         };
@@ -3973,6 +4433,7 @@ mod tests {
             bundle_roots: &[],
             node_trusted_keys_dir: None,
             verified_code: &[],
+            verified_command: None,
             item_ref: "tool:tests/live",
             thread_id: "T-live",
         };
@@ -4036,6 +4497,7 @@ mod tests {
                     bundle_roots: &[],
                     node_trusted_keys_dir: None,
                     verified_code: &[],
+                    verified_command: None,
                     item_ref: "tool:tests/runtime-workspace",
                     thread_id: "T-runtime-workspace",
                 },

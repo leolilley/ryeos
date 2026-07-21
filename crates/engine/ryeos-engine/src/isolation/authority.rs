@@ -66,6 +66,10 @@ pub struct IsolationLaunchContext<'a> {
     pub bundle_roots: &'a [PathBuf],
     pub node_trusted_keys_dir: Option<&'a Path>,
     pub verified_code: &'a [IsolationVerifiedCode],
+    /// The one verified-code entry that must supply the process executable.
+    /// Other entries may be imported tool/runtime files and cannot silently
+    /// substitute for a changed command.
+    pub verified_command: Option<&'a IsolationVerifiedCode>,
     pub item_ref: &'a str,
     pub thread_id: &'a str,
 }

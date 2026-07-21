@@ -1754,8 +1754,16 @@ pub async fn run_and_wait(
     let wait_project_authority = params
         .provenance
         .execution_project_authority(&params.effective_caps)?;
+    let wait_isolation_live_access_authority =
+        params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(&engine, &params.resolved)?;
+    let prepared_plan = thread_lifecycle::prepare_item_plan(
+        &engine,
+        &params.resolved,
+        state.isolation.as_ref(),
+        params.lifecycle_authority,
+        wait_isolation_live_access_authority.as_ref(),
+    )?;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
     let wait_launch_metadata = admitted_root_launch_metadata(
         &params,
@@ -1830,7 +1838,10 @@ pub async fn run_and_wait(
     // Internal/recovery requests without a fresh admission retain the older
     // path-substitution behavior until they rebuild their own authoritative
     // context.
-    if params.resolved.root_admission.is_none()
+    if matches!(
+        params.provenance.project_authority(),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+    ) && params.resolved.root_admission.is_none()
         && effective_path != params.provenance.effective_path()
     {
         params.resolved.plan_context.project_context =
@@ -1912,8 +1923,6 @@ pub async fn run_and_wait(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let wait_isolation_project_authority = params.provenance.isolation_project_authority();
-    let wait_isolation_live_access_authority =
-        params.provenance.isolation_live_access_authority()?;
     let wait_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
@@ -2397,8 +2406,15 @@ pub async fn run_detached(
     let bg_project_authority = params
         .provenance
         .execution_project_authority(&params.effective_caps)?;
+    let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(&engine, &params.resolved)?;
+    let prepared_plan = thread_lifecycle::prepare_item_plan(
+        &engine,
+        &params.resolved,
+        state.isolation.as_ref(),
+        params.lifecycle_authority,
+        bg_isolation_live_access_authority.as_ref(),
+    )?;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
     let bg_launch_metadata = admitted_root_launch_metadata(
         &params,
@@ -2468,7 +2484,10 @@ pub async fn run_detached(
     tracing::Span::current().record("thread_id", created.thread_id.as_str());
 
     // Keep fresh admitted planning authority sealed; see `run_and_wait`.
-    if params.resolved.root_admission.is_none()
+    if matches!(
+        params.provenance.project_authority(),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+    ) && params.resolved.root_admission.is_none()
         && effective_path != params.provenance.effective_path()
     {
         params.resolved.plan_context.project_context =
@@ -2559,7 +2578,6 @@ pub async fn run_detached(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let bg_isolation_project_authority = params.provenance.isolation_project_authority();
-    let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -3903,7 +3921,11 @@ async fn run_existing_recovered_thread(
 
     // Update plan_context to point at the materialized path so the
     // engine resolves item refs from there.
-    if effective_path != params.provenance.effective_path() {
+    if matches!(
+        params.provenance.project_authority(),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+    ) && effective_path != params.provenance.effective_path()
+    {
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),
         };
@@ -3921,12 +3943,25 @@ async fn run_existing_recovered_thread(
         .state_root_override()
         .unwrap_or(effective_path.as_path())
         .to_path_buf();
-    let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(&engine, &params.resolved)
+    let bg_isolation_live_access_authority = params
+        .provenance
+        .isolation_live_access_authority()
         .inspect_err(|_| {
-            guard.fail_thread("plan_build_failed");
+            guard.fail_thread("recovery_confinement_failed");
             guard.cleanup();
         })?;
+    let engine = params.provenance.request_engine().clone();
+    let prepared_plan = thread_lifecycle::prepare_item_plan(
+        &engine,
+        &params.resolved,
+        state.isolation.as_ref(),
+        params.lifecycle_authority,
+        bg_isolation_live_access_authority.as_ref(),
+    )
+    .inspect_err(|_| {
+        guard.fail_thread("plan_build_failed");
+        guard.cleanup();
+    })?;
     let launch_timeout_secs = prepared_plan.timeout_secs;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved).inspect_err(|_| {
         guard.fail_thread("protocol_contract_failed");
@@ -4052,14 +4087,6 @@ async fn run_existing_recovered_thread(
             guard.fail_thread("recovery_project_authority_failed");
             guard.cleanup();
         })?;
-    let bg_isolation_live_access_authority = params
-        .provenance
-        .isolation_live_access_authority()
-        .inspect_err(|_| {
-            guard.fail_thread("recovery_confinement_failed");
-            guard.cleanup();
-        })?;
-
     let parts = guard.into_detached_parts();
     let bg_state = parts.state;
     let bg_temp_dir = parts.temp_dir;
@@ -4258,18 +4285,22 @@ mod tests {
         // (ephemeral, long-gone) LocalPath checkout the spawn ran in,
         // and the pin identity lives in `original_pushed_head_ref`. The
         // pin must win — resolution must never target the stale path.
+        let stale_checkout = tempfile::tempdir().unwrap();
+        let stale_checkout_path = stale_checkout.path().to_path_buf();
+        let snapshot_hash = "c".repeat(64);
         let resume = resume_record(
             ProjectContext::LocalPath {
-                path: PathBuf::from("/var/cache/executions/pre-123"),
+                path: stale_checkout_path,
             },
             Some(OriginalPushedHeadRef {
-                snapshot_hash: "snap-abc".into(),
+                snapshot_hash: snapshot_hash.clone(),
                 original_project_path: PathBuf::from("/laptop/proj"),
             }),
         );
+        drop(stale_checkout);
         match decide_resume_provenance(&resume) {
             ResumeProvenanceDecision::PinnedPushedHead(pinned) => {
-                assert_eq!(pinned.snapshot_hash, "snap-abc");
+                assert_eq!(pinned.snapshot_hash, snapshot_hash);
                 assert_eq!(pinned.original_project_path, PathBuf::from("/laptop/proj"));
             }
             other => panic!("expected PinnedPushedHead, got {other:?}"),
@@ -4278,15 +4309,17 @@ mod tests {
 
     #[test]
     fn live_localpath_record_selects_live_authority_without_legacy_snapshot_hints() {
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_path_buf();
         let resume = resume_record(
             ProjectContext::LocalPath {
-                path: PathBuf::from("/home/op/proj"),
+                path: project_path.clone(),
             },
             None,
         );
         match decide_resume_provenance(&resume) {
             ResumeProvenanceDecision::LiveProject(path) => {
-                assert_eq!(path, std::path::Path::new("/home/op/proj"));
+                assert_eq!(path, project_path);
             }
             other => panic!("expected LiveProject, got {other:?}"),
         }
@@ -4294,15 +4327,17 @@ mod tests {
 
     #[test]
     fn pinned_localpath_record_selects_a_fresh_snapshot_checkout() {
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_path_buf();
         let mut resume = resume_record(
             ProjectContext::LocalPath {
-                path: PathBuf::from("/home/op/proj"),
+                path: project_path.clone(),
             },
             None,
         );
         resume.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
-            "local:/home/op/proj".to_string(),
-            Some(PathBuf::from("/home/op/proj")),
+            format!("local:{}", project_path.display()),
+            Some(project_path.clone()),
             "a".repeat(64),
             ryeos_state::objects::PinnedProjectRealization::Cow {
                 terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
@@ -4319,7 +4354,7 @@ mod tests {
                 original_path,
             } => {
                 assert_eq!(snapshot_hash, "a".repeat(64));
-                assert_eq!(original_path, std::path::Path::new("/home/op/proj"));
+                assert_eq!(original_path, project_path);
             }
             other => panic!("expected PinnedLocalSnapshot, got {other:?}"),
         }

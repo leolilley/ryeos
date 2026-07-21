@@ -441,6 +441,7 @@ fn import_one(
             bundle_roots: isolation_bundle_roots,
             node_trusted_keys_dir: Some(isolation_node_trusted_keys_dir),
             verified_code: &isolation_verified_code,
+            verified_command: None,
             item_ref,
             thread_id: "offline-doctor",
         },

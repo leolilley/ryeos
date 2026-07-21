@@ -167,6 +167,14 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub admitted_artifact_identity: Option<ryeos_state::objects::AdmittedLaunchArtifactIdentity>,
 
+    /// Wire schema of the CAS-rooted admitted launch capsule. Schema-10 rows
+    /// written before this field existed omit it and therefore retain the
+    /// bounded schema-v2 rollout predecessor. Fresh admissions always seal
+    /// the current schema explicitly so continuations never silently upgrade
+    /// the rooted capsule or change its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_launch_capsule_schema: Option<u32>,
+
     /// Exact secret-free managed launch-preparation result rooted in the
     /// admitted capsule. Runtime SQLite carries an operational copy only;
     /// recovery reads the authoritative value from CAS.
@@ -217,6 +225,7 @@ impl Default for RuntimeLaunchMetadata {
             sealed_root_request: None,
             admitted_project_authority: None,
             admitted_artifact_identity: None,
+            admitted_launch_capsule_schema: None,
             admitted_prepared_launch: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -479,6 +488,9 @@ impl ResumeContext {
     ) -> anyhow::Result<(Option<PathBuf>, Option<String>)> {
         self.project_authority.validate()?;
         self.lifecycle_authority.validate()?;
+        if let Some(identity) = &self.stable_project_identity {
+            identity.validate()?;
+        }
         match self.project_authority.environment() {
             ryeos_state::objects::EnvironmentAuthority::ProjectOverlay {
                 source_identity, ..
@@ -526,6 +538,11 @@ impl ResumeContext {
                 ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. },
                 ProjectContext::None,
             ) => {
+                if self.stable_project_identity.is_some() {
+                    anyhow::bail!(
+                        "projectless execution authority cannot carry stable project identity"
+                    );
+                }
                 if self.durable_project_snapshot_hash().is_some() {
                     anyhow::bail!(
                         "projectless execution authority cannot carry a project snapshot"
@@ -537,8 +554,29 @@ impl ResumeContext {
                 ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
                     canonical_root, ..
                 },
-                ProjectContext::LocalPath { .. },
+                ProjectContext::LocalPath { path },
             ) => {
+                if path != canonical_root {
+                    anyhow::bail!(
+                        "live project context {} contradicts canonical authority root {}",
+                        path.display(),
+                        canonical_root.display()
+                    );
+                }
+                let expected_identity =
+                    StableProjectIdentity::from_path(canonical_root, &self.origin_site_id)?;
+                match &self.stable_project_identity {
+                    Some(identity) if identity == &expected_identity => {}
+                    None if self.lifecycle_authority.recovery
+                        != ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable => {
+                    }
+                    Some(_) => anyhow::bail!(
+                        "stable project identity contradicts live project authority root"
+                    ),
+                    None => anyhow::bail!(
+                        "restartable live project authority has no stable project identity"
+                    ),
+                }
                 if self.durable_project_snapshot_hash().is_some() {
                     anyhow::bail!("live project authority contradicts immutable snapshot pin");
                 }
@@ -638,6 +676,11 @@ impl RuntimeLaunchMetadata {
                 &self.admitted_artifact_identity,
                 &attempt.admitted_artifact_identity,
             )?,
+            admitted_launch_capsule_schema: exact(
+                "admitted launch capsule schema",
+                &self.admitted_launch_capsule_schema,
+                &attempt.admitted_launch_capsule_schema,
+            )?,
             admitted_prepared_launch: exact(
                 "admitted prepared launch",
                 &self.admitted_prepared_launch,
@@ -689,6 +732,18 @@ impl RuntimeLaunchMetadata {
         }
         if self.sealed_root_request.is_none() && self.admitted_artifact_identity.is_some() {
             anyhow::bail!("launch metadata has admitted artifacts without a sealed request");
+        }
+        if let Some(schema) = self.admitted_launch_capsule_schema {
+            if !matches!(
+                schema,
+                ryeos_state::objects::LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
+                    | ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
+            ) {
+                anyhow::bail!("admitted launch capsule schema {schema} is unsupported");
+            }
+            if self.sealed_root_request.is_none() {
+                anyhow::bail!("launch metadata has a capsule schema without a sealed request");
+            }
         }
         if let Some(admitted) = &self.admitted_project_authority {
             admitted.validate()?;
@@ -751,6 +806,7 @@ impl RuntimeLaunchMetadata {
             sealed_root_request: None,
             admitted_project_authority: None,
             admitted_artifact_identity: None,
+            admitted_launch_capsule_schema: None,
             admitted_prepared_launch: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -772,6 +828,7 @@ impl RuntimeLaunchMetadata {
             && self.sealed_root_request.is_none()
             && self.admitted_project_authority.is_none()
             && self.admitted_artifact_identity.is_none()
+            && self.admitted_launch_capsule_schema.is_none()
             && self.admitted_prepared_launch.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
@@ -804,7 +861,9 @@ impl RuntimeLaunchMetadata {
         effective_caps.sort();
         effective_caps.dedup();
         let capsule = ryeos_state::objects::AdmittedLaunchCapsule {
-            schema: ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            schema: self
+                .admitted_launch_capsule_schema
+                .unwrap_or(ryeos_state::objects::LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION),
             kind: "admitted_launch_capsule".to_string(),
             exact_program: sealed.admitted_program_value()?,
             exact_program_hash: sealed.admitted_program_hash()?,
@@ -896,6 +955,7 @@ impl RuntimeLaunchMetadata {
             sealed_root_request: self.sealed_root_request.clone(),
             admitted_project_authority: self.admitted_project_authority.clone(),
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
+            admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
             admitted_prepared_launch: self.admitted_prepared_launch.clone(),
             follow_parent_context: None,
             follow_launch_window: None,
@@ -924,6 +984,7 @@ impl RuntimeLaunchMetadata {
             sealed_root_request: self.sealed_root_request.clone(),
             admitted_project_authority: self.admitted_project_authority.clone(),
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
+            admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
             ..Self::default()
         }
     }
@@ -934,11 +995,16 @@ impl RuntimeLaunchMetadata {
     }
 
     pub fn set_sealed_root_request(&mut self, request: SealedRootExecutionRequest) {
+        let first_seal = self.sealed_root_request.is_none();
         if self.admitted_project_authority.is_none() {
             self.admitted_project_authority = self
                 .resume_context
                 .as_ref()
                 .map(|resume| resume.project_authority.clone());
+        }
+        if first_seal && self.admitted_launch_capsule_schema.is_none() {
+            self.admitted_launch_capsule_schema =
+                Some(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
         }
         self.sealed_root_request = Some(request);
     }
@@ -1096,6 +1162,7 @@ mod tests {
             sealed_root_request: None,
             admitted_project_authority: None,
             admitted_artifact_identity: None,
+            admitted_launch_capsule_schema: None,
             admitted_prepared_launch: None,
             follow_parent_context: None,
             follow_launch_window: None,
@@ -1181,6 +1248,78 @@ mod tests {
         assert!(successor.sealed_root_request.is_none());
         assert!(successor.follow_parent_context.is_none());
         assert!(successor.follow_launch_window.is_none());
+    }
+
+    #[test]
+    fn legacy_capsule_schema_and_hash_survive_continuation_without_upgrade() {
+        let sealed = SealedRootExecutionRequest::storage_test_fixture();
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS;
+        let lifecycle_authority =
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE;
+        let mut resume = resume_context(ProjectContext::None);
+        resume.kind = "graph_run".to_string();
+        resume.item_ref = sealed.item_ref().to_string();
+        resume.executor_ref = Some(sealed.executor_ref().to_string());
+        resume.runtime_ref = Some(sealed.runtime_ref().to_string());
+        resume.project_authority = project_authority.clone();
+        resume.lifecycle_authority = lifecycle_authority;
+        let artifacts = ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executor_ref: sealed.executor_ref().to_string(),
+            executor_item_content_hash: "33".repeat(32),
+            executor_item_signer_fingerprint: Some("fp:executor".to_string()),
+            executor_bundle_manifest_hash: None,
+            executor_bundle_signer_fingerprint: None,
+            protocol_ref: "protocol:test/direct".to_string(),
+            protocol_content_hash: "44".repeat(32),
+            protocol_signer_fingerprint: "fp:protocol".to_string(),
+            execution_plan_hash: "55".repeat(32),
+            executable_identity: ryeos_state::objects::DirectExecutableIdentity::VerifiedContent {
+                content_hash: "66".repeat(32),
+            },
+            runtime_identity: None,
+        };
+        let mut legacy = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
+            .with_resume_context(resume)
+            .with_admitted_artifact_identity(artifacts)
+            .with_sealed_root_request(sealed);
+        legacy.admitted_project_authority = Some(project_authority);
+        legacy.admitted_launch_capsule_schema = None;
+        legacy.validate().unwrap();
+        let legacy_capsule = legacy.admitted_launch_capsule().unwrap().unwrap();
+        assert_eq!(
+            legacy_capsule.schema,
+            ryeos_state::objects::LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
+        );
+        let legacy_hash = legacy_capsule.content_hash().unwrap();
+
+        let successor = legacy.for_continuation_successor(
+            "source-thread",
+            PathBuf::from("/state/successor/checkpoints"),
+        );
+        successor.validate().unwrap();
+        assert_eq!(successor.admitted_launch_capsule_schema, None);
+        assert_eq!(
+            successor
+                .admitted_launch_capsule()
+                .unwrap()
+                .unwrap()
+                .content_hash()
+                .unwrap(),
+            legacy_hash
+        );
+    }
+
+    #[test]
+    fn replacing_inherited_legacy_sealed_request_does_not_stamp_current_capsule_schema() {
+        let sealed = SealedRootExecutionRequest::storage_test_fixture();
+        let mut successor = RuntimeLaunchMetadata {
+            sealed_root_request: Some(sealed.clone()),
+            admitted_launch_capsule_schema: None,
+            ..RuntimeLaunchMetadata::default()
+        };
+        successor.set_sealed_root_request(sealed);
+        assert_eq!(successor.admitted_launch_capsule_schema, None);
     }
 
     #[test]
@@ -1399,7 +1538,10 @@ mod tests {
 
     #[test]
     fn live_restartable_authority_roundtrips_without_a_snapshot_pin() {
-        let context = resume_context(local_path_ctx());
+        let live_dir = tempfile::tempdir().unwrap();
+        let context = resume_context(ProjectContext::LocalPath {
+            path: live_dir.path().to_path_buf(),
+        });
         assert_eq!(
             context.lifecycle_authority,
             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE
@@ -1415,6 +1557,38 @@ mod tests {
         let decoded: ResumeContext = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, context);
         assert!(decoded.original_snapshot_hash.is_none());
+    }
+
+    #[test]
+    fn live_restartable_authority_requires_exact_context_and_stable_identity() {
+        let live_dir = tempfile::tempdir().unwrap();
+        let other_dir = tempfile::tempdir().unwrap();
+        let mut context = resume_context(ProjectContext::LocalPath {
+            path: live_dir.path().to_path_buf(),
+        });
+        context.project_context = ProjectContext::LocalPath {
+            path: other_dir.path().to_path_buf(),
+        };
+        assert!(context.authoritative_project_identity().is_err());
+
+        context.project_context = ProjectContext::LocalPath {
+            path: live_dir.path().to_path_buf(),
+        };
+        context.stable_project_identity = None;
+        assert!(context.authoritative_project_identity().is_err());
+    }
+
+    #[test]
+    fn projectless_authority_rejects_stable_project_identity() {
+        let mut context = resume_context(ProjectContext::None);
+        context.stable_project_identity = Some(
+            StableProjectIdentity::from_path(
+                std::path::Path::new("/tmp/not-a-project"),
+                "site:test",
+            )
+            .unwrap(),
+        );
+        assert!(context.authoritative_project_identity().is_err());
     }
 
     #[test]

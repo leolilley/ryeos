@@ -122,6 +122,7 @@ pub(crate) fn run_handler_subprocess(
             bundle_roots: &launch.bundle_roots,
             node_trusted_keys_dir: None,
             verified_code: &verified_code,
+            verified_command: Some(&verified_code[0]),
             item_ref: &canonical_ref,
             thread_id: "handler",
         },

@@ -447,6 +447,17 @@ impl ExecutionProvenance {
                 self.original_project_path().display()
             );
         }
+        if matches!(
+            &authority,
+            ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        ) && self.effective_path() != self.original_project_path()
+        {
+            anyhow::bail!(
+                "live execution effective path {} differs from canonical project root {}",
+                self.effective_path().display(),
+                self.original_project_path().display()
+            );
+        }
         if projected_snapshot != self.pinned_snapshot_hash() {
             anyhow::bail!(
                 "execution project authority snapshot does not match provenance snapshot: authority {:?}, provenance {:?}",

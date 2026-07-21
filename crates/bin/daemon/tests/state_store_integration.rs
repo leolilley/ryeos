@@ -292,6 +292,9 @@ mod integration_tests {
                 id,
                 &RuntimeLaunchMetadata::default()
                     .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                    .with_launch_driver(
+                        ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime,
+                    )
                     .with_resume_context(ResumeContext {
                         kind: kind.into(),
                         item_ref: item_ref.into(),
@@ -319,7 +322,7 @@ mod integration_tests {
                             )
                             .unwrap(),
                         ),
-                        local_overlay_root: Some(std::env::temp_dir()),
+                        local_overlay_root: None,
                         original_snapshot_hash: None,
                         original_pushed_head_ref: None,
                         state_root: None,
@@ -1537,7 +1540,7 @@ mod integration_tests {
                 )
                 .unwrap(),
             ),
-            local_overlay_root: Some(std::env::temp_dir()),
+            local_overlay_root: None,
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -1564,6 +1567,9 @@ mod integration_tests {
                     id,
                     &RuntimeLaunchMetadata::default()
                         .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                        .with_launch_driver(
+                            ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime,
+                        )
                         .with_resume_context(resume_ctx()),
                 )
                 .expect("seed launch metadata");
@@ -1677,7 +1683,7 @@ mod integration_tests {
                 )
                 .unwrap(),
             ),
-            local_overlay_root: Some(std::env::temp_dir()),
+            local_overlay_root: None,
             original_snapshot_hash: None,
             original_pushed_head_ref: None,
             state_root: None,
@@ -1702,6 +1708,9 @@ mod integration_tests {
                     id,
                     &RuntimeLaunchMetadata::default()
                         .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                        .with_launch_driver(
+                            ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime,
+                        )
                         .with_resume_context(resume_ctx()),
                 )
                 .expect("seed launch metadata");

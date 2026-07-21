@@ -817,6 +817,7 @@ async fn dispatch_streaming_subprocess(
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &isolation_verified_code,
+                    verified_command: Some(&isolation_verified_code[0]),
                     item_ref: &subject_item_ref,
                     thread_id: &thread_id,
                 },

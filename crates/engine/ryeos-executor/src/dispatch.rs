@@ -1833,6 +1833,7 @@ pub(crate) async fn dispatch_method(
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&node_trusted_keys_dir),
                     verified_code: &isolation_verified_code,
+                    verified_command: Some(&isolation_verified_code[0]),
                     item_ref: &runtime_item_ref_string,
                     thread_id: &thread_id,
                 },

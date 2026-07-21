@@ -4997,6 +4997,37 @@ impl PreparedItemPlan {
     ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
         let canonical_plan = lillux::canonical_json(&serde_json::to_value(&self.plan)?)?;
         let execution_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+        let plan_runtime = self
+            .plan
+            .runtime_identity
+            .as_ref()
+            .ok_or_else(|| anyhow!("direct execution plan has no verified runtime identity"))?;
+        let runtime_signer_fingerprint = plan_runtime
+            .runtime_signer_fingerprint
+            .clone()
+            .ok_or_else(|| {
+                anyhow!(
+                    "direct runtime {} has no verified signer identity",
+                    plan_runtime.runtime_ref
+                )
+            })?;
+        let runtime_identity = ryeos_state::objects::DirectRuntimeIdentity {
+            runtime_ref: plan_runtime.runtime_ref.clone(),
+            runtime_source_space: match plan_runtime.runtime_source_space {
+                ryeos_engine::contracts::ItemSpace::Project => {
+                    ryeos_state::objects::DirectRuntimeSourceSpace::Project
+                }
+                ryeos_engine::contracts::ItemSpace::Bundle => {
+                    ryeos_state::objects::DirectRuntimeSourceSpace::Bundle
+                }
+            },
+            runtime_content_hash: plan_runtime.runtime_content_hash.clone(),
+            runtime_signer_fingerprint,
+            runtime_bundle_manifest_hash: plan_runtime.runtime_bundle_manifest_hash.clone(),
+            runtime_bundle_signer_fingerprint: plan_runtime
+                .runtime_bundle_signer_fingerprint
+                .clone(),
+        };
         let executable_identity = match self.plan.nodes.first() {
             Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec
                 .verified_command
@@ -5059,6 +5090,7 @@ impl PreparedItemPlan {
             protocol_signer_fingerprint: protocol.signer_fingerprint.clone(),
             execution_plan_hash,
             executable_identity,
+            runtime_identity: Some(runtime_identity),
         };
         identity.validate()?;
         Ok(identity)
@@ -5068,11 +5100,14 @@ impl PreparedItemPlan {
 pub fn prepare_item_plan(
     engine: &Engine,
     resolved: &ResolvedExecutionRequest,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+    lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    live_access: Option<&ryeos_engine::isolation::IsolationLiveAccessAuthority>,
 ) -> Result<PreparedItemPlan> {
     let verified = engine
         .verify(&resolved.plan_context, resolved.resolved_item.clone())
         .map_err(|e| anyhow!("verification failed: {e}"))?;
-    let plan = engine
+    let mut plan = engine
         .build_plan(
             &resolved.plan_context,
             &verified,
@@ -5080,6 +5115,34 @@ pub fn prepare_item_plan(
             &resolved.plan_context.execution_hints,
         )
         .map_err(|e| anyhow!("plan build failed: {e}"))?;
+    if lifecycle_authority.recovery
+        == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
+    {
+        if !isolation.is_enforced() {
+            bail!(
+                "restartable verified-content execution requires enforced isolation; disabled isolation has no descriptor-backed immutable exec boundary"
+            );
+        }
+        let spec = match plan.nodes.first_mut() {
+            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec,
+            Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {
+                bail!("item plan entrypoint is complete, not a subprocess")
+            }
+            None => bail!("item plan is empty"),
+        };
+        if spec.verified_command.is_none() {
+            let project_root = match &resolved.plan_context.project_context {
+                ProjectContext::LocalPath { path } => Some(path.as_path()),
+                ProjectContext::None
+                | ProjectContext::SnapshotHash { .. }
+                | ProjectContext::ProjectRef { .. } => None,
+            };
+            let captured = isolation
+                .capture_verified_command(Path::new(&spec.cmd), project_root, live_access)
+                .map_err(|error| anyhow!("capture direct executable identity: {error}"))?;
+            spec.verified_command = Some(captured);
+        }
+    }
     let timeout_secs = match plan.nodes.first() {
         Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
             spec.timeout_secs

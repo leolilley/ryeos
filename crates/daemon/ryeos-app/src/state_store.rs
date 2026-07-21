@@ -933,7 +933,7 @@ fn load_admitted_launch_capsule(
         .get_object(capsule_hash)?
         .ok_or_else(|| anyhow!("admitted launch capsule is missing from CAS: {capsule_hash}"))?;
     let capsule = ryeos_state::objects::AdmittedLaunchCapsule::from_current_value(value)
-        .context("decode current admitted launch capsule")?;
+        .context("decode supported admitted launch capsule")?;
     if capsule.content_hash()? != capsule_hash {
         bail!("admitted launch capsule object hash is not canonical: {capsule_hash}");
     }
@@ -1006,7 +1006,11 @@ fn verify_admitted_launch_capsule(
         ),
         (Some(rooted_hash), Some(expected)) => {
             let expected_hash = expected.content_hash()?;
-            if snapshot.upstream_thread_id.is_none() && rooted_hash != expected_hash {
+            let rooted = load_admitted_launch_capsule(state_authority, rooted_hash)?;
+            if snapshot.upstream_thread_id.is_none()
+                && rooted.schema == expected.schema
+                && rooted_hash != expected_hash
+            {
                 bail!(
                     "thread {} admitted capsule drift: authoritative {}, attempted {}",
                     snapshot.thread_id,
@@ -1014,7 +1018,6 @@ fn verify_admitted_launch_capsule(
                     expected_hash
                 );
             }
-            let rooted = load_admitted_launch_capsule(state_authority, rooted_hash)?;
             if !rooted.same_continuation_admission(&expected)? {
                 bail!(
                     "thread {} launch attempt changed immutable admitted capsule authority",

@@ -82,6 +82,20 @@ pub struct MaterializationRequirement {
     pub ref_string: String,
 }
 
+/// Exact verified runtime descriptor selected while resolving the executor
+/// chain for a direct item launch. This travels with the built plan so later
+/// admission never re-resolves a mutable runtime reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanRuntimeIdentity {
+    pub runtime_ref: String,
+    pub runtime_source_space: crate::contracts::ItemSpace,
+    pub runtime_content_hash: String,
+    pub runtime_signer_fingerprint: Option<String>,
+    pub runtime_bundle_manifest_hash: Option<String>,
+    pub runtime_bundle_signer_fingerprint: Option<String>,
+}
+
 /// Normalized subprocess specification — the single source of truth for
 /// what to spawn. Compiled from the executor chain's runtime config by
 /// the plan builder. The dispatch layer just runs this struct.
@@ -163,6 +177,10 @@ pub struct ExecutionPlan {
     /// Executor IDs traversed during chain resolution.
     #[serde(default)]
     pub executor_chain: Vec<String>,
+    /// Verified identity of the first executor-chain hop (the runtime
+    /// descriptor) selected by this exact plan build.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_identity: Option<PlanRuntimeIdentity>,
     /// When set (from `--debug-raw` via `execution_hints`), the dispatcher
     /// attaches a `debug` block (resolved cmd/args/cwd/env keys + exit code and
     /// size-limited raw stdout/stderr) to the completion. Default `false` —

@@ -1002,7 +1002,8 @@ pub fn execution_tree(
             t.thread_id, t.chain_root_id, t.kind, t.status,
             t.item_ref, t.executor_ref, t.launch_mode,
             t.current_site_id, t.origin_site_id, t.upstream_thread_id,
-            t.requested_by, t.project_root,
+            t.requested_by, t.project_root, t.project_authority_json,
+            t.admitted_launch_capsule_hash,
             t.base_project_snapshot_hash, t.result_project_snapshot_hash,
             t.captured_history_policy_json,
             t.created_at, t.updated_at, t.started_at, t.finished_at,
@@ -3144,7 +3145,7 @@ mod tests {
                  (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
                   launch_mode, current_site_id, origin_site_id, project_authority_json, created_at, updated_at) \
                  VALUES (?1, ?1, 'directive', ?2, 'directive:test', 'test/exec', \
-                  'inline', 'site:test', 'site:test', ?4, ?3, ?3)",
+                  'wait', 'site:test', 'site:test', ?4, ?3, ?3)",
                 rusqlite::params![
                     id,
                     status,
@@ -3206,7 +3207,7 @@ mod tests {
                  (thread_id, chain_root_id, kind, status, item_ref, executor_ref, \
                   launch_mode, current_site_id, origin_site_id, requested_by, project_authority_json, created_at, updated_at) \
                  VALUES (?1, ?1, ?2, ?3, 'directive:test', 'test/exec', \
-                  'inline', 'site:test', 'site:test', ?4, ?5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                  'wait', 'site:test', 'site:test', ?4, ?5, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
                 rusqlite::params![
                     id,
                     kind,

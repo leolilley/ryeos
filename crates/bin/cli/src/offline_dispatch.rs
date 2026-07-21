@@ -663,6 +663,7 @@ fn exec_tool(
                         .join("config/keys/trusted"),
                 ),
                 verified_code: &isolation_verified_code,
+                verified_command: Some(&isolation_verified_code[0]),
                 item_ref: tool_ref_str,
                 thread_id: "offline-cli",
             },

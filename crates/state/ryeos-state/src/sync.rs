@@ -642,6 +642,24 @@ mod tests {
     use std::fs;
     use std::sync::Arc;
 
+    fn projectless_authority_json() -> serde_json::Value {
+        serde_json::json!({ "kind": "projectless", "environment": { "kind": "none" } })
+    }
+
+    fn durable_history_policy_json(item_ref: &str) -> serde_json::Value {
+        serde_json::json!({
+            "retention": { "mode": "durable" },
+            "canonical_item_ref": item_ref,
+            "item_content_hash": "11".repeat(32),
+            "item_signer_fingerprint": "22".repeat(32),
+            "item_trust_class": "trusted",
+            "kind_schema_content_hash": "33".repeat(32),
+            "resolved_from": {
+                "node_default": { "node_policy": "missing_config" }
+            }
+        })
+    }
+
     fn test_trust_store() -> Arc<crate::refs::TrustStore> {
         let signer = TestSigner::default();
         let mut trust_store = crate::refs::TrustStore::new();
@@ -789,18 +807,9 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
-            "captured_history_policy": {
-                "retention": { "mode": "durable" },
-                "canonical_item_ref": "directive:test/item",
-                "item_content_hash": "11".repeat(32),
-                "item_signer_fingerprint": "22".repeat(32),
-                "item_trust_class": "trusted",
-                "kind_schema_content_hash": "33".repeat(32),
-                "resolved_from": {
-                    "node_default": { "node_policy": "missing_config" }
-                }
-            }
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
+            "captured_history_policy": durable_history_policy_json("directive:test/item"),
         });
         let snap_hash = object_hash(&snap);
         let cs = serde_json::json!({
@@ -1028,18 +1037,9 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
-            "captured_history_policy": {
-                "retention": { "mode": "durable" },
-                "canonical_item_ref": "directive:test/item",
-                "item_content_hash": "11".repeat(32),
-                "item_signer_fingerprint": "22".repeat(32),
-                "item_trust_class": "trusted",
-                "kind_schema_content_hash": "33".repeat(32),
-                "resolved_from": {
-                    "node_default": { "node_policy": "missing_config" }
-                }
-            }
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
+            "captured_history_policy": durable_history_policy_json("directive:test/item"),
         });
         let snap_hash = object_hash(&snap);
         let cs = serde_json::json!({
@@ -1136,18 +1136,9 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
-            "captured_history_policy": {
-                "retention": { "mode": "durable" },
-                "canonical_item_ref": "directive:test/imported",
-                "item_content_hash": "11".repeat(32),
-                "item_signer_fingerprint": "22".repeat(32),
-                "item_trust_class": "trusted",
-                "kind_schema_content_hash": "33".repeat(32),
-                "resolved_from": {
-                    "node_default": { "node_policy": "missing_config" }
-                }
-            }
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
+            "captured_history_policy": durable_history_policy_json("directive:test/imported"),
         });
         let snap_bytes = lillux::canonical_json(&snap).unwrap().into_bytes();
         let snap_hash = lillux::sha256_hex(&snap_bytes);
