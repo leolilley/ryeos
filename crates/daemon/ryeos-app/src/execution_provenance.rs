@@ -1004,7 +1004,7 @@ mod tests {
             .resolve_live_project_authority(
                 &project,
                 ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
-                vec!["project.write".to_string()],
+                vec![crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
             )
             .unwrap();
         let live_access = isolation_live_access_authority_for_project(&project_authority)
