@@ -1,8 +1,8 @@
 //! Provider-native credential validation driven by verified provider setup metadata.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use std::net::{IpAddr, SocketAddr};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItemRequest;
@@ -115,8 +115,9 @@ pub async fn handle(
     };
     let model = req.model.as_deref().unwrap_or_default();
     let url = validation.url.replace("{model}", model);
-    let parsed_url = url::Url::parse(&url)
-        .map_err(|error| HandlerError::Internal(format!("verified validation URL is invalid: {error}")))?;
+    let parsed_url = url::Url::parse(&url).map_err(|error| {
+        HandlerError::Internal(format!("verified validation URL is invalid: {error}"))
+    })?;
     let pinned_resolution = resolve_validation_target(&parsed_url, credential.is_some()).await?;
     let mut client_builder = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(validation.timeout_seconds.min(30)))
@@ -135,8 +136,7 @@ pub async fn handle(
     if let (Some(credential), Some(header_name)) = (
         credential.as_ref().map(|value| value.as_str()),
         runtime_provider.auth.header_name.as_deref(),
-    )
-    {
+    ) {
         let authorization = Zeroizing::new(format!(
             "{}{}",
             runtime_provider.auth.prefix.as_deref().unwrap_or_default(),
@@ -173,10 +173,18 @@ pub async fn handle(
             body.extend_from_slice(&chunk);
         }
         let rendered = std::str::from_utf8(body.as_slice()).unwrap_or("[non-UTF-8 response body]");
-        let sanitized = Zeroizing::new(rendered
-            .chars()
-            .map(|character| if character.is_control() { '�' } else { character })
-            .collect::<String>());
+        let sanitized = Zeroizing::new(
+            rendered
+                .chars()
+                .map(|character| {
+                    if character.is_control() {
+                        '�'
+                    } else {
+                        character
+                    }
+                })
+                .collect::<String>(),
+        );
         let detail = redact(
             sanitized.as_str(),
             credential.as_ref().map(|value| value.as_str()),
@@ -212,7 +220,9 @@ async fn resolve_validation_target(
     }
     let addresses = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|error| HandlerError::BadRequest(format!("provider validation DNS lookup failed: {error}")))?
+        .map_err(|error| {
+            HandlerError::BadRequest(format!("provider validation DNS lookup failed: {error}"))
+        })?
         .collect::<Vec<_>>();
     if addresses.is_empty() {
         return Err(HandlerError::BadRequest(
@@ -247,7 +257,9 @@ fn validate_target_ip(ip: IpAddr, sends_credential: bool) -> HandlerResult<()> {
                 || ip.segments()[0] == 0x2001 && ip.segments()[1] == 0x0db8
         }
     };
-    if (sends_credential && loopback) || (unsafe_network && !(!sends_credential && loopback)) {
+    let credential_to_loopback = sends_credential && loopback;
+    let unsafe_non_loopback = unsafe_network && !loopback;
+    if credential_to_loopback || unsafe_non_loopback {
         return Err(HandlerError::BadRequest(
             "provider validation target resolves to a disallowed network".to_string(),
         ));
