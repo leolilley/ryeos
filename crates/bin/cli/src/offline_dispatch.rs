@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::engine::EffectiveItem;
-use ryeos_runtime::{CommandDef, CommandDispatch, CommandRegistry};
+use ryeos_runtime::{CommandAvailability, CommandDef, CommandDispatch, CommandRegistry};
 use serde_json::Value;
 
 use crate::error::CliError;
@@ -97,9 +97,16 @@ pub async fn try_offline_dispatch(
     let Ok(matched) = registry.resolve(argv) else {
         return Ok(None);
     };
-    let CommandDispatch::ExecuteRef { execute, .. } = &matched.command.dispatch else {
+    let CommandDispatch::ExecuteRef {
+        execute,
+        availability,
+    } = &matched.command.dispatch
+    else {
         return Ok(None);
     };
+    if *availability == CommandAvailability::Daemon {
+        return Ok(None);
+    }
 
     // 3. Parse the command's execute ref for the engine. Kind semantics stay in
     //    the engine; dispatch below is based on composed fields.
@@ -1571,6 +1578,29 @@ else:
 
         assert_eq!(result["name"], "leo");
         assert_eq!(result["project_path"], fixture.project_str());
+    }
+
+    #[test]
+    fn daemon_only_execute_ref_bypasses_offline_tool_dispatch() {
+        let fixture = Fixture::new();
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("node")
+                .join("commands")
+                .join("custom.yaml"),
+            "tokens: [\"custom\"]\ndescription: Daemon-owned command\nforms:\n  - slots:\n      - field: name\ndispatch:\n  kind: execute_ref\n  execute: service:custom\n  availability: daemon\n",
+        );
+
+        let outcome = try_offline_dispatch_for_test(
+            &["custom".to_string(), "leo".to_string()],
+            &fixture.system,
+            &fixture.project_str(),
+        )
+        .unwrap();
+
+        assert!(outcome.is_none(), "daemon-only command ran offline");
     }
 
     #[test]
