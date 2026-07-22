@@ -160,7 +160,7 @@ NO_COLOR=1 TERM=xterm COLUMNS=40 RYEOS_TTY=always bash -c \
     _ "$helper" 2>"$tmp/wide-cells"
 assert_terminal_frames_fit "$tmp/wide-cells" 39 wide
 
-NO_COLOR=1 TERM=xterm RYEOS_TTY=always COLUMNS= bash -c \
+NO_COLOR=1 TERM=xterm RYEOS_TTY=always COLUMNS='' bash -c \
     'source "$1"; _ryeos_term_detect_columns() { printf 47; }; ryeos_term_init; [[ "$_RYEOS_TERM_WIDTH" == 46 ]]' \
     _ "$helper"
 

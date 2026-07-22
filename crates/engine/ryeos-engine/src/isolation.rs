@@ -1249,22 +1249,21 @@ impl IsolationRuntime {
                     "live project path binding changed before command capture: {error}"
                 ))
             })?;
-            let captured = if canonical_command.starts_with(&canonical_project) {
+            let captured = if canonical_command.starts_with(canonical_project) {
                 if command != canonical_command {
                     return Err(refused(format!(
                         "project-local command symlink is not descriptor-rooted: {}",
                         command.display()
                     )));
                 }
-                let relative =
-                    canonical_command
-                        .strip_prefix(&canonical_project)
-                        .map_err(|_| {
-                            refused(format!(
-                                "project command escaped its descriptor root: {}",
-                                canonical_command.display()
-                            ))
-                        })?;
+                let relative = canonical_command
+                    .strip_prefix(canonical_project)
+                    .map_err(|_| {
+                        refused(format!(
+                            "project command escaped its descriptor root: {}",
+                            canonical_command.display()
+                        ))
+                    })?;
                 read_descriptor_relative_regular_file_limited(root, relative, max_file_bytes)?
             } else {
                 if !is_on_system_runtime_surface(&canonical_command) {
@@ -1525,7 +1524,7 @@ impl IsolationRuntime {
 
                 let mut verified = context.verified_code.iter().collect::<Vec<_>>();
                 if let Some(admitted) = context.verified_command {
-                    if !verified.iter().any(|candidate| *candidate == admitted) {
+                    if !verified.contains(&admitted) {
                         verified.push(admitted);
                     }
                 }
