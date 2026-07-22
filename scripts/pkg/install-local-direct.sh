@@ -167,6 +167,8 @@ validate_source_publisher_trust() {
     local -a declared_fingerprints=()
     local -a encoded_public_keys=()
 
+    VALIDATED_SOURCE_PUBLISHER_FINGERPRINT=""
+
     if [[ ! -f "$trust_file" ]]; then
         ryeos_term_fail "source publisher trust document not found: $trust_file"
         return 1
@@ -206,11 +208,11 @@ validate_source_publisher_trust() {
         ryeos_term_fail "source publisher trust document fingerprint does not match its public_key: $trust_file"
         return 1
     fi
+    VALIDATED_SOURCE_PUBLISHER_FINGERPRINT="$computed_fingerprint"
     if [[ "$computed_fingerprint" == "$official_fingerprint" ]]; then
         return 0
     fi
     if [[ "$allow_source_publishers" == "1" ]]; then
-        ryeos_term_info "explicitly trusting source publisher $computed_fingerprint"
         return 0
     fi
 
@@ -218,6 +220,43 @@ validate_source_publisher_trust() {
     ryeos_term_fail "refusing to pin trust from $trust_file automatically"
     ryeos_term_info "rerun with --trust-source-publishers to make this development/custom trust decision explicit, or use --no-init to install files only"
     return 1
+}
+
+# Validate every selected trust document, then report the operator's explicit
+# trust decision once per distinct non-official publisher. A full source tree
+# normally repeats one publisher document at the root and in every bundle; the
+# documents remain independent validation boundaries even when their signer is
+# the same.
+validate_selected_source_publisher_trust() {
+    local allow_source_publishers="$1"
+    local official_fingerprint="$2"
+    shift 2
+    local trust_file fingerprint count
+    local -a publisher_order=()
+    local -A publisher_counts=()
+
+    for trust_file in "$@"; do
+        validate_source_publisher_trust \
+            "$trust_file" "$allow_source_publishers" "$official_fingerprint" || return 1
+        fingerprint="$VALIDATED_SOURCE_PUBLISHER_FINGERPRINT"
+        if [[ "$fingerprint" == "$official_fingerprint" ]]; then
+            continue
+        fi
+        if [[ -z "${publisher_counts[$fingerprint]+present}" ]]; then
+            publisher_order+=("$fingerprint")
+            publisher_counts["$fingerprint"]=0
+        fi
+        publisher_counts["$fingerprint"]=$((publisher_counts["$fingerprint"] + 1))
+    done
+
+    for fingerprint in "${publisher_order[@]}"; do
+        count="${publisher_counts[$fingerprint]}"
+        if (( count == 1 )); then
+            ryeos_term_info "explicitly trusting source publisher $fingerprint"
+        else
+            ryeos_term_info "explicitly trusting source publisher $fingerprint · $count selected documents"
+        fi
+    done
 }
 
 # Build init trust arguments from the exact source boundary the installer
@@ -579,11 +618,9 @@ if [[ $run_init -eq 1 ]]; then
         source_trust_doc="$repo_root/bundles/$name/PUBLISHER_TRUST.toml"
         [[ -f "$source_trust_doc" ]] && source_trust_docs+=("$source_trust_doc")
     done
-    for source_trust_doc in "${source_trust_docs[@]}"; do
-        validate_source_publisher_trust \
-            "$source_trust_doc" "$trust_source_publishers" "$official_publisher_fp" \
-            || die "source publisher trust policy rejected initialization"
-    done
+    validate_selected_source_publisher_trust \
+        "$trust_source_publishers" "$official_publisher_fp" "${source_trust_docs[@]}" \
+        || die "source publisher trust policy rejected initialization"
 fi
 
 daemon_was_running=0

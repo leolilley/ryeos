@@ -66,6 +66,15 @@ expect_rejected validate_source_publisher_trust "$root_trust" 0 "$official_finge
 validate_source_publisher_trust "$root_trust" 1 "$official_fingerprint"
 expect_rejected validate_source_publisher_trust "$tmp/missing.toml" 1 "$official_fingerprint"
 
+# Repeated documents from one selected publisher are all validated but produce
+# one operator-facing trust decision instead of one line per bundle.
+trust_output="$(
+    _RYEOS_TERM_WIDTH=200 validate_selected_source_publisher_trust \
+        1 "$official_fingerprint" "$root_trust" "$bundle_trust" 2>&1
+)"
+[[ "$(grep -o "$dev_fingerprint" <<<"$trust_output" | wc -l)" -eq 1 ]]
+[[ "$trust_output" == *"2 selected documents"* ]]
+
 # A custom key cannot bypass the early guard by merely claiming the official
 # fingerprint in text; classification hashes the decoded key material.
 forged_trust="$tmp/forged/PUBLISHER_TRUST.toml"
