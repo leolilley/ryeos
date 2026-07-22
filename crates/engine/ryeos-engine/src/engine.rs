@@ -1183,6 +1183,28 @@ formats:
     }
 
     #[test]
+    fn registered_resolution_roots_keep_project_ai_root_first() {
+        let engine = test_engine().with_registered_bundle_roots(vec![
+            crate::item_resolution::RegisteredBundleRoot {
+                name: "core".to_owned(),
+                canonical_root: PathBuf::from("/bundles/core"),
+            },
+        ]);
+        let roots = engine.resolution_roots(Some(PathBuf::from("/workspace/project")));
+
+        assert_eq!(roots.ordered.len(), 2);
+        assert_eq!(roots.ordered[0].space, ItemSpace::Project);
+        assert_eq!(roots.ordered[0].label, "project");
+        assert_eq!(
+            roots.ordered[0].ai_root,
+            PathBuf::from("/workspace/project/.ai")
+        );
+        assert_eq!(roots.ordered[1].space, ItemSpace::Bundle);
+        assert_eq!(roots.ordered[1].label, "bundle:core");
+        assert_eq!(roots.ordered[1].ai_root, PathBuf::from("/bundles/core/.ai"));
+    }
+
+    #[test]
     fn resolution_roots_without_project() {
         let engine = test_engine();
         let roots = engine.resolution_roots(None);
