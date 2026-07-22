@@ -72,7 +72,7 @@ pub(crate) struct DispatchLaunchOptions {
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
-    pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     /// Exact verified subject and captured policy returned by synchronous
     /// dispatch preflight. This may name a terminal target behind the
     /// caller-named wrapper; both success and failure persistence consume this
@@ -93,8 +93,10 @@ impl DispatchLaunchOptions {
         root_admission: ryeos_app::thread_lifecycle::RootExecutionAdmission,
         execution_workspace: &std::path::Path,
         ref_bindings: BTreeMap<String, String>,
+        lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     ) -> anyhow::Result<Self> {
         root_admission.validate()?;
+        lifecycle_authority.validate()?;
         if root_admission.ref_bindings() != &ref_bindings {
             anyhow::bail!("dispatch launch secondary identities do not match sealed admission");
         }
@@ -122,8 +124,7 @@ impl DispatchLaunchOptions {
             usage_subject_asserted_by: None,
             call: None,
             previous_thread_id: None,
-            lifecycle_authority:
-                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+            lifecycle_authority,
             root_admission,
             project_path,
             captured_generation: None,

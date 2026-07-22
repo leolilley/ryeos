@@ -152,6 +152,7 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
 
     Ok(lillux::SubprocessRequest {
         cmd: spec.cmd.clone(),
+        argv0: None,
         args: spec.args.clone(),
         cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,
@@ -449,6 +450,7 @@ fn isolation_plan_request(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
+            verified_command: spec.verified_command.as_ref(),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -473,6 +475,7 @@ fn isolation_plan_request_awaiting_attachment(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
+            verified_command: spec.verified_command.as_ref(),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -601,7 +604,11 @@ mod tests {
             app_root,
             isolation,
             isolation_project_authority: crate::isolation::IsolationProjectAuthority::External,
-            isolation_live_access_authority: None,
+            isolation_live_access_authority: Some(
+                crate::isolation::IsolationLiveAccessAuthority::UnconfinedHost {
+                    authorized_write_namespaces: vec!["project".into()],
+                },
+            ),
             isolation_state_root: None,
             isolation_checkpoint_dir: None,
             isolation_daemon_socket_path: None,
@@ -637,6 +644,7 @@ mod tests {
             materialization_requirements: Vec::new(),
             cache_key: "test".into(),
             executor_chain: vec!["@test".into()],
+            runtime_identity: None,
             debug_raw: false,
         }
     }

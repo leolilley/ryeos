@@ -359,7 +359,7 @@ fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
     serde_json::json!({
         "schema_version": 2,
         "ownership": "daemon_owned",
-        "recovery": if project_backed { "none" } else { "restart_recoverable" },
+        "recovery": "restart_recoverable",
         "response": if accepted { "accepted" } else { "wait" },
         "target": { "kind": "here" },
         "environment": if project_backed {
@@ -1781,21 +1781,30 @@ mod tests {
     }
 
     #[test]
-    fn live_project_execute_is_daemon_owned_but_not_restart_recoverable() {
-        let policy = execution_policy_value(true, true);
-        assert_eq!(policy["ownership"], "daemon_owned");
-        assert_eq!(policy["recovery"], "none");
-        assert_eq!(policy["response"], "accepted");
-        assert_eq!(policy["project"]["kind"], "live_direct");
+    fn live_project_execute_is_daemon_owned_and_restart_recoverable() {
+        let wait = execution_policy_value(true, false);
+        let accepted = execution_policy_value(true, true);
+        for policy in [&wait, &accepted] {
+            assert_eq!(policy["ownership"], "daemon_owned");
+            assert_eq!(policy["recovery"], "restart_recoverable");
+            assert_eq!(policy["project"]["kind"], "live_direct");
+        }
+        assert_eq!(wait["response"], "wait");
+        assert_eq!(accepted["response"], "accepted");
+        assert_eq!(wait["project"], accepted["project"]);
     }
 
     #[test]
     fn projectless_execute_can_be_restart_recoverable() {
-        let policy = execution_policy_value(false, false);
-        assert_eq!(policy["ownership"], "daemon_owned");
-        assert_eq!(policy["recovery"], "restart_recoverable");
-        assert_eq!(policy["response"], "wait");
-        assert_eq!(policy["project"]["kind"], "projectless");
+        let wait = execution_policy_value(false, false);
+        let accepted = execution_policy_value(false, true);
+        for policy in [&wait, &accepted] {
+            assert_eq!(policy["ownership"], "daemon_owned");
+            assert_eq!(policy["recovery"], "restart_recoverable");
+            assert_eq!(policy["project"]["kind"], "projectless");
+        }
+        assert_eq!(wait["response"], "wait");
+        assert_eq!(accepted["response"], "accepted");
     }
 
     #[test]

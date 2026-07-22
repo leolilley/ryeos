@@ -56,6 +56,20 @@ pub fn ryeosd_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ryeosd"))
 }
 
+fn ryeosd_command() -> Command {
+    let mut command = Command::new(ryeosd_binary());
+    // Debug daemon builds cross the default 2 MiB Tokio worker stack while
+    // constructing the fully verified inventory/launch closure used by these
+    // real-process integration tests. Release installs are optimized below
+    // that boundary. Keep the harness deterministic while still honoring a
+    // caller-supplied larger stack.
+    command.env(
+        "RUST_MIN_STACK",
+        std::env::var_os("RUST_MIN_STACK").unwrap_or_else(|| "4194304".into()),
+    );
+    command
+}
+
 /// Monotonic per-process counter used to give each spawned daemon a
 /// unique stderr log file name without relying on a port number that
 /// isn't known until after bind.
@@ -530,7 +544,7 @@ impl DaemonHarness {
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
         let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
-        let mut cmd = Command::new(ryeosd_binary());
+        let mut cmd = ryeosd_command();
         cmd.arg("--app-root")
             .arg(&app_root)
             .arg("--bind")
@@ -665,7 +679,7 @@ impl DaemonHarness {
         let uds_path = state_dir_outer.path().join("ryeosd.sock");
         let stderr_log_path = daemon_stderr_log_path(state_dir_outer.path(), harness_id);
 
-        let mut cmd = Command::new(ryeosd_binary());
+        let mut cmd = ryeosd_command();
         // NOTE: NO . The fast fixture is the init.
         cmd.arg("--app-root")
             .arg(&state_path)
@@ -753,6 +767,15 @@ impl DaemonHarness {
             "ref_bindings": ref_bindings,
             "project_path": project_path,
             "parameters": params,
+            "execution_policy": if project_path.is_some() {
+                ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                )
+            } else {
+                ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                )
+            },
         });
         self.post_json("/execute", body).await
     }
@@ -851,7 +874,7 @@ impl DaemonHarness {
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
 
-        let mut cmd = Command::new(ryeosd_binary());
+        let mut cmd = ryeosd_command();
         cmd.arg("--app-root")
             .arg(&self.state_path)
             .arg("--bind")
@@ -947,7 +970,7 @@ impl DaemonHarness {
         let stderr_log_path = daemon_stderr_log_path(self._state_dir_outer.path(), harness_id);
         let daemon_json = self.state_path.join("daemon.json");
         let _ = std::fs::remove_file(&daemon_json);
-        let mut cmd = Command::new(ryeosd_binary());
+        let mut cmd = ryeosd_command();
         cmd.arg("--app-root")
             .arg(&self.state_path)
             .arg("--bind")
@@ -1085,7 +1108,7 @@ impl StandaloneHarness {
         service_ref: &str,
         params_json: Option<&str>,
     ) -> anyhow::Result<std::process::Output> {
-        let mut cmd = tokio::process::Command::new(ryeosd_binary());
+        let mut cmd = ryeosd_command();
         cmd.arg("--app-root")
             .arg(&self.app_root)
             .arg("--uds-path")
@@ -1147,7 +1170,7 @@ pub async fn run_service_standalone(
     )?;
     drop(scheduler_db);
 
-    let mut cmd = Command::new(ryeosd_binary());
+    let mut cmd = ryeosd_command();
     cmd.arg("--app-root")
         .arg(&state_path)
         .arg("--uds-path")

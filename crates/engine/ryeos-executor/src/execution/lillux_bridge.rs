@@ -18,6 +18,7 @@ pub fn to_lillux_request(spec: &SubprocessSpec) -> anyhow::Result<lillux::Subpro
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("subprocess command path is not valid UTF-8"))?
             .to_owned(),
+        argv0: None,
         args: spec.args.clone(),
         cwd: Some(
             spec.cwd

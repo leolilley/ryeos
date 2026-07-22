@@ -1,10 +1,15 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum IsolationLiveAccessAuthority {
     DescriptorRootedMasked {
+        /// Exact live root retained from authority resolution through adapter
+        /// spawn. Isolation mounts clone this descriptor; they never reopen the
+        /// ambient project pathname after identity validation.
+        root: Arc<lillux::PinnedDirectory>,
         root_device_id: u64,
         root_inode: u64,
         denied_control_paths: Vec<PathBuf>,
@@ -61,6 +66,10 @@ pub struct IsolationLaunchContext<'a> {
     pub bundle_roots: &'a [PathBuf],
     pub node_trusted_keys_dir: Option<&'a Path>,
     pub verified_code: &'a [IsolationVerifiedCode],
+    /// The one verified-code entry that must supply the process executable.
+    /// Other entries may be imported tool/runtime files and cannot silently
+    /// substitute for a changed command.
+    pub verified_command: Option<&'a IsolationVerifiedCode>,
     pub item_ref: &'a str,
     pub thread_id: &'a str,
 }

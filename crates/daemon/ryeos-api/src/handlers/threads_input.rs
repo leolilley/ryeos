@@ -298,6 +298,7 @@ fn admit_fresh_launch(
     parameters: &Value,
     ctx: &HandlerContext,
     state: &AppState,
+    lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
 ) -> Result<crate::routes::launch::DispatchLaunchOptions, HandlerError> {
     let preflight = crate::routes::launch::preflight_dispatch_launch(
         state,
@@ -327,6 +328,7 @@ fn admit_fresh_launch(
         root_admission,
         &project.effective_path,
         ref_bindings.clone(),
+        lifecycle_authority,
     )
     .map_err(|error| {
         HandlerError::Internal(format!(
@@ -396,15 +398,6 @@ pub async fn handle(
                 .map_err(|error| {
                     HandlerError::BadRequest(format!("capture fresh thread project: {error}"))
                 })?;
-            let mut launch_options = admit_fresh_launch(
-                &parsed_ref,
-                &ref_bindings,
-                &project_ctx,
-                &parameters,
-                &ctx,
-                &state,
-            )?
-            .retain_captured_generation(project_ctx.take_captured_generation());
             let resolved_authority =
                 ryeos_app::execution_policy::resolve_standard_local_live_authority(
                     &project_ctx.effective_path,
@@ -412,7 +405,16 @@ pub async fn handle(
                     &state.isolation,
                 )
                 .map_err(|error| HandlerError::Internal(error.to_string()))?;
-            launch_options.lifecycle_authority = resolved_authority.lifecycle;
+            let launch_options = admit_fresh_launch(
+                &parsed_ref,
+                &ref_bindings,
+                &project_ctx,
+                &parameters,
+                &ctx,
+                &state,
+                resolved_authority.lifecycle,
+            )?
+            .retain_captured_generation(project_ctx.take_captured_generation());
             let launch_provenance =
                 ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
                     project_ctx.effective_path.clone(),

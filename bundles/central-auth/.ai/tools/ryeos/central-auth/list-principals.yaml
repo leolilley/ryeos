@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-14T23:11:07Z:4ecd1f9a5540e79a2d76ec8e1cea9029492818a3a63ec008ccdbe295ea5de7a8:loZT/+yITNt0f9xyieSRaua3VTxkjW8F1FYM8teiyWPSz8RHuzg736xTFhD2XmDA/m4gl+khbJrdDk7mmxvsBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T08:42:53Z:4ecd1f9a5540e79a2d76ec8e1cea9029492818a3a63ec008ccdbe295ea5de7a8:dR4y17/X6qwZF+x0yVZBQ9tE1zBXAVVqLrncMaqhIPBmvmkKn5VCqmJKlgzPxrwqMNIqep0HtJpUxWtqNfc3Ag==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "list-principals"

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-19T06:52:20Z:fed77e6eae30dc4de4c88b9f12005ab5cc4eaf98bf3ceac120626d0160b5d64e:VkAoI7fiZpGtLIfXcV2SbCUGh3/4gfg16BwZEFw5Cgc/OBm27RibT6Rs7lu3yN/+PNgDoJsYV9PFvU17Z8D6BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-21T12:08:28Z:dd4b319b17cbbcc616a7f629a5e58d34f944dabb01af40a9b62228e1a3f23a6a:g5KPLWrBc6Zlh9J35f/rbFy7Df0HnsPra+J9ZKIc6Qf1tgbdmRVhJW5dmSLoVNsLwiZQR5NtJslgE8nVExs2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -36,7 +36,7 @@ config:
     - "-u"
     - "-c"
     - |
-      import os,sys,json,importlib.util,inspect,asyncio
+      import os,sys,json,hashlib,types,inspect,asyncio
       from pathlib import Path
       _saved_stdout=os.dup(1)
       os.set_inheritable(_saved_stdout,False)
@@ -45,7 +45,14 @@ config:
       def prepend(path):
           value=str(path)
           if value and value not in sys.path:sys.path.insert(0,value)
-      tool_path=Path(sys.argv[1]).resolve()
+      sealed_path=sys.argv[1]
+      handoff=json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP","null"))
+      entry=handoff.get("entries",dict()).get(sealed_path) if isinstance(handoff,dict) else None
+      if not isinstance(handoff,dict) or handoff.get("version")!=1 or not entry:sys.exit("RyeOS Python runtime: missing sealed tool identity")
+      tool_path=Path(entry["logical_path"])
+      source=Path(sealed_path).read_bytes()
+      actual_hash=hashlib.sha256(source).hexdigest()
+      if actual_hash!=entry["content_hash"]:sys.exit("RyeOS Python runtime: sealed tool digest mismatch")
       runtime_lib=Path(sys.argv[2]).resolve()
       project_path=sys.argv[3]
       tools_root=None
@@ -59,11 +66,14 @@ config:
       bundle_tool_root=tools_root/rel.parts[0]
       tool_dir=tool_path.parent
       for path in reversed([tool_dir,bundle_tool_root,bundle_tool_root/"lib",runtime_lib]):prepend(path)
-      spec=importlib.util.spec_from_file_location("tool",sys.argv[1])
-      mod=importlib.util.module_from_spec(spec)
-      spec.loader.exec_module(mod)
+      mod=types.ModuleType("tool")
+      mod.__file__=str(tool_path)
+      mod.__loader__=None
+      mod.__package__=None
+      mod.__spec__=None
+      exec(compile(source,str(tool_path),"exec"),mod.__dict__)
       fn=getattr(mod,"execute",None)
-      if not fn:sys.exit("No execute() in "+sys.argv[1])
+      if not fn:sys.exit("No execute() in "+str(tool_path))
       p=json.loads(sys.stdin.read())
       if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,project_path))
       else:r=fn(p,project_path)

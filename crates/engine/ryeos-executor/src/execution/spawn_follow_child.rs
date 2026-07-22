@@ -72,14 +72,8 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
     let params: SpawnFollowChildParams = serde_json::from_value(params.clone())
         .context("invalid runtime.spawn_follow_child params")?;
 
-    if params.children.is_empty() {
-        bail!("follow: children must be nonempty");
-    }
-    let fanout = params.children.len() > 1 || params.launch_window_width.is_some();
+    let fanout = validate_follow_launch(params.children.len(), params.launch_window_width)?;
     let children = params.children;
-    if params.launch_window_width == Some(0) {
-        bail!("follow: launch_window_width must be greater than zero");
-    }
 
     let parent_thread_id = params.thread_id.clone();
     let project_path = std::path::PathBuf::from(&params.project_path);
@@ -1262,6 +1256,33 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "parent_successor_thread_id": parent_successor_thread_id,
         "idempotent": re_drive,
     }))
+}
+
+fn validate_follow_launch(children_len: usize, launch_window_width: Option<u32>) -> Result<bool> {
+    if children_len == 0 {
+        bail!("follow: children must be nonempty");
+    }
+    if launch_window_width == Some(0) {
+        bail!("follow: launch_window_width must be greater than zero");
+    }
+    Ok(children_len > 1 || launch_window_width.is_some())
+}
+
+#[cfg(test)]
+mod launch_shape_tests {
+    use super::validate_follow_launch;
+
+    #[test]
+    fn single_child_can_use_a_launch_window() {
+        assert!(validate_follow_launch(1, Some(1)).expect("single-item launch window is valid"));
+        assert!(validate_follow_launch(1, Some(8)).expect("window may exceed cohort size"));
+    }
+
+    #[test]
+    fn invalid_follow_launch_shapes_remain_rejected() {
+        assert!(validate_follow_launch(0, Some(1)).is_err());
+        assert!(validate_follow_launch(1, Some(0)).is_err());
+    }
 }
 
 /// Walk the follow-waiter lineage from `chain_root_id` upward and refuse a new

@@ -1,11 +1,12 @@
-# rye:unsigned
+# ryeos-tool:
+#   category: ryeos/central-auth/lib
+#   version: "0.1.0"
+#   tool_type: python
+#   executor_id: null
+#   description: "Shared central-auth implementation for the sibling RyeOS tool descriptors. Not directly invokable."
 """Shared central-auth implementation for the sibling RyeOS tool descriptors."""
 
 from __future__ import annotations
-
-__version__ = "0.1.0"
-__category__ = "ryeos/central-auth"
-__description__ = "Shared implementation for central-auth tool descriptors"
 
 import argparse
 import base64

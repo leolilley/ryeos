@@ -1509,7 +1509,10 @@ fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
         return error.to_string();
     }
     if let Some(error) = payload.get("error").filter(|value| !value.is_null()) {
-        return value_summary(error);
+        // Failure diagnostics are not a compact result projection. Preserve the
+        // complete structured body so fields beyond the normal four-field TTY
+        // summary remain available for diagnosis.
+        return serde_json::to_string(error).unwrap_or_else(|_| error.to_string());
     }
     payload
         .get("outcome_code")
@@ -1683,6 +1686,26 @@ mod tests {
             "outcome_code": "success"
         })));
         assert!(!result_indicates_failure(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn structured_failure_reason_preserves_the_complete_error_body() {
+        let tail = "diagnostic-tail-marker".repeat(24);
+        let payload = serde_json::json!({
+            "error": {
+                "code": "pipeline_failed",
+                "phase": "dispatch",
+                "project": "arc",
+                "retryable": false,
+                "cause": "nested failure",
+                "detail": tail,
+            }
+        });
+
+        let reason = stream_failure_reason(&payload, "command failed");
+        assert!(reason.contains("pipeline_failed"));
+        assert!(reason.contains("nested failure"));
+        assert!(reason.contains(&tail));
     }
 
     #[test]

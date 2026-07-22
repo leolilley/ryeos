@@ -790,6 +790,7 @@ async fn dispatch_streaming_subprocess(
 
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
+            argv0: None,
             args: vec![],
             cwd: Some(project_path_str),
             envs,
@@ -817,6 +818,7 @@ async fn dispatch_streaming_subprocess(
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &isolation_verified_code,
+                    verified_command: Some(&isolation_verified_code[0]),
                     item_ref: &subject_item_ref,
                     thread_id: &thread_id,
                 },
@@ -1153,10 +1155,7 @@ async fn dispatch_tool_subprocess(
             launch_handoff,
         ))
         .await
-        .map_err(|e| DispatchError::SubprocessRunFailed {
-            item_ref: item_ref_for_error.clone(),
-            detail: e.to_string(),
-        })?;
+        .map_err(|error| map_runner_error(item_ref_for_error.clone(), error))?;
         Ok(json!({
             "thread": result.running_thread,
             "detached": true,
@@ -1168,10 +1167,7 @@ async fn dispatch_tool_subprocess(
             launch_handoff,
         ))
         .await
-        .map_err(|e| DispatchError::SubprocessRunFailed {
-            item_ref: item_ref_for_error,
-            detail: e.to_string(),
-        })?;
+        .map_err(|error| map_runner_error(item_ref_for_error, error))?;
         let mut envelope = json!({
             "thread": result.finalized_thread,
             "result": result.result,
@@ -1180,5 +1176,21 @@ async fn dispatch_tool_subprocess(
             envelope["debug"] = debug;
         }
         Ok(envelope)
+    }
+}
+
+fn map_runner_error(item_ref: String, error: anyhow::Error) -> DispatchError {
+    if let Some(eligibility) = error.chain().find_map(|cause| {
+        cause.downcast_ref::<crate::execution::runner::ExecutionNotRestartEligible>()
+    }) {
+        return DispatchError::ExecutionNotRestartEligible {
+            item_ref: eligibility.item_ref.clone(),
+            reason: eligibility.reason.clone(),
+            remediation: eligibility.remediation.clone(),
+        };
+    }
+    DispatchError::SubprocessRunFailed {
+        item_ref,
+        detail: error.to_string(),
     }
 }

@@ -251,6 +251,7 @@ impl LaunchPreparerRunner {
         let subprocess = self.isolation.apply(
             lillux::SubprocessRequest {
                 cmd: binary_path.to_string_lossy().into_owned(),
+                argv0: None,
                 args: Vec::new(),
                 cwd: Some(project_path.to_string_lossy().into_owned()),
                 envs: Vec::new(),
@@ -274,6 +275,7 @@ impl LaunchPreparerRunner {
                 bundle_roots: &self.bundle_roots,
                 node_trusted_keys_dir: None,
                 verified_code: &verified_code,
+                verified_command: Some(&verified_code[0]),
                 item_ref: &item_ref,
                 thread_id: "launch-preparer",
             },

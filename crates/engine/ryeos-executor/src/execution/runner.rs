@@ -1592,6 +1592,35 @@ fn verify_fresh_root_admission(params: &ExecutionParams) -> Result<()> {
     admission.ensure_matches_subject(engine, admission.verified_subject(), &params.resolved.kind)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("{reason}")]
+pub struct ExecutionNotRestartEligible {
+    pub item_ref: String,
+    pub reason: String,
+    pub remediation: String,
+}
+
+fn ensure_restart_eligible_artifact(
+    lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    item_ref: &str,
+    direct_executable_identity: Option<&ryeos_state::objects::DirectExecutableIdentity>,
+) -> Result<()> {
+    if lifecycle_authority.recovery
+        == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
+        && matches!(
+            direct_executable_identity,
+            Some(ryeos_state::objects::DirectExecutableIdentity::NodePolicy)
+        )
+    {
+        return Err(anyhow::Error::new(ExecutionNotRestartEligible {
+            item_ref: item_ref.to_string(),
+            reason: "the direct executable is authorized only by mutable node policy, not verified content identity".to_string(),
+            remediation: "install or resolve a content-verified executable, or use an explicitly request-scoped offline execution surface".to_string(),
+        }));
+    }
+    Ok(())
+}
+
 fn admitted_root_launch_metadata(
     params: &ExecutionParams,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
@@ -1644,13 +1673,26 @@ fn admitted_root_launch_metadata(
         executor_ref: Some(params.resolved.executor_ref.clone()),
         runtime_ref: Some(runtime_ref),
     };
+    let admitted_artifact_identity = prepared_plan.admitted_artifact_identity(
+        params.provenance.request_engine(),
+        &params.resolved,
+        protocol,
+    )?;
+    let direct_executable_identity = match &admitted_artifact_identity {
+        ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executable_identity,
+            ..
+        } => Some(executable_identity),
+        ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime { .. } => None,
+    };
+    ensure_restart_eligible_artifact(
+        params.lifecycle_authority,
+        &params.resolved.item_ref,
+        direct_executable_identity,
+    )?;
     let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
         .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
-        .with_admitted_artifact_identity(prepared_plan.admitted_artifact_identity(
-            params.provenance.request_engine(),
-            &params.resolved,
-            protocol,
-        )?)
+        .with_admitted_artifact_identity(admitted_artifact_identity)
         .with_resume_context(resume)
         .with_sealed_root_request(sealed);
     metadata.validate()?;
@@ -1712,8 +1754,16 @@ pub async fn run_and_wait(
     let wait_project_authority = params
         .provenance
         .execution_project_authority(&params.effective_caps)?;
+    let wait_isolation_live_access_authority =
+        params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(&engine, &params.resolved)?;
+    let prepared_plan = thread_lifecycle::prepare_item_plan(
+        &engine,
+        &params.resolved,
+        state.isolation.as_ref(),
+        params.lifecycle_authority,
+        wait_isolation_live_access_authority.as_ref(),
+    )?;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
     let wait_launch_metadata = admitted_root_launch_metadata(
         &params,
@@ -1788,7 +1838,10 @@ pub async fn run_and_wait(
     // Internal/recovery requests without a fresh admission retain the older
     // path-substitution behavior until they rebuild their own authoritative
     // context.
-    if params.resolved.root_admission.is_none()
+    if matches!(
+        params.provenance.project_authority(),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+    ) && params.resolved.root_admission.is_none()
         && effective_path != params.provenance.effective_path()
     {
         params.resolved.plan_context.project_context =
@@ -1870,8 +1923,6 @@ pub async fn run_and_wait(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let wait_isolation_project_authority = params.provenance.isolation_project_authority();
-    let wait_isolation_live_access_authority =
-        params.provenance.isolation_live_access_authority()?;
     let wait_roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
         &engine.resolution_roots(Some(effective_path.clone())),
         &state.config.app_root,
@@ -2355,8 +2406,15 @@ pub async fn run_detached(
     let bg_project_authority = params
         .provenance
         .execution_project_authority(&params.effective_caps)?;
+    let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(&engine, &params.resolved)?;
+    let prepared_plan = thread_lifecycle::prepare_item_plan(
+        &engine,
+        &params.resolved,
+        state.isolation.as_ref(),
+        params.lifecycle_authority,
+        bg_isolation_live_access_authority.as_ref(),
+    )?;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
     let bg_launch_metadata = admitted_root_launch_metadata(
         &params,
@@ -2426,7 +2484,10 @@ pub async fn run_detached(
     tracing::Span::current().record("thread_id", created.thread_id.as_str());
 
     // Keep fresh admitted planning authority sealed; see `run_and_wait`.
-    if params.resolved.root_admission.is_none()
+    if matches!(
+        params.provenance.project_authority(),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+    ) && params.resolved.root_admission.is_none()
         && effective_path != params.provenance.effective_path()
     {
         params.resolved.plan_context.project_context =
@@ -2517,7 +2578,6 @@ pub async fn run_detached(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let bg_isolation_project_authority = params.provenance.isolation_project_authority();
-    let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -3861,7 +3921,11 @@ async fn run_existing_recovered_thread(
 
     // Update plan_context to point at the materialized path so the
     // engine resolves item refs from there.
-    if effective_path != params.provenance.effective_path() {
+    if matches!(
+        params.provenance.project_authority(),
+        ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
+    ) && effective_path != params.provenance.effective_path()
+    {
         params.resolved.plan_context.project_context = ProjectContext::LocalPath {
             path: effective_path.clone(),
         };
@@ -3879,12 +3943,25 @@ async fn run_existing_recovered_thread(
         .state_root_override()
         .unwrap_or(effective_path.as_path())
         .to_path_buf();
-    let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(&engine, &params.resolved)
+    let bg_isolation_live_access_authority = params
+        .provenance
+        .isolation_live_access_authority()
         .inspect_err(|_| {
-            guard.fail_thread("plan_build_failed");
+            guard.fail_thread("recovery_confinement_failed");
             guard.cleanup();
         })?;
+    let engine = params.provenance.request_engine().clone();
+    let prepared_plan = thread_lifecycle::prepare_item_plan(
+        &engine,
+        &params.resolved,
+        state.isolation.as_ref(),
+        params.lifecycle_authority,
+        bg_isolation_live_access_authority.as_ref(),
+    )
+    .inspect_err(|_| {
+        guard.fail_thread("plan_build_failed");
+        guard.cleanup();
+    })?;
     let launch_timeout_secs = prepared_plan.timeout_secs;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved).inspect_err(|_| {
         guard.fail_thread("protocol_contract_failed");
@@ -4000,6 +4077,16 @@ async fn run_existing_recovered_thread(
         guard.track_thread_auth_token(token);
     }
 
+    // Complete every fallible authority reconstruction while the exact launch
+    // claim is still guarded. Once `into_detached_parts` disarms the guard,
+    // there must be no error path that can leave an active row unowned.
+    let bg_project_authority = params
+        .provenance
+        .execution_project_authority(&params.effective_caps)
+        .inspect_err(|_| {
+            guard.fail_thread("recovery_project_authority_failed");
+            guard.cleanup();
+        })?;
     let parts = guard.into_detached_parts();
     let bg_state = parts.state;
     let bg_temp_dir = parts.temp_dir;
@@ -4019,9 +4106,6 @@ async fn run_existing_recovered_thread(
     let bg_resume_snapshot_hash = resume_snapshot_hash;
     let bg_tree_publication = tree_publication;
     let bg_project_path = Some(params.provenance.original_project_path().to_path_buf());
-    let bg_project_authority = params
-        .provenance
-        .execution_project_authority(&params.effective_caps)?;
     let bg_skip_resume_snapshot_pin = params.provenance.is_borrowed_child();
     let bg_terminal_publication = params
         .provenance
@@ -4033,7 +4117,6 @@ async fn run_existing_recovered_thread(
         .state_root_override()
         .map(std::path::Path::to_path_buf);
     let bg_isolation_project_authority = params.provenance.isolation_project_authority();
-    let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let bg_runtime_state_dir = state.config.app_root.clone();
 
     tokio::spawn(dispatch_detached_bg_task(
@@ -4075,6 +4158,39 @@ mod tests {
     use super::*;
     use ryeos_app::launch_metadata::OriginalPushedHeadRef;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal};
+
+    #[test]
+    fn restartable_node_policy_direct_execution_is_refused_before_metadata_birth() {
+        let error = ensure_restart_eligible_artifact(
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            "tool:test/node-policy",
+            Some(&ryeos_state::objects::DirectExecutableIdentity::NodePolicy),
+        )
+        .unwrap_err();
+        let eligibility = error
+            .downcast_ref::<ExecutionNotRestartEligible>()
+            .expect("typed restart eligibility refusal");
+        assert_eq!(eligibility.item_ref, "tool:test/node-policy");
+    }
+
+    #[test]
+    fn verified_and_request_scoped_direct_execution_remain_eligible() {
+        let verified = ryeos_state::objects::DirectExecutableIdentity::VerifiedContent {
+            content_hash: "a".repeat(64),
+        };
+        ensure_restart_eligible_artifact(
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            "tool:test/verified",
+            Some(&verified),
+        )
+        .unwrap();
+        ensure_restart_eligible_artifact(
+            ryeos_state::objects::ExecutionLifecycleAuthority::REQUEST_SCOPED,
+            "tool:test/node-policy",
+            Some(&ryeos_state::objects::DirectExecutableIdentity::NodePolicy),
+        )
+        .unwrap();
+    }
 
     fn resume_record(
         project_context: ProjectContext,
@@ -4169,18 +4285,22 @@ mod tests {
         // (ephemeral, long-gone) LocalPath checkout the spawn ran in,
         // and the pin identity lives in `original_pushed_head_ref`. The
         // pin must win — resolution must never target the stale path.
+        let stale_checkout = tempfile::tempdir().unwrap();
+        let stale_checkout_path = stale_checkout.path().to_path_buf();
+        let snapshot_hash = "c".repeat(64);
         let resume = resume_record(
             ProjectContext::LocalPath {
-                path: PathBuf::from("/var/cache/executions/pre-123"),
+                path: stale_checkout_path,
             },
             Some(OriginalPushedHeadRef {
-                snapshot_hash: "snap-abc".into(),
+                snapshot_hash: snapshot_hash.clone(),
                 original_project_path: PathBuf::from("/laptop/proj"),
             }),
         );
+        drop(stale_checkout);
         match decide_resume_provenance(&resume) {
             ResumeProvenanceDecision::PinnedPushedHead(pinned) => {
-                assert_eq!(pinned.snapshot_hash, "snap-abc");
+                assert_eq!(pinned.snapshot_hash, snapshot_hash);
                 assert_eq!(pinned.original_project_path, PathBuf::from("/laptop/proj"));
             }
             other => panic!("expected PinnedPushedHead, got {other:?}"),
@@ -4188,38 +4308,53 @@ mod tests {
     }
 
     #[test]
-    fn localpath_record_without_snapshot_ref_is_rejected() {
+    fn live_localpath_record_selects_live_authority_without_legacy_snapshot_hints() {
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_path_buf();
         let resume = resume_record(
             ProjectContext::LocalPath {
-                path: PathBuf::from("/home/op/proj"),
+                path: project_path.clone(),
             },
             None,
         );
         match decide_resume_provenance(&resume) {
-            ResumeProvenanceDecision::MissingPushedHeadRef(ProjectContext::LocalPath { path }) => {
-                assert_eq!(path, std::path::Path::new("/home/op/proj"));
+            ResumeProvenanceDecision::LiveProject(path) => {
+                assert_eq!(path, project_path);
             }
-            other => panic!("expected MissingPushedHeadRef, got {other:?}"),
+            other => panic!("expected LiveProject, got {other:?}"),
         }
     }
 
     #[test]
     fn pinned_localpath_record_selects_a_fresh_snapshot_checkout() {
+        let project = tempfile::tempdir().unwrap();
+        let project_path = project.path().to_path_buf();
         let mut resume = resume_record(
             ProjectContext::LocalPath {
-                path: PathBuf::from("/home/op/proj"),
+                path: project_path.clone(),
             },
             None,
         );
-        resume.original_snapshot_hash = Some("snap-local".into());
+        resume.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            format!("local:{}", project_path.display()),
+            Some(project_path.clone()),
+            "a".repeat(64),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        resume.original_snapshot_hash = Some("legacy-hint-must-not-win".into());
 
         match decide_resume_provenance(&resume) {
             ResumeProvenanceDecision::PinnedLocalSnapshot {
                 snapshot_hash,
                 original_path,
             } => {
-                assert_eq!(snapshot_hash, "snap-local");
-                assert_eq!(original_path, std::path::Path::new("/home/op/proj"));
+                assert_eq!(snapshot_hash, "a".repeat(64));
+                assert_eq!(original_path, project_path);
             }
             other => panic!("expected PinnedLocalSnapshot, got {other:?}"),
         }
@@ -4241,7 +4376,19 @@ mod tests {
             ProjectContext::None,
         ];
         for pc in contexts {
-            let resume = resume_record(pc.clone(), None);
+            let mut resume = resume_record(ProjectContext::None, None);
+            resume.project_context = pc.clone();
+            resume.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+                "snapshot:unattributed".to_string(),
+                None,
+                "b".repeat(64),
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+                },
+                ryeos_state::objects::EnvironmentAuthority::None,
+                Vec::new(),
+            )
+            .unwrap();
             match decide_resume_provenance(&resume) {
                 ResumeProvenanceDecision::MissingPushedHeadRef(_) => {}
                 other => panic!("expected MissingPushedHeadRef for {pc:?}, got {other:?}"),

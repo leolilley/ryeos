@@ -1860,6 +1860,10 @@ mod tests {
     use crate::signer::{Signer as _, TestSigner};
     use ryeos_tracing::test as trace_test;
 
+    fn projectless_authority_json() -> Value {
+        serde_json::json!({ "kind": "projectless", "environment": { "kind": "none" } })
+    }
+
     #[derive(Default)]
     struct RecordingRecoveryObserver {
         updates: std::sync::Mutex<Vec<ProjectionRecoveryProgress>>,
@@ -2017,7 +2021,8 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
             "captured_history_policy": null,
         });
         if thread_id == chain_root_id {

@@ -237,6 +237,7 @@ pub(super) fn spawn_runtime(params: SpawnRuntimeParams<'_>) -> Result<SpawnedRun
                 bundle_roots: &envelope.roots.bundle_roots,
                 node_trusted_keys_dir: Some(&envelope.roots.node_trusted_keys_dir),
                 verified_code: std::slice::from_ref(verified_command),
+                verified_command: Some(verified_command),
                 item_ref: &isolation_item_ref,
                 thread_id,
             },

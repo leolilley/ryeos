@@ -3987,6 +3987,12 @@ async fn follow_fanout_binds_item_before_rendering_action() {
         rec.recorded_follow_requests()[0].children[0].item_ref,
         "directive:bound"
     );
+    assert_eq!(rec.recorded_follow_requests()[0].children.len(), 1);
+    assert_eq!(
+        rec.recorded_follow_requests()[0].launch_window_width,
+        Some(2),
+        "a one-item run still carries the authored launch window"
+    );
 }
 
 #[tokio::test]

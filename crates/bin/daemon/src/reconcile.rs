@@ -20,7 +20,15 @@ use ryeos_state::objects::ThreadStatus;
 const ACTIVE_OWNER_DEAD_SETTLEMENT_GRACE_MS: i64 = 5_000;
 const PROJECT_AUTHORITY_WAIT_MS: i64 = 15 * 60 * 1_000;
 
-fn live_project_authority_available(resume: &ResumeContext) -> Result<(), String> {
+#[derive(Debug)]
+enum LiveProjectAuthorityError {
+    Transient(String),
+    Permanent(String),
+}
+
+fn live_project_authority_available(
+    resume: &ResumeContext,
+) -> Result<(), LiveProjectAuthorityError> {
     let ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
         canonical_root,
         authored_project_identity,
@@ -30,33 +38,62 @@ fn live_project_authority_available(resume: &ResumeContext) -> Result<(), String
     else {
         return Ok(());
     };
-    let root = lillux::PinnedDirectory::open(canonical_root)
-        .map_err(|error| format!("open authorized live project root: {error:#}"))?
-        .ok_or_else(|| {
-            format!(
+    match std::fs::symlink_metadata(canonical_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(LiveProjectAuthorityError::Transient(format!(
                 "authorized live project root is unavailable: {}",
                 canonical_root.display()
-            )
-        })?;
-    if !root
-        .entry_names()
-        .map_err(|error| format!("inspect authorized live project root: {error:#}"))?
-        .iter()
-        .any(|name| name.as_os_str() == std::ffi::OsStr::new(ryeos_engine::AI_DIR))
-    {
-        return Err(format!(
-            "authorized live project root no longer contains {}: {}",
-            ryeos_engine::AI_DIR,
-            canonical_root.display()
-        ));
+            )));
+        }
+        Err(error) => {
+            return Err(LiveProjectAuthorityError::Transient(format!(
+                "inspect authorized live project root: {error}"
+            )));
+        }
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(LiveProjectAuthorityError::Permanent(format!(
+                "authorized live project root is not a real directory: {}",
+                canonical_root.display()
+            )));
+        }
+        Ok(_) => {}
     }
+    let root = lillux::PinnedDirectory::open(canonical_root)
+        .map_err(|error| {
+            LiveProjectAuthorityError::Permanent(format!(
+                "securely open authorized live project root: {error:#}"
+            ))
+        })?
+        .ok_or_else(|| {
+            LiveProjectAuthorityError::Transient(format!(
+                "authorized live project root disappeared while opening: {}",
+                canonical_root.display()
+            ))
+        })?;
+    root.open_child_directory(std::ffi::OsStr::new(ryeos_engine::AI_DIR))
+        .map_err(|error| {
+            LiveProjectAuthorityError::Permanent(format!(
+                "open authorized live project control directory descriptor-relative: {error:#}"
+            ))
+        })?
+        .ok_or_else(|| {
+            LiveProjectAuthorityError::Permanent(format!(
+                "authorized live project root no longer contains a real {} directory: {}",
+                ryeos_engine::AI_DIR,
+                canonical_root.display()
+            ))
+        })?;
     let expected = format!("local:{}", canonical_root.display());
     if authored_project_identity != &expected {
-        return Err("authorized live project identity no longer matches its canonical root".into());
+        return Err(LiveProjectAuthorityError::Permanent(
+            "authorized live project identity no longer matches its canonical root".into(),
+        ));
     }
-    live_access
-        .validate()
-        .map_err(|error| format!("invalid persisted live access authority: {error:#}"))?;
+    live_access.validate().map_err(|error| {
+        LiveProjectAuthorityError::Permanent(format!(
+            "invalid persisted live access authority: {error:#}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -837,7 +874,35 @@ async fn reconcile_active_threads_inner(
                         state.state_store.clear_recovery_wait(&thread.thread_id)?;
                     }
                 }
-                Err(detail) => {
+                Err(LiveProjectAuthorityError::Permanent(detail)) => {
+                    state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                    tracing::error!(
+                        thread_id = %thread.thread_id,
+                        detail = %bounded_recovery_detail(&detail),
+                        "persisted live project authority is permanently invalid"
+                    );
+                    let outcome =
+                        ryeos_executor::execution::launch::settle_recovery_preparation_refusal(
+                            state,
+                            &thread.thread_id,
+                            "project_authority_invalid",
+                            "live_project_authority",
+                            "the persisted live project authority is no longer valid",
+                        )?;
+                    if matches!(
+                        outcome,
+                        ryeos_executor::execution::launch::RecoveryRefusalOutcome::Finalized
+                    ) {
+                        reconciled += 1;
+                    }
+                    tracing::warn!(
+                        thread_id = %thread.thread_id,
+                        ?outcome,
+                        "permanent live project authority refusal classified"
+                    );
+                    continue;
+                }
+                Err(LiveProjectAuthorityError::Transient(detail)) => {
                     let now_ms = lillux::time::timestamp_millis();
                     let wait = state.state_store.wait_for_project_authority(
                         &thread.thread_id,
@@ -847,24 +912,33 @@ async fn reconcile_active_threads_inner(
                         now_ms.saturating_add(PROJECT_AUTHORITY_WAIT_MS),
                     )?;
                     if now_ms >= wait.deadline_at_ms {
-                        finalize_dead(
+                        let outcome = ryeos_executor::execution::launch::settle_recovery_preparation_refusal(
                             state,
-                            mode,
                             &thread.thread_id,
-                            pgid,
-                            &thread.status,
-                            Some((
-                                "project_authority_unavailable",
-                                json!({
-                                    "reason": wait.reason,
-                                    "detail": wait.detail,
-                                    "started_at_ms": wait.started_at_ms,
-                                    "deadline_at_ms": wait.deadline_at_ms,
-                                }),
-                            )),
-                            &mut reconciled,
+                            "project_authority_unavailable",
+                            "live_project_authority_wait",
+                            "the admitted live project authority did not become available before its recovery deadline",
                         )?;
-                        state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                        if matches!(
+                            outcome,
+                            ryeos_executor::execution::launch::RecoveryRefusalOutcome::Finalized
+                        ) {
+                            reconciled += 1;
+                        }
+                        if !matches!(
+                            outcome,
+                            ryeos_executor::execution::launch::RecoveryRefusalOutcome::AlreadyClaimed
+                        ) {
+                            state.state_store.clear_recovery_wait(&thread.thread_id)?;
+                        }
+                        tracing::warn!(
+                            thread_id = %thread.thread_id,
+                            ?outcome,
+                            started_at_ms = wait.started_at_ms,
+                            deadline_at_ms = wait.deadline_at_ms,
+                            detail = %wait.detail,
+                            "live project authority recovery wait expired"
+                        );
                     } else {
                         tracing::warn!(
                             thread_id = %thread.thread_id,
@@ -2092,6 +2166,83 @@ mod tests {
             executor_ref: None,
             runtime_ref: None,
         }
+    }
+
+    fn live_ctx(root: &std::path::Path) -> ResumeContext {
+        let canonical_root = root.canonicalize().unwrap();
+        let mut context = ctx();
+        context.project_context = ProjectContext::LocalPath {
+            path: canonical_root.clone(),
+        };
+        context.project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
+            canonical_root.clone(),
+            format!("local:{}", canonical_root.display()),
+            ryeos_state::objects::LiveProjectAccess::ReadWrite,
+            ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        context.stable_project_identity = Some(
+            ryeos_app::launch_metadata::StableProjectIdentity::from_path(&canonical_root, "site:a")
+                .unwrap(),
+        );
+        context.local_overlay_root = None;
+        context.original_snapshot_hash = None;
+        context
+    }
+
+    #[test]
+    fn live_project_recovery_requires_a_real_descriptor_relative_ai_directory() {
+        let project = tempfile::tempdir().unwrap();
+        let context = live_ctx(project.path());
+        assert!(matches!(
+            live_project_authority_available(&context),
+            Err(LiveProjectAuthorityError::Permanent(_))
+        ));
+
+        std::fs::write(
+            project.path().join(ryeos_engine::AI_DIR),
+            b"not a directory",
+        )
+        .unwrap();
+        assert!(matches!(
+            live_project_authority_available(&context),
+            Err(LiveProjectAuthorityError::Permanent(_))
+        ));
+        std::fs::remove_file(project.path().join(ryeos_engine::AI_DIR)).unwrap();
+
+        std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR)).unwrap();
+        assert!(live_project_authority_available(&context).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_project_recovery_rejects_a_symlinked_ai_directory() {
+        use std::os::unix::fs::symlink;
+
+        let project = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        symlink(elsewhere.path(), project.path().join(ryeos_engine::AI_DIR)).unwrap();
+        assert!(matches!(
+            live_project_authority_available(&live_ctx(project.path())),
+            Err(LiveProjectAuthorityError::Permanent(_))
+        ));
+    }
+
+    #[test]
+    fn missing_live_project_root_is_a_transient_authority_wait() {
+        let parent = tempfile::tempdir().unwrap();
+        let project = parent.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(ryeos_engine::AI_DIR)).unwrap();
+        let context = live_ctx(&project);
+        std::fs::remove_dir_all(&project).unwrap();
+
+        assert!(matches!(
+            live_project_authority_available(&context),
+            Err(LiveProjectAuthorityError::Transient(_))
+        ));
     }
 
     fn thread_detail(

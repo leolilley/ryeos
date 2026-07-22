@@ -387,6 +387,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             root_admission,
             &project_ctx.effective_path,
             req.ref_bindings,
+            resolved_contract.lifecycle_authority,
         )
         .map_err(|error| {
             RouteDispatchError::Internal(format!(
@@ -399,7 +400,6 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         options.usage_subject = usage_subject;
         options.usage_subject_asserted_by = usage_subject_asserted_by;
         options.call = req.call;
-        options.lifecycle_authority = resolved_contract.lifecycle_authority;
         let request_scoped = resolved_contract.lifecycle_authority.ownership
             == ryeos_state::objects::ExecutionOwnershipAuthority::RequestScoped;
         options = options.retain_captured_generation(project_ctx.take_captured_generation());

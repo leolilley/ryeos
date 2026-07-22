@@ -149,6 +149,7 @@ pub fn import_dry_run(
     }
     let isolation_context = IsolationLaunchContext {
         verified_code: &verified_code,
+        verified_command: spec.verified_command.as_ref(),
         ..isolation_context
     };
 
@@ -175,6 +176,7 @@ fn run_probe(
 ) -> Value {
     let request = lillux::SubprocessRequest {
         cmd: interpreter.to_string(),
+        argv0: None,
         args,
         cwd,
         envs,
@@ -318,6 +320,7 @@ mod tests {
                 bundle_roots: &[],
                 node_trusted_keys_dir: None,
                 verified_code: &[],
+                verified_command: None,
                 item_ref: "tool:test",
                 thread_id: "env-probe-test",
             },

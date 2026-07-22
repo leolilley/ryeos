@@ -251,6 +251,10 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
+    fn projectless_authority_json() -> Value {
+        serde_json::json!({ "kind": "projectless", "environment": { "kind": "none" } })
+    }
+
     fn setup_cas_refs() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let cas_root = tmp.path().join("state").join("objects");
@@ -381,7 +385,8 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);
@@ -564,7 +569,8 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);
@@ -811,7 +817,8 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
             "captured_history_policy": durable_history_policy_json(),
         });
 
@@ -845,7 +852,8 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap1 = write_object(&cas_root, &snap_v1);
@@ -939,7 +947,8 @@ mod tests {
             "upstream_thread_id": null,
             "requested_by": null,
             "project_root": null,
-            "project_authority": { "kind": "projectless" },
+            "project_authority": projectless_authority_json(),
+            "admitted_launch_capsule_hash": null,
             "captured_history_policy": durable_history_policy_json(),
         });
         let snap_hash = write_object(&cas_root, &snap);

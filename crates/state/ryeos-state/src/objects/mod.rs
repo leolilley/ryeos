@@ -30,7 +30,8 @@ pub mod thread_snapshot;
 
 pub use admitted_launch_capsule::{
     AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, DirectExecutableIdentity,
-    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+    DirectRuntimeIdentity, DirectRuntimeSourceSpace, ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+    LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{

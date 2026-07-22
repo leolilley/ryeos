@@ -11,6 +11,7 @@ use lillux::{
 fn shell(script: String) -> SubprocessRequest {
     SubprocessRequest {
         cmd: "/bin/sh".to_string(),
+        argv0: None,
         args: vec!["-c".to_string(), script],
         cwd: None,
         envs: vec![],
@@ -99,6 +100,7 @@ fn direct_setup_failure_returns_no_pending_process() {
 fn exec_failure_is_reported_by_release_transition() {
     let request = SubprocessRequest {
         cmd: "/definitely/not/a/real/lillux-executable".to_string(),
+        argv0: None,
         args: vec![],
         cwd: None,
         envs: vec![],

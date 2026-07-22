@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-core-tools"
-version = "0.5.53"
+version = "0.5.54"
 edition = "2021"
 license.workspace = true
 

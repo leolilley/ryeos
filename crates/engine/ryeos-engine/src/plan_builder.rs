@@ -16,7 +16,7 @@ use crate::canonical_ref::CanonicalRef;
 use crate::contracts::TrustClass as ContractTrustClass;
 use crate::contracts::{
     ExecutionHints, ExecutionPlan, PlanCapabilities, PlanContext, PlanNode, PlanNodeId,
-    VerifiedItem,
+    PlanRuntimeIdentity, SignatureEnvelope, VerifiedItem,
 };
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
@@ -31,6 +31,301 @@ use crate::trust::TrustStore;
 /// Maximum executor chain depth before we assume a cycle or misconfiguration.
 const MAX_CHAIN_DEPTH: usize = 16;
 
+/// Closed projection of the current signed bundle-manifest schema used when
+/// sealing a runtime's source-bundle generation. This deliberately mirrors the
+/// publisher's v1 document instead of accepting a lenient `name` projection:
+/// generation identity must not be supplied by a replayed or structurally
+/// obsolete trusted document.
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceBundleManifest {
+    name: String,
+    version: String,
+    #[serde(default)]
+    description: String,
+    provides_kinds: Vec<String>,
+    #[serde(default)]
+    requires_kinds: Vec<String>,
+    #[serde(default)]
+    uses_kinds: Vec<String>,
+    #[serde(default)]
+    runtime_authority: RuntimeSourceAuthorityDecls,
+    #[serde(default)]
+    smoke: Vec<RuntimeSourceSmokeDecl>,
+    #[serde(default)]
+    shadows: Vec<String>,
+    #[serde(default)]
+    isolation_backends: Vec<ryeos_isolation_protocol::IsolationBackendDeclaration>,
+}
+
+#[allow(dead_code)]
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceAuthorityDecls {
+    #[serde(default)]
+    bundle_events: Vec<RuntimeSourceBundleEventDecl>,
+    #[serde(default)]
+    runtime_vault: Vec<RuntimeSourceVaultDecl>,
+    #[serde(default)]
+    item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceBundleEventDecl {
+    event_kind: String,
+    operations: Vec<RuntimeSourceBundleEventOperation>,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeSourceBundleEventOperation {
+    Append,
+    Scan,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceVaultDecl {
+    namespace: String,
+    operations: Vec<RuntimeSourceVaultOperation>,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeSourceVaultOperation {
+    Put,
+    Get,
+    Delete,
+    List,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceItemAuthorDecl {
+    kind: String,
+    namespace: String,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSourceSmokeDecl {
+    #[serde(rename = "ref")]
+    item_ref: String,
+    ref_bindings: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    inputs: serde_json::Value,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+impl RuntimeSourceAuthorityDecls {
+    fn validate(&self) -> Result<(), String> {
+        for declaration in &self.bundle_events {
+            if declaration.event_kind.trim().is_empty() {
+                return Err("bundle_events declaration has an empty event_kind".into());
+            }
+            if declaration.operations.is_empty() {
+                return Err(format!(
+                    "bundle_events declaration for {:?} has no operations",
+                    declaration.event_kind
+                ));
+            }
+            if declaration.event_kind.contains('*') || declaration.event_kind.contains('?') {
+                return Err(format!(
+                    "bundle_events event_kind contains a wildcard: {:?}",
+                    declaration.event_kind
+                ));
+            }
+        }
+        for declaration in &self.runtime_vault {
+            if declaration.namespace.trim().is_empty() {
+                return Err("runtime_vault declaration has an empty namespace".into());
+            }
+            if declaration.operations.is_empty() {
+                return Err(format!(
+                    "runtime_vault declaration for {:?} has no operations",
+                    declaration.namespace
+                ));
+            }
+            if declaration.namespace.contains('*') || declaration.namespace.contains('?') {
+                return Err(format!(
+                    "runtime_vault namespace contains a wildcard: {:?}",
+                    declaration.namespace
+                ));
+            }
+        }
+        for declaration in &self.item_authoring {
+            validate_runtime_source_item_author_pattern(&declaration.kind, &declaration.namespace)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_runtime_source_item_author_pattern(kind: &str, namespace: &str) -> Result<(), String> {
+    if kind.is_empty()
+        || !kind.chars().all(|character| {
+            character.is_ascii_lowercase()
+                || character.is_ascii_digit()
+                || matches!(character, '_' | '-')
+        })
+    {
+        return Err(format!("item_authoring kind is not canonical: {kind:?}"));
+    }
+    if namespace.trim() != namespace
+        || namespace.is_empty()
+        || namespace.starts_with('/')
+        || namespace.ends_with('/')
+        || namespace.contains('\\')
+    {
+        return Err(format!(
+            "item_authoring namespace is not a relative bare-id pattern: {namespace:?}"
+        ));
+    }
+    for segment in namespace.split('/') {
+        if segment.is_empty()
+            || matches!(segment, "." | "..")
+            || !segment.chars().all(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '-' | '_' | '.' | '*' | '?')
+            })
+        {
+            return Err(format!(
+                "item_authoring namespace contains an invalid segment: {namespace:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn verify_bundle_source_manifest_identity(
+    bundle_root: &Path,
+    node_trust_store: &TrustStore,
+) -> Result<(String, String), EngineError> {
+    let manifest_path = bundle_root.join(crate::AI_DIR).join("manifest.yaml");
+    let metadata = std::fs::symlink_metadata(&manifest_path).map_err(|error| {
+        EngineError::Internal(format!(
+            "stat runtime source-bundle manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(EngineError::Internal(format!(
+            "runtime source-bundle manifest is not a regular file: {}",
+            manifest_path.display()
+        )));
+    }
+    let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+        EngineError::Internal(format!(
+            "read runtime source-bundle manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let envelope = SignatureEnvelope {
+        prefix: "#".to_string(),
+        suffix: None,
+        after_shebang: false,
+    };
+    let signature =
+        crate::item_resolution::parse_signature_header(&raw, &envelope).ok_or_else(|| {
+            EngineError::Internal(format!(
+                "runtime source-bundle manifest is unsigned: {}",
+                manifest_path.display()
+            ))
+        })?;
+    let (trust_class, _) =
+        crate::trust::verify_item_signature(&raw, &signature, &envelope, node_trust_store)
+            .map_err(|error| {
+                EngineError::Internal(format!(
+                    "verify runtime source-bundle manifest {}: {error}",
+                    manifest_path.display()
+                ))
+            })?;
+    if trust_class != ContractTrustClass::Trusted {
+        return Err(EngineError::Internal(format!(
+            "runtime source-bundle manifest signer {} is not node-trusted",
+            signature.signer_fingerprint
+        )));
+    }
+    let body = lillux::signature::strip_signature_lines(&raw);
+    let manifest_value: serde_yaml::Value = serde_yaml::from_str(&body).map_err(|error| {
+        EngineError::Internal(format!(
+            "parse runtime source-bundle manifest {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest_mapping = manifest_value.as_mapping().ok_or_else(|| {
+        EngineError::Internal(format!(
+            "runtime source-bundle manifest must contain a YAML mapping: {}",
+            manifest_path.display()
+        ))
+    })?;
+    for required in ["name", "version", "provides_kinds", "requires_kinds"] {
+        if !manifest_mapping.contains_key(serde_yaml::Value::String(required.to_string())) {
+            return Err(EngineError::Internal(format!(
+                "runtime source-bundle manifest is not ryeos.bundle-manifest/v1: missing required field {required:?} at {}",
+                manifest_path.display()
+            )));
+        }
+    }
+    let manifest: RuntimeSourceBundleManifest =
+        serde_yaml::from_value(manifest_value).map_err(|error| {
+            EngineError::Internal(format!(
+                "runtime source-bundle manifest is not the current closed schema at {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+    let expected_name = bundle_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            EngineError::Internal(format!(
+                "runtime source-bundle root has no UTF-8 bundle identity: {}",
+                bundle_root.display()
+            ))
+        })?;
+    if manifest.name != expected_name {
+        return Err(EngineError::Internal(format!(
+            "runtime source-bundle manifest identity mismatch: name is {:?}, expected {:?}",
+            manifest.name, expected_name
+        )));
+    }
+    manifest.runtime_authority.validate().map_err(|error| {
+        EngineError::Internal(format!(
+            "runtime source-bundle manifest has invalid runtime_authority at {}: {error}",
+            manifest_path.display()
+        ))
+    })?;
+    let mut backend_ids = std::collections::BTreeSet::new();
+    for backend in &manifest.isolation_backends {
+        backend.validate().map_err(|error| {
+            EngineError::Internal(format!(
+                "runtime source-bundle manifest has invalid isolation backend {:?}: {error}",
+                backend.id
+            ))
+        })?;
+        if !backend_ids.insert(backend.id.as_str()) {
+            return Err(EngineError::Internal(format!(
+                "runtime source-bundle manifest has duplicate isolation backend id {:?}",
+                backend.id
+            )));
+        }
+    }
+    Ok((
+        lillux::sha256_hex(body.as_bytes()),
+        signature.signer_fingerprint,
+    ))
+}
+
 // ── Chain data types ─────────────────────────────────────────────────────
 
 /// Result of resolving the executor chain to a terminal.
@@ -42,6 +337,7 @@ struct ChainTerminal {
     verified_chain: Vec<(String, ContractTrustClass)>,
     chain_content_hashes: Vec<String>,
     intermediates: Vec<ChainIntermediate>,
+    runtime_identity: Option<PlanRuntimeIdentity>,
 }
 
 // ── Chain walker ────────────────────────────────────────────────────────
@@ -62,12 +358,14 @@ fn resolve_executor_chain(
     parsers: &ParserDispatcher,
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
+    node_trust_store: Option<&TrustStore>,
 ) -> Result<ChainTerminal, EngineError> {
     let mut current_id = starting_executor_id.to_owned();
     let mut visited: Vec<String> = Vec::new();
     let mut verified_chain: Vec<(String, ContractTrustClass)> = Vec::new();
     let mut chain_content_hashes: Vec<String> = Vec::new();
     let mut intermediates: Vec<ChainIntermediate> = Vec::new();
+    let mut runtime_identity = None;
 
     loop {
         // Cycle detection
@@ -133,7 +431,7 @@ fn resolve_executor_chain(
                 kind: ref_.kind.clone(),
             })?;
 
-        let (source_path, _space, matched_ext) =
+        let (source_path, source_space, matched_ext) =
             crate::item_resolution::resolve_item(roots, kind_schema, &ref_)?;
 
         let content = std::fs::read_to_string(&source_path).map_err(|e| {
@@ -172,7 +470,46 @@ fn resolve_executor_chain(
         verified_chain.push((current_id.clone(), trust_class));
 
         let content_hash = crate::item_resolution::content_hash(&content);
-        chain_content_hashes.push(content_hash);
+        chain_content_hashes.push(content_hash.clone());
+
+        if runtime_identity.is_none() {
+            let bundle_identity = if source_space == crate::contracts::ItemSpace::Bundle {
+                let ai = source_path
+                    .ancestors()
+                    .find(|path| path.file_name().is_some_and(|name| name == crate::AI_DIR))
+                    .ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "bundle runtime source has no .ai ancestor: {}",
+                            source_path.display()
+                        ))
+                    })?;
+                let bundle_root = ai.parent().ok_or_else(|| {
+                    EngineError::Internal(format!(
+                        "bundle runtime .ai path has no root: {}",
+                        source_path.display()
+                    ))
+                })?;
+                node_trust_store
+                    .map(|trust| verify_bundle_source_manifest_identity(bundle_root, trust))
+                    .transpose()?
+            } else {
+                None
+            };
+            runtime_identity = Some(PlanRuntimeIdentity {
+                runtime_ref: resolved_id.clone(),
+                runtime_source_space: source_space,
+                runtime_content_hash: content_hash,
+                runtime_signer_fingerprint: sig_header
+                    .as_ref()
+                    .map(|header| header.signer_fingerprint.clone()),
+                runtime_bundle_manifest_hash: bundle_identity
+                    .as_ref()
+                    .map(|identity| identity.0.clone()),
+                runtime_bundle_signer_fingerprint: bundle_identity
+                    .as_ref()
+                    .map(|identity| identity.1.clone()),
+            });
+        }
 
         let parsed = parsers.dispatch(
             &source_format.parser,
@@ -210,6 +547,7 @@ fn resolve_executor_chain(
         verified_chain,
         chain_content_hashes,
         intermediates,
+        runtime_identity,
     })
 }
 
@@ -274,6 +612,7 @@ pub fn resolve_terminal_executor(
         parsers,
         roots,
         trust_store,
+        None,
     )?;
     let last = terminal.intermediates.last().ok_or_else(|| {
         EngineError::Internal("executor chain resolved to an empty intermediate list".to_string())
@@ -475,6 +814,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         parsers,
         roots,
         trust_store,
+        Some(node_trust_store),
     )?;
 
     // Step 2a: Prepend the root item as the first chain intermediate.
@@ -606,6 +946,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,
+        runtime_identity: terminal.runtime_identity,
         debug_raw: input
             .hints
             .values
@@ -721,6 +1062,60 @@ mod tests {
                 "unsigned in {space:?} should widen to Unsigned"
             );
         }
+    }
+
+    #[test]
+    fn runtime_bundle_generation_rejects_a_replayed_manifest_name() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let body = "name: other-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\n";
+        let signed = lillux::signature::sign_content(body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+
+        let error = verify_bundle_source_manifest_identity(&bundle_root, &test_ts()).unwrap_err();
+        assert!(error.to_string().contains("manifest identity mismatch"));
+    }
+
+    #[test]
+    fn runtime_bundle_generation_rejects_invalid_runtime_authority() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let body = "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nruntime_authority:\n  bundle_events:\n    - event_kind: events\n      operations: []\n";
+        let signed = lillux::signature::sign_content(body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+
+        let error = verify_bundle_source_manifest_identity(&bundle_root, &test_ts()).unwrap_err();
+        assert!(error.to_string().contains("invalid runtime_authority"));
+    }
+
+    #[test]
+    fn runtime_bundle_generation_rejects_duplicate_isolation_backend_ids() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let backend = "  - id: linux\n    protocol: ryeos.isolation-adapter/v1\n    targets: [x86_64-unknown-linux-gnu]\n    adapter: adapter\n    artifacts: {launcher: launcher}\n    capabilities: [filesystem.private_root]\n";
+        let body = format!(
+            "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nisolation_backends:\n{backend}{backend}"
+        );
+        let signed = lillux::signature::sign_content(&body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+
+        let error = verify_bundle_source_manifest_identity(&bundle_root, &test_ts()).unwrap_err();
+        assert!(error.to_string().contains("duplicate isolation backend id"));
     }
 
     const AI_DIR: &str = crate::AI_DIR;
@@ -1707,6 +2102,16 @@ category: ryeos/core/subprocess\n";
         // 6. Verify the plan structure
         assert_eq!(plan.root_ref, "tool:my_tool");
         assert_eq!(plan.item_kind, "tool");
+        let runtime_identity = plan
+            .runtime_identity
+            .as_ref()
+            .expect("plan should retain its first verified runtime hop");
+        assert_eq!(runtime_identity.runtime_ref, "tool:runtimes/python/script");
+        assert_eq!(
+            runtime_identity.runtime_content_hash,
+            crate::item_resolution::content_hash(&runtime_content)
+        );
+        assert!(runtime_identity.runtime_signer_fingerprint.is_none());
 
         // Chain should include the runtime hop and the resolved terminal
         assert!(

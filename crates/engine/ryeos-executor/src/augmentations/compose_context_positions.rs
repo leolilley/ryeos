@@ -456,6 +456,7 @@ pub async fn run(
             .build();
         let subprocess_request = lillux::SubprocessRequest {
             cmd: executor_path_str,
+            argv0: None,
             args: vec![],
             cwd: Some(project_path_str),
             envs,
@@ -483,6 +484,7 @@ pub async fn run(
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
                     verified_code: &isolation_verified_code,
+                    verified_command: Some(&isolation_verified_code[0]),
                     item_ref: &runtime_item_ref_string,
                     thread_id: &child_thread_id,
                 },

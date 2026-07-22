@@ -31,6 +31,7 @@ pub async fn handle(_req: Request, state: Arc<AppState>) -> Result<Value> {
         "fingerprint": fingerprint,
         "signing_key": signing_key,
         "site_id": site_id,
+        "version": state.daemon_build.version,
     });
     if let Some(ref vfp) = state.vault_fingerprint {
         resp["vault_fingerprint"] = Value::String(vfp.clone());

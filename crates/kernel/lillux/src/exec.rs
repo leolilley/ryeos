@@ -27,6 +27,10 @@ use clap::Subcommand;
 /// daemon process bypassed `required_secrets` scoping.
 pub struct SubprocessRequest {
     pub cmd: String,
+    /// Optional `argv[0]` spelling distinct from the executable path.
+    /// Descriptor-backed launchers use this to execute immutable content while
+    /// preserving virtual-environment and multi-call binary semantics.
+    pub argv0: Option<String>,
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub envs: Vec<(String, String)>,
@@ -1925,6 +1929,7 @@ fn lib_spawn_with_stdio(
     let start = Instant::now();
     let SubprocessRequest {
         cmd,
+        argv0,
         args,
         cwd,
         envs,
@@ -1998,6 +2003,18 @@ fn lib_spawn_with_stdio(
     let envs_str: Vec<String> = envs.iter().map(|(k, v)| format!("{k}={v}")).collect();
 
     let mut command = process::Command::new(&cmd);
+    #[cfg(unix)]
+    if let Some(argv0) = argv0 {
+        use std::os::unix::process::CommandExt as _;
+        command.arg0(argv0);
+    }
+    #[cfg(not(unix))]
+    if argv0.is_some() {
+        return Err(spawn_failure(
+            start,
+            "Failed to spawn: custom argv[0] is unsupported on this platform",
+        ));
+    }
     command.args(&args);
     command.env_clear();
     set_envs(&mut command, &envs_str);
@@ -3916,6 +3933,7 @@ fn do_exec(
 ) -> serde_json::Value {
     let r = lib_run(SubprocessRequest {
         cmd: cmd.to_string(),
+        argv0: None,
         args: args.to_vec(),
         cwd: cwd.map(|s| s.to_string()),
         envs: envs

@@ -1350,6 +1350,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 accepted_root_admission,
                 &project_ctx.effective_path,
                 request.ref_bindings.clone(),
+                lifecycle_authority,
             )
             .map_err(|error| {
                 RouteDispatchError::Internal(format!(
@@ -1359,7 +1360,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
             launch_options.usage_subject = usage_subject.clone();
             launch_options.usage_subject_asserted_by = usage_subject_asserted_by.clone();
             launch_options.call = request.call().cloned();
-            launch_options.lifecycle_authority = lifecycle_authority;
             launch_options =
                 launch_options.retain_captured_generation(project_ctx.take_captured_generation());
             let thread_id = ryeos_app::thread_lifecycle::new_thread_id();

@@ -516,6 +516,7 @@ fn inspect_isolation_backend(
             .map_err(|error| anyhow::anyhow!("seal isolation inspection request: {error}"))?;
         let result = lillux::run(lillux::SubprocessRequest {
             cmd: format!("/proc/self/fd/{}", adapter.as_raw_fd()),
+            argv0: None,
             args: vec![
                 "inspect".to_string(),
                 request_handle.as_raw_fd().to_string(),
