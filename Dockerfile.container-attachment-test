@@ -1,0 +1,10 @@
+ARG BASE_IMAGE=debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+
+FROM rust:1.95-slim@sha256:e14e87345b4d5964ddcc3491d27ee046a0f23820f340c3c1e24da6880141f7c0 AS smoke-builder
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --locked --release -p lillux --example attachment_smoke
+
+FROM ${BASE_IMAGE}
+COPY --from=smoke-builder /build/target/release/examples/attachment_smoke /usr/local/libexec/lillux-attachment-smoke

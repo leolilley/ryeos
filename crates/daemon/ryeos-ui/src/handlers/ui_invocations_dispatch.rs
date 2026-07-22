@@ -154,7 +154,19 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
 
-    let result = execute_prepared_item_ref(&req, &state, prepared, verified, ctx).await?;
+    let result = if policy.read_only {
+        execute_read_only_service(&req, &state, prepared, verified, ctx).await?
+    } else {
+        execute_prepared_item_ref(
+            &req,
+            &state,
+            prepared,
+            verified,
+            &invocation_ctx.scopes,
+            ctx,
+        )
+        .await?
+    };
 
     ui.session_bus.publish(
         &session_id,
@@ -179,8 +191,10 @@ fn prepare_item_ref(
     state: &AppState,
     project_path: &std::path::Path,
 ) -> Result<PreparedInvocation> {
-    ryeos_app::execution_policy::authorize_standard_local_live_execution(&ctx.scopes)
-        .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
+    // Resolution is not project execution. The verified descriptor decides
+    // whether this request belongs to the daemon-local read lane or the
+    // ordinary live-project execution lane, so requiring write authority here
+    // makes every `ui_read_only` service unsatisfiable by construction.
     let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
     let checkout_id = format!(
         "ui-{}-{:08x}",
@@ -193,7 +207,7 @@ fn prepare_item_ref(
         project_path,
         &ctx.fingerprint,
         &checkout_id,
-        ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+        ryeos_executor::execution::project_source::PinnedContextRealization::ReadOnly,
     )
     .map_err(|e| HandlerError::Internal(format!("resolve project context: {e}")))?;
 
@@ -227,11 +241,83 @@ fn prepare_item_ref(
     })
 }
 
+async fn execute_read_only_service(
+    req: &Request,
+    state: &AppState,
+    prepared: PreparedInvocation,
+    verified: ryeos_engine::contracts::VerifiedItem,
+    local_handler_context: HandlerContext,
+) -> Result<Value> {
+    let item_ref = req.item_ref();
+    let canonical = CanonicalRef::parse(item_ref)
+        .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
+    if canonical.kind != "service" {
+        return Err(HandlerError::Forbidden(
+            "ui_read_only dispatch is restricted to verified daemon services".into(),
+        )
+        .into());
+    }
+    if !req.ref_bindings.is_empty() {
+        return Err(HandlerError::BadRequest(
+            "ui_read_only service dispatch does not accept ref bindings".into(),
+        )
+        .into());
+    }
+
+    // Read-only UI sources are in-process daemon queries. They need the live
+    // project only as a resolution/input scope; manufacturing project
+    // execution provenance for them both over-authorizes the handler and
+    // wrongly demands `ryeos.write.project.live`. Availability, signed
+    // required_caps, audit policy, and session-local context are still
+    // enforced by the shared verified service executor.
+    let result = ryeos_executor::executor::execute_service_verified(
+        verified,
+        item_ref,
+        req.params.clone(),
+        ryeos_executor::executor::ExecutionMode::Live,
+        &prepared.exec_ctx,
+        state,
+        None,
+        Some(local_handler_context),
+    )
+    .await
+    .map_err(map_dispatch_error)?;
+
+    let thread_profile = prepared
+        .exec_ctx
+        .engine
+        .kinds
+        .get(&canonical.kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.thread_profile.as_ref())
+        .map(|profile| profile.name.clone())
+        .ok_or_else(|| {
+            HandlerError::Internal(format!(
+                "verified executable kind '{}' has no execution.thread_profile",
+                canonical.kind
+            ))
+        })?;
+
+    Ok(json!({
+        "thread": {
+            "thread_id": result.invocation_id,
+            "recorded": result.recorded,
+            "kind": thread_profile,
+            "item_ref": item_ref,
+            "status": "completed",
+            "trust_class": format!("{:?}", result.trust_class),
+            "effective_caps": result.effective_caps,
+        },
+        "result": result.value,
+    }))
+}
+
 async fn execute_prepared_item_ref(
     req: &Request,
     state: &AppState,
     prepared: PreparedInvocation,
     verified: ryeos_engine::contracts::VerifiedItem,
+    authority_scopes: &[String],
     local_handler_context: HandlerContext,
 ) -> Result<Value> {
     let item_ref = req.item_ref();
@@ -240,10 +326,10 @@ async fn execute_prepared_item_ref(
 
     let resolved_authority = ryeos_app::execution_policy::resolve_standard_local_live_authority(
         &prepared.project.effective_path,
-        local_handler_context.scopes.clone(),
+        authority_scopes.to_vec(),
         &state.isolation,
     )
-    .map_err(|error| HandlerError::Internal(error.to_string()))?;
+    .map_err(|error| HandlerError::Forbidden(error.to_string()))?;
     let provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
         prepared.project.effective_path.clone(),
         prepared.exec_ctx.engine.clone(),
@@ -279,12 +365,23 @@ async fn execute_prepared_item_ref(
         state,
     )
     .await
-    .map_err(|e| HandlerError::Structured {
-        code: e.code().to_owned(),
-        status: e.http_status().as_u16(),
-        body: ryeos_executor::structured_error::StructuredErrorPayload::from(&e).to_value(),
-    })
+    .map_err(dispatch_error_to_handler)
     .map_err(Into::into)
+}
+
+fn map_dispatch_error(error: anyhow::Error) -> HandlerError {
+    let error = error
+        .downcast::<ryeos_executor::dispatch_error::DispatchError>()
+        .unwrap_or_else(ryeos_executor::dispatch_error::DispatchError::Internal);
+    dispatch_error_to_handler(error)
+}
+
+fn dispatch_error_to_handler(error: ryeos_executor::dispatch_error::DispatchError) -> HandlerError {
+    HandlerError::Structured {
+        code: error.code().to_owned(),
+        status: error.http_status().as_u16(),
+        body: ryeos_executor::structured_error::StructuredErrorPayload::from(&error).to_value(),
+    }
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

@@ -1922,6 +1922,7 @@ fn validate_principal_identifier(label: &str, principal: &str) -> Result<()> {
 pub struct NonExecutionRootAdmission {
     verified_subject: VerifiedItem,
     plan_context: PlanContext,
+    project_authority: ryeos_state::objects::ExecutionProjectAuthority,
     thread_profile: String,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
     captured_history_policy: ryeos_state::objects::CapturedThreadHistoryPolicy,
@@ -1949,11 +1950,19 @@ impl NonExecutionRootAdmission {
         }
     }
 
+    pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {
+        &self.project_authority
+    }
+
     fn validate(&self) -> Result<()> {
         validate_principal_identifier(
             "non-execution root planning principal",
             plan_principal_identifier(&self.plan_context),
         )?;
+        self.project_authority.validate()?;
+        if self.project_authority.project_root_projection() != self.project_root() {
+            bail!("non-execution root project authority does not match its planning context");
+        }
         if self.thread_profile.trim().is_empty()
             || self.thread_profile.trim() != self.thread_profile
         {
@@ -2770,6 +2779,9 @@ impl ThreadLifecycleService {
         }
         if params.project_root.as_deref() != admission.project_root() {
             bail!("non-execution root project path does not match its sealed PlanContext");
+        }
+        if &params.project_authority != admission.project_authority() {
+            bail!("non-execution root project authority does not match its sealed admission");
         }
         if params.captured_history_policy.is_some() {
             bail!("root captured history policy is supplied only by sealed admission authority");
@@ -4757,18 +4769,30 @@ pub fn admit_non_execution_root(
     validate_principal_identifier("non-execution root acting principal", requested_by)?;
     let canonical_ref = CanonicalRef::parse(item_ref)
         .map_err(|error| anyhow!("invalid root policy item ref `{item_ref}`: {error}"))?;
+    let canonical_project_path = project_path.canonicalize().with_context(|| {
+        format!(
+            "canonicalize non-execution root project {}",
+            project_path.display()
+        )
+    })?;
+    let mut capability_ceiling = caller_scopes.clone();
+    capability_ceiling.sort();
+    capability_ceiling.dedup();
+    let project_authority = ryeos_state::objects::ExecutionProjectAuthority::live(
+        canonical_project_path.clone(),
+        format!("local:{}", canonical_project_path.display()),
+        ryeos_state::objects::LiveProjectAccess::ReadOnly,
+        ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+        ryeos_state::objects::EnvironmentAuthority::None,
+        capability_ceiling,
+    )?;
     let plan_context = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: requested_by.to_string(),
             scopes: caller_scopes,
         }),
         project_context: ProjectContext::LocalPath {
-            path: project_path.canonicalize().with_context(|| {
-                format!(
-                    "canonicalize non-execution root project {}",
-                    project_path.display()
-                )
-            })?,
+            path: canonical_project_path,
         },
         current_site_id: current_site_id.to_string(),
         origin_site_id: origin_site_id.to_string(),
@@ -4786,6 +4810,7 @@ pub fn admit_non_execution_root(
     let admission = NonExecutionRootAdmission {
         verified_subject,
         plan_context,
+        project_authority,
         thread_profile,
         captured_history_policy: capture_thread_history_policy(&resolved_history_policy)?,
         resolved_history_policy,
@@ -4989,6 +5014,14 @@ pub struct PreparedItemPlan {
 }
 
 impl PreparedItemPlan {
+    pub fn runtime_ref(&self) -> Result<&str> {
+        self.plan
+            .runtime_identity
+            .as_ref()
+            .map(|identity| identity.runtime_ref.as_str())
+            .ok_or_else(|| anyhow!("direct execution plan has no verified runtime identity"))
+    }
+
     pub fn admitted_artifact_identity(
         &self,
         engine: &Engine,

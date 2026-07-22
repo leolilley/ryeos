@@ -93,7 +93,7 @@ async fn closure_describe_reports_objects_and_blobs() {
 
     assert_eq!(value["complete"], true);
     assert_eq!(value["roots"], json!([snapshot_hash]));
-    assert_eq!(value["object_hashes"].as_array().unwrap().len(), 3);
+    assert_eq!(value["object_hashes"].as_array().unwrap().len(), 4);
     assert_eq!(value["blob_hashes"], json!([blob_hash]));
 }
 
@@ -107,11 +107,11 @@ async fn closure_get_returns_present_entries() {
         .unwrap();
 
     assert_eq!(value["closure"]["complete"], true);
-    assert_eq!(value["closure"]["counts"]["objects"], 3);
+    assert_eq!(value["closure"]["counts"]["objects"], 4);
     assert_eq!(value["closure"]["counts"]["blobs"], 1);
 
     let entries = value["entries"].as_array().unwrap();
-    assert_eq!(values(entries, "object").len(), 3);
+    assert_eq!(values(entries, "object").len(), 4);
 
     let blob_entries = values(entries, "blob");
     assert_eq!(blob_entries.len(), 1);

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:51:58Z:eab0b7556498581c20f73c5f8b9cb61723ba652bd5ed2ad715b6164781791d49:oH+AJ9JB95v80FrnOa+8jMLkDbTAqBw9isfmLfhgj68Caf28Jn/6I7xb04inmgyFEn4jgniusVdPrE2pxqh5Aw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-22T02:33:55Z:34d0a133fc39ccfaf48a2c05853f3c3d85ee58a558677cbc23005cd467796319:0OIJ4v5amnLgbKK410GGZwNh4zW/UVmciLxSN8/Tk2aZGAtqwN86ikA/7FUa3EvPBLjg0Pc1YhastMInMbDOBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -91,7 +91,7 @@ Sign after creating or editing any item:
 
 ## Verification
 
-`ryeos verify <ref>` checks:
+`ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` checks each target's:
 1. The signature header exists
 2. The content hash matches the current file content
 3. The signing key is in the trust store

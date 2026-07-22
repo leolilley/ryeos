@@ -33,6 +33,12 @@ use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 use tokio::time::Instant;
 
+fn live_wait_policy() -> ryeos_app::execution_policy::ExecutionPolicy {
+    ryeos_app::execution_policy::ExecutionPolicy::local_live(
+        ryeos_app::execution_policy::ExecutionResponse::Wait,
+    )
+}
+
 /// Provider latency that keeps the thread observably `running` while we attach
 /// a subscriber. Large enough that the terminal cannot arrive bundled with the
 /// opening event on any reasonable machine.
@@ -329,6 +335,7 @@ async fn open_gateway_stream(
         "ref_bindings": { "model": "directive:test/live_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
+        "execution_policy": live_wait_policy(),
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
     let path = "/execute/stream";
@@ -402,6 +409,7 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
         "ref_bindings": { "model": "directive:test/live_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
+        "execution_policy": live_wait_policy(),
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
     let path = "/execute/stream";

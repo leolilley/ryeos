@@ -39,8 +39,9 @@ RUN --mount=type=secret,id=publisher-key \
 FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates && \
+        ca-certificates tini && \
     rm -rf /var/lib/apt/lists/*
+RUN test -x /usr/bin/tini
 
 WORKDIR /app
 
@@ -72,4 +73,4 @@ LABEL io.ryeos.bundle-protocol="1.0"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["ryeos", "node", "status"]
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

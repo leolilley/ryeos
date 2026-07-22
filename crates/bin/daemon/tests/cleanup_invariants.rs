@@ -567,6 +567,9 @@ fn gate_18_remote_execute_request_defaults() {
         serde_json::from_value(serde_json::json!({
             "item_ref": "directive:some/test",
             "ref_bindings": {},
+            "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
         }))
         .expect("Request with required identity fields must parse");
     assert!(

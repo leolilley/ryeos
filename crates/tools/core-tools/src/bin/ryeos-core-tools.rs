@@ -201,11 +201,15 @@ enum Cmd {
         project_path: Option<String>,
     },
 
-    /// Resolve and trust-verify an item.
+    /// Resolve and trust-verify one or more items.
     Verify {
-        /// Canonical ref to verify.
-        #[arg(long)]
-        item_ref: Option<String>,
+        /// Canonical refs or `.ai/...` paths of the items to verify.
+        #[arg(value_name = "ITEM_REF", num_args = 0..)]
+        item_refs: Vec<String>,
+
+        /// Backward-compatible repeatable canonical ref flag.
+        #[arg(long = "item-ref")]
+        flagged_item_refs: Vec<String>,
 
         /// Project root path.
         #[arg(long)]
@@ -537,14 +541,23 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Verify {
-            item_ref,
+            mut item_refs,
+            flagged_item_refs,
             project_path,
         } => {
             let params = if cli.stdin_json {
+                if !item_refs.is_empty() || !flagged_item_refs.is_empty() {
+                    anyhow::bail!(
+                        "--stdin-json is mutually exclusive with ITEM_REF/--item-ref values"
+                    );
+                }
                 read_stdin_json()?
             } else {
-                let ir = item_ref.ok_or_else(|| anyhow::anyhow!("--item-ref required"))?;
-                let mut obj = serde_json::json!({ "item_ref": ir });
+                item_refs.extend(flagged_item_refs);
+                if item_refs.is_empty() {
+                    anyhow::bail!("ITEM_REF required (or pass --stdin-json)");
+                }
+                let mut obj = serde_json::json!({ "item_refs": item_refs });
                 if let Some(p) = project_path {
                     obj["project_path"] = serde_json::json!(p);
                 }
@@ -555,8 +568,11 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             let engine = ryeos_core_tools::actions::inspect::boot(
                 params.project_path.as_deref().map(std::path::Path::new),
             )?;
-            let report = ryeos_core_tools::actions::inspect::verify::run_verify(params, &engine)?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            let run = ryeos_core_tools::actions::inspect::verify::run_verify(params, &engine)?;
+            println!("{}", serde_json::to_string_pretty(&run.report)?);
+            if run.total > 1 && run.failed > 0 {
+                anyhow::bail!("{}/{} items failed verification", run.failed, run.total);
+            }
             Ok(())
         }
         Cmd::Snapshot { cmd } => run_snapshot(cmd, cli.stdin_json),

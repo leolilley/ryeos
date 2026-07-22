@@ -340,6 +340,15 @@ struct ChainTerminal {
     runtime_identity: Option<PlanRuntimeIdentity>,
 }
 
+#[derive(Clone, Copy)]
+struct ExecutorChainResolutionContext<'a> {
+    kinds: &'a KindRegistry,
+    parsers: &'a ParserDispatcher,
+    roots: &'a ResolutionRoots,
+    trust_store: &'a TrustStore,
+    node_trust_store: Option<&'a TrustStore>,
+}
+
 // ── Chain walker ────────────────────────────────────────────────────────
 
 /// Resolve the executor chain from a starting executor_id to a terminal.
@@ -354,12 +363,15 @@ fn resolve_executor_chain(
     starting_executor_id: &str,
     root_source_path: &Path,
     root_kind: &str,
-    kinds: &KindRegistry,
-    parsers: &ParserDispatcher,
-    roots: &ResolutionRoots,
-    trust_store: &TrustStore,
-    node_trust_store: Option<&TrustStore>,
+    context: ExecutorChainResolutionContext<'_>,
 ) -> Result<ChainTerminal, EngineError> {
+    let ExecutorChainResolutionContext {
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        node_trust_store,
+    } = context;
     let mut current_id = starting_executor_id.to_owned();
     let mut visited: Vec<String> = Vec::new();
     let mut verified_chain: Vec<(String, ContractTrustClass)> = Vec::new();
@@ -608,11 +620,13 @@ pub fn resolve_terminal_executor(
         starting_executor_id,
         root_source_path,
         root_kind,
-        kinds,
-        parsers,
-        roots,
-        trust_store,
-        None,
+        ExecutorChainResolutionContext {
+            kinds,
+            parsers,
+            roots,
+            trust_store,
+            node_trust_store: None,
+        },
     )?;
     let last = terminal.intermediates.last().ok_or_else(|| {
         EngineError::Internal("executor chain resolved to an empty intermediate list".to_string())
@@ -810,11 +824,13 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         &executor_id,
         &resolved.source_path,
         &resolved.kind,
-        kinds,
-        parsers,
-        roots,
-        trust_store,
-        Some(node_trust_store),
+        ExecutorChainResolutionContext {
+            kinds,
+            parsers,
+            roots,
+            trust_store,
+            node_trust_store: Some(node_trust_store),
+        },
     )?;
 
     // Step 2a: Prepend the root item as the first chain intermediate.

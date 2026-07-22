@@ -1,0 +1,6 @@
+category: "ryeos-runtime"
+tiers:
+  general:
+    provider: local-openai
+    model: mock-model
+    context_window: 200000

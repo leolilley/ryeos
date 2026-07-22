@@ -720,18 +720,26 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 mod tests {
     use super::*;
 
+    fn local_live_policy() -> Value {
+        serde_json::to_value(ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ))
+        .unwrap()
+    }
+
     #[test]
     fn launch_request_minimal_fields_deserialize() {
         let json = serde_json::json!({
             "item_ref": "directive:foo/bar",
             "ref_bindings": {},
             "project_path": "/tmp/project",
-            "parameters": {}
+            "parameters": {},
+            "execution_policy": local_live_policy()
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "directive:foo/bar");
         assert_eq!(req.project_path, "/tmp/project");
-        assert_eq!(req.launch_mode, "wait");
+        assert!(req.launch_mode.is_empty());
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
         assert!(req.call.is_none());
@@ -744,15 +752,18 @@ mod tests {
             "ref_bindings": {"guard": "tool:guard/check"},
             "project_path": "/home/me/project",
             "parameters": {"key": "val"},
-            "launch_mode": "detached",
-            "target_site_id": "site:remote",
+            "execution_policy": local_live_policy(),
             "validate_only": true,
             "call": {"method": "run", "args": {"arg": 42}}
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "tool:x/y");
-        assert_eq!(req.launch_mode, "detached");
-        assert_eq!(req.target_site_id.as_deref(), Some("site:remote"));
+        assert!(req.launch_mode.is_empty());
+        assert_eq!(req.target_site_id, None);
+        assert_eq!(
+            req.execution_policy.response,
+            ryeos_app::execution_policy::ExecutionResponse::Wait
+        );
         assert!(req.validate_only);
         let call = req.call.as_ref().expect("call present");
         assert_eq!(call.method(), Some("run"));
@@ -766,6 +777,7 @@ mod tests {
             "ref_bindings": {},
             "project_path": "/tmp/p",
             "parameters": {},
+            "execution_policy": local_live_policy(),
             "bogus_field": true
         });
         let result = serde_json::from_value::<LaunchRequest>(json);
@@ -781,15 +793,16 @@ mod tests {
     }
 
     #[test]
-    fn launch_request_defaults_are_inline_local() {
+    fn launch_request_routing_fields_are_derived_after_deserialization() {
         let json = serde_json::json!({
             "item_ref": "directive:x",
             "ref_bindings": {},
             "project_path": "/tmp/p",
-            "parameters": {}
+            "parameters": {},
+            "execution_policy": local_live_policy()
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
-        assert_eq!(req.launch_mode, "wait");
+        assert!(req.launch_mode.is_empty());
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
         assert!(req.call.is_none());

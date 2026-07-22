@@ -36,6 +36,12 @@ use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 
+fn live_execution_policy(
+    response: ryeos_app::execution_policy::ExecutionResponse,
+) -> ryeos_app::execution_policy::ExecutionPolicy {
+    ryeos_app::execution_policy::ExecutionPolicy::local_live(response)
+}
+
 fn plant_mock_provider(
     user_space: &Path,
     mock_base_url: &str,
@@ -336,6 +342,9 @@ async fn sse_dispatch_launch_e2e_round_trip() {
         "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
+        "execution_policy": live_execution_policy(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
 
@@ -442,6 +451,9 @@ async fn sse_dispatch_launch_rejects_last_event_id() {
         "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": project_path,
         "parameters": {"name": "World"},
+        "execution_policy": live_execution_policy(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
 
@@ -490,7 +502,9 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
             "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
-            "launch_mode": "detached"
+            "execution_policy": live_execution_policy(
+                ryeos_app::execution_policy::ExecutionResponse::Accepted,
+            )
         }),
         10,
     )
@@ -515,6 +529,9 @@ async fn sse_dispatch_launch_rejects_validate_only_before_spawn() {
             "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
+            "execution_policy": live_execution_policy(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            ),
             "validate_only": true
         }),
         10,
@@ -531,6 +548,11 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
     let project = tempfile::tempdir().expect("project tempdir");
     let project_path = project.path().to_str().unwrap().to_string();
 
+    let mut remote_policy =
+        live_execution_policy(ryeos_app::execution_policy::ExecutionResponse::Wait);
+    remote_policy.target = ryeos_app::execution_policy::ExecutionTarget::Site {
+        site_id: "site:not-local".to_string(),
+    };
     let resp = post_execute_stream(
         &h,
         &user_sk,
@@ -540,13 +562,17 @@ async fn sse_dispatch_launch_rejects_non_local_target_site_before_spawn() {
             "ref_bindings": { "model": "directive:test/launch_e2e" },
             "project_path": project_path,
             "parameters": {"name": "World"},
-            "target_site_id": "site:not-local"
+            "execution_policy": remote_policy
         }),
         10,
     )
     .await;
 
-    assert_pre_admission_rejection(resp, "target-site streaming is not yet supported").await;
+    assert_pre_admission_rejection(
+        resp,
+        "remote execution requires pinned portable project authority",
+    )
+    .await;
     drop(project);
 }
 
@@ -703,6 +729,9 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
         "ref_bindings": {},
         "project_path": project_path,
         "parameters": {},
+        "execution_policy": live_execution_policy(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
 
@@ -745,6 +774,9 @@ async fn sse_dispatch_launch_rejects_relative_project_path() {
         "ref_bindings": { "model": "directive:test/launch_e2e" },
         "project_path": "relative/path",
         "parameters": {},
+        "execution_policy": live_execution_policy(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
 

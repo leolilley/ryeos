@@ -44,8 +44,9 @@ FROM debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883
 # so project images can install their own Python tool dependencies without
 # rebuilding the RyeOS base from scratch.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates python3 python3-venv python3-pip && \
+        ca-certificates python3 python3-venv python3-pip tini && \
     rm -rf /var/lib/apt/lists/*
+RUN test -x /usr/bin/tini
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 
@@ -85,4 +86,4 @@ LABEL io.ryeos.bundle-protocol="1.0"
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
   CMD ["ryeos", "node", "status"]
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]

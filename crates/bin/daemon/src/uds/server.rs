@@ -363,7 +363,10 @@ pub(crate) async fn dispatch_runtime_method(
             ryeos_executor::execution::runtime_dispatch::handle(params, state).await
         }
         "runtime.spawn_follow_child" => {
-            ryeos_executor::execution::spawn_follow_child::handle(params, state).await
+            Box::pin(ryeos_executor::execution::spawn_follow_child::handle(
+                params, state,
+            ))
+            .await
         }
         "runtime.append_event" => handle_append_event(&clean_params, state),
         "runtime.append_events" => handle_append_event_batch(&clean_params, state),
@@ -2386,7 +2389,7 @@ mod tests {
                             )
                             .unwrap(),
                         ),
-                        local_overlay_root: Some(std::path::PathBuf::from("/tmp/p")),
+                        local_overlay_root: None,
                         original_snapshot_hash: Some("a".repeat(64)),
                         original_pushed_head_ref: None,
                         state_root: None,

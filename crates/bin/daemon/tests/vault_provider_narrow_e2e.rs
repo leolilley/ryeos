@@ -587,7 +587,9 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
         "ref_bindings": {},
         "project_path": project.path().to_str().unwrap(),
         "parameters": {},
-        "launch_mode": "detached",
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Accepted,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
     let user_key = h.user_key.as_ref().expect("fast fixture user key");
@@ -607,11 +609,11 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     let resp_body: serde_json::Value = resp.json().await.unwrap_or(serde_json::json!({}));
     assert_eq!(
         status,
-        reqwest::StatusCode::OK,
-        "/execute should succeed for detached tool; got status={status} body={resp_body:#}"
+        reqwest::StatusCode::ACCEPTED,
+        "/execute should accept daemon-owned tool execution; got status={status} body={resp_body:#}"
     );
 
-    let thread_id = resp_body["thread"]["thread_id"]
+    let thread_id = resp_body["thread_id"]
         .as_str()
         .expect("response includes thread.thread_id")
         .to_string();
@@ -805,6 +807,9 @@ async fn execute_stream_emits_structured_required_secret_missing_stream_error() 
         "ref_bindings": { "model": "directive:test/sse_secret" },
         "project_path": project.path().to_str().unwrap(),
         "parameters": {"name": "World"},
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body_obj).expect("serialize body");
 

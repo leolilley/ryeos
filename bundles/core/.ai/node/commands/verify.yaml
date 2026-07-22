@@ -1,11 +1,17 @@
-# ryeos:signed:2026-06-19T05:40:59Z:ce3559152ca2e5523560f0924c2f134ca8aa1048ece4b85b046dc34f983b623f:h61j7bzvVC4Pq6mk1Nhahsm9kIDMkw0UlYOIy3+3A+IwsZwb/wh3vL8jEu/0ejLqZL2Xn078bTXKa5y4LlDHCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T02:33:39Z:9f76d67995aa9bbdb9445c74ebe436a4a8568e797d091045f9e22777799cc280:N/q658Ay2gPKeeoSzkteXima3vcaQzionsERabjMoxf6trt0ToUAIqNrmC2Py30XWZ8Fi5FSfa22KZENhOBPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - verify
-description: Verify an item's signature chain
+description: Verify one or more items' signature chains by canonical ref or .ai path
+arguments:
+- name: item_refs
+  kind: string
+  positional: 1
+  required: true
+  arity: variadic
 forms:
 - slots:
-  - field: item_ref
-    matcher: canonical_ref
+  - field: item_refs
+    matcher: string
 project:
   resolution: optional
   bind_parameter: project

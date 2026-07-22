@@ -1,10 +1,11 @@
-# ryeos:signed:2026-06-07T05:18:56Z:a4031a48a2220c8e02a80e2a259f599917ec82489341d67b1951ecc7b1199a1a:/xAnHqqG8rZiVrktFbR6RvCHZsLYF1PnC8QEH1Uq8KiX6raCRoa70kZM7EOIxBHWEY+0oW2TF6axSl+BZlzxDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T02:33:45Z:760d150d377fca8c67d7ca6bf7b2dbdff738954da3efa6779c33b80135f53779:abvI4DUcmVRhpuGJYXcQIlegia9/jfzscE6JNqgqqncftdANfFRN84idWXgPErHrmh7gKBL5KJmR1QZZ+JUsCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: service
 endpoint: verify
 availability: offline
 offline_execute: tool:ryeos/core/verify
 required_caps: ["ryeos.execute.service.verify"]
 schema:
-  item_ref: string
+  item_ref: string?
+  item_refs: string[]?
   project_path: string?
-description: "Resolve and trust-verify an item via the engine"
+description: "Resolve and trust-verify one or more items via the engine"

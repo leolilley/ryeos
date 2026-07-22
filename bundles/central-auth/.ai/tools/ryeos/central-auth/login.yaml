@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T08:42:53Z:364982f7c00d787dcb4534e4cc86db48f42b972ddc03e1373b78e15aa50caa7f:brkod9UMw41h2g3YQDg/+O+6f+bQhHgpt7ZGvtpBvATaOxlKRkX3wLFl8XSbk92nuETi71ihptFXRrTji2JJAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
+# ryeos:signed:2026-07-21T23:12:22Z:364982f7c00d787dcb4534e4cc86db48f42b972ddc03e1373b78e15aa50caa7f:6NplKdN+MNtpOBZJiamrGnMbJk6eeWARL9qXK478bsMqW1l7RCUzspBTmHI2u63HbSyPLKzc5b8CZwVjhcZeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "login"
