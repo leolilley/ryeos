@@ -117,6 +117,11 @@ pub struct Engine {
     /// System bundle roots (parents of `AI_DIR`)
     pub bundle_roots: Vec<PathBuf>,
 
+    /// Immutable signed-registration identities corresponding one-to-one with
+    /// `bundle_roots`. Production engines populate this from the retained node
+    /// generation; directory basenames are never treated as bundle identity.
+    registered_bundle_roots: Vec<crate::item_resolution::RegisteredBundleRoot>,
+
     /// Operator-owned `.ai/` root. This is intentionally excluded from
     /// ordinary item resolution and is admitted only for signed launch-config
     /// inputs, between an active project and installed bundles.
@@ -182,6 +187,24 @@ impl CheckedEngineGeneration<'_> {
         self.engine.effective_item_current(request)
     }
 
+    pub fn verify(
+        &self,
+        ctx: &PlanContext,
+        item: ResolvedItem,
+    ) -> Result<VerifiedItem, EngineError> {
+        self.engine.verify(ctx, item)
+    }
+
+    pub fn build_plan(
+        &self,
+        ctx: &PlanContext,
+        item: &VerifiedItem,
+        parameters: &Value,
+        hints: &ExecutionHints,
+    ) -> Result<ExecutionPlan, EngineError> {
+        self.engine.build_plan_current(ctx, item, parameters, hints)
+    }
+
     /// Resolve independent canonical items concurrently while retaining this
     /// generation and preserving input order.
     pub fn resolve_many(
@@ -223,6 +246,7 @@ impl Engine {
             protocols: ProtocolRegistry::empty(),
             host_env: crate::runtime::HostEnvBindings::default(),
             bundle_roots,
+            registered_bundle_roots: Vec::new(),
             operator_ai_root: None,
             isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
         }
@@ -234,6 +258,21 @@ impl Engine {
     ) -> Self {
         self.isolation_generation = isolation;
         self
+    }
+
+    pub fn with_registered_bundle_roots(
+        mut self,
+        registered: Vec<crate::item_resolution::RegisteredBundleRoot>,
+    ) -> Self {
+        self.registered_bundle_roots = registered;
+        self
+    }
+
+    pub fn registered_bundle_name_for_root(&self, root: &std::path::Path) -> Option<&str> {
+        self.registered_bundle_roots
+            .iter()
+            .find(|bundle| bundle.canonical_root == root)
+            .map(|bundle| bundle.name.as_str())
     }
 
     pub fn with_operator_ai_root(mut self, operator_ai_root: PathBuf) -> Self {
@@ -792,6 +831,9 @@ impl Engine {
 
     /// Build resolution roots for a given project root (project-first order).
     pub fn resolution_roots(&self, project_root: Option<PathBuf>) -> ResolutionRoots {
+        if !self.registered_bundle_roots.is_empty() {
+            return ResolutionRoots::from_registered(project_root, &self.registered_bundle_roots);
+        }
         let system_ai: Vec<PathBuf> = self.bundle_roots.iter().map(|p| p.join(AI_DIR)).collect();
         let project_ai = project_root.map(|p| p.join(AI_DIR));
         ResolutionRoots::from_flat(project_ai, system_ai)

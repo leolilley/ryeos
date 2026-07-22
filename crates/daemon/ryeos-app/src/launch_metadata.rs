@@ -167,11 +167,7 @@ pub struct RuntimeLaunchMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub admitted_artifact_identity: Option<ryeos_state::objects::AdmittedLaunchArtifactIdentity>,
 
-    /// Wire schema of the CAS-rooted admitted launch capsule. Schema-10 rows
-    /// written before this field existed omit it and therefore retain the
-    /// bounded schema-v2 rollout predecessor. Fresh admissions always seal
-    /// the current schema explicitly so continuations never silently upgrade
-    /// the rooted capsule or change its hash.
+    /// Exact wire schema of the CAS-rooted admitted launch capsule.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admitted_launch_capsule_schema: Option<u32>,
 
@@ -734,16 +730,18 @@ impl RuntimeLaunchMetadata {
             anyhow::bail!("launch metadata has admitted artifacts without a sealed request");
         }
         if let Some(schema) = self.admitted_launch_capsule_schema {
-            if !matches!(
-                schema,
-                ryeos_state::objects::LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
-                    | ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
-            ) {
-                anyhow::bail!("admitted launch capsule schema {schema} is unsupported");
+            if schema != ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION {
+                anyhow::bail!(
+                    "admitted launch capsule is not the exact current contract: stored schema={schema}, current schema={}",
+                    ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
+                );
             }
             if self.sealed_root_request.is_none() {
                 anyhow::bail!("launch metadata has a capsule schema without a sealed request");
             }
+        }
+        if self.sealed_root_request.is_some() && self.admitted_launch_capsule_schema.is_none() {
+            anyhow::bail!("sealed launch metadata has no admitted capsule schema");
         }
         if let Some(admitted) = &self.admitted_project_authority {
             admitted.validate()?;
@@ -863,7 +861,7 @@ impl RuntimeLaunchMetadata {
         let capsule = ryeos_state::objects::AdmittedLaunchCapsule {
             schema: self
                 .admitted_launch_capsule_schema
-                .unwrap_or(ryeos_state::objects::LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION),
+                .ok_or_else(|| anyhow::anyhow!("sealed launch has no admitted capsule schema"))?,
             kind: "admitted_launch_capsule".to_string(),
             exact_program: sealed.admitted_program_value()?,
             exact_program_hash: sealed.admitted_program_hash()?,
@@ -1248,78 +1246,6 @@ mod tests {
         assert!(successor.sealed_root_request.is_none());
         assert!(successor.follow_parent_context.is_none());
         assert!(successor.follow_launch_window.is_none());
-    }
-
-    #[test]
-    fn legacy_capsule_schema_and_hash_survive_continuation_without_upgrade() {
-        let sealed = SealedRootExecutionRequest::storage_test_fixture();
-        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS;
-        let lifecycle_authority =
-            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE;
-        let mut resume = resume_context(ProjectContext::None);
-        resume.kind = "graph_run".to_string();
-        resume.item_ref = sealed.item_ref().to_string();
-        resume.executor_ref = Some(sealed.executor_ref().to_string());
-        resume.runtime_ref = Some(sealed.runtime_ref().to_string());
-        resume.project_authority = project_authority.clone();
-        resume.lifecycle_authority = lifecycle_authority;
-        let artifacts = ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-            executor_ref: sealed.executor_ref().to_string(),
-            executor_item_content_hash: "33".repeat(32),
-            executor_item_signer_fingerprint: Some("fp:executor".to_string()),
-            executor_bundle_manifest_hash: None,
-            executor_bundle_signer_fingerprint: None,
-            protocol_ref: "protocol:test/direct".to_string(),
-            protocol_content_hash: "44".repeat(32),
-            protocol_signer_fingerprint: "fp:protocol".to_string(),
-            execution_plan_hash: "55".repeat(32),
-            executable_identity: ryeos_state::objects::DirectExecutableIdentity::VerifiedContent {
-                content_hash: "66".repeat(32),
-            },
-            runtime_identity: None,
-        };
-        let mut legacy = RuntimeLaunchMetadata::default()
-            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
-            .with_resume_context(resume)
-            .with_admitted_artifact_identity(artifacts)
-            .with_sealed_root_request(sealed);
-        legacy.admitted_project_authority = Some(project_authority);
-        legacy.admitted_launch_capsule_schema = None;
-        legacy.validate().unwrap();
-        let legacy_capsule = legacy.admitted_launch_capsule().unwrap().unwrap();
-        assert_eq!(
-            legacy_capsule.schema,
-            ryeos_state::objects::LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
-        );
-        let legacy_hash = legacy_capsule.content_hash().unwrap();
-
-        let successor = legacy.for_continuation_successor(
-            "source-thread",
-            PathBuf::from("/state/successor/checkpoints"),
-        );
-        successor.validate().unwrap();
-        assert_eq!(successor.admitted_launch_capsule_schema, None);
-        assert_eq!(
-            successor
-                .admitted_launch_capsule()
-                .unwrap()
-                .unwrap()
-                .content_hash()
-                .unwrap(),
-            legacy_hash
-        );
-    }
-
-    #[test]
-    fn replacing_inherited_legacy_sealed_request_does_not_stamp_current_capsule_schema() {
-        let sealed = SealedRootExecutionRequest::storage_test_fixture();
-        let mut successor = RuntimeLaunchMetadata {
-            sealed_root_request: Some(sealed.clone()),
-            admitted_launch_capsule_schema: None,
-            ..RuntimeLaunchMetadata::default()
-        };
-        successor.set_sealed_root_request(sealed);
-        assert_eq!(successor.admitted_launch_capsule_schema, None);
     }
 
     #[test]

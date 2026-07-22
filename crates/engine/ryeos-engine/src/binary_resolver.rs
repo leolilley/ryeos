@@ -30,10 +30,9 @@ use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
 use lillux::crypto::VerifyingKey;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::contracts::{ItemSpace, SignatureEnvelope, TrustClass as ContractTrustClass};
+use crate::contracts::ItemSpace;
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::resolution::TrustClass;
@@ -220,14 +219,15 @@ pub fn resolve_runtime_binary_command_ref(
     let slash_count = rest.matches('/').count();
     match slash_count {
         0 => {
-            let bundle_root = registered_bundle_root_for_source(wrapper_source_path, roots)
-                .or_else(|| find_bundle_root(wrapper_source_path))
-                .ok_or_else(|| EngineError::InvalidBinPrefix {
+            let (_bundle_name, bundle_root) =
+                registered_bundle_root_for_source(wrapper_source_path, roots).ok_or_else(|| {
+                    EngineError::InvalidBinPrefix {
                     raw: binary_ref.to_string(),
                     detail: format!(
-                        "cannot find bundle root (no registered bundle or .ai/ ancestor of {})",
+                        "cannot find registered bundle root containing {}",
                         wrapper_source_path.display()
                     ),
+                }
                 })?;
             resolve_bundle_binary_ref(
                 binary_ref,
@@ -241,7 +241,7 @@ pub fn resolve_runtime_binary_command_ref(
             validate_bundle_name(target_bundle, binary_ref)?;
             validate_bin_name(bin_name, binary_ref)?;
 
-            let source_root = registered_bundle_root_for_source(wrapper_source_path, roots)
+            let (source_name, source_root) = registered_bundle_root_for_source(wrapper_source_path, roots)
                 .ok_or_else(|| EngineError::InvalidBinPrefix {
                     raw: binary_ref.to_string(),
                     detail: format!(
@@ -249,7 +249,11 @@ pub fn resolve_runtime_binary_command_ref(
                         wrapper_source_path.display()
                     ),
                 })?;
-            let source_manifest = load_minimal_bundle_manifest(&source_root, trust_store)?;
+            let source_manifest = crate::plan_builder::verify_bundle_source_manifest_identity(
+                &source_root,
+                &source_name,
+                trust_store,
+            )?;
             let (target_root, target_manifest) =
                 find_qualified_target_bundle(target_bundle, roots, trust_store)?;
 
@@ -1200,31 +1204,26 @@ fn verify_installed_mode(
 fn registered_bundle_root_for_source(
     source_path: &Path,
     roots: &ResolutionRoots,
-) -> Option<PathBuf> {
+) -> Option<(String, PathBuf)> {
     roots
         .ordered
         .iter()
         .filter(|root| root.space == ItemSpace::Bundle)
-        .filter_map(|root| root.ai_root.parent().map(Path::to_path_buf))
-        .find(|bundle_root| source_path.starts_with(bundle_root))
-}
-
-/// Walk up from `path` to find the first ancestor containing `.ai/`.
-fn find_bundle_root(path: &Path) -> Option<PathBuf> {
-    let mut current = path;
-    loop {
-        if current.join(crate::AI_DIR).is_dir() {
-            return Some(current.to_path_buf());
-        }
-        current = current.parent()?;
-    }
+        .filter_map(|root| {
+            let name = root.label.strip_prefix("bundle:")?;
+            let bundle_root = root.ai_root.parent()?.to_path_buf();
+            source_path
+                .starts_with(&bundle_root)
+                .then(|| (name.to_string(), bundle_root))
+        })
+        .next()
 }
 
 fn find_qualified_target_bundle(
     target_name: &str,
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
-) -> Result<(PathBuf, MinimalBundleManifest), EngineError> {
+) -> Result<(PathBuf, crate::plan_builder::SignedBundleManifestIdentity), EngineError> {
     let mut searched = Vec::new();
     let mut skipped = Vec::new();
     let mut matches = Vec::new();
@@ -1243,8 +1242,19 @@ fn find_qualified_target_bundle(
         // in the registered set must not break qualified resolution of others.
         // The reason is retained so a broken registration surfaces in the
         // not-found diagnostic rather than looking like a genuine absence.
-        match load_minimal_bundle_manifest(&bundle_root, trust_store) {
-            Ok(manifest) if manifest.name == target_name => {
+        let Some(registered_name) = root.label.strip_prefix("bundle:") else {
+            skipped.push(format!(
+                "registered bundle root has invalid label {:?}",
+                root.label
+            ));
+            continue;
+        };
+        match crate::plan_builder::verify_bundle_source_manifest_identity(
+            &bundle_root,
+            registered_name,
+            trust_store,
+        ) {
+            Ok(manifest) if registered_name == target_name => {
                 matches.push((bundle_root, manifest));
             }
             Ok(_) => {}
@@ -1266,85 +1276,9 @@ fn find_qualified_target_bundle(
     }
 }
 
-/// The subset of a signed bundle manifest that qualified binary resolution
-/// needs: the bundle identity and its kind-dependency surface. Intentionally a
-/// lenient projection (no `deny_unknown_fields`) so it does not break when the
-/// full manifest schema gains fields — the manifest is already signature- and
-/// trust-verified before it is parsed here, so extra fields are not a hazard.
-#[derive(Debug, Deserialize)]
-struct MinimalBundleManifest {
-    name: String,
-    #[serde(default)]
-    provides_kinds: Vec<String>,
-    #[serde(default)]
-    requires_kinds: Vec<String>,
-    #[serde(default)]
-    uses_kinds: Vec<String>,
-}
-
-fn load_minimal_bundle_manifest(
-    bundle_root: &Path,
-    trust_store: &TrustStore,
-) -> Result<MinimalBundleManifest, EngineError> {
-    let manifest_path = bundle_root.join(crate::AI_DIR).join("manifest.yaml");
-    let file_type = std::fs::symlink_metadata(&manifest_path)
-        .map_err(|e| EngineError::QualifiedBinManifestInvalid {
-            path: manifest_path.display().to_string(),
-            reason: format!("stat failed: {e}"),
-        })?
-        .file_type();
-    if file_type.is_symlink() || !file_type.is_file() {
-        return Err(EngineError::QualifiedBinManifestInvalid {
-            path: manifest_path.display().to_string(),
-            reason: "manifest is not a regular file".into(),
-        });
-    }
-
-    let raw = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        EngineError::QualifiedBinManifestInvalid {
-            path: manifest_path.display().to_string(),
-            reason: format!("read failed: {e}"),
-        }
-    })?;
-    let envelope = SignatureEnvelope {
-        prefix: "#".into(),
-        suffix: None,
-        after_shebang: false,
-    };
-    let sig_header =
-        crate::item_resolution::parse_signature_header(&raw, &envelope).ok_or_else(|| {
-            EngineError::QualifiedBinManifestInvalid {
-                path: manifest_path.display().to_string(),
-                reason: "missing or malformed signature header".into(),
-            }
-        })?;
-    let (trust_class, _) =
-        crate::trust::verify_item_signature(&raw, &sig_header, &envelope, trust_store).map_err(
-            |e| EngineError::QualifiedBinManifestInvalid {
-                path: manifest_path.display().to_string(),
-                reason: format!("signature verification failed: {e}"),
-            },
-        )?;
-    if trust_class != ContractTrustClass::Trusted {
-        return Err(EngineError::QualifiedBinManifestInvalid {
-            path: manifest_path.display().to_string(),
-            reason: format!(
-                "manifest signer {} is not trusted (trust_class: {:?})",
-                sig_header.signer_fingerprint, trust_class
-            ),
-        });
-    }
-
-    let body = lillux::signature::strip_signature_lines(&raw);
-    serde_yaml::from_str(&body).map_err(|e| EngineError::QualifiedBinManifestInvalid {
-        path: manifest_path.display().to_string(),
-        reason: format!("parse failed: {e}"),
-    })
-}
-
 fn ensure_qualified_binary_dependency(
-    source: &MinimalBundleManifest,
-    target: &MinimalBundleManifest,
+    source: &crate::plan_builder::SignedBundleManifestIdentity,
+    target: &crate::plan_builder::SignedBundleManifestIdentity,
 ) -> Result<(), EngineError> {
     if source.name == target.name {
         return Ok(());
@@ -1842,11 +1776,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn full_bundle_executor_manifest_rejects_special_ai_entry() {
+        use std::os::unix::ffi::OsStrExt as _;
+
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let (fingerprint, key) = write_resolver_fixture(&bundle, "demo");
-        let socket_path = bundle.join(crate::AI_DIR).join("unexpected.sock");
-        let _socket = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let fifo_path = bundle.join(crate::AI_DIR).join("unexpected.fifo");
+        let fifo = std::ffi::CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
 
         let error = verify_bundle_executor_manifest(&bundle, &trust_store_for(&fingerprint, &key))
             .expect_err("special entries in .ai must be refused");
@@ -1921,11 +1858,21 @@ mod tests {
         ResolutionRoots {
             ordered: bundle_roots
                 .iter()
-                .enumerate()
-                .map(|(i, root)| ResolutionRoot {
-                    space: ItemSpace::Bundle,
-                    label: format!("bundle:{i}"),
-                    ai_root: root.join(crate::AI_DIR),
+                .map(|root| {
+                    let raw =
+                        std::fs::read_to_string(root.join(crate::AI_DIR).join("manifest.yaml"))
+                            .unwrap();
+                    let body = lillux::signature::strip_signature_lines(&raw);
+                    let manifest: serde_yaml::Value = serde_yaml::from_str(&body).unwrap();
+                    let name = manifest
+                        .get("name")
+                        .and_then(serde_yaml::Value::as_str)
+                        .unwrap();
+                    ResolutionRoot {
+                        space: ItemSpace::Bundle,
+                        label: format!("bundle:{name}"),
+                        ai_root: root.join(crate::AI_DIR),
+                    }
                 })
                 .collect(),
         }
@@ -2160,7 +2107,7 @@ mod tests {
             } => {
                 assert_eq!(bundle, "core");
                 assert!(
-                    skipped.iter().any(|s| s.contains("invalid")),
+                    skipped.iter().any(|s| s.contains("not node-trusted")),
                     "expected the skipped invalid manifest to be reported, got: {skipped:?}"
                 );
             }
@@ -2170,10 +2117,9 @@ mod tests {
 
     #[test]
     fn qualified_ref_tolerates_full_signed_manifest_fields() {
-        // Guards the intentional lenient projection: a real generated manifest
-        // carries `description` and a `runtime_authority` block (and may gain
-        // more fields). The minimal projection must ignore them, not reject the
-        // manifest — so qualified resolution keeps working against real bundles.
+        // A real generated manifest carries the complete current closed shape,
+        // including `description` and `runtime_authority`. Qualified resolution
+        // must consume that same full verifier rather than a second projection.
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("authoring");
         let target = tmp.path().join("core");

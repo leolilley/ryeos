@@ -13,6 +13,12 @@ use crate::contracts::{ItemSpace, ShadowedCandidate, SignatureEnvelope, Signatur
 use crate::error::EngineError;
 use crate::kind_registry::KindSchema;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredBundleRoot {
+    pub name: String,
+    pub canonical_root: PathBuf,
+}
+
 /// A single labeled search root.
 #[derive(Debug, Clone)]
 pub struct ResolutionRoot {
@@ -54,6 +60,23 @@ impl ResolutionRoots {
             });
         }
 
+        Self { ordered }
+    }
+
+    pub fn from_registered(project: Option<PathBuf>, bundles: &[RegisteredBundleRoot]) -> Self {
+        let mut ordered = Vec::new();
+        if let Some(project_root) = project {
+            ordered.push(ResolutionRoot {
+                space: ItemSpace::Project,
+                label: "project".to_owned(),
+                ai_root: project_root,
+            });
+        }
+        ordered.extend(bundles.iter().map(|bundle| ResolutionRoot {
+            space: ItemSpace::Bundle,
+            label: format!("bundle:{}", bundle.name),
+            ai_root: bundle.canonical_root.join(crate::AI_DIR),
+        }));
         Self { ordered }
     }
 }

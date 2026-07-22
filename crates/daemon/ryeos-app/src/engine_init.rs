@@ -68,8 +68,8 @@ impl VerifiedBundleGeneration {
                 .with_context(|| {
                     format!("bundle root disappeared: {}", canonical_root.display())
                 })?;
-            let manifest = ryeos_bundle::manifest::load_verified_manifest(
-                &canonical_root.join(ryeos_engine::AI_DIR),
+            let manifest = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+                &canonical_root,
                 &record.name,
                 node_trust_store,
             )
@@ -108,14 +108,26 @@ impl VerifiedBundleGeneration {
             .collect()
     }
 
+    pub fn registered_roots(&self) -> Vec<ryeos_engine::item_resolution::RegisteredBundleRoot> {
+        self.bundles
+            .iter()
+            .map(
+                |bundle| ryeos_engine::item_resolution::RegisteredBundleRoot {
+                    name: bundle.name.clone(),
+                    canonical_root: bundle.canonical_root.clone(),
+                },
+            )
+            .collect()
+    }
+
     pub fn ensure_current(&self, node_trust_store: &TrustStore) -> Result<()> {
         if self.records.len() != self.bundles.len() {
             anyhow::bail!("verified bundle generation has inconsistent record counts");
         }
         for bundle in &self.bundles {
             ensure_generation_root_binding(bundle)?;
-            let manifest = ryeos_bundle::manifest::load_verified_manifest(
-                &bundle.canonical_root.join(ryeos_engine::AI_DIR),
+            let manifest = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+                &bundle.canonical_root,
                 &bundle.name,
                 node_trust_store,
             )
@@ -223,7 +235,7 @@ pub fn load_locked_registered_isolation(
         crate::bundle_transaction::BundleRegistryReadLock::acquire_for_composition(app_root)
             .context("acquire bundle-generation read lock for isolation composition")?;
     let (runtime, node_trust, generation) = load_registered_generation_under_lock(app_root)?;
-    let bundle_roots = generation.roots();
+    let bundle_roots = generation.registered_roots();
     let lifeline = Arc::new(RetainedRegisteredGeneration {
         app_root: app_root.to_path_buf(),
         _read_lock: None,
@@ -585,6 +597,7 @@ pub fn build_engine(
         build_engine_for_roots_with_isolation(
             config,
             &generation.roots(),
+            Some(generation.registered_roots()),
             None, // no project root at startup — resolved per-request
             None, // no overlay — daemon's persistent trust store wins
             isolation,
@@ -633,6 +646,7 @@ pub fn build_engine_for_roots(
     build_engine_for_roots_with_isolation(
         config,
         bundle_roots,
+        None,
         project_root,
         trust_overlay,
         isolation,
@@ -652,10 +666,11 @@ pub fn build_registered_engine_for_roots(
         .ensure_registered_generation_current()
         .context("verify retained bundle generation before engine construction")?;
     let captured_roots = isolation
-        .registered_generation_bundle_roots()
+        .registered_generation_roots()
         .context("registered engine requires a retained bundle generation")?;
     let captured = captured_roots
         .iter()
+        .map(|root| &root.canonical_root)
         .collect::<std::collections::BTreeSet<_>>();
     let requested = bundle_roots
         .iter()
@@ -667,8 +682,15 @@ pub fn build_registered_engine_for_roots(
         anyhow::bail!("standalone engine roots differ from its retained isolation generation");
     }
     let guard = Arc::clone(&isolation);
-    let engine =
-        build_engine_for_roots(config, bundle_roots, project_root, trust_overlay, isolation)?;
+    let (engine, _) = build_engine_for_roots_with_isolation(
+        config,
+        bundle_roots,
+        Some(captured_roots.to_vec()),
+        project_root,
+        trust_overlay,
+        isolation,
+        None,
+    )?;
     guard
         .ensure_registered_generation_current()
         .context("verify retained bundle generation after engine construction")?;
@@ -681,7 +703,7 @@ pub fn retain_daemon_generation(
     generation: Arc<VerifiedBundleGeneration>,
     node_trust_store: TrustStore,
 ) -> ryeos_engine::isolation::IsolationRuntime {
-    let roots = generation.roots();
+    let roots = generation.registered_roots();
     runtime.retain_registered_generation(
         Arc::new(RetainedRegisteredGeneration {
             app_root,
@@ -697,6 +719,7 @@ pub fn retain_daemon_generation(
 fn build_engine_for_roots_with_isolation(
     config: &Config,
     bundle_roots: &[PathBuf],
+    registered_bundle_roots: Option<Vec<ryeos_engine::item_resolution::RegisteredBundleRoot>>,
     project_root: Option<&std::path::Path>,
     trust_overlay: Option<&TrustStore>,
     isolation: Arc<ryeos_engine::isolation::IsolationRuntime>,
@@ -785,6 +808,7 @@ fn build_engine_for_roots_with_isolation(
     } = build_node_bundle_admission(&bundle_roots, &node_trust_store, isolation.clone())?;
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
+        .with_registered_bundle_roots(registered_bundle_roots.unwrap_or_default())
         .with_operator_ai_root(config.app_root.join(ryeos_engine::AI_DIR))
         .with_isolation_generation(Arc::clone(&isolation))
         .with_trust_store(trust_store)

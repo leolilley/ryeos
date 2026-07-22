@@ -96,6 +96,40 @@ pub struct PlanRuntimeIdentity {
     pub runtime_bundle_signer_fingerprint: Option<String>,
 }
 
+/// Signed executor-manifest identity of the installed bundle that supplied a
+/// `bin:` command. This authorizes executable material only; it contributes no
+/// runtime or callback capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanBundleExecutorIdentity {
+    pub manifest_hash: String,
+    pub signer_fingerprint: String,
+}
+
+/// Exact command authority selected while compiling a subprocess plan.
+/// Keeping bundle resolution distinct from descriptor-rooted capture prevents
+/// either path from silently degrading into the other after `bin:` has been
+/// expanded to an absolute path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlanVerifiedCommand {
+    BundleExecutor {
+        code: crate::isolation::IsolationVerifiedCode,
+        provider: PlanBundleExecutorIdentity,
+    },
+    CapturedContent {
+        code: crate::isolation::IsolationVerifiedCode,
+    },
+}
+
+impl PlanVerifiedCommand {
+    pub fn code(&self) -> &crate::isolation::IsolationVerifiedCode {
+        match self {
+            Self::BundleExecutor { code, .. } | Self::CapturedContent { code } => code,
+        }
+    }
+}
+
 /// Normalized subprocess specification — the single source of truth for
 /// what to spawn. Compiled from the executor chain's runtime config by
 /// the plan builder. The dispatch layer just runs this struct.
@@ -105,7 +139,7 @@ pub struct PlanSubprocessSpec {
     pub cmd: String,
     /// Exact identity of a bundle/CAS command resolved while building this
     /// plan. System executables and project-local interpreters use `None`.
-    pub verified_command: Option<crate::isolation::IsolationVerifiedCode>,
+    pub verified_command: Option<PlanVerifiedCommand>,
     #[serde(default)]
     pub args: Vec<String>,
     pub cwd: Option<PathBuf>,
