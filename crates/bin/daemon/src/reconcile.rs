@@ -840,6 +840,33 @@ async fn reconcile_active_threads_inner(
             }
         }
 
+        // Unsupported launch authority is history, not current recovery
+        // authority. The runtime DB inspected only its outer wire fields and
+        // deliberately did not deserialize the predecessor payload. Settle
+        // this thread alone after proving that no live owner remains; never
+        // let one old capsule abort reconciliation for unrelated threads.
+        if let Some(incompatible) = &thread.runtime.incompatible_launch_metadata {
+            state.state_store.clear_recovery_wait(&thread.thread_id)?;
+            finalize_dead(
+                state,
+                mode,
+                &thread.thread_id,
+                pgid,
+                &thread.status,
+                Some((
+                    "incompatible_admitted_launch_capsule_schema",
+                    json!({
+                        "stored_launch_metadata_schema": incompatible.schema_version,
+                        "stored_capsule_schema": incompatible.admitted_launch_capsule_schema,
+                        "current_launch_metadata_schema": ryeos_app::launch_metadata::LAUNCH_METADATA_SCHEMA_VERSION,
+                        "current_capsule_schema": ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+                    }),
+                )),
+                &mut reconciled,
+            )?;
+            continue;
+        }
+
         let interrupted_spawn = pgid.is_none();
 
         if let Some(resume) = thread
@@ -1302,6 +1329,16 @@ async fn reconcile_active_threads_inner(
 
 fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
     for intent in state.state_store.detached_spawn_intents()? {
+        if let Some(incompatible) = &intent.incompatible_launch_metadata {
+            tracing::warn!(
+                operation_id = %intent.operation_id,
+                child_thread_id = %intent.child_thread_id,
+                stored_launch_metadata_schema = incompatible.schema_version,
+                stored_capsule_schema = ?incompatible.admitted_launch_capsule_schema,
+                "sealed detached intent uses unsupported launch authority; preserving it as opaque history"
+            );
+            continue;
+        }
         let child = match state.state_store.get_thread(&intent.child_thread_id)? {
             Some(child) => child,
             None => {
@@ -2281,6 +2318,7 @@ mod tests {
                 stop_requested_at_ms: None,
                 stop_intent: None,
                 launch_metadata: lm,
+                incompatible_launch_metadata: None,
                 recovery_wait: None,
             },
         }

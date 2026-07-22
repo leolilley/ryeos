@@ -207,10 +207,21 @@ fn validate_runtime_source_item_author_pattern(kind: &str, namespace: &str) -> R
     Ok(())
 }
 
-fn verify_bundle_source_manifest_identity(
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedBundleManifestIdentity {
+    pub name: String,
+    pub body_digest: String,
+    pub signer_fingerprint: String,
+    pub provides_kinds: Vec<String>,
+    pub requires_kinds: Vec<String>,
+    pub uses_kinds: Vec<String>,
+}
+
+pub fn verify_bundle_source_manifest_identity(
     bundle_root: &Path,
+    expected_name: &str,
     node_trust_store: &TrustStore,
-) -> Result<(String, String), EngineError> {
+) -> Result<SignedBundleManifestIdentity, EngineError> {
     let manifest_path = bundle_root.join(crate::AI_DIR).join("manifest.yaml");
     let metadata = std::fs::symlink_metadata(&manifest_path).map_err(|error| {
         EngineError::Internal(format!(
@@ -284,15 +295,6 @@ fn verify_bundle_source_manifest_identity(
                 manifest_path.display()
             ))
         })?;
-    let expected_name = bundle_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            EngineError::Internal(format!(
-                "runtime source-bundle root has no UTF-8 bundle identity: {}",
-                bundle_root.display()
-            ))
-        })?;
     if manifest.name != expected_name {
         return Err(EngineError::Internal(format!(
             "runtime source-bundle manifest identity mismatch: name is {:?}, expected {:?}",
@@ -320,10 +322,14 @@ fn verify_bundle_source_manifest_identity(
             )));
         }
     }
-    Ok((
-        lillux::sha256_hex(body.as_bytes()),
-        signature.signer_fingerprint,
-    ))
+    Ok(SignedBundleManifestIdentity {
+        name: manifest.name,
+        body_digest: lillux::sha256_hex(body.as_bytes()),
+        signer_fingerprint: signature.signer_fingerprint,
+        provides_kinds: manifest.provides_kinds,
+        requires_kinds: manifest.requires_kinds,
+        uses_kinds: manifest.uses_kinds,
+    })
 }
 
 // ── Chain data types ─────────────────────────────────────────────────────
@@ -501,8 +507,24 @@ fn resolve_executor_chain(
                         source_path.display()
                     ))
                 })?;
+                let expected_name = roots
+                    .ordered
+                    .iter()
+                    .find(|root| {
+                        root.space == crate::contracts::ItemSpace::Bundle
+                            && root.ai_root == bundle_root.join(crate::AI_DIR)
+                    })
+                    .and_then(|root| root.label.strip_prefix("bundle:"))
+                    .ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "runtime source bundle is absent from registered resolution roots: {}",
+                            bundle_root.display()
+                        ))
+                    })?;
                 node_trust_store
-                    .map(|trust| verify_bundle_source_manifest_identity(bundle_root, trust))
+                    .map(|trust| {
+                        verify_bundle_source_manifest_identity(bundle_root, expected_name, trust)
+                    })
                     .transpose()?
             } else {
                 None
@@ -516,10 +538,10 @@ fn resolve_executor_chain(
                     .map(|header| header.signer_fingerprint.clone()),
                 runtime_bundle_manifest_hash: bundle_identity
                     .as_ref()
-                    .map(|identity| identity.0.clone()),
+                    .map(|identity| identity.body_digest.clone()),
                 runtime_bundle_signer_fingerprint: bundle_identity
                     .as_ref()
-                    .map(|identity| identity.1.clone()),
+                    .map(|identity| identity.signer_fingerprint.clone()),
             });
         }
 
@@ -1093,7 +1115,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = verify_bundle_source_manifest_identity(&bundle_root, &test_ts()).unwrap_err();
+        let error =
+            verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap_err();
         assert!(error.to_string().contains("manifest identity mismatch"));
     }
 
@@ -1110,7 +1134,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = verify_bundle_source_manifest_identity(&bundle_root, &test_ts()).unwrap_err();
+        let error =
+            verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap_err();
         assert!(error.to_string().contains("invalid runtime_authority"));
     }
 
@@ -1130,7 +1156,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = verify_bundle_source_manifest_identity(&bundle_root, &test_ts()).unwrap_err();
+        let error =
+            verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts())
+                .unwrap_err();
         assert!(error.to_string().contains("duplicate isolation backend id"));
     }
 

@@ -5011,6 +5011,7 @@ impl RunningItem {
 pub struct PreparedItemPlan {
     plan: ExecutionPlan,
     pub timeout_secs: u64,
+    wrapper_source_identity: ryeos_state::objects::DirectWrapperSourceIdentity,
 }
 
 impl PreparedItemPlan {
@@ -5024,7 +5025,7 @@ impl PreparedItemPlan {
 
     pub fn admitted_artifact_identity(
         &self,
-        engine: &Engine,
+        _engine: &Engine,
         resolved: &ResolvedExecutionRequest,
         protocol: &ryeos_engine::protocols::VerifiedProtocol,
     ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
@@ -5062,48 +5063,29 @@ impl PreparedItemPlan {
                 .clone(),
         };
         let executable_identity = match self.plan.nodes.first() {
-            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec
-                .verified_command
-                .as_ref()
-                .map(
-                    |identity| ryeos_state::objects::DirectExecutableIdentity::VerifiedContent {
-                        content_hash: identity.content_hash.clone(),
+            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
+                match spec.verified_command.as_ref() {
+                    Some(ryeos_engine::contracts::PlanVerifiedCommand::BundleExecutor {
+                        code,
+                        provider,
+                    }) => ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+                        content_hash: code.content_hash.clone(),
+                        provider_manifest_hash: provider.manifest_hash.clone(),
+                        provider_manifest_signer_fingerprint: provider.signer_fingerprint.clone(),
                     },
-                )
-                .unwrap_or(ryeos_state::objects::DirectExecutableIdentity::NodePolicy),
+                    Some(ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent {
+                        code,
+                    }) => ryeos_state::objects::DirectExecutableIdentity::CapturedContent {
+                        content_hash: code.content_hash.clone(),
+                    },
+                    None => ryeos_state::objects::DirectExecutableIdentity::NodePolicy,
+                }
+            }
             Some(ryeos_engine::contracts::PlanNode::Complete { .. }) | None => {
                 ryeos_state::objects::DirectExecutableIdentity::NodePolicy
             }
         };
-        let executor_bundle =
-            if resolved.resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Bundle {
-                let ai = resolved
-                    .resolved_item
-                    .source_path
-                    .ancestors()
-                    .find(|path| {
-                        path.file_name()
-                            .is_some_and(|name| name == ryeos_engine::AI_DIR)
-                    })
-                    .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
-                let root = ai
-                    .parent()
-                    .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
-                Some(
-                    ryeos_engine::binary_resolver::verify_bundle_executor_manifest_identity(
-                        root,
-                        &engine.node_trust_store,
-                    )?
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "executor item bundle has no signed generation identity: {}",
-                            root.display()
-                        )
-                    })?,
-                )
-            } else {
-                None
-            };
+        let wrapper_source_identity = self.wrapper_source_identity.clone();
         let identity = ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executor_ref: resolved.executor_ref.clone(),
             executor_item_content_hash: resolved.resolved_item.raw_content_digest.clone(),
@@ -5112,18 +5094,13 @@ impl PreparedItemPlan {
                 .signature_header
                 .as_ref()
                 .map(|header| header.signer_fingerprint.clone()),
-            executor_bundle_manifest_hash: executor_bundle
-                .as_ref()
-                .map(|bundle| bundle.manifest_hash.clone()),
-            executor_bundle_signer_fingerprint: executor_bundle
-                .as_ref()
-                .map(|bundle| bundle.signer_fingerprint.clone()),
+            wrapper_source_identity,
             protocol_ref: protocol.canonical_ref.clone(),
             protocol_content_hash: protocol.raw_content_digest.clone(),
             protocol_signer_fingerprint: protocol.signer_fingerprint.clone(),
             execution_plan_hash,
             executable_identity,
-            runtime_identity: Some(runtime_identity),
+            runtime_identity,
         };
         identity.validate()?;
         Ok(identity)
@@ -5137,50 +5114,95 @@ pub fn prepare_item_plan(
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     live_access: Option<&ryeos_engine::isolation::IsolationLiveAccessAuthority>,
 ) -> Result<PreparedItemPlan> {
-    let verified = engine
-        .verify(&resolved.plan_context, resolved.resolved_item.clone())
-        .map_err(|e| anyhow!("verification failed: {e}"))?;
-    let mut plan = engine
-        .build_plan(
-            &resolved.plan_context,
-            &verified,
-            &resolved.parameters,
-            &resolved.plan_context.execution_hints,
-        )
-        .map_err(|e| anyhow!("plan build failed: {e}"))?;
-    if lifecycle_authority.recovery
-        == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
-    {
-        let spec = match plan.nodes.first_mut() {
-            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec,
+    engine.with_checked_bundle_generation(|generation| {
+        let verified = generation
+            .verify(&resolved.plan_context, resolved.resolved_item.clone())
+            .map_err(|e| anyhow!("verification failed: {e}"))?;
+        let mut plan = generation
+            .build_plan(
+                &resolved.plan_context,
+                &verified,
+                &resolved.parameters,
+                &resolved.plan_context.execution_hints,
+            )
+            .map_err(|e| anyhow!("plan build failed: {e}"))?;
+        let wrapper_source_identity = if resolved.resolved_item.source_space
+            == ryeos_engine::contracts::ItemSpace::Bundle
+        {
+            let ai = resolved
+                .resolved_item
+                .source_path
+                .ancestors()
+                .find(|path| {
+                    path.file_name()
+                        .is_some_and(|name| name == ryeos_engine::AI_DIR)
+                })
+                .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
+            let root = ai
+                .parent()
+                .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
+            let expected_name = engine
+                .registered_bundle_name_for_root(root)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "bundle item root is absent from the retained registered generation: {}",
+                        root.display()
+                    )
+                })?;
+            let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+                root,
+                expected_name,
+                &engine.node_trust_store,
+            )?;
+            ryeos_state::objects::DirectWrapperSourceIdentity::Bundle {
+                manifest_hash: identity.body_digest,
+                manifest_signer_fingerprint: identity.signer_fingerprint,
+            }
+        } else {
+            ryeos_state::objects::DirectWrapperSourceIdentity::Project
+        };
+        if lifecycle_authority.recovery
+            == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
+        {
+            let spec = match plan.nodes.first_mut() {
+                Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => spec,
+                Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {
+                    bail!("item plan entrypoint is complete, not a subprocess")
+                }
+                None => bail!("item plan is empty"),
+            };
+            if spec.verified_command.is_none() {
+                let project_root = match &resolved.plan_context.project_context {
+                    ProjectContext::LocalPath { path } => Some(path.as_path()),
+                    ProjectContext::None
+                    | ProjectContext::SnapshotHash { .. }
+                    | ProjectContext::ProjectRef { .. } => None,
+                };
+                let captured = isolation
+                    .capture_verified_command(Path::new(&spec.cmd), project_root, live_access)
+                    .map_err(|error| anyhow!("capture direct executable identity: {error}"))?;
+                spec.verified_command = Some(
+                    ryeos_engine::contracts::PlanVerifiedCommand::CapturedContent {
+                        code: captured,
+                    },
+                );
+            }
+        }
+        let timeout_secs = match plan.nodes.first() {
+            Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
+                spec.timeout_secs
+            }
             Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {
                 bail!("item plan entrypoint is complete, not a subprocess")
             }
             None => bail!("item plan is empty"),
         };
-        if spec.verified_command.is_none() {
-            let project_root = match &resolved.plan_context.project_context {
-                ProjectContext::LocalPath { path } => Some(path.as_path()),
-                ProjectContext::None
-                | ProjectContext::SnapshotHash { .. }
-                | ProjectContext::ProjectRef { .. } => None,
-            };
-            let captured = isolation
-                .capture_verified_command(Path::new(&spec.cmd), project_root, live_access)
-                .map_err(|error| anyhow!("capture direct executable identity: {error}"))?;
-            spec.verified_command = Some(captured);
-        }
-    }
-    let timeout_secs = match plan.nodes.first() {
-        Some(ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. }) => {
-            spec.timeout_secs
-        }
-        Some(ryeos_engine::contracts::PlanNode::Complete { .. }) => {
-            bail!("item plan entrypoint is complete, not a subprocess")
-        }
-        None => bail!("item plan is empty"),
-    };
-    Ok(PreparedItemPlan { plan, timeout_secs })
+        Ok(PreparedItemPlan {
+            plan,
+            timeout_secs,
+            wrapper_source_identity,
+        })
+    })
 }
 
 /// Run the prepared engine plan's spawn phase.

@@ -450,7 +450,7 @@ fn isolation_plan_request(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
-            verified_command: spec.verified_command.as_ref(),
+            verified_command: spec.verified_command.as_ref().map(|command| command.code()),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -475,7 +475,7 @@ fn isolation_plan_request_awaiting_attachment(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
-            verified_command: spec.verified_command.as_ref(),
+            verified_command: spec.verified_command.as_ref().map(|command| command.code()),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -496,6 +496,7 @@ fn isolation_plan_request_parts<'a>(
     let request = spec_to_request(spec)?;
     let mut verified_code = ctx.isolation_verified_code.clone();
     if let Some(command) = &spec.verified_command {
+        let command = command.code();
         if !verified_code.contains(command) {
             verified_code.push(command.clone());
         }

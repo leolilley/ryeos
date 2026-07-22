@@ -143,13 +143,14 @@ pub fn import_dry_run(
         .collect();
     let mut verified_code = isolation_context.verified_code.to_vec();
     if let Some(command) = &spec.verified_command {
+        let command = command.code();
         if !verified_code.contains(command) {
             verified_code.push(command.clone());
         }
     }
     let isolation_context = IsolationLaunchContext {
         verified_code: &verified_code,
-        verified_command: spec.verified_command.as_ref(),
+        verified_command: spec.verified_command.as_ref().map(|command| command.code()),
         ..isolation_context
     };
 

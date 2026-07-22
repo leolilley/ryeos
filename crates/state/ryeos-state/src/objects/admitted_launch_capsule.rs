@@ -6,13 +6,17 @@ use super::{
     ExecutionProjectAuthority, ExecutionRecoveryAuthority,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 3;
-pub const LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 2;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DirectExecutableIdentity {
-    VerifiedContent {
+    BundleExecutor {
+        content_hash: String,
+        provider_manifest_hash: String,
+        provider_manifest_signer_fingerprint: String,
+    },
+    CapturedContent {
         content_hash: String,
     },
     /// The exact command spelling remains sealed in `execution_plan_hash`, but
@@ -20,6 +24,16 @@ pub enum DirectExecutableIdentity {
     /// rather than a bundle/CAS content identity. This driver is not eligible
     /// for autonomous restart recovery.
     NodePolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "space", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DirectWrapperSourceIdentity {
+    Project,
+    Bundle {
+        manifest_hash: String,
+        manifest_signer_fingerprint: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,8 +44,7 @@ pub enum DirectRuntimeSourceSpace {
 }
 
 /// Exact runtime descriptor identity selected by the executor-chain build for
-/// a direct item launch. Optional only so schema-v2 rows remain decodable;
-/// every schema-v3 direct capsule must carry it.
+/// a direct item launch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectRuntimeIdentity {
@@ -66,15 +79,13 @@ pub enum AdmittedLaunchArtifactIdentity {
         executor_ref: String,
         executor_item_content_hash: String,
         executor_item_signer_fingerprint: Option<String>,
-        executor_bundle_manifest_hash: Option<String>,
-        executor_bundle_signer_fingerprint: Option<String>,
+        wrapper_source_identity: DirectWrapperSourceIdentity,
         protocol_ref: String,
         protocol_content_hash: String,
         protocol_signer_fingerprint: String,
         execution_plan_hash: String,
         executable_identity: DirectExecutableIdentity,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        runtime_identity: Option<DirectRuntimeIdentity>,
+        runtime_identity: DirectRuntimeIdentity,
     },
 }
 
@@ -122,8 +133,7 @@ impl AdmittedLaunchArtifactIdentity {
                 executor_ref,
                 executor_item_content_hash,
                 executor_item_signer_fingerprint,
-                executor_bundle_manifest_hash,
-                executor_bundle_signer_fingerprint,
+                wrapper_source_identity,
                 protocol_ref,
                 protocol_content_hash,
                 protocol_signer_fingerprint,
@@ -136,16 +146,22 @@ impl AdmittedLaunchArtifactIdentity {
                 if let Some(signer) = executor_item_signer_fingerprint {
                     validate_trimmed_control_free("executor item signer", signer, false)?;
                 }
-                match (
-                    executor_bundle_manifest_hash,
-                    executor_bundle_signer_fingerprint,
-                ) {
-                    (Some(hash), Some(signer)) => {
-                        validate_hash("executor bundle manifest hash", hash)?;
-                        validate_trimmed_control_free("executor bundle signer", signer, false)?;
+                match wrapper_source_identity {
+                    DirectWrapperSourceIdentity::Project => {}
+                    DirectWrapperSourceIdentity::Bundle {
+                        manifest_hash,
+                        manifest_signer_fingerprint,
+                    } => {
+                        if executor_item_signer_fingerprint.is_none() {
+                            anyhow::bail!("bundle direct wrapper has no verified item signer");
+                        }
+                        validate_hash("wrapper source manifest hash", manifest_hash)?;
+                        validate_trimmed_control_free(
+                            "wrapper source manifest signer",
+                            manifest_signer_fingerprint,
+                            false,
+                        )?;
                     }
-                    (None, None) => {}
-                    _ => anyhow::bail!("executor bundle identity must be complete or absent"),
                 }
                 validate_trimmed_control_free("protocol ref", protocol_ref, false)?;
                 validate_hash("protocol content hash", protocol_content_hash)?;
@@ -155,12 +171,27 @@ impl AdmittedLaunchArtifactIdentity {
                     false,
                 )?;
                 validate_hash("execution plan hash", execution_plan_hash)?;
-                if let DirectExecutableIdentity::VerifiedContent { content_hash } =
-                    executable_identity
-                {
-                    validate_hash("verified executable content hash", content_hash)?;
+                match executable_identity {
+                    DirectExecutableIdentity::BundleExecutor {
+                        content_hash,
+                        provider_manifest_hash,
+                        provider_manifest_signer_fingerprint,
+                    } => {
+                        validate_hash("verified executable content hash", content_hash)?;
+                        validate_hash("provider executor manifest hash", provider_manifest_hash)?;
+                        validate_trimmed_control_free(
+                            "provider executor manifest signer",
+                            provider_manifest_signer_fingerprint,
+                            false,
+                        )?;
+                    }
+                    DirectExecutableIdentity::CapturedContent { content_hash } => {
+                        validate_hash("captured executable content hash", content_hash)?;
+                    }
+                    DirectExecutableIdentity::NodePolicy => {}
                 }
-                if let Some(runtime) = runtime_identity {
+                {
+                    let runtime = runtime_identity;
                     validate_trimmed_control_free(
                         "direct runtime ref",
                         &runtime.runtime_ref,
@@ -262,7 +293,7 @@ pub struct AdmittedLaunchCapsule {
 }
 
 impl AdmittedLaunchCapsule {
-    /// Decode the current contract plus the one bounded rollout predecessor.
+    /// Decode only the exact current CAS wire contract.
     ///
     /// Inspecting the outer identity first ensures a predecessor nested
     /// authority is rejected as an old capsule, before serde interprets any
@@ -282,11 +313,9 @@ impl AdmittedLaunchCapsule {
             .get("schema")
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| anyhow::anyhow!("admitted launch capsule has no numeric schema"))?;
-        if schema != u64::from(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION)
-            && schema != u64::from(LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION)
-        {
+        if schema != u64::from(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION) {
             anyhow::bail!(
-                "admitted launch capsule schema is unsupported: stored schema={schema}, current schema={ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION}"
+                "admitted launch capsule is not the exact current contract: stored schema={schema}, current schema={ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION}"
             );
         }
         let capsule: Self =
@@ -296,10 +325,8 @@ impl AdmittedLaunchCapsule {
     }
 
     pub fn validate(&self) -> anyhow::Result<()> {
-        if !matches!(
-            self.schema,
-            LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION | ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
-        ) || self.kind != "admitted_launch_capsule"
+        if self.schema != ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
+            || self.kind != "admitted_launch_capsule"
         {
             anyhow::bail!("invalid admitted launch capsule wire identity");
         }
@@ -348,17 +375,6 @@ impl AdmittedLaunchCapsule {
         self.project_authority.validate()?;
         self.lifecycle_authority.validate()?;
         self.artifact_identity.validate()?;
-        if self.schema == ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
-            && matches!(
-                self.artifact_identity,
-                AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-                    runtime_identity: None,
-                    ..
-                }
-            )
-        {
-            anyhow::bail!("schema-v3 direct launch capsule has no runtime identity");
-        }
         if self.lifecycle_authority.recovery == ExecutionRecoveryAuthority::RestartRecoverable
             && matches!(
                 self.artifact_identity,
@@ -425,24 +441,7 @@ impl AdmittedLaunchCapsule {
     pub fn same_continuation_admission(&self, other: &Self) -> anyhow::Result<bool> {
         self.validate()?;
         other.validate()?;
-        let schema_compatible = self.schema == other.schema
-            || (matches!(
-                (&self.artifact_identity, &other.artifact_identity),
-                (
-                    AdmittedLaunchArtifactIdentity::ManagedRuntime { .. },
-                    AdmittedLaunchArtifactIdentity::ManagedRuntime { .. }
-                )
-            ) && matches!(
-                (self.schema, other.schema),
-                (
-                    LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
-                    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
-                ) | (
-                    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
-                    LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION
-                )
-            ));
-        Ok(schema_compatible
+        Ok(self.schema == other.schema
             && self.kind == other.kind
             && self.exact_program == other.exact_program
             && self.exact_program_hash == other.exact_program_hash
@@ -500,21 +499,23 @@ mod tests {
                 executor_ref: "tool:test/executor".to_string(),
                 executor_item_content_hash: "a".repeat(64),
                 executor_item_signer_fingerprint: Some("fp:test".to_string()),
-                executor_bundle_manifest_hash: Some("b".repeat(64)),
-                executor_bundle_signer_fingerprint: Some("fp:bundle".to_string()),
+                wrapper_source_identity: DirectWrapperSourceIdentity::Bundle {
+                    manifest_hash: "b".repeat(64),
+                    manifest_signer_fingerprint: "fp:bundle".to_string(),
+                },
                 protocol_ref: "protocol:test/direct".to_string(),
                 protocol_content_hash: "c".repeat(64),
                 protocol_signer_fingerprint: "fp:protocol".to_string(),
                 execution_plan_hash: "e".repeat(64),
                 executable_identity,
-                runtime_identity: Some(DirectRuntimeIdentity {
+                runtime_identity: DirectRuntimeIdentity {
                     runtime_ref: "tool:test/runtime".to_string(),
                     runtime_source_space: DirectRuntimeSourceSpace::Bundle,
                     runtime_content_hash: "f".repeat(64),
                     runtime_signer_fingerprint: "fp:runtime".to_string(),
                     runtime_bundle_manifest_hash: Some("1".repeat(64)),
                     runtime_bundle_signer_fingerprint: Some("fp:bundle".to_string()),
-                }),
+                },
             },
             prepared_launch: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
@@ -576,7 +577,7 @@ mod tests {
 
     #[test]
     fn restart_recovery_accepts_a_content_verified_direct_executable() {
-        let capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+        let capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         });
         capsule.validate().unwrap();
@@ -585,14 +586,14 @@ mod tests {
 
     #[test]
     fn current_decoder_rejects_predecessor_epoch_before_nested_authority_decode() {
-        let mut value = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         })
         .to_value();
         let object = value.as_object_mut().unwrap();
         object.insert(
             "schema".to_string(),
-            serde_json::json!(LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION - 1),
+            serde_json::json!(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION - 1),
         );
         object.insert(
             "project_authority".to_string(),
@@ -601,61 +602,18 @@ mod tests {
 
         let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
         assert!(
-            error.to_string().contains("schema is unsupported"),
+            error.to_string().contains("not the exact current contract"),
             "unexpected error: {error:#}"
         );
     }
 
     #[test]
-    fn legacy_direct_capsule_preserves_absent_runtime_identity_on_round_trip() {
-        let mut value = direct_capsule(DirectExecutableIdentity::VerifiedContent {
-            content_hash: "f".repeat(64),
-        })
-        .to_value();
-        let object = value.as_object_mut().unwrap();
-        object.insert(
-            "schema".to_string(),
-            serde_json::json!(LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION),
-        );
-        object
-            .get_mut("artifact_identity")
-            .and_then(serde_json::Value::as_object_mut)
-            .unwrap()
-            .remove("runtime_identity");
-        let expected_hash = lillux::sha256_hex(lillux::canonical_json(&value).unwrap().as_bytes());
-
-        let decoded = AdmittedLaunchCapsule::from_current_value(value).unwrap();
-        let encoded = decoded.to_value();
-        assert!(encoded["artifact_identity"]
-            .get("runtime_identity")
-            .is_none());
-        assert_eq!(decoded.content_hash().unwrap(), expected_hash);
-    }
-
-    #[test]
-    fn legacy_managed_capsule_is_semantically_compatible_with_current_schema() {
-        let current = managed_capsule(Some(serde_json::json!({"prepared": true})));
-        let mut legacy_value = current.to_value();
-        legacy_value.as_object_mut().unwrap().insert(
-            "schema".to_string(),
-            serde_json::json!(LEGACY_ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION),
-        );
-        let legacy = AdmittedLaunchCapsule::from_current_value(legacy_value).unwrap();
-        assert!(legacy.same_continuation_admission(&current).unwrap());
-        assert!(current.same_continuation_admission(&legacy).unwrap());
-        assert_ne!(
-            legacy.content_hash().unwrap(),
-            current.content_hash().unwrap()
-        );
-    }
-
-    #[test]
     fn bundle_runtime_requires_its_source_bundle_generation_identity() {
-        let mut capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "9".repeat(64),
         });
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-            runtime_identity: Some(runtime),
+            runtime_identity: runtime,
             ..
         } = &mut capsule.artifact_identity
         else {
@@ -671,7 +629,7 @@ mod tests {
 
     #[test]
     fn current_decoder_accepts_valid_current_capsule() {
-        let expected = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+        let expected = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         });
         let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
@@ -680,7 +638,7 @@ mod tests {
 
     #[test]
     fn current_decoder_requires_numeric_epoch_before_typed_decode() {
-        let mut value = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         })
         .to_value();
@@ -713,8 +671,33 @@ mod tests {
     }
 
     #[test]
+    fn source_only_wrapper_seals_distinct_source_and_provider_manifests() {
+        let wrapper_manifest_hash = "a".repeat(64);
+        let provider_manifest_hash = "b".repeat(64);
+        let mut capsule = direct_capsule(DirectExecutableIdentity::BundleExecutor {
+            content_hash: "e".repeat(64),
+            provider_manifest_hash: provider_manifest_hash.clone(),
+            provider_manifest_signer_fingerprint: "provider-signer".into(),
+        });
+        let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            wrapper_source_identity,
+            ..
+        } = &mut capsule.artifact_identity
+        else {
+            unreachable!()
+        };
+        *wrapper_source_identity = DirectWrapperSourceIdentity::Bundle {
+            manifest_hash: wrapper_manifest_hash.clone(),
+            manifest_signer_fingerprint: "wrapper-signer".into(),
+        };
+
+        capsule.validate().unwrap();
+        assert_ne!(wrapper_manifest_hash, provider_manifest_hash);
+    }
+
+    #[test]
     fn exact_program_hash_is_verified_not_trusted() {
-        let mut capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         });
         capsule.exact_program_hash = "0".repeat(64);
@@ -739,7 +722,7 @@ mod tests {
 
     #[test]
     fn direct_capsule_rejects_managed_prepared_launch_state() {
-        let mut capsule = direct_capsule(DirectExecutableIdentity::VerifiedContent {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         });
         capsule.prepared_launch = Some(serde_json::json!({"argv": ["unexpected"]}));

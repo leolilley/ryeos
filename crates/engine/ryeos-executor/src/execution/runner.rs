@@ -4175,7 +4175,7 @@ mod tests {
 
     #[test]
     fn verified_and_request_scoped_direct_execution_remain_eligible() {
-        let verified = ryeos_state::objects::DirectExecutableIdentity::VerifiedContent {
+        let verified = ryeos_state::objects::DirectExecutableIdentity::CapturedContent {
             content_hash: "a".repeat(64),
         };
         ensure_restart_eligible_artifact(

@@ -80,7 +80,18 @@ pub struct RuntimeInfo {
     /// another service response. Internal owners use `get_launch_metadata`.
     #[serde(skip_serializing)]
     pub launch_metadata: Option<RuntimeLaunchMetadata>,
+    /// Outer-only classification of an authority contract that is not the
+    /// exact current wire schema. The predecessor payload remains opaque in
+    /// SQLite and is never deserialized into current authority.
+    #[serde(skip_serializing)]
+    pub incompatible_launch_metadata: Option<IncompatibleLaunchMetadata>,
     pub recovery_wait: Option<RecoveryWaitDisposition>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncompatibleLaunchMetadata {
+    pub schema_version: u64,
+    pub admitted_launch_capsule_schema: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -303,6 +314,7 @@ pub struct DetachedSpawnIntent {
     pub child_project_authority: Option<ryeos_state::objects::ExecutionProjectAuthority>,
     pub admitted_launch_capsule_hash: Option<String>,
     pub launch_metadata: Option<crate::launch_metadata::RuntimeLaunchMetadata>,
+    pub incompatible_launch_metadata: Option<IncompatibleLaunchMetadata>,
     pub initial_events: Option<Vec<crate::state_store::NewEventRecord>>,
 }
 
@@ -328,8 +340,14 @@ fn decode_detached_spawn_intent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Det
         admitted_launch_capsule_hash: row.get(5)?,
         launch_metadata: row
             .get::<_, Option<String>>(6)?
-            .map(|raw| decode_current_launch_metadata_column(6, &raw))
-            .transpose()?,
+            .map(|raw| decode_stored_launch_metadata_column(6, &raw))
+            .transpose()?
+            .and_then(StoredLaunchMetadata::current),
+        incompatible_launch_metadata: row
+            .get::<_, Option<String>>(6)?
+            .map(|raw| decode_stored_launch_metadata_column(6, &raw))
+            .transpose()?
+            .and_then(StoredLaunchMetadata::incompatible),
         initial_events: row
             .get::<_, Option<String>>(7)?
             .map(|raw| serde_json::from_str(&raw))
@@ -1762,11 +1780,66 @@ fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
     Ok(decoded)
 }
 
-fn decode_current_launch_metadata_column(
+enum StoredLaunchMetadata {
+    Current(RuntimeLaunchMetadata),
+    Incompatible(IncompatibleLaunchMetadata),
+}
+
+impl StoredLaunchMetadata {
+    fn current(self) -> Option<RuntimeLaunchMetadata> {
+        match self {
+            Self::Current(metadata) => Some(metadata),
+            Self::Incompatible(_) => None,
+        }
+    }
+
+    fn incompatible(self) -> Option<IncompatibleLaunchMetadata> {
+        match self {
+            Self::Current(_) => None,
+            Self::Incompatible(metadata) => Some(metadata),
+        }
+    }
+}
+
+/// Classify predecessor launch authority from outer wire fields only. An
+/// unsupported payload is deliberately not deserialized as the current Rust
+/// type; it remains opaque history until retention or explicit discard removes
+/// it.
+fn decode_stored_launch_metadata(raw: &str) -> Result<StoredLaunchMetadata> {
+    let value: Value = serde_json::from_str(raw).context("decode stored launch metadata")?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("stored launch metadata must be an object"))?;
+    let schema_version = object
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow::anyhow!("stored launch metadata has no numeric schema_version"))?;
+    let capsule_schema = object
+        .get("admitted_launch_capsule_schema")
+        .and_then(Value::as_u64);
+    let sealed = object
+        .get("sealed_root_request")
+        .is_some_and(|value| !value.is_null());
+    let current_capsule_schema =
+        u64::from(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
+    if schema_version != u64::from(LAUNCH_METADATA_SCHEMA_VERSION)
+        || (sealed && capsule_schema != Some(current_capsule_schema))
+    {
+        return Ok(StoredLaunchMetadata::Incompatible(
+            IncompatibleLaunchMetadata {
+                schema_version,
+                admitted_launch_capsule_schema: capsule_schema,
+            },
+        ));
+    }
+    decode_current_launch_metadata(raw).map(StoredLaunchMetadata::Current)
+}
+
+fn decode_stored_launch_metadata_column(
     column: usize,
     raw: &str,
-) -> rusqlite::Result<RuntimeLaunchMetadata> {
-    decode_current_launch_metadata(raw).map_err(|error| {
+) -> rusqlite::Result<StoredLaunchMetadata> {
+    decode_stored_launch_metadata(raw).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(
             column,
             rusqlite::types::Type::Text,
@@ -1818,7 +1891,7 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
         rows
     };
     for (owner, owner_id, raw) in rows {
-        decode_current_launch_metadata(&raw)
+        decode_stored_launch_metadata(&raw)
             .with_context(|| format!("validate launch metadata for {owner} row `{owner_id}`"))?;
     }
     let authorities = {
@@ -3867,9 +3940,9 @@ impl RuntimeDb {
         else {
             return Ok(None);
         };
-        let launch_metadata = lm_text
+        let stored_launch_metadata = lm_text
             .as_deref()
-            .map(decode_current_launch_metadata)
+            .map(decode_stored_launch_metadata)
             .transpose()
             .with_context(|| {
                 format!(
@@ -3877,6 +3950,11 @@ impl RuntimeDb {
                     lm_text.as_deref().map_or(0, str::len)
                 )
             })?;
+        let (launch_metadata, incompatible_launch_metadata) = match stored_launch_metadata {
+            Some(StoredLaunchMetadata::Current(metadata)) => (Some(metadata), None),
+            Some(StoredLaunchMetadata::Incompatible(metadata)) => (None, Some(metadata)),
+            None => (None, None),
+        };
         let process_identity = match identity_text.as_deref() {
             None => None,
             Some(value) => {
@@ -3927,6 +4005,7 @@ impl RuntimeDb {
             stop_requested_at_ms,
             stop_intent,
             launch_metadata,
+            incompatible_launch_metadata,
             recovery_wait,
         }))
     }
@@ -7413,7 +7492,7 @@ mod tests {
     }
 
     #[test]
-    fn open_rejects_former_authority_shape_at_launch_epoch_without_mutation() {
+    fn open_preserves_former_launch_authority_as_opaque_thread_scoped_history() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("runtime.db");
         let db = RuntimeDb::open(&path).unwrap();
@@ -7445,21 +7524,21 @@ mod tests {
             .unwrap();
         drop(db);
 
-        let error = RuntimeDb::open(&path)
-            .err()
-            .expect("former launch authority must require the explicit reset action");
-        let message = format!("{error:#}");
-        assert!(message.contains("stored launch metadata is not the exact current contract"));
-        assert!(message.contains(&format!(
-            "stored schema_version={}",
-            LAUNCH_METADATA_SCHEMA_VERSION - 1
-        )));
-        assert!(message.contains(&format!(
-            "current schema_version={LAUNCH_METADATA_SCHEMA_VERSION}"
-        )));
-        assert!(message.contains("--discard-thread-history"));
-        assert!(!message.contains("missing field `confinement`"));
-        assert!(!message.contains("unknown field `denied_control_paths`"));
+        let reopened =
+            RuntimeDb::open(&path).expect("old launch authority must not block node open");
+        let runtime = reopened
+            .get_runtime_info("T-pre-isolation")
+            .unwrap()
+            .unwrap();
+        assert!(runtime.launch_metadata.is_none());
+        assert_eq!(
+            runtime.incompatible_launch_metadata,
+            Some(IncompatibleLaunchMetadata {
+                schema_version: u64::from(LAUNCH_METADATA_SCHEMA_VERSION - 1),
+                admitted_launch_capsule_schema: None,
+            })
+        );
+        drop(reopened);
 
         let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let retained: String = conn
@@ -7470,6 +7549,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retained, predecessor);
+    }
+
+    #[test]
+    fn predecessor_capsule_schema_is_classified_before_nested_authority_decode() {
+        let raw = lillux::canonical_json(&serde_json::json!({
+            "schema_version": LAUNCH_METADATA_SCHEMA_VERSION,
+            "admitted_launch_capsule_schema":
+                ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION - 1,
+            "sealed_root_request": {"deliberately": "not-current-authority"}
+        }))
+        .unwrap();
+        let StoredLaunchMetadata::Incompatible(incompatible) =
+            decode_stored_launch_metadata(&raw).unwrap()
+        else {
+            panic!("predecessor capsule must remain opaque")
+        };
+        assert_eq!(
+            incompatible.admitted_launch_capsule_schema,
+            Some(u64::from(
+                ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION - 1
+            ))
+        );
     }
 
     #[test]
@@ -7884,9 +7985,9 @@ mod tests {
     }
 
     #[test]
-    fn schema_version_mismatch_errors() {
-        // O5: Schema version mismatch must surface as a typed error,
-        // not silently degrade to None.
+    fn schema_version_mismatch_is_explicit_incompatible_authority() {
+        // An unsupported authority contract is not current metadata and is not
+        // silently lost: reconciliation receives its explicit outer marker.
         let (_tmp, db) = fresh_db();
         db.insert_thread_runtime("t1", "c1").unwrap();
         let mut payload = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
@@ -7894,17 +7995,19 @@ mod tests {
         let payload = serde_json::to_string(&payload).unwrap();
         db.conn
             .execute(
-                "UPDATE thread_runtime SET pid = ?2, pgid = ?3, launch_metadata = ?4
+                "UPDATE thread_runtime SET launch_metadata = ?2
                  WHERE thread_id = ?1",
-                params!["t1", 1i64, 2i64, payload],
+                params!["t1", payload],
             )
             .unwrap();
-        let err = db
-            .get_runtime_info("t1")
-            .expect_err("schema version mismatch must error");
-        assert!(
-            format!("{err:#}").contains("stored launch metadata is not the exact current contract"),
-            "expected schema mismatch error, got: {err}"
+        let runtime = db.get_runtime_info("t1").unwrap().unwrap();
+        assert!(runtime.launch_metadata.is_none());
+        assert_eq!(
+            runtime.incompatible_launch_metadata,
+            Some(IncompatibleLaunchMetadata {
+                schema_version: 999,
+                admitted_launch_capsule_schema: None,
+            })
         );
     }
 

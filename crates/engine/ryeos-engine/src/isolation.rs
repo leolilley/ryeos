@@ -102,6 +102,7 @@ pub struct IsolationRuntime {
     _generation_lifeline: Option<Arc<dyn IsolationGenerationLifeline>>,
     generation_node_trust: Option<TrustStore>,
     generation_bundle_roots: Option<Vec<PathBuf>>,
+    generation_registered_bundle_roots: Option<Vec<crate::item_resolution::RegisteredBundleRoot>>,
 }
 
 /// Adapter evidence paired with the exact upper-directory descriptor the
@@ -1116,11 +1117,17 @@ impl IsolationRuntime {
         mut self,
         lifeline: Arc<dyn IsolationGenerationLifeline>,
         node_trust: TrustStore,
-        bundle_roots: Vec<PathBuf>,
+        bundle_roots: Vec<crate::item_resolution::RegisteredBundleRoot>,
     ) -> Self {
         self._generation_lifeline = Some(lifeline);
         self.generation_node_trust = Some(node_trust);
-        self.generation_bundle_roots = Some(bundle_roots);
+        self.generation_bundle_roots = Some(
+            bundle_roots
+                .iter()
+                .map(|root| root.canonical_root.clone())
+                .collect(),
+        );
+        self.generation_registered_bundle_roots = Some(bundle_roots);
         self
     }
 
@@ -1130,6 +1137,12 @@ impl IsolationRuntime {
 
     pub fn registered_generation_bundle_roots(&self) -> Option<&[PathBuf]> {
         self.generation_bundle_roots.as_deref()
+    }
+
+    pub fn registered_generation_roots(
+        &self,
+    ) -> Option<&[crate::item_resolution::RegisteredBundleRoot]> {
+        self.generation_registered_bundle_roots.as_deref()
     }
 
     pub fn ensure_registered_generation_current(&self) -> Result<(), EngineError> {
@@ -2855,6 +2868,7 @@ impl IsolationRuntime {
             _generation_lifeline: None,
             generation_node_trust: None,
             generation_bundle_roots: None,
+            generation_registered_bundle_roots: None,
         })
     }
 

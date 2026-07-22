@@ -631,9 +631,15 @@ pub fn compile_with_handlers(
         )?;
         (
             resolved.absolute_path.to_string_lossy().into_owned(),
-            Some(crate::isolation::IsolationVerifiedCode {
-                source_path: resolved.absolute_path,
-                content_hash: resolved.content_hash,
+            Some(crate::contracts::PlanVerifiedCommand::BundleExecutor {
+                code: crate::isolation::IsolationVerifiedCode {
+                    source_path: resolved.absolute_path,
+                    content_hash: resolved.content_hash,
+                },
+                provider: crate::contracts::PlanBundleExecutorIdentity {
+                    manifest_hash: resolved.manifest_hash,
+                    signer_fingerprint: resolved.signer_fingerprint,
+                },
             }),
         )
     } else {
