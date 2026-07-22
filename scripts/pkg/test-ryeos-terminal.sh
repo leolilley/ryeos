@@ -164,6 +164,28 @@ NO_COLOR=1 TERM=xterm RYEOS_TTY=always COLUMNS='' bash -c \
     'source "$1"; _ryeos_term_detect_columns() { printf 47; }; ryeos_term_init; [[ "$_RYEOS_TERM_WIDTH" == 46 ]]' \
     _ "$helper"
 
+# A captured `tput cols` reports its terminfo fallback on some systems rather
+# than the actual terminal width. The renderer must prefer the dimensions read
+# from the terminal fd, even when an inherited COLUMNS value is stale.
+NO_COLOR=1 TERM=xterm RYEOS_TTY=always COLUMNS=120 bash -c \
+    'stty() { printf "24 62\n"; }; source "$1"; ryeos_term_init; [[ "$_RYEOS_TERM_WIDTH" == 61 ]]' \
+    _ "$helper"
+
+# Refresh at phase boundaries so a resize during a long build is honored by
+# the next install/publish/verify update instead of continuing to wrap frames.
+NO_COLOR=1 TERM=xterm RYEOS_TTY=always bash -c '
+    terminal_columns=80
+    stty() { printf "24 %s\n" "$terminal_columns"; }
+    source "$1"
+    ryeos_term_init
+    [[ "$_RYEOS_TERM_WIDTH" == 79 ]]
+    terminal_columns=52
+    ryeos_term_update "publishing ryeos-ui bundle" "signed manifests"
+    [[ "$_RYEOS_TERM_WIDTH" == 51 ]]
+    ryeos_term_cleanup
+' _ "$helper" 2>"$tmp/resized"
+assert_terminal_frames_fit "$tmp/resized" 51 resized
+
 if command -v script >/dev/null 2>&1; then
     TERM=xterm RYEOS_TTY=auto script -qec \
         "bash -c \"source '$helper'; ryeos_term_init; ryeos_term_begin RUN pty; ryeos_term_cleanup\"" \

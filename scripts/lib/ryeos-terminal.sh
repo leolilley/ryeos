@@ -58,16 +58,36 @@ _ryeos_term_elapsed() {
 }
 
 _ryeos_term_detect_columns() {
-    local detected=""
-    if [[ "${COLUMNS:-}" =~ ^[0-9]+$ ]] && (( COLUMNS >= 2 )); then
+    local detected="" terminal_size=""
+    if [[ "$_RYEOS_TERM_MODE" == tty ]] && command -v stty >/dev/null 2>&1; then
+        # Query the terminal attached to stderr. `tput cols` runs with stdout
+        # captured by this function, so ncurses can see that pipe instead of
+        # the operator's terminal and silently return its 80-column fallback.
+        # That makes long spinner frames wrap and turns every carriage-return
+        # repaint into a new line. stty reads the real terminal through fd 2.
+        terminal_size="$(stty size <&2 2>/dev/null || true)"
+        if [[ "$terminal_size" =~ ^[[:space:]]*[0-9]+[[:space:]]+([0-9]+)[[:space:]]*$ ]]; then
+            detected="${BASH_REMATCH[1]}"
+        fi
+    fi
+    if [[ -z "$detected" && "${COLUMNS:-}" =~ ^[0-9]+$ ]] && (( COLUMNS >= 2 )); then
         detected="$COLUMNS"
-    elif [[ "$_RYEOS_TERM_MODE" == tty ]] && command -v tput >/dev/null 2>&1; then
-        detected="$(tput cols 2>/dev/null || true)"
     fi
     if [[ ! "$detected" =~ ^[0-9]+$ ]] || (( detected < 2 )); then
         detected=80
     fi
     printf '%s' "$detected"
+}
+
+_ryeos_term_refresh_width() {
+    _RYEOS_TERM_WIDTH="$(_ryeos_term_detect_columns)"
+    if [[ "$_RYEOS_TERM_MODE" == tty ]]; then
+        # Never paint the terminal's final cell. Printing into the last column
+        # sets autowrap on common terminals, so the next carriage-return repaint
+        # starts on a fresh physical line and every spinner frame pollutes
+        # scrollback. One reserved cell keeps the rich renderer in-place.
+        _RYEOS_TERM_WIDTH=$(( _RYEOS_TERM_WIDTH - 1 ))
+    fi
 }
 
 _ryeos_term_stop_spinner() {
@@ -177,14 +197,7 @@ ryeos_term_init() {
         _RYEOS_TERM_UNICODE=0
         _RYEOS_TERM_COLOR=0
     fi
-    _RYEOS_TERM_WIDTH="$(_ryeos_term_detect_columns)"
-    if [[ "$_RYEOS_TERM_MODE" == tty ]]; then
-        # Never paint the terminal's final cell. Printing into the last column
-        # sets autowrap on common terminals, so the next carriage-return repaint
-        # starts on a fresh physical line and every spinner frame pollutes
-        # scrollback. One reserved cell keeps the rich renderer in-place.
-        _RYEOS_TERM_WIDTH=$(( _RYEOS_TERM_WIDTH - 1 ))
-    fi
+    _ryeos_term_refresh_width
     if [[ "$_RYEOS_TERM_TRAPS" == 0 ]]; then
         _ryeos_term_capture_trap EXIT _RYEOS_TERM_PREV_EXIT
         _ryeos_term_capture_trap INT _RYEOS_TERM_PREV_INT
@@ -301,11 +314,19 @@ _ryeos_term_start_spinner() {
     [[ "$_RYEOS_TERM_MODE" == tty && "$_RYEOS_TERM_ACTIVE" == 1 && "$_RYEOS_TERM_SUSPENDED" == 0 ]] || return 0
     _ryeos_term_stop_spinner
     (
-        local frame_index=0
+        local frame_index=0 resize_pending=0
         local interval="${RYEOS_TERM_SPINNER_INTERVAL:-0.1}"
         local -a frames=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
         trap - EXIT INT TERM
-        while sleep "$interval"; do
+        trap 'resize_pending=1' WINCH
+        while :; do
+            # A resize can interrupt sleep. Keep the renderer alive, refresh
+            # from the terminal fd, and repaint within the new boundary.
+            sleep "$interval" || true
+            if [[ "$resize_pending" == 1 ]]; then
+                _ryeos_term_refresh_width
+                resize_pending=0
+            fi
             _ryeos_term_render_active "${frames[$frame_index]}"
             frame_index=$(( (frame_index + 1) % ${#frames[@]} ))
         done
@@ -324,6 +345,7 @@ ryeos_term_begin() {
         _RYEOS_TERM_DEPTH=$(( _RYEOS_TERM_DEPTH + 1 ))
     fi
     _RYEOS_TERM_SUSPENDED=0
+    _ryeos_term_refresh_width
     label_limit=$(( _RYEOS_TERM_WIDTH - 20 ))
     (( _RYEOS_TERM_WIDTH <= 30 )) && label_limit=$(( _RYEOS_TERM_WIDTH - 10 - ${#verb} ))
     label="$(_ryeos_term_clamp "$label" "$label_limit")"
@@ -343,6 +365,7 @@ ryeos_term_begin() {
 ryeos_term_update() {
     local label="$1" detail="${2:-}" message message_limit suffix=""
     _ryeos_term_stop_spinner
+    _ryeos_term_refresh_width
     _RYEOS_TERM_LABEL="$label"
     _RYEOS_TERM_DETAIL="$detail"
     if [[ "$_RYEOS_TERM_MODE" == tty ]]; then
@@ -362,6 +385,7 @@ ryeos_term_end() {
     local tone glyph suffix="" message parent_index elapsed message_limit
     _ryeos_term_clear
     _RYEOS_TERM_SUSPENDED=0
+    _ryeos_term_refresh_width
     [[ -n "$detail" ]] && suffix="  ·  $detail"
     elapsed="$(_ryeos_term_elapsed "$started")"
     message_limit=$(( _RYEOS_TERM_WIDTH - 16 - ${#elapsed} ))
