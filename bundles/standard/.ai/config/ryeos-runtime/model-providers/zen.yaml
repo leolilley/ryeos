@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T00:52:25Z:8312ce8d2ae556fb530c2bcb797335ac429faba51c7a3ad794a65d3a272dea0c:7vr9dVuR7rivHhTmr+S1AyGONrtR04g2ECyTXqKecWvnsofO0bxwLEwvD1+CO6Ag9qREO9M8jBGHUkUFocHQCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T08:09:36Z:d077b57f2b1b55ec542df2f061c524943224e24d1e9de468741ed3014972e937:vAUtIq71sQ1aw0pJLAiYzGZn5cZPtEAj6/ONc79VgMtdr6NYhLHjscP7x007auz4fx0jAoyROslR+5IN3pibDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://opencode.ai/zen/v1"
@@ -9,6 +9,7 @@ auth:
 headers:
   Content-Type: application/json
 schemas:
+  accounting: {require_usage: true}
   messages:
     role_map: {user: user, assistant: assistant, system: system, tool: tool}
     content_key: content
@@ -32,7 +33,16 @@ schemas:
         name: "{name}"
         description: "{description}"
         parameters: "{schema}"
-  streaming: {mode: delta_merge}
+  streaming:
+    mode: delta_merge
+    metadata:
+      finish_reason_path: choices.0.finish_reason
+      response_id_path: id
+      error:
+        path: error
+        message_path: message
+        code_path: code
+  output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
 body_template:
   model: "{model}"
   messages: "{messages}"
@@ -91,13 +101,13 @@ profiles:
       anthropic-version: "2023-06-01"
     body_template:
       model: "{model}"
-      max_tokens: "{max_tokens}"
       messages: "{messages}"
       tools: "{tools}"
       stream: "{stream}"
     body_extra:
       max_tokens: 8192
     schemas:
+      accounting: {require_usage: true}
       messages:
         role_map: {user: user, assistant: assistant}
         content_key: content
@@ -128,6 +138,14 @@ profiles:
           input_schema: "{schema}"
       streaming:
         mode: event_typed
+        metadata:
+          finish_reason_path: delta.stop_reason
+          response_id_path: message.id
+          error:
+            path: error
+            message_path: message
+            code_path: type
+      output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
     extra:
       stream_url: ""
 
@@ -163,6 +181,7 @@ profiles:
           includeThoughts: true
           thinkingLevel: low
     schemas:
+      accounting: {require_usage: true}
       messages:
         role_map: {user: user, assistant: model}
         content_key: parts
@@ -196,6 +215,13 @@ profiles:
         list_wrap: functionDeclarations
       streaming:
         mode: complete_chunks
+        metadata:
+          finish_reason_path: "candidates.0.finishReason"
+          response_id_path: responseId
+          error:
+            path: error
+            message_path: message
+            code_path: code
         paths:
           content_path: "candidates.0.content.parts"
           text_field: text
@@ -207,6 +233,7 @@ profiles:
           input_tokens_field: promptTokenCount
           output_tokens_field: candidatesTokenCount
           finish_reason_path: "candidates.0.finishReason"
+      output_limit: {path: generationConfig.maxOutputTokens, semantics: provider_native_output_tokens}
     extra:
       stream_url: ""
 

@@ -7,10 +7,12 @@ use serde_json::Value;
 // The launch preparer and runtime consume this one strict schema.
 #[allow(unused_imports)]
 pub use ryeos_directive_core::{
-    AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, PricingConfig,
-    ProtocolFamily, ProviderConfig, ProviderProfile, SamplingConfig, SchemasConfig, StreamPaths,
+    AssistantToolCallsPlacement, MessageSchemas, ModelRoutingConfig, ModelSpec, OutputLimitConfig,
+    OutputLimitSemantics, PricingConfig, ProtocolFamily, ProviderAccountingConfig, ProviderConfig,
+    ProviderProfile, ReportedCostUnit, SamplingConfig, SchemasConfig, StreamErrorConfig,
+    StreamMetadataConfig, StreamPaths, StreamUsageConfig, StreamingConfig, StreamingMode,
     SystemMessageConfig, SystemMessageMode, TextPlacement, ToolResultConfig, ToolResultWrapMode,
-    ToolSchemaConfig,
+    ToolSchemaConfig, UsageAggregation,
 };
 
 /// Typed runtime view of a directive's effective header *after* the
@@ -293,12 +295,23 @@ pub struct ExecutionConfig {
     pub backoff_base_ms: u64,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
-    /// Runtime-side backstop for a single model turn's generated output. This
-    /// is independent of provider `max_tokens` request fields, which are
-    /// template/provider dependent and may be absent or ignored. `0` disables
-    /// the backstop.
-    #[serde(default = "default_max_output_tokens_per_turn")]
-    pub max_output_tokens_per_turn: u64,
+    /// Provider-native output-token ceiling requested for a single model turn.
+    /// Providers apply their own tokenizer; RyeOS does not treat final usage
+    /// metadata as evidence that locally streamed output crossed this value.
+    /// `0` disables the runtime ceiling while preserving any limit authored in
+    /// the provider's signed request template/body defaults.
+    #[serde(default = "default_max_provider_output_tokens_per_turn")]
+    pub max_provider_output_tokens_per_turn: u64,
+    /// Exact UTF-8 byte backstop for semantic output accepted from one provider
+    /// stream (text, emitted reasoning, and tool arguments). This is an
+    /// independent limit, not a token-to-byte conversion. `0` disables it.
+    #[serde(default = "default_max_stream_output_bytes_per_turn")]
+    pub max_stream_output_bytes_per_turn: u64,
+    /// Maximum bytes buffered for one logical SSE event before its delimiter.
+    /// This is a framing/memory-safety bound, not generated-output accounting.
+    /// `0` disables the framing bound.
+    #[serde(default = "default_max_provider_stream_frame_bytes")]
+    pub max_provider_stream_frame_bytes: u64,
     #[serde(default)]
     pub tool_preload: bool,
     #[serde(default)]
@@ -313,6 +326,57 @@ pub struct ExecutionConfig {
     /// `false` to fail a directive on the first mid-stream cut.
     #[serde(default = "default_retry_mid_stream")]
     pub retry_mid_stream: bool,
+    /// Execution-owned provider-attempt accounting policy. Wire parsing stays
+    /// in the signed provider schema; budget/failure behavior belongs here.
+    #[serde(default)]
+    pub accounting: AttemptAccountingConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptAccountingConfig {
+    #[serde(default)]
+    pub failure_policy: AccountingFailurePolicy,
+    #[serde(default)]
+    pub budget_mode: AccountingBudgetMode,
+    #[serde(default)]
+    pub reservation: AttemptReservationConfig,
+}
+
+impl Default for AttemptAccountingConfig {
+    fn default() -> Self {
+        Self {
+            failure_policy: AccountingFailurePolicy::Auto,
+            budget_mode: AccountingBudgetMode::Settled,
+            reservation: AttemptReservationConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AccountingFailurePolicy {
+    #[default]
+    Auto,
+    Warn,
+    FailClosed,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum AccountingBudgetMode {
+    #[default]
+    Settled,
+    Hard,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptReservationConfig {
+    #[serde(default)]
+    pub max_tokens_per_attempt: Option<u64>,
+    #[serde(default)]
+    pub max_cost_per_attempt_usd: Option<f64>,
 }
 
 fn default_retries() -> u32 {
@@ -331,8 +395,16 @@ fn default_timeout() -> u64 {
     300
 }
 
-fn default_max_output_tokens_per_turn() -> u64 {
+fn default_max_provider_output_tokens_per_turn() -> u64 {
     32_768
+}
+
+fn default_max_stream_output_bytes_per_turn() -> u64 {
+    131_072
+}
+
+fn default_max_provider_stream_frame_bytes() -> u64 {
+    1_048_576
 }
 
 fn default_retry_mid_stream() -> bool {
@@ -348,11 +420,49 @@ impl Default for ExecutionConfig {
             never_retry: vec![],
             backoff_base_ms: default_backoff_base_ms(),
             timeout_seconds: default_timeout(),
-            max_output_tokens_per_turn: default_max_output_tokens_per_turn(),
+            max_provider_output_tokens_per_turn: default_max_provider_output_tokens_per_turn(),
+            max_stream_output_bytes_per_turn: default_max_stream_output_bytes_per_turn(),
+            max_provider_stream_frame_bytes: default_max_provider_stream_frame_bytes(),
             tool_preload: false,
             retry_on_timeout: false,
             retry_mid_stream: default_retry_mid_stream(),
+            accounting: AttemptAccountingConfig::default(),
         }
+    }
+}
+
+impl ExecutionConfig {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if let Some(tokens) = self.accounting.reservation.max_tokens_per_attempt {
+            if tokens == 0 {
+                anyhow::bail!("accounting.reservation.max_tokens_per_attempt must be positive");
+            }
+        }
+        if let Some(cost) = self.accounting.reservation.max_cost_per_attempt_usd {
+            if !cost.is_finite() || cost <= 0.0 {
+                anyhow::bail!(
+                    "accounting.reservation.max_cost_per_attempt_usd must be finite and positive"
+                );
+            }
+        }
+        if self.accounting.budget_mode == AccountingBudgetMode::Hard {
+            anyhow::bail!(
+                "accounting.budget_mode=hard requires the durable reservation/reconciliation backend, which is not enabled by this runtime build"
+            );
+        }
+        if self.accounting.budget_mode == AccountingBudgetMode::Settled
+            && (self.accounting.reservation.max_tokens_per_attempt.is_some()
+                || self
+                    .accounting
+                    .reservation
+                    .max_cost_per_attempt_usd
+                    .is_some())
+        {
+            anyhow::bail!(
+                "accounting.reservation ceilings are only meaningful with accounting.budget_mode=hard"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -420,6 +530,12 @@ pub enum StreamEvent {
         id: Option<String>,
         name: String,
         arguments: Value,
+        /// Stable parser-owned key for byte metering; never derived from a
+        /// provider/model identifier and unique within one response stream.
+        stream_key: String,
+        /// Exact byte length of the provider argument representation used by
+        /// the parser before normalization/recovery.
+        argument_bytes: usize,
         /// Set when the streamed argument JSON failed to parse and was
         /// recovered as `{}` (see [`MalformedArgs`]). `None` on a clean parse.
         /// Carried so the runner can attach the corruption fact to the
@@ -439,6 +555,7 @@ pub enum StreamEvent {
     ToolUsePartial {
         id: Option<String>,
         name: String,
+        stream_key: String,
         /// The new JSON fragment that just arrived (NOT the cumulative
         /// buffer — consumers get the delta and reconstruct the full
         /// state if they need it).
@@ -499,6 +616,7 @@ pub struct UsageUpdate {
     pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
+    pub anomalies: Vec<String>,
 }
 
 /// Normalize a provider-specific finish reason string to a canonical enum.
@@ -614,9 +732,17 @@ hooks:
             "omitted retry_mid_stream defaults ON — a dropped stream is transient"
         );
         assert_eq!(
-            cfg.max_output_tokens_per_turn,
-            default_max_output_tokens_per_turn(),
-            "omitted per-turn output cap defaults to the runtime backstop, not 0"
+            cfg.max_provider_output_tokens_per_turn,
+            default_max_provider_output_tokens_per_turn(),
+            "omitted provider output cap uses the configured default, not 0"
+        );
+        assert_eq!(
+            cfg.max_stream_output_bytes_per_turn,
+            default_max_stream_output_bytes_per_turn()
+        );
+        assert_eq!(
+            cfg.max_provider_stream_frame_bytes,
+            default_max_provider_stream_frame_bytes()
         );
     }
 
@@ -628,10 +754,40 @@ hooks:
         assert_eq!(parsed.retry_status_codes, default.retry_status_codes);
         assert_eq!(parsed.backoff_base_ms, default.backoff_base_ms);
         assert_eq!(
-            parsed.max_output_tokens_per_turn,
-            default.max_output_tokens_per_turn
+            parsed.max_provider_output_tokens_per_turn,
+            default.max_provider_output_tokens_per_turn
+        );
+        assert_eq!(
+            parsed.max_stream_output_bytes_per_turn,
+            default.max_stream_output_bytes_per_turn
+        );
+        assert_eq!(
+            parsed.max_provider_stream_frame_bytes,
+            default.max_provider_stream_frame_bytes
         );
         assert_eq!(parsed.retry_mid_stream, default.retry_mid_stream);
         assert_eq!(parsed.retries, 2);
+    }
+
+    #[test]
+    fn stream_output_byte_limit_is_independent_and_explicitly_disableable() {
+        let disabled: ExecutionConfig = serde_yaml::from_str(
+            "max_provider_output_tokens_per_turn: 10\nmax_stream_output_bytes_per_turn: 0\n",
+        )
+        .unwrap();
+        assert_eq!(disabled.max_stream_output_bytes_per_turn, 0);
+
+        let explicit: ExecutionConfig = serde_yaml::from_str(
+            "max_provider_output_tokens_per_turn: 10\nmax_stream_output_bytes_per_turn: 123\n",
+        )
+        .unwrap();
+        assert_eq!(explicit.max_stream_output_bytes_per_turn, 123);
+    }
+
+    #[test]
+    fn removed_output_limit_key_is_rejected() {
+        let error = serde_yaml::from_str::<ExecutionConfig>("max_output_tokens_per_turn: 10\n")
+            .expect_err("removed key must not deserialize");
+        assert!(error.to_string().contains("unknown field"));
     }
 }

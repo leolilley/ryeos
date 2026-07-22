@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T00:52:25Z:beedbb19abd31f2b1704a6f32f1c1688fac7f45f9ccb422aac0d451d7f6a7c0f:47jB4WVr8hHxZcFIYs/Z0w3CfpGGGbfV+Sz2GexsFAvwvWeDyzTexc2Z5nZ5RVz7ZtFL4cpq1loyizGcg8mwBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T08:09:36Z:4afbe7ffeb453bb0d64fb6aeccbd6b2a9fbec24508417dc4f11516e422b7a50b:DcMQk2JKQKgYfstn2WE8oyr5GCwdLrBUo1duDRR6usVjhyppVaEQbzIafRqclL3FXpQGl/0qVK9V9uSsUx8nBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: anthropic_messages
 base_url: "https://api.anthropic.com/v1/messages"
@@ -10,6 +10,7 @@ headers:
   Content-Type: application/json
   anthropic-version: "2023-06-01"
 schemas:
+  accounting: {require_usage: true}
   messages:
     role_map: {user: user, assistant: assistant, system: system, tool: user}
     content_key: content
@@ -36,10 +37,18 @@ schemas:
       name: "{name}"
       description: "{description}"
       input_schema: "{schema}"
-  streaming: {mode: event_typed}
+  streaming:
+    mode: event_typed
+    metadata:
+      finish_reason_path: delta.stop_reason
+      response_id_path: message.id
+      error:
+        path: error
+        message_path: message
+        code_path: type
+  output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
 body_template:
   model: "{model}"
-  max_tokens: "{max_tokens}"
   messages: "{messages}"
   tools: "{tools}"
   stream: "{stream}"

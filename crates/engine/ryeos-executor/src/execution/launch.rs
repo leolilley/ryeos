@@ -4988,14 +4988,21 @@ fn follow_resume_payload(
     }
     let statuses: Vec<FanoutItemStatus> = envelopes
         .iter()
-        .map(|envelope| {
-            if ryeos_runtime::envelope::envelope_succeeded(envelope) {
+        .enumerate()
+        .map(|(index, envelope)| {
+            let status = ryeos_runtime::envelope::follow_envelope_terminal_status(envelope)
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "follow-resume: invalid terminal envelope at child index {index}: {error}"
+                    ))
+                })?;
+            Ok(if status.is_success() {
                 FanoutItemStatus::Completed
             } else {
                 FanoutItemStatus::Failed
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, BuildAndLaunchError>>()?;
     let failed = statuses
         .iter()
         .filter(|status| **status == FanoutItemStatus::Failed)
@@ -5169,6 +5176,7 @@ mod tests {
             vec![
                 json!({
                     "success": true,
+                    "child_thread_id": "T-follow-child-1",
                     "status": "completed",
                     "result": {"answer": 1},
                     "outputs": null,
@@ -5177,6 +5185,7 @@ mod tests {
                 }),
                 json!({
                     "success": false,
+                    "child_thread_id": "T-follow-child-2",
                     "status": "failed",
                     "result": {"error": "boom"},
                     "outputs": null,

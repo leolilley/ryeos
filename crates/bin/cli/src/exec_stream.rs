@@ -79,10 +79,31 @@ pub fn render_event(
                     } else {
                         console.text(&format!("- {}  {summary}", ev.event))?;
                     }
+                    if let Some(detail) = nonterminal_failure_detail(&ev.event, inner) {
+                        console.error(&crate::tty::Diagnostic::error(format!(
+                            "{} failure: {detail}",
+                            ev.event
+                        )))?;
+                    }
                 }
                 Ok(StreamOutcome::Continue)
             }
         },
+    }
+}
+
+/// Failure lifecycle events still receive the compact generic milestone, but
+/// their actionable diagnostic is rendered separately without the 32-character
+/// scalar truncation used by ordinary one-line summaries.
+fn nonterminal_failure_detail(event: &str, payload: &Value) -> Option<String> {
+    let status = payload.get("status").and_then(Value::as_str);
+    if event != "graph_step_completed" || !matches!(status, Some("error" | "retry")) {
+        return None;
+    }
+    match payload.get("error") {
+        Some(Value::String(error)) if !error.is_empty() => Some(error.clone()),
+        Some(error) if !error.is_null() => Some(error.to_string()),
+        _ => None,
     }
 }
 
@@ -93,6 +114,18 @@ fn failure_reason(payload: &Value) -> String {
     }
     if let Some(obj) = payload.get("error") {
         if !obj.is_null() {
+            if let Some(summary) = obj.get("summary").and_then(Value::as_str) {
+                let locator = obj.get("diagnostic_locator");
+                let thread_id = locator
+                    .and_then(|locator| locator.get("thread_id"))
+                    .and_then(Value::as_str);
+                return thread_id.map_or_else(
+                    || summary.to_string(),
+                    |thread_id| {
+                        format!("{summary}; full child diagnostic: `ryeos thread tail {thread_id}`")
+                    },
+                );
+            }
             return obj.to_string();
         }
     }
@@ -324,6 +357,33 @@ mod tests {
             )),
             StreamOutcome::Continue
         ));
+    }
+
+    #[test]
+    fn graph_step_failure_detail_is_not_field_truncated() {
+        let detail = "child runtime failed: ".to_string() + &"diagnostic-tail-marker".repeat(24);
+        let mut payload = serde_json::json!({
+            "status": "error",
+            "error": detail,
+        });
+        assert_eq!(
+            nonterminal_failure_detail("graph_step_completed", &payload),
+            payload
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        );
+        assert!(nonterminal_failure_detail("graph_step_completed", &payload)
+            .unwrap()
+            .ends_with("diagnostic-tail-marker"));
+        payload
+            .as_object_mut()
+            .unwrap()
+            .insert("status".to_string(), serde_json::json!("retry"));
+        assert!(nonterminal_failure_detail("graph_step_completed", &payload)
+            .unwrap()
+            .ends_with("diagnostic-tail-marker"));
+        assert!(nonterminal_failure_detail("tool_call_result", &payload).is_none());
     }
 
     #[test]

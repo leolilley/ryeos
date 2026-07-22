@@ -485,6 +485,7 @@ config:
         };
         json!({
             "success": status.is_success(),
+            "child_thread_id": "T-resume-child",
             "status": status,
             "result": result,
             "outputs": null,
@@ -509,7 +510,7 @@ config:
         let definition = definition();
         for value in [
             json!({}),
-            json!({"schema_version": 2}),
+            json!({"schema_version": 1}),
             json!({"schema_version": 99}),
         ] {
             let error = from_checkpoint_value(&value, &definition)

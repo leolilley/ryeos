@@ -697,6 +697,7 @@ impl CallbackClient {
         turn: u32,
         tokens: Option<(u64, u64)>,
         assistant_message: Option<Value>,
+        provider_accounting: Option<Value>,
     ) -> Result<()> {
         let mut data = serde_json::json!({"turn": turn});
         if let Some(Value::Object(message)) = assistant_message {
@@ -709,6 +710,9 @@ impl CallbackClient {
         if let Some((input, output)) = tokens {
             data["input_tokens"] = serde_json::json!(input);
             data["output_tokens"] = serde_json::json!(output);
+        }
+        if let Some(provider_accounting) = provider_accounting {
+            data["provider_accounting"] = provider_accounting;
         }
         self.append_runtime_event(RuntimeEventType::CognitionOut, data)
             .await
@@ -1489,6 +1493,11 @@ mod tests {
                 "reasoning_content": "hidden",
                 "delta": "must not be copied",
             })),
+            Some(json!({
+                "requested_output_tokens": 32768,
+                "generation_header_id": "generation-1",
+                "contract_anomalies": ["reported output exceeds request limit"],
+            })),
         )
         .await
         .unwrap();
@@ -1500,6 +1509,11 @@ mod tests {
         assert_eq!(evt["reasoning_content"], "hidden");
         assert_eq!(evt["input_tokens"], 10);
         assert_eq!(evt["output_tokens"], 5);
+        assert_eq!(evt["provider_accounting"]["requested_output_tokens"], 32768);
+        assert_eq!(
+            evt["provider_accounting"]["generation_header_id"],
+            "generation-1"
+        );
         assert!(evt.get("delta").is_none());
     }
 

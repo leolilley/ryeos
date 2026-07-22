@@ -205,6 +205,7 @@ pub(super) fn fallback_finalization(
             .expect("validated runtime cost must serialize for fallback settlement")
     });
     let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+        thread_id,
         terminal_status.as_str(),
         runtime_result.result.as_ref(),
         terminal_error.as_ref(),
@@ -266,6 +267,7 @@ mod tests {
                     final_cost: None,
                     managed_envelope: Some(json!({
                         "success": false,
+                        "child_thread_id": "T-authority",
                         "status": "timed_out",
                         "result": "payload",
                         "outputs": {"answer": 42},
@@ -285,6 +287,7 @@ mod tests {
             final_cost: None,
             managed_envelope: Some(json!({
                 "success": result.success,
+                "child_thread_id": "T-authority",
                 "status": result.status,
                 "result": result.result,
                 "outputs": result.outputs,
