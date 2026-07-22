@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-06T12:24:50Z:1aca6b518a35d273d11bd67c70e12f647259a006a38632bd7e4a4ea86c7d698f:TYzwvi0IrVXZRtjoERzoIeQPxnVKjCh7xzKrP79utKGXKSDgAjnt3VTcDeT3tJu2rdsWtD4Z49bE61/ds5yYAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-22T08:09:36Z:787b6beb4add88d058b273ecbe6d79a23909a3ce3200803126bc627595ec21b1:sjcMmsCQkap5sgbdKjPzzNr/pGFjxPsP6paCuTb3ijw7F4E+uOC9AHWltXXOdHqGbvYyhyRCi+2gCn7Rv3tfDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [reference, execution, retry, timeout, config]
@@ -24,7 +24,11 @@ how LLM API calls are made — timeouts, retries, backoff, and more.
 | `never_retry`        | 401, 403, 404 | HTTP codes that never retry    |
 | `backoff_base_ms`    | 1000     | Exponential backoff base (ms)         |
 | `timeout_seconds`    | 300      | Overall request timeout               |
-| `max_output_tokens_per_turn` | 32768 | Runtime-side cap for one model turn's generated output; `0` disables |
+| `max_provider_output_tokens_per_turn` | 32768 | Provider-native output-token ceiling sent through the provider's signed output-limit schema |
+| `max_stream_output_bytes_per_turn` | 131072 | Exact local UTF-8 semantic-output byte backstop; `0` disables |
+| `max_provider_stream_frame_bytes` | 1048576 | Maximum buffered logical SSE event size; `0` disables |
+| `accounting.failure_policy` | auto | Fail closed for unavailable usage with a finite token/spend budget; otherwise warn |
+| `accounting.budget_mode` | settled | Settle after each attempt; may overshoot a finite budget by one attempt |
 | `tool_preload`       | false    | Whether to preload tool definitions   |
 | `retry_on_timeout`   | true     | Whether timeouts trigger retries      |
 
@@ -39,9 +43,23 @@ Auth errors (401, 403) and not-found (404) are never retried.
 
 Timeouts are retried by default (`retry_on_timeout: true`).
 
-Per-turn output caps are enforced by the directive runtime while streaming, so
-they still apply if a provider omits or ignores a wire-level `max_tokens` field.
-Cap failures are terminal for the turn rather than retryable provider errors.
+The provider-native token ceiling and RyeOS-local byte backstop are independent.
+RyeOS sends the token ceiling only at the signed provider schema's declared
+request path. It never treats final provider usage metadata as proof that local
+stream output crossed a limit. The local backstop counts exact UTF-8 bytes of
+accepted visible text, emitted reasoning, and raw tool arguments before live
+publication. It is intentionally reported as bytes, not as an estimated or
+universal token count. Local cap failures are terminal for the turn rather than
+retryable provider errors.
+
+Every provider issue is preceded by an indexed
+`provider_attempt_accounting` pending record and followed by a reported,
+spend-only, unavailable, cancelled, or interrupted state. `settled` budget
+mode preserves the after-attempt budget contract and is deliberately labeled
+as capable of a one-attempt overshoot. `hard` is rejected during config
+validation in this runtime build: RyeOS must not claim a hard budget until the
+durable reservation/reconciliation backend is enabled. Reservation ceiling
+fields are rejected in `settled` mode rather than silently ignored.
 
 ## Config Resolution Chain
 

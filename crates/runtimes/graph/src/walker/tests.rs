@@ -3494,6 +3494,7 @@ fn follow_resume_params(graph: &GraphDefinition, follow_result: Option<Value>) -
 fn follow_terminal_envelope(status: RuntimeResultStatus, result: Value) -> Value {
     json!({
         "success": status.is_success(),
+        "child_thread_id": "T-follow-child",
         "status": status,
         "result": result,
         "outputs": null,
@@ -4144,6 +4145,7 @@ async fn follow_fanout_error_redirect_rolls_back_collected_candidate() {
         "items":[
             {
                 "success": true,
+                "child_thread_id": "T-follow-child-1",
                 "status": RuntimeResultStatus::Completed,
                 "result": {"ok": 1},
                 "outputs": null,
@@ -4152,6 +4154,7 @@ async fn follow_fanout_error_redirect_rolls_back_collected_candidate() {
             },
             {
                 "success": false,
+                "child_thread_id": "T-follow-child-2",
                 "status": RuntimeResultStatus::Failed,
                 "result": {"error":"boom"},
                 "outputs": null,

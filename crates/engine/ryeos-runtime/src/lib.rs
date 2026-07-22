@@ -29,8 +29,9 @@ pub use authorizer::{
     CapabilityClause, CapabilityParseError,
 };
 pub use callback::{
-    client_from_env, parse_hook_action, ActionPayload, CallbackError, DispatchActionRequest,
-    ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, TerminalCompletion,
+    client_from_env, parse_hook_action, validate_runtime_thread_id, ActionPayload, CallbackError,
+    DispatchActionRequest, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure,
+    RuntimeFailureDiagnosticLocator, TerminalCompletion, RUNTIME_FAILURE_KIND,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{

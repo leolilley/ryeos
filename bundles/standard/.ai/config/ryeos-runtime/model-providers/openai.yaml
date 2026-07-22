@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T00:52:25Z:0a1546ad6a4afedc6bf25c587c755c8afb82df38424fd39fd488a786bbe292ec:sNb+TCRJ9i7DgT9zSAiGKkXZ+BchthlVTb+oLxWajf6iXsRApeWYn/yeRvqmNfQ1vaa/o7i5taF/ELITaeGrAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T08:09:36Z:65a04058a86445a38e74091ef1a715d7ad58eae933830b0aff5072b182be7567:Ei7BRvq1wjLEmcqxzleFYceN2oHW3rM3c476aoQKpeesS1HQgnN8a5UupGFdFW7ooskx0hVXzdLCtR16OEPxDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://api.openai.com/v1"
@@ -9,6 +9,7 @@ auth:
 headers:
   Content-Type: application/json
 schemas:
+  accounting: {require_usage: true}
   messages:
     role_map: {user: user, assistant: assistant, system: system, tool: tool}
     content_key: content
@@ -32,7 +33,16 @@ schemas:
         name: "{name}"
         description: "{description}"
         parameters: "{schema}"
-  streaming: {mode: delta_merge}
+  streaming:
+    mode: delta_merge
+    metadata:
+      finish_reason_path: choices.0.finish_reason
+      response_id_path: id
+      error:
+        path: error
+        message_path: message
+        code_path: code
+  output_limit: {path: max_completion_tokens, semantics: provider_native_output_tokens}
 body_template:
   model: "{model}"
   messages: "{messages}"

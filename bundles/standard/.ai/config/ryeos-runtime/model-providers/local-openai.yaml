@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T00:52:25Z:7337c40314151b6078e5fbb581983aa8ad349c08d6f538a4be7d6c12e7f298c4:Kaw0xElr3UmGkJP568rddM5TELpRI4YQ91UF+5DevtY/SsDtGFu5JAzKQjthxDeGkpe+ZqOg9PsQV1CCxpOiBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T08:09:36Z:e794e2a61cd646db1af3f169c60626f645b8622fca4ec0e544d749fa2aaff504:1YnT6qAmq+9eldZq9MXYFJeLw8X6Q9+4/d8S1kQZip2kxrV2Ta3/8n7GHn9l0cNfys6VQ3xPUvze14TwqoQZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 # Offline/eval target: a local OpenAI-compatible server (vLLM, llama.cpp,
@@ -32,7 +32,16 @@ schemas:
         name: "{name}"
         description: "{description}"
         parameters: "{schema}"
-  streaming: {mode: delta_merge}
+  streaming:
+    mode: delta_merge
+    metadata:
+      finish_reason_path: choices.0.finish_reason
+      response_id_path: id
+      error:
+        path: error
+        message_path: message
+        code_path: code
+  output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
 body_template:
   model: "{model}"
   messages: "{messages}"
@@ -43,6 +52,7 @@ body_template:
 # Local open-weights models are free to run; report zero spend so cost
 # accounting still records token counts without inventing a dollar figure.
 pricing:
+  explicitly_free: true
   input_per_million: 0.0
   output_per_million: 0.0
 extra:

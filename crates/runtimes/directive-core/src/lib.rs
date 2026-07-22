@@ -166,11 +166,38 @@ pub enum SystemMessageMode {
 #[serde(deny_unknown_fields)]
 pub struct SchemasConfig {
     #[serde(default)]
+    pub accounting: Option<ProviderAccountingConfig>,
+    #[serde(default)]
     pub messages: Option<MessageSchemas>,
     #[serde(default)]
     pub tools: Option<ToolSchemaConfig>,
     #[serde(default)]
     pub streaming: Option<StreamingConfig>,
+    #[serde(default)]
+    pub output_limit: Option<OutputLimitConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderAccountingConfig {
+    /// A completed response must contain structurally valid final token usage.
+    /// This policy is independent from the paths/mode used to parse it.
+    #[serde(default)]
+    pub require_usage: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputLimitConfig {
+    /// Dot-separated path in the rendered request body.
+    pub path: String,
+    pub semantics: OutputLimitSemantics,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum OutputLimitSemantics {
+    ProviderNativeOutputTokens,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -224,9 +251,104 @@ pub struct ToolSchemaConfig {
 #[serde(deny_unknown_fields)]
 pub struct StreamingConfig {
     #[serde(default)]
-    pub mode: Option<String>,
+    pub mode: Option<StreamingMode>,
     #[serde(default)]
     pub paths: Option<StreamPaths>,
+    #[serde(default)]
+    pub metadata: Option<StreamMetadataConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum StreamingMode {
+    EventTyped,
+    DeltaMerge,
+    CompleteChunks,
+}
+
+impl StreamingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EventTyped => "event_typed",
+            Self::DeltaMerge => "delta_merge",
+            Self::CompleteChunks => "complete_chunks",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamMetadataConfig {
+    #[serde(default)]
+    pub usage: Option<StreamUsageConfig>,
+    #[serde(default)]
+    pub finish_reason_path: Option<String>,
+    #[serde(default)]
+    pub error: Option<StreamErrorConfig>,
+    #[serde(default)]
+    pub response_id_path: Option<String>,
+    #[serde(default)]
+    pub generation_id_header: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamUsageConfig {
+    pub path: String,
+    #[serde(default)]
+    pub input_tokens_path: Option<String>,
+    #[serde(default)]
+    pub output_tokens_path: Option<String>,
+    #[serde(default)]
+    pub reasoning_tokens_path: Option<String>,
+    #[serde(default)]
+    pub reported_cost_path: Option<String>,
+    #[serde(default)]
+    pub reported_cost_unit: Option<ReportedCostUnit>,
+    #[serde(default)]
+    pub cost_details_path: Option<String>,
+    #[serde(default)]
+    pub is_byok_path: Option<String>,
+    #[serde(default)]
+    pub reasoning_included_in_output: bool,
+    #[serde(default)]
+    pub aggregation: UsageAggregation,
+    /// The signed protocol contract permits exactly one matching usage
+    /// snapshot per response.
+    #[serde(default)]
+    pub single_snapshot: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReportedCostUnit {
+    Usd,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum UsageAggregation {
+    /// Provider frames contain cumulative totals. Each declared counter must
+    /// be nondecreasing; regressions are contract violations.
+    #[default]
+    CumulativeFields,
+    /// Each matching frame is a complete authoritative snapshot.
+    LatestSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamErrorConfig {
+    pub path: String,
+    pub message_path: String,
+    /// Raw finish-reason values that assert an error object must be present at
+    /// `path`. This is a signed protocol contract, not a provider-name rule.
+    #[serde(default)]
+    pub finish_reasons: Vec<String>,
+    #[serde(default)]
+    pub code_path: Option<String>,
+    #[serde(default)]
+    pub metadata_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -255,6 +377,10 @@ pub struct StreamPaths {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PricingConfig {
+    /// This route is intentionally zero-cost (for example, a local model).
+    /// Without this declaration, zero fallback rates mean untracked pricing.
+    #[serde(default)]
+    pub explicitly_free: bool,
     #[serde(default)]
     pub input_per_million: Option<f64>,
     #[serde(default)]
@@ -556,6 +682,12 @@ impl ProviderConfig {
         if self.body_template.is_none() {
             bail!("provider config{context} has no body_template");
         }
+        validate_body_template_placeholders(
+            self.body_template
+                .as_ref()
+                .expect("body_template presence checked"),
+            context,
+        )?;
         if self.auth.env_var.is_some() != self.auth.header_name.is_some() {
             bail!(
                 "provider config{context}: auth.env_var and auth.header_name must both be set or both be absent"
@@ -602,6 +734,214 @@ impl ProviderConfig {
                 if system.mode == SystemMessageMode::BodyField && system.field.is_none() {
                     bail!("provider config{context}: body_field system messages require a field");
                 }
+            }
+        }
+
+        if let Some(metadata) = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.streaming.as_ref())
+            .and_then(|streaming| streaming.metadata.as_ref())
+        {
+            let require_path = |label: &str, value: &str| -> Result<()> {
+                if value.trim().is_empty() {
+                    bail!("provider config{context}: streaming metadata {label} cannot be empty");
+                }
+                Ok(())
+            };
+            if let Some(usage) = metadata.usage.as_ref() {
+                require_path("usage.path", &usage.path)?;
+                if usage.input_tokens_path.is_none() || usage.output_tokens_path.is_none() {
+                    bail!(
+                        "provider config{context}: streaming metadata usage requires input_tokens_path and output_tokens_path"
+                    );
+                }
+                if usage.reported_cost_path.is_some() != usage.reported_cost_unit.is_some() {
+                    bail!(
+                        "provider config{context}: streaming metadata usage reported_cost_path and reported_cost_unit must be declared together"
+                    );
+                }
+                if usage.single_snapshot && usage.aggregation == UsageAggregation::CumulativeFields
+                {
+                    bail!(
+                        "provider config{context}: streaming metadata usage.single_snapshot requires latest_snapshot aggregation"
+                    );
+                }
+                for (label, path) in [
+                    (
+                        "usage.input_tokens_path",
+                        usage.input_tokens_path.as_deref(),
+                    ),
+                    (
+                        "usage.output_tokens_path",
+                        usage.output_tokens_path.as_deref(),
+                    ),
+                    (
+                        "usage.reasoning_tokens_path",
+                        usage.reasoning_tokens_path.as_deref(),
+                    ),
+                    (
+                        "usage.reported_cost_path",
+                        usage.reported_cost_path.as_deref(),
+                    ),
+                    (
+                        "usage.cost_details_path",
+                        usage.cost_details_path.as_deref(),
+                    ),
+                    ("usage.is_byok_path", usage.is_byok_path.as_deref()),
+                ] {
+                    if let Some(path) = path {
+                        require_path(label, path)?;
+                    }
+                }
+            }
+            for (label, path) in [
+                ("finish_reason_path", metadata.finish_reason_path.as_deref()),
+                ("response_id_path", metadata.response_id_path.as_deref()),
+                (
+                    "generation_id_header",
+                    metadata.generation_id_header.as_deref(),
+                ),
+            ] {
+                if let Some(path) = path {
+                    require_path(label, path)?;
+                }
+            }
+            if let Some(error) = metadata.error.as_ref() {
+                require_path("error.path", &error.path)?;
+                require_path("error.message_path", &error.message_path)?;
+                if let Some(path) = error.code_path.as_deref() {
+                    require_path("error.code_path", path)?;
+                }
+                if let Some(path) = error.metadata_path.as_deref() {
+                    require_path("error.metadata_path", path)?;
+                }
+                let mut seen = std::collections::HashSet::new();
+                for reason in &error.finish_reasons {
+                    require_path("error.finish_reasons", reason)?;
+                    if !seen.insert(reason.to_ascii_lowercase()) {
+                        bail!(
+                            "provider config{context}: streaming metadata error.finish_reasons must be unique"
+                        );
+                    }
+                }
+            }
+        }
+
+        let streaming = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.streaming.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "provider config{context}: schemas.streaming is required and must declare a mode"
+                )
+            })?;
+        if streaming.mode.is_none() {
+            bail!("provider config{context}: schemas.streaming.mode is required");
+        }
+        {
+            match streaming.mode {
+                Some(StreamingMode::EventTyped)
+                    if self.family != ProtocolFamily::AnthropicMessages =>
+                {
+                    bail!(
+                        "provider config{context}: streaming mode event_typed requires family anthropic_messages"
+                    );
+                }
+                Some(StreamingMode::DeltaMerge)
+                    if self.family != ProtocolFamily::ChatCompletions =>
+                {
+                    bail!(
+                        "provider config{context}: streaming mode delta_merge requires family chat_completions"
+                    );
+                }
+                Some(StreamingMode::CompleteChunks) => {
+                    if self.family != ProtocolFamily::GoogleGenerateContent {
+                        bail!(
+                            "provider config{context}: streaming mode complete_chunks requires family google_generate_content"
+                        );
+                    }
+                    if streaming.paths.is_none() {
+                        bail!(
+                            "provider config{context}: streaming mode complete_chunks requires streaming.paths"
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.output_limit.as_ref())
+            .is_none()
+        {
+            bail!("provider config{context}: schemas.output_limit is required");
+        }
+
+        if self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.accounting.as_ref())
+            .is_some_and(|accounting| accounting.require_usage)
+        {
+            let streaming = self
+                .schemas
+                .as_ref()
+                .and_then(|schemas| schemas.streaming.as_ref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                    "provider config{context}: accounting.require_usage requires schemas.streaming"
+                )
+                })?;
+            let metadata_usage = streaming
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.usage.as_ref())
+                .is_some();
+            let protocol_usage = match streaming.mode {
+                Some(StreamingMode::EventTyped | StreamingMode::DeltaMerge) => true,
+                Some(StreamingMode::CompleteChunks) => streaming
+                    .paths
+                    .as_ref()
+                    .and_then(|paths| paths.usage_path.as_ref())
+                    .is_some(),
+                None => false,
+            };
+            if !metadata_usage && !protocol_usage {
+                bail!(
+                    "provider config{context}: accounting.require_usage needs a declared metadata usage schema or a streaming mode with a usage source"
+                );
+            }
+        }
+
+        if let Some(output_limit) = self
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.output_limit.as_ref())
+        {
+            if output_limit
+                .path
+                .split('.')
+                .any(|segment| segment.is_empty())
+            {
+                bail!(
+                    "provider config{context}: output_limit.path must contain non-empty dot-separated segments"
+                );
+            }
+        }
+
+        if let Some(pricing) = self.pricing.as_ref() {
+            if pricing.explicitly_free
+                && (pricing.input_per_million.is_some_and(|rate| rate != 0.0)
+                    || pricing.output_per_million.is_some_and(|rate| rate != 0.0)
+                    || !pricing.models.is_empty())
+            {
+                bail!(
+                    "provider config{context}: pricing.explicitly_free cannot be combined with non-zero/default or per-model prices"
+                );
             }
         }
 
@@ -722,6 +1062,36 @@ fn deep_merge(base: &mut Value, overlay: &Value) {
         }
         (base, overlay) => *base = overlay.clone(),
     }
+}
+
+fn validate_body_template_placeholders(template: &Value, context: &str) -> Result<()> {
+    match template {
+        Value::String(value) => {
+            let trimmed = value.trim();
+            if let Some(placeholder) = trimmed
+                .strip_prefix('{')
+                .and_then(|rest| rest.strip_suffix('}'))
+            {
+                if !matches!(placeholder, "model" | "messages" | "tools" | "stream") {
+                    bail!(
+                        "provider config{context}: body_template placeholder `{{{placeholder}}}` is not supported"
+                    );
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                validate_body_template_placeholders(value, context)?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                validate_body_template_placeholders(value, context)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn glob_match(pattern: &str, candidate: &str) -> bool {

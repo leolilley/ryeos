@@ -61,7 +61,7 @@ use transitions::resolve_next_on_error;
 /// and structural drift are rejected rather than migrated. The contract pins
 /// the signed graph definition and expression language, and no alternate or
 /// legacy checkpoint versions are accepted.
-pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const GRAPH_CHECKPOINT_SCHEMA_VERSION: u32 = 2;
 pub(crate) const EXPRESSION_LANGUAGE: &str = "rye-expr/1";
 
 /// Follow-resume field keys for the checkpoint / resume-state payload. Shared by

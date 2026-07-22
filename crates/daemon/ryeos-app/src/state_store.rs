@@ -177,6 +177,7 @@ pub struct FinalizeThreadRecord {
 #[serde(deny_unknown_fields)]
 struct ManagedTerminalEnvelope {
     success: bool,
+    child_thread_id: String,
     status: ryeos_runtime::envelope::RuntimeResultStatus,
     result: Value,
     outputs: Value,
@@ -205,6 +206,7 @@ fn runtime_status_for_thread_status(
 
 fn validate_managed_terminal_envelope(
     raw: &Value,
+    thread_id: &str,
     status: ThreadStatus,
     result: Option<&Value>,
     error: Option<&Value>,
@@ -214,6 +216,12 @@ fn validate_managed_terminal_envelope(
         .context("validate managed runtime terminal envelope")?;
     let envelope: ManagedTerminalEnvelope =
         serde_json::from_value(raw.clone()).context("decode managed runtime terminal envelope")?;
+    if envelope.child_thread_id != thread_id {
+        bail!(
+            "managed runtime envelope child_thread_id `{}` contradicts settlement thread `{thread_id}`",
+            envelope.child_thread_id
+        );
+    }
     let expected_runtime_status = runtime_status_for_thread_status(status)?;
     if envelope.status != expected_runtime_status {
         bail!(
@@ -331,10 +339,11 @@ fn terminal_facets(
 
 const FOLLOW_ENVELOPE_LIMIT_CODE: &str = "follow_terminal_envelope_limit_exceeded";
 
-fn follow_envelope_limit_failure(cost: Option<&Value>) -> Value {
+fn follow_envelope_limit_failure(child_thread_id: &str, cost: Option<&Value>) -> Value {
     let status = ryeos_runtime::envelope::RuntimeResultStatus::Failed;
     json!({
         "success": false,
+        "child_thread_id": child_thread_id,
         "status": status,
         "result": {
             "code": FOLLOW_ENVELOPE_LIMIT_CODE,
@@ -353,7 +362,8 @@ fn follow_envelope_limit_reservation() -> Value {
         "total_usd": f64::MAX,
         "basis": ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP,
     });
-    follow_envelope_limit_failure(Some(&maximum_cost))
+    let maximum_thread_id = format!("T-{}", "x".repeat(126));
+    follow_envelope_limit_failure(&maximum_thread_id, Some(&maximum_cost))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -550,13 +560,29 @@ fn validate_prospective_follow_resume_payload(
 fn admit_follow_terminal_envelope(
     waiter: &runtime_db::FollowWaiter,
     child_chain_root_id: &str,
+    child_terminal_thread_id: &str,
     candidate: &Value,
 ) -> Result<(Value, bool)> {
+    let candidate_thread_id = candidate
+        .get("child_thread_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("follow terminal envelope has no child_thread_id"))?;
+    ryeos_runtime::validate_runtime_thread_id(candidate_thread_id)
+        .map_err(anyhow::Error::msg)
+        .context("follow terminal envelope has an invalid child_thread_id")?;
+    if candidate_thread_id != child_terminal_thread_id {
+        bail!(
+            "follow terminal envelope child_thread_id `{candidate_thread_id}` does not match terminal child `{child_terminal_thread_id}`"
+        );
+    }
+    ryeos_runtime::envelope::follow_envelope_terminal_status(candidate)
+        .map_err(anyhow::Error::msg)
+        .context("validate canonical follow terminal envelope")?;
     match validate_prospective_follow_resume_payload(waiter, child_chain_root_id, candidate) {
         Ok(()) => Ok((candidate.clone(), false)),
         Err(candidate_error) => {
             let cost = validated_follow_candidate_cost(candidate)?;
-            let degraded = follow_envelope_limit_failure(cost.as_ref());
+            let degraded = follow_envelope_limit_failure(child_terminal_thread_id, cost.as_ref());
             validate_prospective_follow_resume_payload(waiter, child_chain_root_id, &degraded)
                 .with_context(|| {
                     format!(
@@ -3027,6 +3053,7 @@ impl StateStore {
         if let Some(envelope) = update.managed_envelope.as_ref() {
             validate_managed_terminal_envelope(
                 envelope,
+                thread_id,
                 terminal_status,
                 update.result_json.as_ref(),
                 update.error_json.as_ref(),
@@ -6413,8 +6440,12 @@ impl StateStore {
         else {
             return Ok(false);
         };
-        let (terminal_envelope, degraded) =
-            admit_follow_terminal_envelope(&waiter, child_chain_root_id, terminal_envelope)?;
+        let (terminal_envelope, degraded) = admit_follow_terminal_envelope(
+            &waiter,
+            child_chain_root_id,
+            child_terminal_thread_id,
+            terminal_envelope,
+        )?;
         if degraded {
             tracing::warn!(
                 child_chain_root_id,
@@ -7492,6 +7523,7 @@ mod tests {
         let waiter = follow_waiter_for_admission();
         let candidate = json!({
             "success": true,
+            "child_thread_id": "T-child",
             "status": "completed",
             "result": 1,
             "outputs": null,
@@ -7507,6 +7539,7 @@ mod tests {
         let waiter = follow_waiter_for_admission();
         let candidate = json!({
             "success": true,
+            "child_thread_id": "T-terminal",
             "status": "completed",
             "result": "x".repeat(checkpoint_shape_limits().max_result_bytes),
             "outputs": null,
@@ -7519,12 +7552,31 @@ mod tests {
         });
 
         let (admitted, degraded) =
-            admit_follow_terminal_envelope(&waiter, "T-child", &candidate).unwrap();
+            admit_follow_terminal_envelope(&waiter, "T-child", "T-terminal", &candidate).unwrap();
         assert!(degraded);
         assert_eq!(admitted["success"], false);
+        assert_eq!(admitted["child_thread_id"], "T-terminal");
         assert_eq!(admitted["result"]["code"], FOLLOW_ENVELOPE_LIMIT_CODE);
         assert_eq!(admitted["cost"]["input_tokens"], 11);
         assert_eq!(admitted["cost"]["output_tokens"], 7);
+    }
+
+    #[test]
+    fn follow_terminal_admission_rejects_mismatched_child_identity() {
+        let waiter = follow_waiter_for_admission();
+        let candidate = json!({
+            "success": true,
+            "child_thread_id": "T-other",
+            "status": "completed",
+            "result": 1,
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+        let error = admit_follow_terminal_envelope(&waiter, "T-child", "T-terminal", &candidate)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("does not match terminal child"), "{error}");
     }
 
     #[test]

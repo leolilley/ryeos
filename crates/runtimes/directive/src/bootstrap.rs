@@ -64,6 +64,9 @@ pub fn bootstrap(
         .load_config_strict::<ExecutionConfig>("ryeos-runtime/execution")
         .map_err(|e| anyhow!("loading config `ryeos-runtime/execution`: {e}"))?
         .unwrap_or_default();
+    execution
+        .validate()
+        .context("invalid config `ryeos-runtime/execution`")?;
 
     // Continuation behavior config (context-threshold ratio, carry bounds) —
     // loaded the same way as execution config, defaults if absent. Directive-

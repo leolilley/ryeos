@@ -48,7 +48,7 @@ impl ResolutionRoots {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Project,
                 label: "project".to_owned(),
-                ai_root: project_root,
+                ai_root: project_root.join(crate::AI_DIR),
             });
         }
 
