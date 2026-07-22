@@ -39,7 +39,7 @@ pub fn render_event(
                 .get("code")
                 .and_then(|v| v.as_str())
                 .unwrap_or("stream_error");
-            let msg = data.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            let msg = failure_reason(&data);
             console.error(&crate::tty::Diagnostic::error(format!("{code}: {msg}")))?;
             Ok(StreamOutcome::Failed(format!("{code}: {msg}")))
         }
@@ -225,6 +225,31 @@ mod tests {
         assert!(matches!(
             render(&ev("stream_error", "{\"code\":\"x\",\"error\":\"y\"}")),
             StreamOutcome::Failed(d) if d.contains("x")
+        ));
+    }
+
+    #[test]
+    fn structured_stream_errors_preserve_the_complete_body() {
+        let tail = "diagnostic-tail-marker".repeat(24);
+        let event = ev(
+            "stream_error",
+            &serde_json::json!({
+                "code": "dispatch_failed",
+                "error": {
+                    "phase": "launch",
+                    "retryable": false,
+                    "detail": tail,
+                }
+            })
+            .to_string(),
+        );
+
+        assert!(matches!(
+            render(&event),
+            StreamOutcome::Failed(detail)
+                if detail.contains("dispatch_failed")
+                    && detail.contains("launch")
+                    && detail.contains(&tail)
         ));
     }
 
