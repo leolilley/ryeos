@@ -3528,7 +3528,7 @@ impl ThreadLifecycleService {
                     "follow child finalized without a canonical envelope; storing a \
                      DEGRADED FAILURE envelope (outputs/warnings unavailable)",
                 );
-                degraded_follow_envelope(terminal_status, result, error, final_cost)
+                degraded_follow_envelope(thread_id, terminal_status, result, error, final_cost)
             }
         };
         if let Err(e) = self.state_store.mark_follow_child_terminal(
@@ -3629,8 +3629,13 @@ impl ThreadLifecycleService {
             .get_thread_result(&terminal.thread_id)?
             .map(|r| (r.result, r.error))
             .unwrap_or((None, None));
-        let envelope =
-            degraded_follow_envelope(&terminal.status, result.as_ref(), error.as_ref(), None);
+        let envelope = degraded_follow_envelope(
+            &terminal.thread_id,
+            &terminal.status,
+            result.as_ref(),
+            error.as_ref(),
+            None,
+        );
         let flipped = self.state_store.mark_follow_child_terminal(
             child_chain_root_id,
             &terminal.thread_id,
@@ -4399,6 +4404,7 @@ impl ThreadLifecycleService {
 /// re-serialized `FinalCost`). A failure carries its cause in `result` (the native
 /// envelope has no separate error field).
 pub fn managed_runtime_envelope(
+    child_thread_id: &str,
     status: &str,
     result: Option<&Value>,
     error: Option<&Value>,
@@ -4410,6 +4416,7 @@ pub fn managed_runtime_envelope(
     let payload = result.or(error).cloned().unwrap_or(Value::Null);
     json!({
         "success": success,
+        "child_thread_id": child_thread_id,
         "status": status,
         "result": payload,
         "outputs": outputs,
@@ -4429,6 +4436,7 @@ pub const DEGRADED_FOLLOW_ENVELOPE_CODE: &str = "degraded_follow_child_terminal_
 /// resuming with silently-missing outputs. Used ONLY when a real waiter would
 /// otherwise consume an unmarked result.
 fn degraded_follow_envelope(
+    child_thread_id: &str,
     child_status: &str,
     child_result: Option<&Value>,
     child_error: Option<&Value>,
@@ -4444,6 +4452,7 @@ fn degraded_follow_envelope(
     });
     json!({
         "success": false,
+        "child_thread_id": child_thread_id,
         "status": status,
         "result": {
             "code": DEGRADED_FOLLOW_ENVELOPE_CODE,
@@ -5643,6 +5652,7 @@ mod tests {
         let outputs = json!({ "answer": 42 });
         let raw_cost = json!({ "input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012 });
         let env = managed_runtime_envelope(
+            "T-child",
             "completed",
             Some(&result),
             None,
@@ -5651,6 +5661,7 @@ mod tests {
             &["w1".to_string()],
         );
         assert_eq!(env["success"], json!(true));
+        assert_eq!(env["child_thread_id"], json!("T-child"));
         assert_eq!(env["status"], json!("completed"));
         assert_eq!(env["result"], result);
         // Structured outputs + warnings are preserved verbatim (raw cost too).
@@ -5662,10 +5673,11 @@ mod tests {
     #[test]
     fn degraded_envelope_is_visible_failure() {
         let child_result = json!({ "answer": 42 });
-        let env = degraded_follow_envelope("completed", Some(&child_result), None, None);
+        let env = degraded_follow_envelope("T-child", "completed", Some(&child_result), None, None);
         // A lost canonical envelope becomes a visible in-band FAILURE so the parent
         // resumes into on_error, not a silent empty success.
         assert_eq!(env["success"], json!(false));
+        assert_eq!(env["child_thread_id"], json!("T-child"));
         assert_eq!(env["status"], json!("failed"));
         assert_eq!(env["result"]["code"], json!(DEGRADED_FOLLOW_ENVELOPE_CODE));
         assert_eq!(env["result"]["child_status"], json!("completed"));

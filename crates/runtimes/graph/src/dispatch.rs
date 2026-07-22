@@ -9,6 +9,8 @@ use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
 use crate::context::ExecutionContext;
 use crate::model::{FanoutItemStatus, GraphResult, GraphRunStatus};
 
+const NATIVE_FAILURE_DIAGNOSTIC_CHARS: usize = 4_096;
+
 /// Outcome of dispatching a single graph action leaf, classified from
 /// the daemon execute envelope BEFORE the bare result is unwrapped.
 ///
@@ -218,20 +220,64 @@ pub async fn dispatch_action(
     // child); capture its id BEFORE classifying `result` so the walker can emit a
     // `child_thread_spawned` event. Empty/absent for subprocess/tool/bare leaves,
     // which spawn no child thread.
-    let child_thread_id = response
+    let callback_child_thread_id = response
         .thread
         .get("thread_id")
-        .or_else(|| response.thread.get("id"))
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .or_else(|| response.thread.get("id"));
+    let (child_thread_id, child_thread_id_error) = match callback_child_thread_id {
+        None => (None, None),
+        Some(Value::String(thread_id)) => {
+            match ryeos_runtime::validate_runtime_thread_id(thread_id) {
+                Ok(()) => (Some(thread_id.clone()), None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+        Some(_) => (None, Some("runtime thread_id is not a string".to_string())),
+    };
 
     match classify_envelope_for_item(response.result, item_id) {
         ActionOutcome::Failure(mut failure) => {
-            failure.child_thread_id = child_thread_id;
+            if let Some(error) = child_thread_id_error {
+                failure
+                    .diagnostic
+                    .push_str(&format!("; invalid dispatched child identity: {error}"));
+                failure.integrity = true;
+                failure.retryable = false;
+                failure.child_thread_id = None;
+                return Ok(ActionOutcome::Failure(failure));
+            }
+            if let Some(authoritative_child_thread_id) = child_thread_id {
+                if failure
+                    .child_thread_id
+                    .as_deref()
+                    .is_some_and(|reported| reported != authoritative_child_thread_id)
+                {
+                    failure.diagnostic.push_str(&format!(
+                        "; RuntimeFailure diagnostic thread does not match dispatched child `{authoritative_child_thread_id}`"
+                    ));
+                    failure.integrity = true;
+                    failure.retryable = false;
+                }
+                failure.child_thread_id = Some(authoritative_child_thread_id);
+            }
+            if let Some(child_thread_id) = failure.child_thread_id.as_deref() {
+                failure.diagnostic.push_str(&format!(
+                    "; child_thread_id={child_thread_id}; full child diagnostic: \
+                     `ryeos thread tail {child_thread_id}`"
+                ));
+            }
             Ok(ActionOutcome::Failure(failure))
         }
         ActionOutcome::Success(mut success) => {
+            if let Some(error) = child_thread_id_error {
+                return Ok(ActionOutcome::Failure(ActionFailure {
+                    diagnostic: format!("invalid dispatched child identity: {error}"),
+                    cost: success.cost,
+                    retryable: false,
+                    child_thread_id: None,
+                    integrity: true,
+                }));
+            }
             success.child_thread_id = child_thread_id;
             // Inline continuation-chasing is retired. A dispatched child that
             // requests continuation must be launched from a `follow: true` node
@@ -418,6 +464,7 @@ struct SubprocessResultEnvelope {
 #[serde(deny_unknown_fields)]
 struct FollowResultEnvelope {
     success: bool,
+    child_thread_id: String,
     status: RuntimeResultStatus,
     result: Value,
     outputs: Value,
@@ -468,12 +515,16 @@ fn classify_follow_envelope_with_projection(
         .map_err(|error| format!("malformed follow result envelope: {error}"))?;
     let FollowResultEnvelope {
         success,
+        child_thread_id: envelope_child_thread_id,
         status,
         result,
         outputs,
         warnings: _warnings,
         cost,
     } = envelope;
+
+    ryeos_runtime::validate_runtime_thread_id(&envelope_child_thread_id)
+        .map_err(|error| format!("malformed follow result envelope: {error}"))?;
 
     if status == RuntimeResultStatus::Continued {
         return Err(
@@ -503,19 +554,51 @@ fn classify_follow_envelope_with_projection(
         ActionOutcome::Success(ActionSuccess {
             result,
             cost,
-            child_thread_id: None,
+            child_thread_id: Some(envelope_child_thread_id),
         })
     } else {
+        let structured_failure = parse_runtime_failure(&result);
+        let mut runtime_failure_contract_error = runtime_failure_contract_error(&result);
+        if let Some(failure) = structured_failure.as_ref() {
+            if failure.diagnostic_locator.thread_id != envelope_child_thread_id {
+                let mismatch = format!(
+                    "RuntimeFailure diagnostic thread `{}` does not match follow child `{}`",
+                    failure.diagnostic_locator.thread_id, envelope_child_thread_id
+                );
+                runtime_failure_contract_error = Some(match runtime_failure_contract_error {
+                    Some(error) => format!("{error}; {mismatch}"),
+                    None => mismatch,
+                });
+            }
+        }
+        let child_thread_id = Some(envelope_child_thread_id);
         let mut diagnostic = format!("child runtime failed (status: {})", status.as_str());
         if let Some(detail) = native_result_failure_detail(&result) {
-            diagnostic.push_str(&format!("; {}", excerpt(&detail, 800)));
+            diagnostic.push_str(&format!(
+                "; {}",
+                excerpt(&detail, NATIVE_FAILURE_DIAGNOSTIC_CHARS)
+            ));
+        }
+        if let Some(contract_error) = runtime_failure_contract_error.as_deref() {
+            diagnostic.push_str(&format!(
+                "; runtime failure contract invalid: {contract_error}"
+            ));
+        }
+        if let Some(child_thread_id) = child_thread_id.as_deref() {
+            diagnostic.push_str(&format!(
+                "; child_thread_id={child_thread_id}; full child diagnostic: \
+                 `ryeos thread tail {child_thread_id}`"
+            ));
         }
         ActionOutcome::Failure(ActionFailure {
             diagnostic,
             cost,
-            retryable: false,
-            child_thread_id: None,
-            integrity: false,
+            retryable: structured_failure
+                .as_ref()
+                .is_some_and(|failure| failure.retryable)
+                && runtime_failure_contract_error.is_none(),
+            child_thread_id,
+            integrity: runtime_failure_contract_error.is_some(),
         })
     };
 
@@ -656,12 +739,23 @@ fn classify_native_runtime_envelope(
     } else {
         // A failed native child (e.g. a directive that burned tokens then
         // errored) still reports `cost` — preserve it.
+        let structured_failure = parse_runtime_failure(&result);
+        let runtime_failure_contract_error = runtime_failure_contract_error(&result);
+        let mut diagnostic = describe_native_failure(&result, status);
+        if let Some(contract_error) = runtime_failure_contract_error.as_deref() {
+            diagnostic.push_str(&format!(
+                "; runtime failure contract invalid: {contract_error}"
+            ));
+        }
         ActionOutcome::Failure(ActionFailure {
-            diagnostic: describe_native_failure(&result, status),
+            diagnostic,
             cost,
-            retryable: false,
-            child_thread_id: None,
-            integrity: false,
+            retryable: structured_failure
+                .as_ref()
+                .is_some_and(|failure| failure.retryable)
+                && runtime_failure_contract_error.is_none(),
+            child_thread_id: structured_failure.map(|failure| failure.diagnostic_locator.thread_id),
+            integrity: runtime_failure_contract_error.is_some(),
         })
     }
 }
@@ -851,7 +945,10 @@ fn describe_subprocess_failure(outcome_code: Option<&str>, error: &Value) -> Str
 fn describe_native_failure(result: &Value, status: RuntimeResultStatus) -> String {
     let mut msg = format!("child runtime failed (status: {})", status.as_str());
     if let Some(detail) = native_result_failure_detail(result) {
-        msg.push_str(&format!("; {}", excerpt(&detail, 800)));
+        msg.push_str(&format!(
+            "; {}",
+            excerpt(&detail, NATIVE_FAILURE_DIAGNOSTIC_CHARS)
+        ));
     }
     msg
 }
@@ -864,6 +961,9 @@ fn native_result_failure_detail(result: &Value) -> Option<String> {
         let trimmed = s.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
+    if let Some(failure) = parse_runtime_failure(result) {
+        return non_empty(&failure.summary);
+    }
     if let Some(s) = result.as_str().and_then(non_empty) {
         return Some(s);
     }
@@ -880,6 +980,21 @@ fn native_result_failure_detail(result: &Value) -> Option<String> {
         return Some(result.to_string());
     }
     None
+}
+
+fn parse_runtime_failure(result: &Value) -> Option<ryeos_runtime::RuntimeFailure> {
+    let failure: ryeos_runtime::RuntimeFailure = serde_json::from_value(result.clone()).ok()?;
+    failure.validate().ok().map(|()| failure)
+}
+
+fn runtime_failure_contract_error(result: &Value) -> Option<String> {
+    if result.get("kind").and_then(Value::as_str) != Some(ryeos_runtime::RUNTIME_FAILURE_KIND) {
+        return None;
+    }
+    match serde_json::from_value::<ryeos_runtime::RuntimeFailure>(result.clone()) {
+        Ok(failure) => failure.validate().err(),
+        Err(error) => Some(format!("malformed versioned RuntimeFailure: {error}")),
+    }
 }
 
 /// Truncate a diagnostic excerpt at a char boundary so it never splits a
@@ -1324,6 +1439,35 @@ mod tests {
             .expect("dispatch response");
         let failure = expect_action_failure(outcome);
         assert_eq!(failure.child_thread_id.as_deref(), Some("T-child-failed"));
+        assert!(failure.diagnostic.contains("child failed"));
+        assert!(failure
+            .diagnostic
+            .contains("ryeos thread tail T-child-failed"));
+    }
+
+    #[tokio::test]
+    async fn direct_dispatch_rejects_unsafe_callback_child_thread_id() {
+        let client = make_mock_client_with_child(
+            vec![json!({
+                "success": true,
+                "status": RuntimeResultStatus::Completed,
+                "result": {"ok": true},
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            })],
+            "T-child;tail",
+        );
+        let action = json!({"item_id": "directive:test/child", "ref_bindings": {}});
+        let outcome = dispatch_action(&client, &action, "T-parent", "/tmp/test", None)
+            .await
+            .expect("dispatch response");
+        let failure = expect_action_failure(outcome);
+        assert!(failure.integrity);
+        assert!(failure.child_thread_id.is_none());
+        assert!(failure
+            .diagnostic
+            .contains("invalid dispatched child identity"));
     }
 
     // ── classify_envelope ──────────────────────────────────────────────
@@ -1361,6 +1505,22 @@ mod tests {
     ) -> Value {
         json!({
             "success": success,
+            "child_thread_id": "T-follow-child",
+            "status": status,
+            "result": result,
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        })
+    }
+
+    fn canonical_native_envelope(
+        success: bool,
+        status: RuntimeResultStatus,
+        result: Value,
+    ) -> Value {
+        json!({
+            "success": success,
             "status": status,
             "result": result,
             "outputs": null,
@@ -1390,7 +1550,7 @@ mod tests {
         let authored = json!({"child_ran": "sentinel"});
         let graph_result = completed_graph_result(authored.clone());
         let envelope =
-            canonical_follow_envelope(true, RuntimeResultStatus::Completed, graph_result.clone());
+            canonical_native_envelope(true, RuntimeResultStatus::Completed, graph_result.clone());
 
         assert_eq!(
             expect_success(classify_envelope_for_item(
@@ -1420,6 +1580,103 @@ mod tests {
         .expect("canonical graph follow envelope");
 
         assert_eq!(expect_success(classified.outcome), authored);
+    }
+
+    #[test]
+    fn failed_follow_preserves_child_thread_diagnostic_reference() {
+        let envelope = canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            json!({
+                "kind": "runtime_failure",
+                "version": 1,
+                "code": "provider_accounting_invalid",
+                "summary": "precise child failure",
+                "diagnostic_locator": {
+                    "thread_id": "T-follow-child",
+                    "turn": 2,
+                    "event_type": "thread_failed"
+                },
+                "retryable": false
+            }),
+        );
+
+        let classified = classify_follow_envelope_for_item(envelope, "directive:test/child")
+            .expect("canonical failed follow envelope");
+        let failure = expect_action_failure(classified.outcome);
+        assert_eq!(failure.child_thread_id.as_deref(), Some("T-follow-child"));
+        assert!(failure.diagnostic.contains("precise child failure"));
+        assert!(failure
+            .diagnostic
+            .contains("ryeos thread tail T-follow-child"));
+    }
+
+    #[test]
+    fn canonical_follow_envelope_supplies_child_id_for_unstructured_failure_payload() {
+        let envelope = canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            json!("unstructured child failure"),
+        );
+
+        let classified = classify_follow_envelope_for_item(envelope, "graph:test/child")
+            .expect("canonical failed follow envelope");
+        let failure = expect_action_failure(classified.outcome);
+        assert_eq!(failure.child_thread_id.as_deref(), Some("T-follow-child"));
+        assert!(failure
+            .diagnostic
+            .contains("ryeos thread tail T-follow-child"));
+    }
+
+    #[test]
+    fn unsupported_runtime_failure_version_is_an_integrity_failure() {
+        let envelope = canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            json!({
+                "kind": "runtime_failure",
+                "version": 99,
+                "code": "provider_protocol_error",
+                "summary": "future contract",
+                "diagnostic_locator": {
+                    "thread_id": "T-future",
+                    "event_type": "thread_failed"
+                },
+                "retryable": true
+            }),
+        );
+        let classified = classify_follow_envelope_for_item(envelope, "directive:test/child")
+            .expect("structurally canonical outer follow envelope");
+        let failure = expect_action_failure(classified.outcome);
+        assert!(failure.integrity);
+        assert!(!failure.retryable);
+        assert!(failure
+            .diagnostic
+            .contains("unsupported runtime failure version 99"));
+    }
+
+    #[test]
+    fn unrelated_versioned_failure_payload_is_not_a_runtime_failure_contract() {
+        let envelope = canonical_follow_envelope(
+            false,
+            RuntimeResultStatus::Failed,
+            json!({
+                "version": 1,
+                "code": "runtime_native_failure",
+                "summary": "typed-looking but undiscriminated",
+                "diagnostic_locator": {
+                    "thread_id": "T-follow-child",
+                    "event_type": "thread_failed"
+                },
+                "retryable": true,
+                "error": "runtime-native failure"
+            }),
+        );
+        let classified = classify_follow_envelope_for_item(envelope, "directive:test/child")
+            .expect("canonical follow envelope");
+        let failure = expect_action_failure(classified.outcome);
+        assert!(!failure.integrity);
+        assert!(failure.diagnostic.contains("runtime-native failure"));
     }
 
     #[test]
@@ -1466,19 +1723,25 @@ mod tests {
 
     #[test]
     fn graph_projection_rejects_malformed_graph_result_as_integrity_failure() {
-        let envelope = canonical_follow_envelope(
+        let native_envelope = canonical_native_envelope(
             true,
             RuntimeResultStatus::Completed,
             json!({"child_ran": "missing graph result contract"}),
         );
         let failure = expect_action_failure(classify_envelope_for_item(
-            envelope.clone(),
+            native_envelope,
             "graph:test/child",
         ));
         assert!(failure.integrity);
         assert!(failure.diagnostic.contains("malformed GraphResult"));
 
-        let error = classify_follow_envelope_for_item(envelope, "graph:test/child").unwrap_err();
+        let follow_envelope = canonical_follow_envelope(
+            true,
+            RuntimeResultStatus::Completed,
+            json!({"child_ran": "missing graph result contract"}),
+        );
+        let error =
+            classify_follow_envelope_for_item(follow_envelope, "graph:test/child").unwrap_err();
         assert!(error.contains("malformed GraphResult"), "{error}");
     }
 
@@ -1494,7 +1757,7 @@ mod tests {
         let mut wrong_kind = completed_graph_result(json!({"child_ran": true}));
         wrong_kind["definition_ref"] = json!("directive:test/child");
         let failure = expect_action_failure(classify_envelope_for_item(
-            canonical_follow_envelope(true, RuntimeResultStatus::Completed, wrong_kind),
+            canonical_native_envelope(true, RuntimeResultStatus::Completed, wrong_kind),
             "graph:test/child",
         ));
         assert!(failure.integrity);
@@ -1792,6 +2055,51 @@ mod tests {
     }
 
     #[test]
+    fn classify_native_runtime_failure_rejects_unsupported_failure_version() {
+        let envelope = json!({
+            "success": false,
+            "status": "failed",
+            "result": {
+                "kind": "runtime_failure",
+                "version": 99,
+                "code": "provider_protocol_error",
+                "summary": "future contract",
+                "diagnostic_locator": {
+                    "thread_id": "T-native-child",
+                    "event_type": "thread_failed"
+                },
+                "retryable": true
+            },
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+        let failure = expect_action_failure(classify_envelope(envelope));
+        assert!(failure.integrity);
+        assert!(!failure.retryable);
+        assert!(failure
+            .diagnostic
+            .contains("unsupported runtime failure version 99"));
+    }
+
+    #[test]
+    fn classify_native_runtime_failure_bounds_unstructured_inline_diagnostic_at_new_limit() {
+        let marker = "precise-original-failure";
+        let envelope = json!({
+            "success": false,
+            "status": "failed",
+            "result": {"error": format!("{}{}", "context ".repeat(700), marker)},
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+
+        let diagnostic = classify_failure(envelope);
+        assert!(!diagnostic.contains(marker));
+        assert!(diagnostic.contains("[truncated]"));
+    }
+
+    #[test]
     fn classify_native_runtime_rejects_unknown_or_contradictory_status() {
         let unknown = json!({
             "success": false,
@@ -1894,6 +2202,23 @@ mod tests {
             let error = classify_follow_envelope(malformed).unwrap_err();
             assert!(error.contains("contradicts terminal status"), "{error}");
         }
+    }
+
+    #[test]
+    fn classify_follow_envelope_requires_nonempty_child_thread_id() {
+        let mut missing =
+            canonical_follow_envelope(true, RuntimeResultStatus::Completed, json!(42));
+        missing
+            .as_object_mut()
+            .expect("test envelope object")
+            .remove("child_thread_id");
+        let error = classify_follow_envelope(missing).unwrap_err();
+        assert!(error.contains("missing field `child_thread_id`"), "{error}");
+
+        let mut empty = canonical_follow_envelope(true, RuntimeResultStatus::Completed, json!(42));
+        empty["child_thread_id"] = json!("   ");
+        let error = classify_follow_envelope(empty).unwrap_err();
+        assert!(error.contains("runtime thread_id is invalid"), "{error}");
     }
 
     #[test]

@@ -23,6 +23,18 @@ struct ManagedNativeEnvelope {
     cost: serde_json::Value,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ManagedFollowEnvelope {
+    success: bool,
+    child_thread_id: String,
+    status: RuntimeResultStatus,
+    result: serde_json::Value,
+    outputs: serde_json::Value,
+    warnings: Vec<String>,
+    cost: serde_json::Value,
+}
+
 struct RequiredNullableString(Option<String>);
 
 impl<'de> serde::Deserialize<'de> for RequiredNullableString {
@@ -227,6 +239,45 @@ pub fn envelope_succeeded(value: &serde_json::Value) -> bool {
     true
 }
 
+/// Validate the exact daemon-managed follow envelope and return its closed
+/// terminal status. This contract intentionally differs from a direct native
+/// envelope by requiring the authoritative child thread identity.
+pub fn follow_envelope_terminal_status(
+    value: &serde_json::Value,
+) -> Result<RuntimeResultStatus, String> {
+    let envelope: ManagedFollowEnvelope = serde_json::from_value(value.clone())
+        .map_err(|error| format!("malformed follow terminal envelope: {error}"))?;
+    let ManagedFollowEnvelope {
+        success,
+        child_thread_id,
+        status,
+        result: _result,
+        outputs: _outputs,
+        warnings: _warnings,
+        cost,
+    } = envelope;
+    crate::validate_runtime_thread_id(&child_thread_id)
+        .map_err(|error| format!("malformed follow terminal envelope: {error}"))?;
+    if status == RuntimeResultStatus::Continued {
+        return Err(
+            "malformed follow terminal envelope: continued is not a terminal status".to_string(),
+        );
+    }
+    if success != status.is_success() {
+        return Err(format!(
+            "malformed follow terminal envelope: success={success} contradicts status `{}`",
+            status.as_str()
+        ));
+    }
+    if !cost.is_null() {
+        let cost: RuntimeCost = serde_json::from_value(cost)
+            .map_err(|error| format!("malformed follow terminal envelope cost: {error}"))?;
+        cost.validate()
+            .map_err(|error| format!("invalid follow terminal envelope cost: {error}"))?;
+    }
+    Ok(status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,6 +344,45 @@ mod tests {
             }),
         ] {
             assert!(!envelope_succeeded(&malformed));
+        }
+    }
+
+    #[test]
+    fn follow_envelope_requires_child_identity_and_consistent_closed_status() {
+        let valid = json!({
+            "success": true,
+            "child_thread_id": "T-follow-child",
+            "status": RuntimeResultStatus::Completed,
+            "result": null,
+            "outputs": null,
+            "warnings": [],
+            "cost": null,
+        });
+        assert_eq!(
+            follow_envelope_terminal_status(&valid).unwrap(),
+            RuntimeResultStatus::Completed
+        );
+
+        for malformed in [
+            json!({
+                "success": true,
+                "status": RuntimeResultStatus::Completed,
+                "result": null,
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            }),
+            json!({
+                "success": true,
+                "child_thread_id": "T-follow-child",
+                "status": RuntimeResultStatus::Failed,
+                "result": null,
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+            }),
+        ] {
+            assert!(follow_envelope_terminal_status(&malformed).is_err());
         }
     }
 

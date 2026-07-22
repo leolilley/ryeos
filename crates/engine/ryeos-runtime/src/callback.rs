@@ -188,6 +188,98 @@ pub struct TerminalCompletion {
     pub warnings: Vec<String>,
 }
 
+/// Versioned failure payload returned by native runtimes. The bounded summary
+/// is safe to propagate through parent graphs; the locator points to the
+/// child's durable, lossless terminal diagnostic.
+pub const RUNTIME_FAILURE_KIND: &str = "runtime_failure";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeFailure {
+    pub kind: String,
+    pub version: u8,
+    pub code: String,
+    pub summary: String,
+    pub diagnostic_locator: RuntimeFailureDiagnosticLocator,
+    pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuntimeFailureDiagnosticLocator {
+    pub thread_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    pub event_type: String,
+}
+
+impl RuntimeFailure {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.kind != RUNTIME_FAILURE_KIND {
+            return Err(format!("unsupported runtime failure kind `{}`", self.kind));
+        }
+        if self.version != 1 {
+            return Err(format!(
+                "unsupported runtime failure version {}",
+                self.version
+            ));
+        }
+        if self.code.is_empty()
+            || self.code.len() > 64
+            || !self
+                .code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte.is_ascii_digit())
+        {
+            return Err(
+                "runtime failure code must be 1..=64 lowercase ASCII letters/digits/underscores"
+                    .to_string(),
+            );
+        }
+        if self.summary.is_empty()
+            || self.summary.chars().count() > 4_096
+            || self
+                .summary
+                .chars()
+                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+        {
+            return Err(
+                "runtime failure summary is empty, oversized, or contains control characters"
+                    .to_string(),
+            );
+        }
+        let locator = &self.diagnostic_locator;
+        validate_runtime_thread_id(&locator.thread_id)?;
+        if locator.event_type != "thread_failed" {
+            return Err("runtime failure locator event_type must be thread_failed".to_string());
+        }
+        if locator.attempt_id.as_ref().is_some_and(|attempt_id| {
+            attempt_id.is_empty()
+                || attempt_id.len() > 256
+                || attempt_id.chars().any(char::is_control)
+        }) {
+            return Err("runtime failure locator has an invalid attempt_id".to_string());
+        }
+        Ok(())
+    }
+}
+
+pub fn validate_runtime_thread_id(thread_id: &str) -> Result<(), String> {
+    if thread_id.len() < 3
+        || thread_id.len() > 128
+        || !thread_id.starts_with("T-")
+        || !thread_id
+            .bytes()
+            .skip(2)
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("runtime thread_id is invalid".to_string());
+    }
+    Ok(())
+}
+
 struct RequiredNullable<T>(Option<T>);
 
 impl<'de, T> Deserialize<'de> for RequiredNullable<T>
@@ -573,6 +665,39 @@ pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn runtime_failure_contract_rejects_unsupported_or_unbounded_values() {
+        let valid = RuntimeFailure {
+            kind: RUNTIME_FAILURE_KIND.to_string(),
+            version: 1,
+            code: "provider_protocol_error".to_string(),
+            summary: "precise failure".to_string(),
+            diagnostic_locator: RuntimeFailureDiagnosticLocator {
+                thread_id: "T-child".to_string(),
+                turn: Some(2),
+                attempt_id: Some("T-child:2:1".to_string()),
+                event_type: "thread_failed".to_string(),
+            },
+            retryable: false,
+        };
+        assert!(valid.validate().is_ok());
+
+        let mut unsupported = valid.clone();
+        unsupported.version = 2;
+        assert!(unsupported.validate().unwrap_err().contains("unsupported"));
+
+        let mut oversized = valid;
+        oversized.summary = "x".repeat(4_097);
+        assert!(oversized.validate().is_err());
+
+        for unsafe_id in ["T-child;tail", "T-child name", "T-`child`"] {
+            assert!(
+                validate_runtime_thread_id(unsafe_id).is_err(),
+                "{unsafe_id}"
+            );
+        }
+    }
 
     #[test]
     fn action_payload_omits_call_when_none() {

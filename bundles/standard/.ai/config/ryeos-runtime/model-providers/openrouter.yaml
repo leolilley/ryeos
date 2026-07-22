@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T00:52:25Z:198c604d5523e8516f1b3c4c53cf85b2fce650fa14d38342c99688f762d54c93:PDXDFmovnpyL563UoJV6SIPAGajYBTBOK5K1X5TDfZ9wjO/41D9w/A3rx1ZFQO5iYjGpWregW9YfMwrOK6gVBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T08:09:36Z:fc3a075ac1e7ebe6bd01c2178162f20d8f2e6ab32bf89063a8a7f1f1e3c89660:Uqs2K3jlebTwIcybujbevgmQKkSl4IBcwcyt3d4iqixH1QRyeKRMQ2E8dziowV9H8HPH1dygdYfFb+MXJEiUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://openrouter.ai/api/v1"
@@ -9,6 +9,7 @@ auth:
 headers:
   Content-Type: application/json
 schemas:
+  accounting: {require_usage: true}
   messages:
     role_map: {user: user, assistant: assistant, system: system, tool: tool}
     content_key: content
@@ -32,7 +33,31 @@ schemas:
         name: "{name}"
         description: "{description}"
         parameters: "{schema}"
-  streaming: {mode: delta_merge}
+  streaming:
+    mode: delta_merge
+    metadata:
+      usage:
+        path: usage
+        input_tokens_path: prompt_tokens
+        output_tokens_path: completion_tokens
+        reasoning_tokens_path: completion_tokens_details.reasoning_tokens
+        reported_cost_path: cost
+        reported_cost_unit: usd
+        cost_details_path: cost_details
+        is_byok_path: is_byok
+        reasoning_included_in_output: true
+        aggregation: latest_snapshot
+        single_snapshot: true
+      finish_reason_path: choices.0.finish_reason
+      response_id_path: id
+      generation_id_header: x-generation-id
+      error:
+        path: error
+        message_path: message
+        finish_reasons: [error]
+        code_path: code
+        metadata_path: metadata
+  output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
 body_template:
   model: "{model}"
   messages: "{messages}"
@@ -49,7 +74,7 @@ pricing:
     anthropic/claude-opus-4-6:             {input_per_million: 5.00, output_per_million: 25.00}
     anthropic/claude-opus-4-5:             {input_per_million: 5.00, output_per_million: 25.00}
     anthropic/claude-opus-4-1:             {input_per_million: 15.00, output_per_million: 75.00}
-    anthropic/claude-sonnet-4-6:           {input_per_million: 3.00, output_per_million: 15.00}
+    anthropic/claude-sonnet-4.6:           {input_per_million: 3.00, output_per_million: 15.00}
     anthropic/claude-sonnet-4-5:           {input_per_million: 3.00, output_per_million: 15.00}
     anthropic/claude-sonnet-4:             {input_per_million: 3.00, output_per_million: 15.00}
     anthropic/claude-haiku-4-5:            {input_per_million: 1.00, output_per_million: 5.00}
@@ -117,12 +142,12 @@ extra:
     validation: {ref: "service:model-providers/validate", url: "https://openrouter.ai/api/v1/models", timeout_seconds: 15}
     models:
       - {name: anthropic/claude-haiku-4-5, display_name: Claude Haiku 4.5, context_window: 200000}
-      - {name: anthropic/claude-sonnet-4-6, display_name: Claude Sonnet 4.6, context_window: 200000, recommended: true}
+      - {name: anthropic/claude-sonnet-4.6, display_name: Claude Sonnet 4.6, context_window: 200000, recommended: true}
       - {name: openai/gpt-5-4, display_name: GPT-5.4, context_window: 200000}
       - {name: google/gemini-3-1-pro-preview, display_name: Gemini 3.1 Pro, context_window: 1000000}
   available_models:
     anthropic: [anthropic/claude-opus-4-7, anthropic/claude-opus-4-6, anthropic/claude-opus-4-5,
-                anthropic/claude-opus-4-1, anthropic/claude-sonnet-4-6, anthropic/claude-sonnet-4-5,
+                anthropic/claude-opus-4-1, anthropic/claude-sonnet-4.6, anthropic/claude-sonnet-4-5,
                 anthropic/claude-sonnet-4, anthropic/claude-haiku-4-5, anthropic/claude-3-5-haiku]
     openai: [openai/gpt-5-5-pro, openai/gpt-5-5, openai/gpt-5-4-pro, openai/gpt-5-4,
              openai/gpt-5-4-mini, openai/gpt-5-4-nano, openai/gpt-4-1, openai/gpt-4-1-mini,

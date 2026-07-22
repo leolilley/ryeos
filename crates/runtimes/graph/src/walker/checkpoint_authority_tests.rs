@@ -399,6 +399,7 @@ config:
                     })),
                     Some(json!({
                         "success": true,
+                        "child_thread_id": "T-authority-child",
                         "status": ThreadTerminalStatus::Completed.as_str(),
                         "result": {"answer": 42},
                         "outputs": null,
@@ -462,6 +463,7 @@ config:
                         "items": [
                             {
                                 "success": true,
+                                "child_thread_id": "T-authority-child-1",
                                 "status": RuntimeResultStatus::Completed,
                                 "result": {"answer": 1},
                                 "outputs": null,
@@ -470,6 +472,7 @@ config:
                             },
                             {
                                 "success": true,
+                                "child_thread_id": "T-authority-child-2",
                                 "status": RuntimeResultStatus::Completed,
                                 "result": {"answer": 2},
                                 "outputs": null,

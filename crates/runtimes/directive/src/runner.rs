@@ -141,6 +141,89 @@ struct RunGuard {
     finalized: bool,
 }
 
+#[derive(Debug)]
+struct ProviderAttemptAccountingPersistenceError(String);
+
+impl std::fmt::Display for ProviderAttemptAccountingPersistenceError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ProviderAttemptAccountingPersistenceError {}
+
+#[derive(Debug, Default)]
+struct AttemptAccountingLifecycle {
+    last: Option<String>,
+    active: Option<String>,
+    closing_payload: Option<Value>,
+}
+
+impl AttemptAccountingLifecycle {
+    fn admit_after_pending_ack(&mut self, attempt_id: String) -> Result<(), String> {
+        if let Some(active) = self.active.as_deref() {
+            return Err(format!(
+                "cannot admit provider attempt `{attempt_id}` while `{active}` remains active"
+            ));
+        }
+        self.last = Some(attempt_id.clone());
+        self.active = Some(attempt_id);
+        self.closing_payload = None;
+        Ok(())
+    }
+
+    fn active_for_close(&self) -> Result<String, String> {
+        self.active.clone().ok_or_else(|| {
+            "provider attempt accounting lifecycle has no active attempt".to_string()
+        })
+    }
+
+    fn ack_closed(&mut self, attempt_id: &str) -> Result<(), String> {
+        match self.active.as_deref() {
+            Some(active) if active == attempt_id => {
+                self.active = None;
+                self.closing_payload = None;
+                Ok(())
+            }
+            Some(active) => Err(format!(
+                "provider attempt closure ACK for `{attempt_id}` does not match active `{active}`"
+            )),
+            None => Err(format!(
+                "provider attempt closure ACK for `{attempt_id}` has no active attempt"
+            )),
+        }
+    }
+
+    fn last(&self) -> Option<&str> {
+        self.last.as_deref()
+    }
+
+    fn has_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    fn bind_closing_payload(&mut self, payload: Value) -> Result<Value, String> {
+        if self.active.is_none() {
+            return Err("cannot bind a terminal payload without an active attempt".to_string());
+        }
+        if let Some(bound) = self.closing_payload.as_ref() {
+            if bound != &payload {
+                return Err(
+                    "provider attempt already has a different terminal payload bound".to_string(),
+                );
+            }
+            return Ok(bound.clone());
+        }
+        self.closing_payload = Some(payload.clone());
+        Ok(payload)
+    }
+
+    #[cfg(test)]
+    fn closing_payload(&self) -> Option<&Value> {
+        self.closing_payload.as_ref()
+    }
+}
+
 impl Drop for RunGuard {
     fn drop(&mut self) {
         if !self.finalized {
@@ -174,13 +257,33 @@ fn directive_outputs_artifact(thread_id: &str, outputs: &Value) -> Value {
 /// spend and one-time provider-default fallbacks (§2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PricingSource {
+    /// The provider reported the request's actual charge.
+    ProviderReported,
     /// A per-model pricing entry matched `model_name`.
     PerModel,
     /// No per-model entry; the provider-level default rates were used.
     ProviderDefault,
+    /// Signed provider pricing explicitly declares this route free.
+    ExplicitlyFree,
+    /// Gateway reported zero while marking the request BYOK; upstream spend is
+    /// outside RyeOS's observed charge and must not be called tracked/free.
+    ByokUntracked,
     /// No pricing configured at all, or configured but with no rate for the
     /// model — cost could not be computed and is reported as `$0`.
     Unpriced,
+}
+
+impl PricingSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProviderReported => "provider_reported",
+            Self::PerModel => "per_model",
+            Self::ProviderDefault => "provider_default",
+            Self::ExplicitlyFree => "explicitly_free",
+            Self::ByokUntracked => "byok_untracked",
+            Self::Unpriced => "unpriced",
+        }
+    }
 }
 
 /// A computed turn cost plus its pricing provenance.
@@ -197,7 +300,7 @@ struct CostBreakdown {
 /// is retryable — the adapter classifies exactly the transient transport/
 /// provider classes (pre-stream send/status/timeout, and a stream that dies
 /// mid-read). Everything else — invalid model, auth, context overflow, a
-/// persistence-first append failure — stays fail-fast. `never_retry` (status
+/// live callback publication failure — stays fail-fast. `never_retry` (status
 /// codes as strings) is an absolute denylist that overrides
 /// `retry_status_codes`. Backoff is exponential from `backoff_base_ms`
 /// (`base * 2^attempt`).
@@ -218,14 +321,13 @@ fn retry_backoff(
         }
         Some(ProviderStreamError::Timeout { .. }) => execution.retry_on_timeout,
         // A pre-stream `.send()` transport failure (DNS/connect/TLS/reset) is
-        // always retry-safe — no cognition_out was persisted. Retry it under the
+        // always retry-safe — no cognition_out was emitted. Retry it under the
         // shared `execution.retries` budget so a burst-fanout connect blip backs
         // off and re-attempts instead of surfacing as a fatal generic error.
         Some(ProviderStreamError::Send { .. }) => true,
         // The stream died mid-read (chunk timeout/reset). The request is
-        // idempotent; deltas persisted before the cut stay in the braid as the
-        // abandoned-partial record, delimited by the `provider_retry` event the
-        // caller appends before re-issuing.
+        // idempotent; the durable `provider_retry` event records the count of
+        // live/ephemeral deltas emitted before the cut.
         Some(ProviderStreamError::MidStream { .. }) => execution.retry_mid_stream,
         None => false,
     };
@@ -437,12 +539,37 @@ impl Runner {
         !self.budget.is_exhausted() && self.harness.check_limits().is_ok()
     }
 
+    fn provider_usage_required(&self) -> bool {
+        self.provider_config
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.accounting.as_ref())
+            .is_some_and(|accounting| accounting.require_usage)
+    }
+
+    fn accounting_fail_closed(&self) -> bool {
+        if self.provider_usage_required() {
+            return true;
+        }
+        match self.execution.accounting.failure_policy {
+            crate::directive::AccountingFailurePolicy::FailClosed => true,
+            crate::directive::AccountingFailurePolicy::Warn => false,
+            crate::directive::AccountingFailurePolicy::Auto => {
+                self.harness.has_finite_accounting_budget()
+            }
+        }
+    }
+
     pub async fn run(&mut self) -> RuntimeResult {
         let mut guard = RunGuard { finalized: false };
         // The entrypoint has already attached the process and durably moved
         // the thread to running before it constructs the runner.
         let mut state = State::CheckingLimits;
         let mut turn = self.initial_turn;
+        // Admission happens only after the pending event is acknowledged.
+        // Closure is two-phase: the ID remains active until the exact terminal
+        // event is acknowledged or recovered by replay.
+        let mut attempt_accounting = AttemptAccountingLifecycle::default();
         // Collected non-fatal callback failures. P2.2 — runtime no
         // longer silently drops `append_event` errors; everything that
         // would have hit `let _ = ...` is now recorded here and
@@ -516,13 +643,12 @@ impl Runner {
                     // HTTP status, a send timeout/transport error, or a stream
                     // that died mid-read — is re-attempted with exponential
                     // backoff. The request is idempotent (same message array).
-                    // Pre-stream classes cannot duplicate a persisted
-                    // cognition_out; the mid-stream class leaves the already-
-                    // persisted deltas in the braid as the honest record of the
-                    // abandoned partial, delimited by the `provider_retry`
-                    // event appended below before the re-issue. Anything not
+                    // Pre-stream classes cannot duplicate an indexed completed
+                    // cognition_out. Mid-stream deltas are live/ephemeral; the
+                    // durable `provider_retry` event below records the abandoned
+                    // attempt before re-issue. Anything not
                     // classified as a `ProviderStreamError` (invalid bytes, a
-                    // persistence-first append failure) routes to
+                    // live callback publication failure) routes to
                     // `State::Errored` unchanged.
                     //
                     // Budget is re-checked before every attempt so a retry never
@@ -535,6 +661,43 @@ impl Runner {
                     let stream_result = loop {
                         if self.budget.is_exhausted() {
                             break Err(anyhow::anyhow!("budget_exceeded"));
+                        }
+                        if let Err(limit) = self.harness.check_retry_limits() {
+                            break Err(anyhow::anyhow!(
+                                "provider attempt refused by effective resource limits: {limit}"
+                            ));
+                        }
+                        let attempt_number = attempt + 1;
+                        let attempt_id = format!("{}:{turn}:{attempt_number}", self.thread_id);
+                        let pending_state = match self.execution.accounting.budget_mode {
+                            crate::directive::AccountingBudgetMode::Settled => "accounting_pending",
+                            crate::directive::AccountingBudgetMode::Hard => {
+                                break Err(anyhow::anyhow!(
+                                    "provider_accounting_policy_invalid: hard budget mode requires the durable reservation/reconciliation backend, which is not enabled by this runtime build"
+                                ));
+                            }
+                        };
+                        if let Err(error) = self
+                            .persist_provider_attempt_accounting(json!({
+                                "attempt_id": &attempt_id,
+                                "attempt_number": attempt_number,
+                                "turn": turn,
+                                "state": pending_state,
+                                "budget_mode": "settled",
+                                "settlement_semantics": "post_attempt_may_overshoot_by_one_attempt",
+                            }))
+                            .await
+                        {
+                            break Err(anyhow::anyhow!(
+                                "resume-critical provider attempt accounting-pending persistence failed before request issue: {error}"
+                            ));
+                        }
+                        if let Err(error) =
+                            attempt_accounting.admit_after_pending_ack(attempt_id.clone())
+                        {
+                            break Err(anyhow::anyhow!(
+                                "provider attempt accounting admission failed: {error}"
+                            ));
                         }
                         let call = crate::provider_adapter::call_provider_streaming(
                             crate::provider_adapter::StreamingCallInput {
@@ -558,6 +721,133 @@ impl Runner {
                         match call {
                             Err(e) => match retry_backoff(&e, attempt, &self.execution) {
                                 Some(delay) => {
+                                    let usage_required = self.accounting_fail_closed();
+                                    let ambiguous_without_accounting = e
+                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
+                                        .is_some_and(|error| matches!(
+                                            error,
+                                            crate::provider_adapter::ProviderStreamError::Timeout { .. }
+                                                | crate::provider_adapter::ProviderStreamError::Send {
+                                                    connect: false,
+                                                    ..
+                                                }
+                                        ));
+                                    if usage_required && ambiguous_without_accounting {
+                                        if let Err(close_error) = self
+                                            .close_active_provider_attempt_accounting(
+                                                &mut attempt_accounting,
+                                                json!({
+                                                    "attempt_number": attempt + 1,
+                                                    "turn": turn,
+                                                    "state": "accounting_unavailable_fail_closed",
+                                                    "ambiguous_provider_acceptance": true,
+                                                    "error": format!("{e:#}"),
+                                                }),
+                                            )
+                                            .await
+                                        {
+                                            break Err(close_error);
+                                        }
+                                        break Err(anyhow::anyhow!(
+                                            "provider_accounting_invalid: refusing an ambiguous retry because the provider may have accepted work but required attempt usage is unavailable; original error: {e:#}"
+                                        ));
+                                    }
+                                    let mid_stream_attempt = e
+                                        .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
+                                        .and_then(|error| match error {
+                                            crate::provider_adapter::ProviderStreamError::MidStream {
+                                                accepted_bytes,
+                                                accepted_output_events,
+                                                live_output_events_emitted,
+                                                usage,
+                                                generation_header_id,
+                                                response_id,
+                                                requested_output_tokens,
+                                                ..
+                                            } => Some((
+                                                *accepted_bytes,
+                                                *accepted_output_events,
+                                                *live_output_events_emitted,
+                                                usage.clone(),
+                                                generation_header_id.clone(),
+                                                response_id.clone(),
+                                                *requested_output_tokens,
+                                            )),
+                                            _ => None,
+                                        });
+                                    let usage_valid = mid_stream_attempt
+                                        .as_ref()
+                                        .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref())
+                                        .is_some_and(|usage| usage.is_valid());
+                                    if let Some((_, _, _, usage, _, _, _)) =
+                                        mid_stream_attempt.as_ref()
+                                    {
+                                        if let Err(settlement_error) = self
+                                            .settle_available_attempt_accounting(
+                                                turn,
+                                                usage.as_ref(),
+                                                turn_start.elapsed().as_millis() as u64,
+                                            )
+                                            .await
+                                        {
+                                            break Err(anyhow::anyhow!(
+                                                "provider attempt accounting settlement failed before retry: {settlement_error:#}"
+                                            ));
+                                        }
+                                    }
+                                    if let Err(close_error) = self
+                                        .close_active_provider_attempt_accounting(
+                                            &mut attempt_accounting,
+                                            json!({
+                                                "attempt_number": attempt + 1,
+                                                "turn": turn,
+                                                "state": if usage_required && mid_stream_attempt.is_some() && !usage_valid {
+                                                    if mid_stream_attempt
+                                                        .as_ref()
+                                                        .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref())
+                                                        .and_then(|usage| usage.reported_cost_usd)
+                                                        .is_some()
+                                                    {
+                                                        "reported_spend_only_fail_closed"
+                                                    } else {
+                                                        "accounting_unavailable_fail_closed"
+                                                    }
+                                                } else {
+                                                    mid_stream_attempt
+                                                        .as_ref()
+                                                        .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref())
+                                                        .map(|usage| if usage.is_valid() {
+                                                            "reported"
+                                                        } else if usage.reported_cost_usd.is_some() {
+                                                            "reported_spend_only"
+                                                        } else {
+                                                            "accounting_unavailable_retry"
+                                                        })
+                                                        .unwrap_or("accounting_unavailable_retry")
+                                                },
+                                                "usage": mid_stream_attempt
+                                                    .as_ref()
+                                                    .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref()),
+                                                "retry_error": format!("{e:#}"),
+                                            }),
+                                        )
+                                        .await
+                                    {
+                                        break Err(close_error);
+                                    }
+                                    if usage_required
+                                        && mid_stream_attempt.is_some()
+                                        && !usage_valid
+                                    {
+                                        break Err(anyhow::anyhow!(
+                                            "provider_accounting_invalid: mid-stream attempt cannot be retried because required final usage is unavailable; original error: {e:#}"
+                                        ));
+                                    }
+                                    if let Err(limit) = self.harness.check_retry_limits() {
+                                        break Err(anyhow::anyhow!(
+                                            "provider retry refused after settling the prior attempt: {limit}; original error: {e:#}"
+                                        ));
+                                    }
                                     attempt += 1;
                                     // Surface whether this was a connect-phase
                                     // transport failure (`Some(true)`) vs another
@@ -575,17 +865,18 @@ impl Runner {
                                             } => Some(*connect),
                                             _ => None,
                                         });
-                                    // A mid-stream cut abandons already-persisted
-                                    // partial output; carry how much so the braid
-                                    // quantifies what precedes this retry marker.
-                                    let mid_stream_persisted_out_events = e
+                                    // A mid-stream cut abandons partial
+                                    // live/ephemeral output; carry how much was
+                                    // acknowledged so
+                                    // the retry marker quantifies the attempt.
+                                    let mid_stream_live_output_events_emitted = e
                                         .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
                                         )
                                         .and_then(|pe| match pe {
                                             crate::provider_adapter::ProviderStreamError::MidStream {
-                                                persisted_out_events,
+                                                live_output_events_emitted,
                                                 ..
-                                            } => Some(*persisted_out_events),
+                                            } => Some(*live_output_events_emitted),
                                             _ => None,
                                         });
                                     tracing::warn!(
@@ -620,14 +911,78 @@ impl Runner {
                                                     "max_retries": self.execution.retries,
                                                     "backoff_ms": delay.as_millis() as u64,
                                                     "send_connect_phase": send_connect_phase,
-                                                    "mid_stream_persisted_out_events":
-                                                        mid_stream_persisted_out_events,
+                                                    "mid_stream_live_output_events_emitted":
+                                                        mid_stream_live_output_events_emitted,
+                                                    "provider_attempt": mid_stream_attempt.as_ref().map(|(
+                                                        accepted_bytes,
+                                                        accepted_output_events,
+                                                        live_output_events_emitted,
+                                                        usage,
+                                                        generation_header_id,
+                                                        response_id,
+                                                        requested_output_tokens,
+                                                    )| json!({
+                                                        "attempt_id": format!("{}:{turn}:{attempt}", self.thread_id),
+                                                        "attempt_number": attempt,
+                                                        "accepted_bytes": accepted_bytes,
+                                                        "accepted_output_events": accepted_output_events,
+                                                        "live_output_events_emitted": live_output_events_emitted,
+                                                        "usage": usage,
+                                                        "generation_header_id": generation_header_id,
+                                                        "response_id": response_id,
+                                                        "requested_output_tokens": requested_output_tokens,
+                                                        "accounting_status": usage.as_ref().map(|usage| if usage.is_valid() {
+                                                            "reported"
+                                                        } else {
+                                                            "malformed"
+                                                        }).unwrap_or("unavailable"),
+                                                    })),
                                                     "error": format!("{e:#}"),
                                                 }),
                                             )
                                             .await,
                                     );
-                                    tokio::time::sleep(delay).await;
+                                    tokio::select! {
+                                        _ = tokio::time::sleep(delay) => {}
+                                        _ = async {
+                                            while !cancel_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                            }
+                                        } => {
+                                            break Ok(crate::provider_adapter::StreamOutcome::Cancelled {
+                                                attempt: crate::provider_adapter::streaming::CutAttemptState {
+                                                    usage: None,
+                                                    generation_header_id: None,
+                                                    response_id: None,
+                                                    requested_output_tokens: None,
+                                                    observed_output: Default::default(),
+                                                },
+                                            });
+                                        }
+                                        _ = async {
+                                            while !interrupt_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                                                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                            }
+                                        } => {
+                                            break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
+                                                partial_message: ProviderMessage {
+                                                    role: "assistant".to_string(),
+                                                    content: None,
+                                                    tool_calls: None,
+                                                    tool_call_id: None,
+                                                    reasoning_content: None,
+                                                },
+                                                events: Vec::new(),
+                                                attempt: crate::provider_adapter::streaming::CutAttemptState {
+                                                    usage: None,
+                                                    generation_header_id: None,
+                                                    response_id: None,
+                                                    requested_output_tokens: None,
+                                                    observed_output: Default::default(),
+                                                },
+                                            });
+                                        }
+                                    }
                                     continue;
                                 }
                                 None => break Err(e),
@@ -640,9 +995,173 @@ impl Runner {
                             response: resp,
                             events,
                         }) => {
-                            let input_tok = resp.usage.as_ref().map_or(0, |u| u.input_tokens);
-                            let output_tok = resp.usage.as_ref().map_or(0, |u| u.output_tokens);
-                            let cost = self.compute_cost(input_tok, output_tok);
+                            let usage_required = self.accounting_fail_closed();
+                            if let Some(usage) = resp.usage.as_ref() {
+                                if !usage.anomalies.is_empty() {
+                                    tracing::warn!(
+                                        turn,
+                                        anomalies = ?usage.anomalies,
+                                        "provider usage metadata is structurally invalid"
+                                    );
+                                    warnings.push(format!(
+                                        "provider_usage_malformed on turn {turn}: {}",
+                                        usage.anomalies.join("; ")
+                                    ));
+                                }
+                                if !usage.contract_anomalies.is_empty() {
+                                    tracing::warn!(
+                                        turn,
+                                        anomalies = ?usage.contract_anomalies,
+                                        "provider usage contradicts a declared request contract"
+                                    );
+                                    warnings.push(format!(
+                                        "provider_contract_anomaly on turn {turn}: {}",
+                                        usage.contract_anomalies.join("; ")
+                                    ));
+                                }
+                                if !usage.metadata_anomalies.is_empty() {
+                                    tracing::warn!(
+                                        turn,
+                                        anomalies = ?usage.metadata_anomalies,
+                                        "provider optional billing metadata is malformed"
+                                    );
+                                    warnings.push(format!(
+                                        "provider_metadata_malformed on turn {turn}: {}",
+                                        usage.metadata_anomalies.join("; ")
+                                    ));
+                                }
+                            }
+                            let valid_usage = resp.usage.as_ref().filter(|usage| usage.is_valid());
+                            // Token-schema validity and provider-reported spend
+                            // validity are independent. Preserve a signed,
+                            // non-negative reported charge even when token fields
+                            // are missing/malformed; never synthesize zero tokens.
+                            let settled_spend_only = if valid_usage.is_none() {
+                                if let Some(reported_cost_usd) = resp
+                                    .usage
+                                    .as_ref()
+                                    .and_then(|usage| usage.reported_cost_usd)
+                                {
+                                    if let Err(error) = self
+                                        .settle_provider_spend_only(
+                                            turn,
+                                            reported_cost_usd,
+                                            turn_start.elapsed().as_millis() as u64,
+                                        )
+                                        .await
+                                    {
+                                        let settlement_error = format!(
+                                            "independent provider-reported spend settlement failed: {error:#}"
+                                        );
+                                        let close_result = self
+                                            .close_active_provider_attempt_accounting(
+                                                &mut attempt_accounting,
+                                                json!({
+                                                    "turn": turn,
+                                                    "state": "settlement_failed",
+                                                    "settlement_error": &settlement_error,
+                                                }),
+                                            )
+                                            .await;
+                                        state = State::Errored {
+                                            error: match close_result {
+                                                Ok(()) => settlement_error,
+                                                Err(close_error) => format!(
+                                                    "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
+                                                ),
+                                            },
+                                        };
+                                        continue;
+                                    }
+                                    true
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            };
+                            if usage_required && valid_usage.is_none() {
+                                let usage_detail = resp
+                                    .usage
+                                    .as_ref()
+                                    .map(|usage| {
+                                        if usage.anomalies.is_empty() {
+                                            "required input/output token counts are incomplete"
+                                                .to_string()
+                                        } else {
+                                            usage.anomalies.join("; ")
+                                        }
+                                    })
+                                    .unwrap_or_else(|| {
+                                        "required usage snapshot is missing".to_string()
+                                    });
+                                state = State::Errored {
+                                    error: format!(
+                                        "provider_accounting_invalid: required usage snapshot is \
+                                         missing or malformed on turn {turn}: {usage_detail} \
+                                         (requested_output_tokens={:?}, generation_header_id={:?}, \
+                                         response_id={:?}, provider_usage={:?})",
+                                        resp.requested_output_tokens,
+                                        resp.generation_header_id,
+                                        resp.response_id,
+                                        resp.usage,
+                                    ),
+                                };
+                                let original_accounting_error = match &state {
+                                    State::Errored { error } => error.clone(),
+                                    _ => {
+                                        unreachable!("required accounting failure set error state")
+                                    }
+                                };
+                                if let Err(error) = self
+                                    .close_active_provider_attempt_accounting(
+                                        &mut attempt_accounting,
+                                        json!({
+                                            "turn": turn,
+                                            "state": "accounting_unavailable_fail_closed",
+                                            "usage": resp.usage,
+                                            "requested_output_tokens": resp.requested_output_tokens,
+                                            "generation_header_id": resp.generation_header_id,
+                                            "response_id": resp.response_id,
+                                            "observed_output": resp.observed_output,
+                                        }),
+                                    )
+                                    .await
+                                {
+                                    state = State::Errored {
+                                        error: format!(
+                                            "{original_accounting_error}; resume-critical provider attempt accounting closure failed: {error}"
+                                        ),
+                                    };
+                                }
+                                continue;
+                            }
+                            if resp.usage.is_some() && valid_usage.is_none() {
+                                warnings.push(format!(
+                                    "provider accounting unavailable on turn {turn}; malformed \
+                                     token counts were not settled as zero"
+                                ));
+                            } else if resp.usage.is_none() {
+                                warnings.push(format!(
+                                    "provider accounting unavailable on turn {turn}; no usage \
+                                     snapshot was reported and no token counts were settled"
+                                ));
+                            }
+                            let token_counts =
+                                valid_usage.and_then(|usage| usage.complete_token_counts());
+                            let (input_tok, output_tok) = token_counts.unwrap_or((0, 0));
+                            let cost = if settled_spend_only {
+                                CostBreakdown {
+                                    usd: resp
+                                        .usage
+                                        .as_ref()
+                                        .and_then(|usage| usage.reported_cost_usd)
+                                        .unwrap_or(0.0),
+                                    source: PricingSource::ProviderReported,
+                                }
+                            } else {
+                                self.compute_cost_for_usage(valid_usage)
+                            };
                             let usd = cost.usd;
                             // §2: an operator auditing spend must be able to tell
                             // "free" from "untracked", and know when a model's
@@ -651,7 +1170,7 @@ impl Runner {
                             // fail-closed): missing pricing does not error the
                             // turn — it records a loud signal and keeps running.
                             match cost.source {
-                                PricingSource::Unpriced => {
+                                PricingSource::Unpriced | PricingSource::ByokUntracked => {
                                     if input_tok != 0 || output_tok != 0 {
                                         tracing::warn!(
                                             model = %self.model_name,
@@ -684,7 +1203,10 @@ impl Runner {
                                                             "model": self.model_name,
                                                             "input_tokens": input_tok,
                                                             "output_tokens": output_tok,
-                                                            "reason": "pricing_missing",
+                                                            "reason": match cost.source {
+                                                                PricingSource::ByokUntracked => "byok_upstream_charge_untracked",
+                                                                _ => "pricing_missing",
+                                                            },
                                                         }),
                                                     )
                                                     .await,
@@ -703,72 +1225,113 @@ impl Runner {
                                         );
                                     }
                                 }
-                                PricingSource::PerModel => {}
+                                PricingSource::ProviderReported
+                                | PricingSource::PerModel
+                                | PricingSource::ExplicitlyFree => {}
                             }
 
-                            let turn_cost = RuntimeCost {
-                                input_tokens: input_tok,
-                                output_tokens: output_tok,
-                                total_usd: usd,
-                                basis: None,
-                            };
-                            let mut proposed_cost = self.budget.cost();
-                            if let Err(error) = proposed_cost.checked_accumulate(&turn_cost) {
+                            if let Some(usage) = valid_usage {
+                                if let Err(e) = self
+                                    .settle_provider_usage(
+                                        turn,
+                                        usage,
+                                        usd,
+                                        turn_start.elapsed().as_millis() as u64,
+                                    )
+                                    .await
+                                {
+                                    let settlement_error =
+                                        format!("provider usage settlement failed: {e:#}");
+                                    let close_result = self
+                                        .close_active_provider_attempt_accounting(
+                                            &mut attempt_accounting,
+                                            json!({
+                                                "turn": turn,
+                                                "state": "settlement_failed",
+                                                "settlement_error": &settlement_error,
+                                            }),
+                                        )
+                                        .await;
+                                    state = State::Errored {
+                                        error: match close_result {
+                                            Ok(()) => settlement_error,
+                                            Err(close_error) => format!(
+                                                "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
+                                            ),
+                                        },
+                                    };
+                                    continue;
+                                }
+                            }
+                            if let Err(error) = self
+                                .close_active_provider_attempt_accounting(
+                                    &mut attempt_accounting,
+                                    json!({
+                                        "turn": turn,
+                                        "state": if valid_usage.is_some() {
+                                            "reported"
+                                        } else if settled_spend_only {
+                                            "reported_spend_only"
+                                        } else {
+                                            "accounting_unavailable_warn"
+                                        },
+                                        "usage": resp.usage,
+                                        "settled_cost_usd": usd,
+                                        "pricing_source": cost.source.as_str(),
+                                        "requested_output_tokens": resp.requested_output_tokens,
+                                        "generation_header_id": resp.generation_header_id,
+                                        "response_id": resp.response_id,
+                                        "observed_output": resp.observed_output,
+                                    }),
+                                )
+                                .await
+                            {
                                 state = State::Errored {
                                     error: format!(
-                                        "provider usage violates accounting bounds: {error}"
+                                        "resume-critical completed provider attempt accounting closure failed: {error}"
                                     ),
                                 };
                                 continue;
                             }
-                            if self
-                                .harness
-                                .tokens_used()
-                                .checked_add(input_tok)
-                                .and_then(|tokens| tokens.checked_add(output_tok))
-                                .is_none()
+                            if crate::directive::normalize_finish_reason(
+                                resp.finish_reason.as_deref(),
+                            ) == FinishReason::Length
                             {
                                 state = State::Errored {
-                                    error: "provider usage exceeds the directive token counter"
+                                    error: "provider_output_limit_reached: provider ended the \
+                                            response at its declared/native output limit; this is \
+                                            distinct from a RyeOS-local output byte limit"
                                         .to_string(),
                                 };
                                 continue;
                             }
-
-                            let proposed_usage = ryeos_state::ThreadUsage {
-                                completed_turns: self.harness.turns_used(),
-                                input_tokens: proposed_cost.input_tokens,
-                                output_tokens: proposed_cost.output_tokens,
-                                spend_usd: proposed_cost.total_usd,
-                                spawns_used: self.harness.spawns_used(),
-                                started_at: lillux::time::iso8601_now(),
-                                settled_at: lillux::time::iso8601_now(),
-                                last_settled_turn_seq: turn as u64,
-                                elapsed_ms: turn_start.elapsed().as_millis() as u64,
-                                provider_id: Some(self.provider_id.clone()),
-                                model: Some(self.model_name.clone()),
-                                profile: self.matched_profile.clone(),
-                            };
-
-                            if let Err(e) = self.callback.emit_thread_usage(&proposed_usage).await {
+                            let error_finish_reason =
+                                self.provider_config
+                                    .schemas
+                                    .as_ref()
+                                    .and_then(|schemas| schemas.streaming.as_ref())
+                                    .and_then(|streaming| streaming.metadata.as_ref())
+                                    .and_then(|metadata| metadata.error.as_ref())
+                                    .is_some_and(|error| {
+                                        resp.finish_reason.as_deref().is_some_and(|actual| {
+                                            error.finish_reasons.iter().any(|declared| {
+                                                declared.eq_ignore_ascii_case(actual)
+                                            })
+                                        })
+                                    });
+                            if error_finish_reason {
                                 state = State::Errored {
                                     error: format!(
-                                        "resume-critical callback emit_thread_usage failed: {e}"
+                                        "provider_protocol_error: response ended with declared \
+                                         error finish reason {:?}, but no valid configured error \
+                                         object was present (generation_header_id={:?}, \
+                                         response_id={:?})",
+                                        resp.finish_reason,
+                                        resp.generation_header_id,
+                                        resp.response_id,
                                     ),
                                 };
                                 continue;
-                            }
-
-                            if let Some(ref usage) = resp.usage {
-                                self.harness
-                                    .record_tokens(usage.input_tokens, usage.output_tokens)
-                                    .expect("provider token usage was prevalidated");
-                                self.harness
-                                    .record_spend(usd)
-                                    .expect("provider spend was prevalidated");
-                                self.budget
-                                    .report(usage.input_tokens, usage.output_tokens, usd)
-                                    .expect("provider budget usage was prevalidated");
                             }
                             self.messages.push(resp.message.clone());
                             let assistant_message = match serde_json::to_value(&resp.message) {
@@ -782,14 +1345,36 @@ impl Runner {
                                     continue;
                                 }
                             };
+                            let provider_accounting = Some(json!({
+                                "attempt_id": format!("{}:{turn}:{}", self.thread_id, attempt + 1),
+                                "attempt_number": attempt + 1,
+                                "input_tokens": resp.usage.as_ref().and_then(|usage| usage.input_tokens),
+                                "output_tokens": resp.usage.as_ref().and_then(|usage| usage.output_tokens),
+                                "reasoning_tokens": resp.usage.as_ref().and_then(|usage| usage.reasoning_tokens),
+                                "reported_cost_usd": resp.usage.as_ref().and_then(|usage| usage.reported_cost_usd),
+                                "cost_details": resp.usage.as_ref().and_then(|usage| usage.cost_details.as_ref()),
+                                "is_byok": resp.usage.as_ref().and_then(|usage| usage.is_byok),
+                                "snapshots_seen": resp.usage.as_ref().map(|usage| usage.snapshots_seen),
+                                "settled_cost_usd": usd,
+                                "pricing_source": cost.source.as_str(),
+                                "source": resp.usage.as_ref().map(|usage| usage.source),
+                                "comparability": resp.usage.as_ref().map(|usage| usage.comparability),
+                                "provider_limit_contract": resp.usage.as_ref().map(|usage| usage.provider_limit_contract),
+                                "schema_errors": resp.usage.as_ref().map(|usage| &usage.anomalies),
+                                "metadata_errors": resp.usage.as_ref().map(|usage| &usage.metadata_anomalies),
+                                "contract_anomalies": resp.usage.as_ref().map(|usage| &usage.contract_anomalies),
+                                "requested_output_tokens": resp.requested_output_tokens,
+                                "observed_output": &resp.observed_output,
+                                "generation_header_id": &resp.generation_header_id,
+                                "response_id": &resp.response_id,
+                            }));
                             if let Err(e) = self
                                 .callback
                                 .emit_turn_complete(
                                     turn,
-                                    resp.usage
-                                        .as_ref()
-                                        .map(|u| (u.input_tokens, u.output_tokens)),
+                                    token_counts,
                                     Some(assistant_message),
+                                    provider_accounting,
                                 )
                                 .await
                             {
@@ -803,24 +1388,149 @@ impl Runner {
                             if let Some(ref reason) = resp.finish_reason {
                                 tracing::debug!(finish_reason = %reason, "provider response");
                             }
+                            if resp.generation_header_id.is_some() || resp.response_id.is_some() {
+                                tracing::debug!(
+                                    generation_header_id = ?resp.generation_header_id,
+                                    response_id = ?resp.response_id,
+                                    "provider response identifiers"
+                                );
+                            }
 
-                            // Real StreamEvents already persisted as
-                            // cognition_out events during streaming.
-                            // The runner's State::Streaming pass is now
-                            // diagnostic-only — message.tool_calls and
-                            // message.content are the source of truth.
+                            // Progressive StreamEvents were already published as
+                            // live/ephemeral cognition_out events. The indexed
+                            // turn consequence was emitted above; this pass is
+                            // diagnostic-only.
                             State::Streaming { events }
                         }
-                        Ok(crate::provider_adapter::StreamOutcome::Cancelled) => {
-                            // SIGTERM cut the stream — finalize cancelled. The
-                            // attempt completed no cognition: no usage settlement,
-                            // no cognition_out.
+                        Ok(crate::provider_adapter::StreamOutcome::Cancelled { attempt: cut }) => {
+                            if attempt_accounting.has_active() {
+                                let settlement = match self
+                                    .settle_available_attempt_accounting(
+                                        turn,
+                                        cut.usage.as_ref(),
+                                        turn_start.elapsed().as_millis() as u64,
+                                    )
+                                    .await
+                                {
+                                    Ok(true) => "reported",
+                                    Ok(false) => "accounting_unavailable_cancelled",
+                                    Err(error) => {
+                                        let settlement_error = format!(
+                                            "cancelled provider attempt accounting settlement failed: {error:#}"
+                                        );
+                                        let close_result = self
+                                            .close_active_provider_attempt_accounting(
+                                                &mut attempt_accounting,
+                                                json!({
+                                                    "turn": turn,
+                                                    "state": "settlement_failed",
+                                                    "settlement_error": &settlement_error,
+                                                }),
+                                            )
+                                            .await;
+                                        state = State::Errored {
+                                            error: match close_result {
+                                                Ok(()) => settlement_error,
+                                                Err(close_error) => format!(
+                                                    "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
+                                                ),
+                                            },
+                                        };
+                                        continue;
+                                    }
+                                };
+                                if let Err(error) = self
+                                    .close_active_provider_attempt_accounting(
+                                        &mut attempt_accounting,
+                                        json!({
+                                            "turn": turn,
+                                            "state": settlement,
+                                            "usage": cut.usage,
+                                            "generation_header_id": cut.generation_header_id,
+                                            "response_id": cut.response_id,
+                                            "requested_output_tokens": cut.requested_output_tokens,
+                                            "observed_output": cut.observed_output,
+                                        }),
+                                    )
+                                    .await
+                                {
+                                    state = State::Errored {
+                                        error: format!(
+                                            "resume-critical cancelled provider attempt accounting closure failed: {error}"
+                                        ),
+                                    };
+                                    continue;
+                                }
+                            }
+                            // SIGTERM remains a cancellation, not a provider
+                            // failure, after independently settling any usage
+                            // received before the signal.
                             State::Cancelled
                         }
                         Ok(crate::provider_adapter::StreamOutcome::Interrupted {
                             partial_message,
                             events,
+                            attempt: cut,
                         }) => {
+                            if attempt_accounting.has_active() {
+                                let settlement = match self
+                                    .settle_available_attempt_accounting(
+                                        turn,
+                                        cut.usage.as_ref(),
+                                        turn_start.elapsed().as_millis() as u64,
+                                    )
+                                    .await
+                                {
+                                    Ok(true) => "reported",
+                                    Ok(false) => "accounting_unavailable_interrupted",
+                                    Err(error) => {
+                                        let settlement_error = format!(
+                                            "interrupted provider attempt accounting settlement failed: {error:#}"
+                                        );
+                                        let close_result = self
+                                            .close_active_provider_attempt_accounting(
+                                                &mut attempt_accounting,
+                                                json!({
+                                                    "turn": turn,
+                                                    "state": "settlement_failed",
+                                                    "settlement_error": &settlement_error,
+                                                }),
+                                            )
+                                            .await;
+                                        state = State::Errored {
+                                            error: match close_result {
+                                                Ok(()) => settlement_error,
+                                                Err(close_error) => format!(
+                                                    "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
+                                                ),
+                                            },
+                                        };
+                                        continue;
+                                    }
+                                };
+                                if let Err(error) = self
+                                    .close_active_provider_attempt_accounting(
+                                        &mut attempt_accounting,
+                                        json!({
+                                            "turn": turn,
+                                            "state": settlement,
+                                            "usage": cut.usage,
+                                            "generation_header_id": cut.generation_header_id,
+                                            "response_id": cut.response_id,
+                                            "requested_output_tokens": cut.requested_output_tokens,
+                                            "observed_output": cut.observed_output,
+                                        }),
+                                    )
+                                    .await
+                                {
+                                    state = State::Errored {
+                                        error: format!(
+                                            "resume-critical interrupted provider attempt accounting closure failed: {error}"
+                                        ),
+                                    };
+                                    continue;
+                                }
+                            }
                             // Live interrupt (SIGUSR1) cut the in-flight cognition.
                             // Surface any provider warnings from the partial stream
                             // (the diagnostic State::Streaming pass is skipped on the
@@ -886,9 +1596,336 @@ impl Runner {
                             // and runs the redirect cognition. Does NOT finalize.
                             State::CheckingLimits
                         }
-                        Err(e) => State::Errored {
-                            error: format!("{e:#}"),
-                        },
+                        Err(e) => {
+                            if e.downcast_ref::<ProviderAttemptAccountingPersistenceError>()
+                                .is_some()
+                            {
+                                // The exact terminal payload may already be
+                                // durable even though append and replay could
+                                // not prove it. A different fallback transition
+                                // would risk two terminal states for one attempt.
+                                state = State::Errored {
+                                    error: format!("{e:#}"),
+                                };
+                                continue;
+                            }
+                            if !attempt_accounting.has_active() {
+                                // The issued attempt was already closed before a
+                                // retry-admission/backoff failure. Do not attach
+                                // another terminal transition to its diagnostic
+                                // last-attempt locator.
+                                state = State::Errored {
+                                    error: format!("{e:#}"),
+                                };
+                                continue;
+                            }
+                            let error = if let Some(limit) = e.downcast_ref::<
+                                crate::provider_adapter::LocalOutputByteLimitError,
+                            >() {
+                                let limit = limit.clone();
+                                tracing::error!(
+                                    turn,
+                                    accepted_bytes = limit.accepted_bytes,
+                                    prospective_bytes = limit.prospective_bytes,
+                                    cap_bytes = limit.cap_bytes,
+                                    accepted_output_events = limit.accepted_output_events,
+                                    live_output_events_emitted =
+                                        limit.live_output_events_emitted,
+                                    generation_header_id = ?limit.generation_header_id,
+                                    response_id = ?limit.response_id,
+                                    "provider attempt crossed the RyeOS-local output byte limit"
+                                );
+                                let mut detail = format!("local_byte_limit_exceeded: {limit}");
+                                if let Some(usage) = limit.usage.as_ref() {
+                                    if !usage.is_valid() {
+                                        detail.push_str(
+                                            "; provider accounting was malformed and was not \
+                                             settled as zero",
+                                        );
+                                        if let Some(reported_cost_usd) = usage.reported_cost_usd {
+                                            if let Err(settlement_error) = self
+                                                .settle_provider_spend_only(
+                                                    turn,
+                                                    reported_cost_usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            {
+                                                detail.push_str(&format!(
+                                                    "; reported-spend settlement also failed: {settlement_error:#}"
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        let cost = self.compute_cost_for_usage(Some(usage));
+                                        if let Err(settlement_error) = self
+                                            .settle_provider_usage(
+                                                turn,
+                                                usage,
+                                                cost.usd,
+                                                turn_start.elapsed().as_millis() as u64,
+                                            )
+                                            .await
+                                        {
+                                            detail.push_str(&format!(
+                                                "; accounting settlement also failed: \
+                                                 {settlement_error:#}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                detail
+                            } else if let Some(provider_error) = e.downcast_ref::<
+                                crate::provider_adapter::ProviderReportedStreamError,
+                            >() {
+                                let provider_error = provider_error.clone();
+                                tracing::error!(
+                                    turn,
+                                    provider_error_code = ?provider_error.code,
+                                    provider_error_metadata_present = provider_error.metadata.is_some(),
+                                    accepted_bytes = provider_error.accepted_bytes,
+                                    accepted_output_events =
+                                        provider_error.accepted_output_events,
+                                    live_output_events_emitted =
+                                        provider_error.live_output_events_emitted,
+                                    generation_header_id =
+                                        ?provider_error.generation_header_id,
+                                    response_id = ?provider_error.response_id,
+                                    "provider reported an error inside the response stream"
+                                );
+                                let mut detail =
+                                    format!("provider_reported_error: {provider_error}");
+                                if let Some(usage) = provider_error.usage.as_ref() {
+                                    if !usage.is_valid() {
+                                        detail.push_str(
+                                            "; provider accounting was malformed and was not \
+                                             settled as zero",
+                                        );
+                                        if let Some(reported_cost_usd) = usage.reported_cost_usd {
+                                            if let Err(settlement_error) = self
+                                                .settle_provider_spend_only(
+                                                    turn,
+                                                    reported_cost_usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            {
+                                                detail.push_str(&format!(
+                                                    "; reported-spend settlement also failed: {settlement_error:#}"
+                                                ));
+                                            }
+                                        }
+                                    } else {
+                                        let (input_tokens, output_tokens) = usage
+                                            .complete_token_counts()
+                                            .expect("valid provider usage has complete token counts");
+                                        let cost = self.compute_cost_for_usage(Some(usage));
+                                        if matches!(
+                                            cost.source,
+                                            PricingSource::Unpriced
+                                                | PricingSource::ByokUntracked
+                                        )
+                                            && (input_tokens != 0 || output_tokens != 0)
+                                        {
+                                            warnings.push(format!(
+                                                "cost untracked for failed provider attempt on turn \
+                                                 {turn}: model `{}` has no usable price",
+                                                self.model_name
+                                            ));
+                                        }
+                                        if let Err(settlement_error) = self
+                                            .settle_provider_usage(
+                                                turn,
+                                                usage,
+                                                cost.usd,
+                                                turn_start.elapsed().as_millis() as u64,
+                                            )
+                                            .await
+                                        {
+                                            detail.push_str(&format!(
+                                                "; accounting settlement also failed: \
+                                                 {settlement_error:#}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                detail
+                            } else if let Some(mid_stream) = e.downcast_ref::<
+                                crate::provider_adapter::ProviderStreamError,
+                            >().and_then(|error| match error {
+                                crate::provider_adapter::ProviderStreamError::MidStream {
+                                    accepted_bytes,
+                                    accepted_output_events,
+                                    live_output_events_emitted,
+                                    usage,
+                                    generation_header_id,
+                                    response_id,
+                                    requested_output_tokens,
+                                    detail,
+                                } => Some((
+                                    *accepted_bytes,
+                                    *accepted_output_events,
+                                    *live_output_events_emitted,
+                                    usage.clone(),
+                                    generation_header_id.clone(),
+                                    response_id.clone(),
+                                    *requested_output_tokens,
+                                    detail.clone(),
+                                )),
+                                _ => None,
+                            }) {
+                                let (
+                                    accepted_bytes,
+                                    accepted_output_events,
+                                    live_output_events_emitted,
+                                    usage,
+                                    generation_header_id,
+                                    response_id,
+                                    requested_output_tokens,
+                                    transport_detail,
+                                ) = mid_stream;
+                                let mut detail = format!(
+                                    "provider_stream_interrupted: {transport_detail} \
+                                     (accepted_bytes={accepted_bytes}, \
+                                     accepted_output_events={accepted_output_events}, \
+                                     live_output_events_emitted={live_output_events_emitted}, \
+                                     generation_header_id={generation_header_id:?}, \
+                                     response_id={response_id:?}, \
+                                     requested_output_tokens={requested_output_tokens:?})"
+                                );
+                                if let Err(settlement_error) = self
+                                    .settle_available_attempt_accounting(
+                                        turn,
+                                        usage.as_ref(),
+                                        turn_start.elapsed().as_millis() as u64,
+                                    )
+                                    .await
+                                {
+                                    detail.push_str(&format!(
+                                        "; accounting settlement also failed: {settlement_error:#}"
+                                    ));
+                                }
+                                detail
+                            } else if let Some(callback_error) = e.downcast_ref::<
+                                crate::provider_adapter::streaming::RuntimeCallbackPublicationError,
+                            >() {
+                                let callback_error = callback_error.clone();
+                                let mut detail = callback_error.to_string();
+                                if let Err(settlement_error) = self
+                                    .settle_available_attempt_accounting(
+                                        turn,
+                                        callback_error.usage.as_ref(),
+                                        turn_start.elapsed().as_millis() as u64,
+                                    )
+                                    .await
+                                {
+                                    detail.push_str(&format!(
+                                        "; accounting settlement also failed: {settlement_error:#}"
+                                    ));
+                                }
+                                detail
+                            } else if let Some(protocol_error) = e.downcast_ref::<
+                                crate::provider_adapter::ProviderProtocolStreamError,
+                            >() {
+                                let protocol_error = protocol_error.clone();
+                                let mut detail = protocol_error.to_string();
+                                if let Some(usage) = protocol_error.usage.as_ref() {
+                                    if usage.is_valid() {
+                                        let cost = self.compute_cost_for_usage(Some(usage));
+                                        if let Err(settlement_error) = self
+                                            .settle_provider_usage(
+                                                turn,
+                                                usage,
+                                                cost.usd,
+                                                turn_start.elapsed().as_millis() as u64,
+                                            )
+                                            .await
+                                        {
+                                            detail.push_str(&format!(
+                                                "; accounting settlement also failed: {settlement_error:#}"
+                                            ));
+                                        }
+                                    } else if let Some(reported_cost_usd) =
+                                        usage.reported_cost_usd
+                                    {
+                                        if let Err(settlement_error) = self
+                                            .settle_provider_spend_only(
+                                                turn,
+                                                reported_cost_usd,
+                                                turn_start.elapsed().as_millis() as u64,
+                                            )
+                                            .await
+                                        {
+                                            detail.push_str(&format!(
+                                                "; reported-spend settlement also failed: {settlement_error:#}"
+                                            ));
+                                        }
+                                    }
+                                }
+                                detail
+                            } else {
+                                format!("{e:#}")
+                            };
+                            let carried_usage = e
+                                .downcast_ref::<crate::provider_adapter::LocalOutputByteLimitError>()
+                                .and_then(|error| error.usage.as_ref())
+                                .or_else(|| {
+                                    e.downcast_ref::<crate::provider_adapter::ProviderReportedStreamError>()
+                                        .and_then(|error| error.usage.as_ref())
+                                })
+                                .or_else(|| {
+                                    e.downcast_ref::<crate::provider_adapter::ProviderProtocolStreamError>()
+                                        .and_then(|error| error.usage.as_ref())
+                                })
+                                .or_else(|| {
+                                    e.downcast_ref::<crate::provider_adapter::streaming::RuntimeCallbackPublicationError>()
+                                        .and_then(|error| error.usage.as_ref())
+                                })
+                                .or_else(|| {
+                                    e.downcast_ref::<crate::provider_adapter::ProviderStreamError>()
+                                        .and_then(|error| match error {
+                                            crate::provider_adapter::ProviderStreamError::MidStream { usage, .. } => usage.as_ref(),
+                                            _ => None,
+                                        })
+                                });
+                            if let Err(close_error) = self
+                                .close_active_provider_attempt_accounting(
+                                    &mut attempt_accounting,
+                                    json!({
+                                            "turn": turn,
+                                            "state": if carried_usage.is_some() {
+                                                "reported_settlement_attempted"
+                                            } else {
+                                                "accounting_unavailable_terminal"
+                                            },
+                                            "usage": carried_usage,
+                                            "provider_reported_error": e
+                                                .downcast_ref::<crate::provider_adapter::ProviderReportedStreamError>()
+                                                .map(|provider_error| json!({
+                                                    "code": provider_error.code,
+                                                    "message": provider_error.message,
+                                                    "metadata": provider_error.metadata,
+                                                    "generation_header_id": provider_error.generation_header_id,
+                                                    "response_id": provider_error.response_id,
+                                                    "requested_output_tokens": provider_error.requested_output_tokens,
+                                                    "accepted_bytes": provider_error.accepted_bytes,
+                                                    "accepted_output_events": provider_error.accepted_output_events,
+                                                    "live_output_events_emitted": provider_error.live_output_events_emitted,
+                                                })),
+                                            "terminal_error": &error,
+                                    }),
+                                )
+                                .await
+                            {
+                                State::Errored {
+                                    error: format!(
+                                        "{error}; resume-critical provider attempt accounting closure failed: {close_error}"
+                                    ),
+                                }
+                            } else {
+                                State::Errored { error }
+                            }
+                        }
                     }
                 }
 
@@ -1788,11 +2825,17 @@ impl Runner {
                         "thread_failed(emit_error)",
                         self.callback.emit_error(&error).await,
                     );
+                    let failure = runtime_failure_payload(
+                        &error,
+                        &self.thread_id,
+                        turn,
+                        attempt_accounting.last(),
+                    );
                     let completion = TerminalCompletion {
                         status: ThreadTerminalStatus::Failed,
                         outcome_code: Some("failed".to_string()),
                         result: None,
-                        error: Some(json!(error)),
+                        error: Some(failure.clone()),
                         cost: Some(serde_json::to_value(self.budget.cost()).expect(
                             "validated directive cost must serialize for terminal settlement",
                         )),
@@ -1809,7 +2852,7 @@ impl Runner {
                         success: false,
                         status: RuntimeResultStatus::Failed,
                         thread_id: self.thread_id.clone(),
-                        result: Some(json!(error)),
+                        result: Some(failure),
                         outputs: json!({}),
                         cost: Some(self.budget.cost()),
                         warnings: Vec::new(),
@@ -1860,6 +2903,248 @@ impl Runner {
         })
     }
 
+    async fn settle_provider_usage(
+        &mut self,
+        turn: u32,
+        usage: &crate::provider_adapter::http::TokenUsage,
+        usd: f64,
+        elapsed_ms: u64,
+    ) -> anyhow::Result<()> {
+        let (input_tokens, output_tokens) = usage
+            .complete_token_counts()
+            .ok_or_else(|| anyhow::anyhow!("provider token usage is incomplete"))?;
+        let turn_cost = RuntimeCost {
+            input_tokens,
+            output_tokens,
+            total_usd: usd,
+            basis: None,
+        };
+        let mut proposed_cost = self.budget.cost();
+        proposed_cost
+            .checked_accumulate(&turn_cost)
+            .map_err(|error| {
+                anyhow::anyhow!("provider usage violates accounting bounds: {error}")
+            })?;
+        self.harness
+            .tokens_used()
+            .checked_add(input_tokens)
+            .and_then(|tokens| tokens.checked_add(output_tokens))
+            .ok_or_else(|| anyhow::anyhow!("provider usage exceeds the directive token counter"))?;
+
+        let proposed_usage = ryeos_state::ThreadUsage {
+            completed_turns: self.harness.turns_used(),
+            input_tokens: proposed_cost.input_tokens,
+            output_tokens: proposed_cost.output_tokens,
+            spend_usd: proposed_cost.total_usd,
+            spawns_used: self.harness.spawns_used(),
+            started_at: lillux::time::iso8601_now(),
+            settled_at: lillux::time::iso8601_now(),
+            last_settled_turn_seq: turn as u64,
+            elapsed_ms,
+            provider_id: Some(self.provider_id.clone()),
+            model: Some(self.model_name.clone()),
+            profile: self.matched_profile.clone(),
+        };
+
+        self.emit_thread_usage_idempotent(&proposed_usage).await?;
+
+        self.harness
+            .record_tokens(input_tokens, output_tokens)
+            .expect("provider token usage was prevalidated");
+        self.harness
+            .record_spend(usd)
+            .expect("provider spend was prevalidated");
+        self.budget
+            .report(input_tokens, output_tokens, usd)
+            .expect("provider budget usage was prevalidated");
+        Ok(())
+    }
+
+    /// Persist one provider-attempt accounting transition. If the callback ACK
+    /// is lost after the daemon commits the event, replay proves the exact
+    /// payload before the runner changes lifecycle state or issues a request.
+    async fn persist_provider_attempt_accounting(
+        &self,
+        payload: Value,
+    ) -> Result<(), ProviderAttemptAccountingPersistenceError> {
+        match self
+            .callback
+            .append_runtime_event(RuntimeEventType::ProviderAttemptAccounting, payload.clone())
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(append_error) => {
+                let replay = self
+                    .callback
+                    .replay_thread(&self.thread_id)
+                    .await
+                    .map_err(|replay_error| {
+                        ProviderAttemptAccountingPersistenceError(format!(
+                            "provider attempt accounting append failed: {append_error}; ACK recovery replay also failed: {replay_error}"
+                        ))
+                    })?;
+                if replay.events.iter().rev().any(|event| {
+                    event.event_type == RuntimeEventType::ProviderAttemptAccounting.as_str()
+                        && event.payload == payload
+                }) {
+                    tracing::warn!(
+                        thread_id = %self.thread_id,
+                        "provider attempt accounting ACK was lost; exact persisted payload recovered by replay"
+                    );
+                    Ok(())
+                } else {
+                    Err(ProviderAttemptAccountingPersistenceError(format!(
+                        "provider attempt accounting append failed: {append_error}; replay did not contain the exact transition"
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Persist and acknowledge the terminal state for the one active attempt.
+    /// The lifecycle remains active if persistence/replay fails, preventing a
+    /// subsequent attempt from being admitted against an unresolved predecessor.
+    async fn close_active_provider_attempt_accounting(
+        &self,
+        lifecycle: &mut AttemptAccountingLifecycle,
+        mut payload: Value,
+    ) -> anyhow::Result<()> {
+        let attempt_id = lifecycle.active_for_close().map_err(anyhow::Error::msg)?;
+        let object = payload.as_object_mut().ok_or_else(|| {
+            anyhow::anyhow!("provider attempt accounting terminal payload must be an object")
+        })?;
+        if let Some(reported_id) = object.get("attempt_id") {
+            if reported_id.as_str() != Some(attempt_id.as_str()) {
+                anyhow::bail!(
+                    "provider attempt accounting terminal payload ID contradicts active attempt `{attempt_id}`"
+                );
+            }
+        } else {
+            object.insert("attempt_id".to_string(), Value::String(attempt_id.clone()));
+        }
+        let payload = lifecycle
+            .bind_closing_payload(payload)
+            .map_err(anyhow::Error::msg)?;
+        self.persist_provider_attempt_accounting(payload)
+            .await
+            .map_err(anyhow::Error::new)?;
+        lifecycle
+            .ack_closed(&attempt_id)
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// Settle every independently trustworthy part of a provider attempt.
+    /// Complete, structurally valid token usage is settled with its cost;
+    /// otherwise a valid signed reported charge is settled without inventing a
+    /// token tuple. `Ok(false)` means accounting was explicitly unavailable.
+    async fn settle_available_attempt_accounting(
+        &mut self,
+        turn: u32,
+        usage: Option<&crate::provider_adapter::http::TokenUsage>,
+        elapsed_ms: u64,
+    ) -> anyhow::Result<bool> {
+        let Some(usage) = usage else {
+            return Ok(false);
+        };
+        if usage.is_valid() {
+            let cost = self.compute_cost_for_usage(Some(usage));
+            self.settle_provider_usage(turn, usage, cost.usd, elapsed_ms)
+                .await?;
+            return Ok(true);
+        }
+        if let Some(reported_cost_usd) = usage.reported_cost_usd {
+            self.settle_provider_spend_only(turn, reported_cost_usd, elapsed_ms)
+                .await?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Preserve a structurally valid provider-reported charge even when token
+    /// fields are independently malformed. No synthetic zero token tuple is
+    /// created; the existing token totals remain unchanged.
+    async fn settle_provider_spend_only(
+        &mut self,
+        turn: u32,
+        usd: f64,
+        elapsed_ms: u64,
+    ) -> anyhow::Result<()> {
+        let mut proposed_cost = self.budget.cost();
+        proposed_cost
+            .checked_accumulate(&RuntimeCost {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_usd: usd,
+                basis: Some("provider_reported_spend_only".to_string()),
+            })
+            .map_err(|error| {
+                anyhow::anyhow!("provider spend violates accounting bounds: {error}")
+            })?;
+        let proposed_usage = ryeos_state::ThreadUsage {
+            completed_turns: self.harness.turns_used(),
+            input_tokens: proposed_cost.input_tokens,
+            output_tokens: proposed_cost.output_tokens,
+            spend_usd: proposed_cost.total_usd,
+            spawns_used: self.harness.spawns_used(),
+            started_at: lillux::time::iso8601_now(),
+            settled_at: lillux::time::iso8601_now(),
+            last_settled_turn_seq: turn as u64,
+            elapsed_ms,
+            provider_id: Some(self.provider_id.clone()),
+            model: Some(self.model_name.clone()),
+            profile: self.matched_profile.clone(),
+        };
+        self.emit_thread_usage_idempotent(&proposed_usage).await?;
+        self.harness
+            .record_spend(usd)
+            .expect("provider spend was prevalidated");
+        self.budget
+            .report(0, 0, usd)
+            .expect("provider spend was prevalidated");
+        Ok(())
+    }
+
+    /// Resolve callback-ACK ambiguity without double-settling. If the append
+    /// response is lost after the daemon persisted the exact cumulative usage,
+    /// replay proves the event exists and local counters may safely commit.
+    async fn emit_thread_usage_idempotent(
+        &self,
+        usage: &ryeos_state::ThreadUsage,
+    ) -> anyhow::Result<()> {
+        let expected = serde_json::to_value(usage)
+            .map_err(|error| anyhow::anyhow!("serialize thread usage for ACK recovery: {error}"))?;
+        match self.callback.emit_thread_usage(usage).await {
+            Ok(()) => Ok(()),
+            Err(append_error) => {
+                let replay =
+                    self.callback
+                        .replay_thread(&self.thread_id)
+                        .await
+                        .map_err(|replay_error| {
+                            anyhow::anyhow!(
+                            "resume-critical callback emit_thread_usage failed: {append_error}; \
+                             ACK recovery replay also failed: {replay_error}"
+                        )
+                        })?;
+                if replay.events.iter().rev().any(|event| {
+                    event.event_type == RuntimeEventType::ThreadUsage.as_str()
+                        && event.payload == expected
+                }) {
+                    tracing::warn!(
+                        thread_id = %self.thread_id,
+                        "thread_usage append ACK was lost; exact persisted payload recovered by replay"
+                    );
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "resume-critical callback emit_thread_usage failed: {append_error}; \
+                         replay did not contain the exact proposed settlement"
+                    ))
+                }
+            }
+        }
+    }
+
     fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> CostBreakdown {
         let Some(ref pricing) = self.provider_config.pricing else {
             return CostBreakdown {
@@ -1867,12 +3152,24 @@ impl Runner {
                 source: PricingSource::Unpriced,
             };
         };
+        if pricing.explicitly_free {
+            return CostBreakdown {
+                usd: 0.0,
+                source: PricingSource::ExplicitlyFree,
+            };
+        }
         // Distinguish a per-model entry from the provider-default fallback so
         // the caller can flag the (otherwise silent) fallback exactly once.
         let (rates, source) = if let Some(p) = pricing.models.get(&self.model_name) {
             (p.clone(), PricingSource::PerModel)
         } else {
             match (pricing.input_per_million, pricing.output_per_million) {
+                (Some(0.0), Some(0.0)) => {
+                    return CostBreakdown {
+                        usd: 0.0,
+                        source: PricingSource::Unpriced,
+                    }
+                }
                 (Some(i), Some(o)) => (
                     ryeos_directive_core::ModelPricing {
                         input_per_million: i,
@@ -1894,6 +3191,30 @@ impl Runner {
             usd: input_cost + output_cost,
             source,
         }
+    }
+
+    fn compute_cost_for_usage(
+        &self,
+        usage: Option<&crate::provider_adapter::http::TokenUsage>,
+    ) -> CostBreakdown {
+        let (input_tokens, output_tokens) = usage
+            .and_then(|usage| usage.complete_token_counts())
+            .unwrap_or((0, 0));
+        if let Some(reported) = usage.and_then(|usage| usage.reported_cost_usd) {
+            if reported.is_finite() && reported >= 0.0 {
+                return CostBreakdown {
+                    usd: reported,
+                    source: if reported == 0.0
+                        && usage.is_some_and(|usage| usage.is_byok == Some(true))
+                    {
+                        PricingSource::ByokUntracked
+                    } else {
+                        PricingSource::ProviderReported
+                    },
+                };
+            }
+        }
+        self.compute_cost(input_tokens, output_tokens)
     }
 
     /// Drain the run-loop's accumulated warnings into a finished
@@ -1933,6 +3254,70 @@ impl Runner {
     }
 }
 
+fn runtime_failure_payload(
+    error: &str,
+    thread_id: &str,
+    turn: u32,
+    attempt_id: Option<&str>,
+) -> Value {
+    const SUMMARY_CHARS: usize = 4_096;
+    const TRUNCATION_SUFFIX: &str = "… [truncated; see diagnostic locator]";
+    let code = error
+        .split_once(':')
+        .map(|(prefix, _)| prefix)
+        .filter(|prefix| {
+            !prefix.is_empty()
+                && prefix.len() <= 64
+                && prefix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_' || byte.is_ascii_digit())
+        })
+        .unwrap_or("directive_failed")
+        .to_string();
+    let sanitized = error
+        .chars()
+        .map(|character| {
+            if character.is_control() && !matches!(character, '\n' | '\r' | '\t') {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    let sanitized = if sanitized.is_empty() {
+        "directive failed without an error message".to_string()
+    } else {
+        sanitized
+    };
+    let summary = if sanitized.chars().count() <= SUMMARY_CHARS {
+        sanitized
+    } else {
+        let prefix_chars = SUMMARY_CHARS.saturating_sub(TRUNCATION_SUFFIX.chars().count());
+        format!(
+            "{}{}",
+            sanitized.chars().take(prefix_chars).collect::<String>(),
+            TRUNCATION_SUFFIX,
+        )
+    };
+    let failure = ryeos_runtime::RuntimeFailure {
+        kind: ryeos_runtime::RUNTIME_FAILURE_KIND.to_string(),
+        version: 1,
+        code,
+        summary,
+        diagnostic_locator: ryeos_runtime::RuntimeFailureDiagnosticLocator {
+            thread_id: thread_id.to_string(),
+            turn: Some(turn),
+            attempt_id: attempt_id.map(str::to_string),
+            event_type: "thread_failed".to_string(),
+        },
+        retryable: false,
+    };
+    failure
+        .validate()
+        .expect("runtime-created failure DTO must satisfy its shared contract");
+    serde_json::to_value(failure).expect("runtime failure DTO must serialize")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1942,6 +3327,43 @@ mod tests {
     use ryeos_runtime::callback_client::CallbackClient;
     use ryeos_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
     use std::path::PathBuf;
+
+    #[test]
+    fn attempt_accounting_lifecycle_requires_ack_before_reuse() {
+        let mut lifecycle = AttemptAccountingLifecycle::default();
+        lifecycle
+            .admit_after_pending_ack("T-test:1:1".to_string())
+            .unwrap();
+        let first = lifecycle.active_for_close().unwrap();
+        let first_payload = json!({"attempt_id": &first, "state": "reported"});
+        lifecycle
+            .bind_closing_payload(first_payload.clone())
+            .unwrap();
+
+        // Preparing or failing to persist a closure does not clear the active
+        // attempt, and a second request cannot be admitted over it.
+        assert_eq!(lifecycle.active_for_close().unwrap(), first);
+        assert_eq!(
+            lifecycle.bind_closing_payload(first_payload).unwrap(),
+            lifecycle.closing_payload().unwrap().clone()
+        );
+        assert!(lifecycle
+            .bind_closing_payload(json!({"attempt_id": &first, "state": "different"}))
+            .is_err());
+        assert!(lifecycle
+            .admit_after_pending_ack("T-test:1:2".to_string())
+            .is_err());
+
+        lifecycle.ack_closed(&first).unwrap();
+        assert!(lifecycle.ack_closed(&first).is_err());
+        lifecycle
+            .admit_after_pending_ack("T-test:1:2".to_string())
+            .unwrap();
+        let second = lifecycle.active_for_close().unwrap();
+        assert_ne!(first, second);
+        lifecycle.ack_closed(&second).unwrap();
+        assert_eq!(lifecycle.last(), Some("T-test:1:2"));
+    }
 
     fn make_callback_env() -> EnvelopeCallback {
         EnvelopeCallback {
@@ -1962,6 +3384,43 @@ mod tests {
     }
 
     #[test]
+    fn runtime_failure_payload_is_versioned_and_locates_lossless_child_error() {
+        let value = runtime_failure_payload(
+            "provider_accounting_invalid: malformed usage",
+            "T-child",
+            15,
+            Some("T-child:15:2"),
+        );
+        let failure: ryeos_runtime::RuntimeFailure = serde_json::from_value(value).unwrap();
+        assert_eq!(failure.version, 1);
+        assert_eq!(failure.code, "provider_accounting_invalid");
+        assert_eq!(failure.diagnostic_locator.thread_id, "T-child");
+        assert_eq!(failure.diagnostic_locator.turn, Some(15));
+        assert_eq!(
+            failure.diagnostic_locator.attempt_id.as_deref(),
+            Some("T-child:15:2")
+        );
+        assert_eq!(failure.diagnostic_locator.event_type, "thread_failed");
+        assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn runtime_failure_payload_normalizes_empty_and_oversized_codes() {
+        let empty: ryeos_runtime::RuntimeFailure =
+            serde_json::from_value(runtime_failure_payload("", "T-child", 1, None)).unwrap();
+        assert_eq!(empty.code, "directive_failed");
+        assert!(!empty.summary.is_empty());
+
+        let oversized_prefix = "a".repeat(65);
+        let oversized: ryeos_runtime::RuntimeFailure = serde_json::from_value(
+            runtime_failure_payload(&format!("{oversized_prefix}: boom"), "T-child", 1, None),
+        )
+        .unwrap();
+        assert_eq!(oversized.code, "directive_failed");
+        assert!(oversized.validate().is_ok());
+    }
+
+    #[test]
     fn compute_cost_with_pricing() {
         let provider = crate::directive::ProviderConfig {
             category: None,
@@ -1971,6 +3430,7 @@ mod tests {
             headers: Default::default(),
             schemas: None,
             pricing: Some(PricingConfig {
+                explicitly_free: false,
                 input_per_million: Some(3.0),
                 output_per_million: Some(15.0),
                 models: Default::default(),
@@ -2012,6 +3472,16 @@ mod tests {
         let cost = runner.compute_cost(1_000_000, 500_000);
         assert!((cost.usd - 10.5).abs() < f64::EPSILON);
         assert_eq!(cost.source, PricingSource::ProviderDefault);
+
+        let usage = crate::provider_adapter::http::TokenUsage {
+            input_tokens: Some(1_000_000),
+            output_tokens: Some(500_000),
+            reported_cost_usd: Some(7.25),
+            ..Default::default()
+        };
+        let reported = runner.compute_cost_for_usage(Some(&usage));
+        assert_eq!(reported.usd, 7.25);
+        assert_eq!(reported.source, PricingSource::ProviderReported);
     }
 
     #[test]
@@ -2421,6 +3891,7 @@ mod tests {
             headers: Default::default(),
             schemas: None,
             pricing: Some(PricingConfig {
+                explicitly_free: false,
                 input_per_million: Some(0.0), // would yield $0 if used
                 output_per_million: Some(0.0),
                 models,
@@ -2431,7 +3902,7 @@ mod tests {
             profiles: vec![],
         };
 
-        let runner = Runner::new(RunnerConfig {
+        let mut runner = Runner::new(RunnerConfig {
             messages: vec![],
             tools: vec![],
             system_prompt: None,
@@ -2466,6 +3937,15 @@ mod tests {
             cost.usd
         );
         assert_eq!(cost.source, PricingSource::PerModel);
+
+        runner.model_name = "missing-paid-model".to_string();
+        let missing = runner.compute_cost(1_000_000, 1_000_000);
+        assert_eq!(missing.usd, 0.0);
+        assert_eq!(
+            missing.source,
+            PricingSource::Unpriced,
+            "zero provider defaults are an untracked sentinel, not free pricing"
+        );
     }
 
     #[test]
@@ -2478,6 +3958,7 @@ mod tests {
             headers: Default::default(),
             schemas: None,
             pricing: Some(PricingConfig {
+                explicitly_free: false,
                 input_per_million: Some(1.0),
                 output_per_million: Some(5.0),
                 models: Default::default(),
@@ -2588,6 +4069,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn provider_length_finish_is_distinct_and_fail_closed() {
+        assert_eq!(
+            crate::directive::normalize_finish_reason(Some("length")),
+            FinishReason::Length
+        );
+    }
+
     fn status_err(code: u16) -> anyhow::Error {
         anyhow::Error::new(crate::provider_adapter::ProviderStreamError::Status {
             code,
@@ -2675,7 +4164,7 @@ mod tests {
     fn retry_backoff_never_retries_unclassified_errors() {
         // Only errors the adapter classified as transient (a typed
         // `ProviderStreamError`) are retryable. Anything unclassified — invalid
-        // bytes, a persistence-first append failure, parse defects — fails the
+        // bytes, a live callback publication failure, parse defects — fails the
         // turn immediately.
         let cfg = retry_cfg();
         let e = anyhow::anyhow!("non-utf8 SSE chunk: invalid byte sequence");
@@ -2689,7 +4178,13 @@ mod tests {
         // default under the shared budget, and disabled by the knob.
         let mid_stream = || {
             anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream {
-                persisted_out_events: 42,
+                live_output_events_emitted: 42,
+                accepted_bytes: 128,
+                accepted_output_events: 3,
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                requested_output_tokens: Some(32_768),
                 detail: "stream chunk error: operation timed out".into(),
             })
         };

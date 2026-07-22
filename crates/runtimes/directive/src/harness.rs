@@ -141,6 +141,50 @@ impl Harness {
         Ok(())
     }
 
+    /// Re-check resources before re-issuing the same logical turn. The turn was
+    /// counted once before the first attempt, so retry admission must not apply
+    /// the turn limit a second time; every other mutable/runaway resource still
+    /// applies, especially token/spend totals settled from the prior attempt.
+    pub fn check_retry_limits(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err("cancelled".to_string());
+        }
+        if self.limits.tokens > 0 && self.tokens_used >= self.limits.tokens {
+            return Err(format!(
+                "token limit exceeded before retry: {} >= {}",
+                self.tokens_used, self.limits.tokens
+            ));
+        }
+        if self.limits.spend_usd > 0.0 && self.spend_used >= self.limits.spend_usd {
+            return Err(format!(
+                "spend limit exceeded before retry: ${:.4} >= ${:.4}",
+                self.spend_used, self.limits.spend_usd
+            ));
+        }
+        if self.limits.duration_seconds > 0 {
+            let elapsed = self.start.elapsed().as_secs();
+            if elapsed >= self.limits.duration_seconds {
+                return Err(format!(
+                    "duration limit exceeded before retry: {}s >= {}s",
+                    elapsed, self.limits.duration_seconds
+                ));
+            }
+        }
+        if self.limits.spawns > 0 && self.spawns_used >= self.limits.spawns {
+            return Err(format!(
+                "spawn limit exceeded before retry: {} >= {}",
+                self.spawns_used, self.limits.spawns
+            ));
+        }
+        if self.limits.depth > 0 && self.depth >= self.limits.depth {
+            return Err(format!(
+                "depth limit exceeded before retry: {} >= {}",
+                self.depth, self.limits.depth
+            ));
+        }
+        Ok(())
+    }
+
     pub fn record_turn(&mut self) {
         self.turns_used += 1;
     }
@@ -215,6 +259,18 @@ impl Harness {
 
     pub fn spend_used(&self) -> f64 {
         self.spend_used
+    }
+
+    pub fn token_limit(&self) -> Option<u64> {
+        (self.limits.tokens > 0).then_some(self.limits.tokens)
+    }
+
+    pub fn spend_limit_usd(&self) -> Option<f64> {
+        (self.limits.spend_usd > 0.0).then_some(self.limits.spend_usd)
+    }
+
+    pub fn has_finite_accounting_budget(&self) -> bool {
+        self.token_limit().is_some() || self.spend_limit_usd().is_some()
     }
 
     pub fn spawns_used(&self) -> u32 {
@@ -370,6 +426,32 @@ mod tests {
         harness.record_turn();
         harness.record_turn();
         assert!(harness.check_limits().is_err());
+    }
+
+    #[test]
+    fn retry_limits_ignore_counted_turn_but_enforce_settled_tokens() {
+        let mut harness = make_harness(
+            HardLimits {
+                turns: 1,
+                tokens: 10,
+                ..HardLimits::default()
+            },
+            vec![],
+        );
+        harness.record_turn();
+        assert!(
+            harness.check_limits().is_err(),
+            "logical turn is already counted"
+        );
+        assert!(
+            harness.check_retry_limits().is_ok(),
+            "same-turn retry must not consume a second turn"
+        );
+        harness.record_tokens(6, 4).unwrap();
+        assert!(harness
+            .check_retry_limits()
+            .unwrap_err()
+            .contains("token limit"));
     }
 
     #[test]

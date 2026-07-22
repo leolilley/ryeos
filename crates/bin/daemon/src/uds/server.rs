@@ -813,6 +813,7 @@ fn handle_finalize(
     // outputs, warnings) BEFORE `completion` moves result/error, so a followed
     // child's structured return survives to the parent's resume.
     let managed_envelope = ryeos_app::thread_lifecycle::managed_runtime_envelope(
+        &params.thread_id,
         params.status.as_str(),
         params.result.as_ref(),
         params.error.as_ref(),
@@ -2359,6 +2360,7 @@ mod tests {
                 "P",
                 &RuntimeLaunchMetadata::default()
                     .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+                    .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
                     .with_resume_context(ResumeContext {
                         kind: "graph".into(),
                         item_ref: "graph:test/graph".into(),
@@ -2565,30 +2567,56 @@ mod tests {
     #[tokio::test]
     async fn reconcile_follow_collects_ready_and_resuming_not_waiting() {
         let (_tmp, state) = setup_app_state();
-        for child in ["CW", "CR", "CX"] {
+        for child in ["T-CW", "T-CR", "T-CX"] {
             state
                 .threads
                 .create_thread_for_test(&make_create_params(child, child))
                 .unwrap();
         }
-        state.threads.mark_running("CW").unwrap();
+        state.threads.mark_running("T-CW").unwrap();
         // A still-waiting waiter: its child chain has not been recorded terminal, so
         // the parent resume is not yet drivable — no intent. (Distinct successors:
         // parent_successor_thread_id is UNIQUE.)
-        arm_waiting_follow_succ(&state, "wk-waiting", "CW", "S-w");
+        arm_waiting_follow_succ(&state, "wk-waiting", "T-CW", "S-w");
         // A waiter whose child chain reached terminal (flipped `waiting → ready`):
         // the parent resume IS drivable — one intent.
-        arm_waiting_follow_succ(&state, "wk-ready", "CR", "S-r");
+        arm_waiting_follow_succ(&state, "wk-ready", "T-CR", "S-r");
         state
             .state_store
-            .mark_follow_child_terminal("CR", "CR", "completed", &json!({"success": true}))
+            .mark_follow_child_terminal(
+                "T-CR",
+                "T-CR",
+                "completed",
+                &json!({
+                    "success": true,
+                    "child_thread_id": "T-CR",
+                    "status": "completed",
+                    "result": null,
+                    "outputs": null,
+                    "warnings": [],
+                    "cost": null,
+                }),
+            )
             .unwrap();
         // A waiter whose resume was interrupted mid-flight (`resuming`) — re-driven,
         // so it too must be collected.
-        arm_waiting_follow_succ(&state, "wk-resuming", "CX", "S-x");
+        arm_waiting_follow_succ(&state, "wk-resuming", "T-CX", "S-x");
         state
             .state_store
-            .mark_follow_child_terminal("CX", "CX", "completed", &json!({"success": true}))
+            .mark_follow_child_terminal(
+                "T-CX",
+                "T-CX",
+                "completed",
+                &json!({
+                    "success": true,
+                    "child_thread_id": "T-CX",
+                    "status": "completed",
+                    "result": null,
+                    "outputs": null,
+                    "warnings": [],
+                    "cost": null,
+                }),
+            )
             .unwrap();
         state
             .state_store
@@ -2726,20 +2754,20 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Cnr", "Cnr"))
+            .create_thread_for_test(&make_create_params("T-Cnr", "T-Cnr"))
             .unwrap();
-        state.threads.mark_running("Cnr").unwrap();
-        arm_waiting_follow(&state, "wk-nr", "Cnr");
+        state.threads.mark_running("T-Cnr").unwrap();
+        arm_waiting_follow(&state, "wk-nr", "T-Cnr");
         assert!(matches!(
             state
                 .state_store
-                .claim_thread_launch("Cnr", "claim-nr", "test-generation")
+                .claim_thread_launch("T-Cnr", "claim-nr", "test-generation")
                 .unwrap(),
             ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
         ));
         let launch_owner = state
             .state_store
-            .get_launch_claim("Cnr")
+            .get_launch_claim("T-Cnr")
             .unwrap()
             .map(|claim| {
                 lillux::canonical_json(&serde_json::to_value(claim.owner).unwrap()).unwrap()
@@ -2748,8 +2776,8 @@ mod tests {
 
         ryeos_executor::execution::launch::finalize_failed_and_kick_follow(
             &state,
-            "Cnr",
-            "Cnr",
+            "T-Cnr",
+            "T-Cnr",
             &launch_owner,
             json!({ "error": "resume rebuild failed" }),
         )
@@ -2779,18 +2807,18 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Ssucc", "Ssucc"))
+            .create_thread_for_test(&make_create_params("T-Ssucc", "T-Ssucc"))
             .unwrap();
         // Exhaust the per-successor auto-launch budget.
         for _ in 0..ryeos_app::thread_lifecycle::MAX_CONTINUATION_AUTO_ATTEMPTS {
-            state.state_store.bump_resume_attempts("Ssucc").unwrap();
+            state.state_store.bump_resume_attempts("T-Ssucc").unwrap();
         }
         // A parent follow waiter awaits this successor's chain.
-        arm_waiting_follow(&state, "wk-succ", "Ssucc");
+        arm_waiting_follow(&state, "wk-succ", "T-Ssucc");
 
         use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
         let reason =
-            match ryeos_executor::execution::launch::launch_successor(state.clone(), "Ssucc")
+            match ryeos_executor::execution::launch::launch_successor(state.clone(), "T-Ssucc")
                 .await
                 .unwrap()
             {
@@ -2821,15 +2849,15 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Cterm", "Cterm"))
+            .create_thread_for_test(&make_create_params("T-Cterm", "T-Cterm"))
             .unwrap();
-        state.threads.mark_running("Cterm").unwrap();
+        state.threads.mark_running("T-Cterm").unwrap();
         // RAW state-store finalize bypasses record_follow_child_terminal, leaving the
         // waiter `waiting` — exactly the crash window.
         state
             .state_store
             .finalize_thread(
-                "Cterm",
+                "T-Cterm",
                 &ryeos_app::state_store::FinalizeThreadRecord {
                     status: "completed".to_string(),
                     outcome_code: Some("success".to_string()),
@@ -2842,7 +2870,7 @@ mod tests {
                 },
             )
             .unwrap();
-        arm_waiting_follow(&state, "wk-term", "Cterm");
+        arm_waiting_follow(&state, "wk-term", "T-Cterm");
         assert_eq!(
             state
                 .state_store
@@ -2907,12 +2935,12 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Ccancel", "Ccancel"))
+            .create_thread_for_test(&make_create_params("T-Ccancel", "T-Ccancel"))
             .unwrap();
-        state.threads.mark_running("Ccancel").unwrap();
-        arm_waiting_follow(&state, "wk-cancel", "Ccancel");
+        state.threads.mark_running("T-Ccancel").unwrap();
+        arm_waiting_follow(&state, "wk-cancel", "T-Ccancel");
         // What threads/cancel does to the child: finalize it `cancelled`.
-        finalize_child(&state, "Ccancel", "cancelled", None);
+        finalize_child(&state, "T-Ccancel", "cancelled", None);
 
         let waiter = state
             .state_store
@@ -3118,10 +3146,23 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         // "S" is a real marked follow-resume successor of "P", advanced to running.
         seed_marked_follow_successor(&state);
-        arm_waiting_follow(&state, "wk-held", "C");
+        arm_waiting_follow(&state, "wk-held", "T-C");
         state
             .state_store
-            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .mark_follow_child_terminal(
+                "T-C",
+                "T-C",
+                "completed",
+                &json!({
+                    "success": true,
+                    "child_thread_id": "T-C",
+                    "status": "completed",
+                    "result": null,
+                    "outputs": null,
+                    "warnings": [],
+                    "cost": null,
+                }),
+            )
             .unwrap();
         state.state_store.mark_follow_resuming("wk-held").unwrap();
         // Someone else holds the launch claim on "S".
@@ -3163,10 +3204,23 @@ mod tests {
             .create_thread_for_test(&make_create_params("S", "S"))
             .unwrap();
         state.threads.mark_running("S").unwrap();
-        arm_waiting_follow(&state, "wk-unmarked", "C");
+        arm_waiting_follow(&state, "wk-unmarked", "T-C");
         state
             .state_store
-            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .mark_follow_child_terminal(
+                "T-C",
+                "T-C",
+                "completed",
+                &json!({
+                    "success": true,
+                    "child_thread_id": "T-C",
+                    "status": "completed",
+                    "result": null,
+                    "outputs": null,
+                    "warnings": [],
+                    "cost": null,
+                }),
+            )
             .unwrap();
         state
             .state_store
@@ -3229,10 +3283,23 @@ mod tests {
                 captured_history_policy: params.captured_history_policy,
             })
             .unwrap();
-        arm_waiting_follow(&state, "wk-nomarker", "C");
+        arm_waiting_follow(&state, "wk-nomarker", "T-C");
         state
             .state_store
-            .mark_follow_child_terminal("C", "C", "completed", &json!({"success": true}))
+            .mark_follow_child_terminal(
+                "T-C",
+                "T-C",
+                "completed",
+                &json!({
+                    "success": true,
+                    "child_thread_id": "T-C",
+                    "status": "completed",
+                    "result": null,
+                    "outputs": null,
+                    "warnings": [],
+                    "cost": null,
+                }),
+            )
             .unwrap();
 
         use ryeos_executor::execution::launch::SuccessorLaunchOutcome;
@@ -3265,15 +3332,15 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("T-C", "T-C"))
             .unwrap();
-        state.threads.mark_running("C").unwrap();
-        arm_waiting_follow(&state, "wk-degraded", "C");
+        state.threads.mark_running("T-C").unwrap();
+        arm_waiting_follow(&state, "wk-degraded", "T-C");
 
         // The generic finalize path carries NO canonical envelope. A follow waiter
         // consuming it gets a visible in-band FAILURE, not a silent empty success —
         // so the parent resumes into its on_error path.
-        finalize_child(&state, "C", "completed", Some(json!({ "answer": 42 })));
+        finalize_child(&state, "T-C", "completed", Some(json!({ "answer": 42 })));
 
         let w = state
             .state_store
@@ -3299,15 +3366,16 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("T-C", "T-C"))
             .unwrap();
-        state.threads.mark_running("C").unwrap();
-        arm_waiting_follow(&state, "wk-mgd", "C");
+        state.threads.mark_running("T-C").unwrap();
+        arm_waiting_follow(&state, "wk-mgd", "T-C");
 
         // The executor-fallback path carries the canonical envelope: outputs +
         // warnings survive to the follow waiter as a success.
         let envelope = json!({
             "success": true,
+            "child_thread_id": "T-C",
             "status": "completed",
             "result": "directive_return",
             "outputs": { "recommendations": ["x"] },
@@ -3318,7 +3386,7 @@ mod tests {
             .threads
             .finalize_thread_with_managed_envelope(
                 &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                    thread_id: "C".to_string(),
+                    thread_id: "T-C".to_string(),
                     status: "completed".to_string(),
                     outcome_code: Some("success".to_string()),
                     result: Some(json!("directive_return")),
@@ -3351,6 +3419,7 @@ mod tests {
             .as_ref()
             .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
+        assert_eq!(env["child_thread_id"], json!("T-C"));
         assert_eq!(env["outputs"]["recommendations"], json!(["x"]));
         assert_eq!(env["warnings"], json!(["w1"]));
     }
@@ -3360,14 +3429,14 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("T-C", "T-C"))
             .unwrap();
-        state.threads.mark_running("C").unwrap();
-        arm_waiting_follow(&state, "wk-cont", "C");
+        state.threads.mark_running("T-C").unwrap();
+        arm_waiting_follow(&state, "wk-cont", "T-C");
 
         // A `continued` finalize is an intermediate link in the child's own chain,
         // not the terminal tail — the waiter stays `waiting`.
-        finalize_child(&state, "C", "continued", None);
+        finalize_child(&state, "T-C", "continued", None);
 
         let w = state
             .state_store
@@ -3383,17 +3452,17 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("C", "C"))
+            .create_thread_for_test(&make_create_params("T-C", "T-C"))
             .unwrap();
-        state.threads.mark_running("C").unwrap();
-        arm_waiting_follow(&state, "wk-out", "C");
+        state.threads.mark_running("T-C").unwrap();
+        arm_waiting_follow(&state, "wk-out", "T-C");
 
         // The child SELF-finalizes via the runtime callback wire (not the executor
         // fallback), carrying a `directive_return`-style result plus its structured
         // outputs + warnings.
         let cbt = generate_test_callback(
             &state,
-            "C",
+            "T-C",
             std::path::PathBuf::from("/proj"),
             std::time::Duration::from_secs(300),
             vec![],
@@ -3405,7 +3474,7 @@ mod tests {
                 "runtime.finalize_thread",
                 json!({
                     "callback_token": cbt.token,
-                    "thread_id": "C",
+                    "thread_id": "T-C",
                     "status": "completed",
                     "outcome_code": "success",
                     "result": "directive_return",
@@ -3433,6 +3502,7 @@ mod tests {
             .as_ref()
             .expect("canonical envelope stored");
         assert_eq!(env["success"], json!(true));
+        assert_eq!(env["child_thread_id"], json!("T-C"));
         assert_eq!(env["result"], json!("directive_return"));
         assert_eq!(env["outputs"]["recommendations"], json!(["a", "b"]));
         assert_eq!(env["warnings"], json!(["w1"]));

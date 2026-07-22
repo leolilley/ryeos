@@ -1107,6 +1107,9 @@ pub struct TtyStreamPresenter {
     thread_id: Option<String>,
     status: String,
     events: Vec<(String, String)>,
+    /// Bounded, separately retained child failures. Ordinary event churn must
+    /// not evict the original child error when a graph subsequently retries.
+    failure_diagnostics: Vec<(String, String)>,
     last_render: Option<std::time::Instant>,
 }
 
@@ -1127,6 +1130,7 @@ impl TtyStreamPresenter {
             thread_id: None,
             status: "opening stream".to_string(),
             events: Vec::new(),
+            failure_diagnostics: Vec::new(),
             last_render: None,
         };
         presenter.render()?;
@@ -1153,7 +1157,7 @@ impl TtyStreamPresenter {
                     .get("code")
                     .and_then(Value::as_str)
                     .unwrap_or("stream_error");
-                let msg = data.get("error").and_then(Value::as_str).unwrap_or("");
+                let msg = stream_failure_reason(&data, "stream_error");
                 let detail = format!("{code}: {msg}");
                 self.status = "error".to_string();
                 self.push_event("stream_error", &detail);
@@ -1175,7 +1179,12 @@ impl TtyStreamPresenter {
                     Ok(StreamOutcome::Failed(detail))
                 }
                 None => {
-                    self.push_event(event, &value_summary(inner));
+                    if let Some(detail) = graph_step_failure_detail(event, inner) {
+                        self.push_failure(event, &detail);
+                        self.push_event(event, "status=error; see retained failure diagnostic");
+                    } else {
+                        self.push_event(event, &value_summary(inner));
+                    }
                     self.render_if_due()?;
                     Ok(StreamOutcome::Continue)
                 }
@@ -1188,6 +1197,14 @@ impl TtyStreamPresenter {
         if self.events.len() > 10 {
             let excess = self.events.len() - 10;
             self.events.drain(0..excess);
+        }
+    }
+
+    fn push_failure(&mut self, event: &str, detail: &str) {
+        self.failure_diagnostics
+            .push((format!("{event} failure"), detail.to_string()));
+        if self.failure_diagnostics.len() > 4 {
+            self.failure_diagnostics.remove(0);
         }
     }
 
@@ -1213,6 +1230,9 @@ impl TtyStreamPresenter {
         for (event, detail) in &self.events {
             owned.push((event.clone(), detail.clone()));
         }
+        for (event, detail) in &self.failure_diagnostics {
+            owned.push((event.clone(), detail.clone()));
+        }
         let refs = owned
             .iter()
             .map(|(label, value)| (label.as_str(), value.as_str()))
@@ -1231,6 +1251,18 @@ impl TtyStreamPresenter {
         self.previous_lines = render_command_frame(&self.console, &lines, self.previous_lines)?;
         self.last_render = Some(std::time::Instant::now());
         Ok(())
+    }
+}
+
+fn graph_step_failure_detail(event: &str, payload: &Value) -> Option<String> {
+    let status = payload.get("status").and_then(Value::as_str);
+    if event != "graph_step_completed" || !matches!(status, Some("error" | "retry")) {
+        return None;
+    }
+    match payload.get("error") {
+        Some(Value::String(error)) if !error.is_empty() => Some(error.clone()),
+        Some(error) if !error.is_null() => Some(error.to_string()),
+        _ => None,
     }
 }
 
@@ -1509,6 +1541,18 @@ fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
         return error.to_string();
     }
     if let Some(error) = payload.get("error").filter(|value| !value.is_null()) {
+        if let Some(summary) = error.get("summary").and_then(Value::as_str) {
+            let thread_id = error
+                .get("diagnostic_locator")
+                .and_then(|locator| locator.get("thread_id"))
+                .and_then(Value::as_str);
+            return thread_id.map_or_else(
+                || summary.to_string(),
+                |thread_id| {
+                    format!("{summary}; full child diagnostic: `ryeos thread tail {thread_id}`")
+                },
+            );
+        }
         // Failure diagnostics are not a compact result projection. Preserve the
         // complete structured body so fields beyond the normal four-field TTY
         // summary remain available for diagnosis.
@@ -1706,6 +1750,39 @@ mod tests {
         assert!(reason.contains("pipeline_failed"));
         assert!(reason.contains("nested failure"));
         assert!(reason.contains(&tail));
+    }
+
+    #[test]
+    fn retry_step_and_structured_stream_error_keep_full_diagnostics() {
+        let tail = "diagnostic-tail-marker".repeat(24);
+        let retry = serde_json::json!({
+            "status": "retry",
+            "error": tail,
+        });
+        assert_eq!(
+            graph_step_failure_detail("graph_step_completed", &retry),
+            retry
+                .get("error")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        );
+
+        let structured = serde_json::json!({
+            "error": {
+                "kind": "runtime_failure",
+                "version": 1,
+                "code": "provider_protocol_error",
+                "summary": "full structured stream failure",
+                "diagnostic_locator": {
+                    "thread_id": "T-child",
+                    "event_type": "thread_failed"
+                },
+                "retryable": false
+            }
+        });
+        let reason = stream_failure_reason(&structured, "stream_error");
+        assert!(reason.contains("full structured stream failure"));
+        assert!(reason.contains("ryeos thread tail T-child"));
     }
 
     #[test]
