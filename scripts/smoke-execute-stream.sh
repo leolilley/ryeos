@@ -25,7 +25,10 @@ AUDIENCE=""
 ITEM_REF="directive:hello"
 PROJECT_PATH="."
 PARAMS_JSON='{}'
+REF_BINDINGS_JSON='{}'
+EXECUTION_POLICY_JSON='null'
 TIMEOUT=30
+REQUIRE_TERMINAL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,7 +38,10 @@ while [[ $# -gt 0 ]]; do
     --item-ref)     ITEM_REF="$2"; shift 2 ;;
     --project-path) PROJECT_PATH="$2"; shift 2 ;;
     --params-json)  PARAMS_JSON="$2"; shift 2 ;;
+    --ref-bindings-json) REF_BINDINGS_JSON="$2"; shift 2 ;;
+    --execution-policy-json) EXECUTION_POLICY_JSON="$2"; shift 2 ;;
     --timeout)      TIMEOUT="$2"; shift 2 ;;
+    --require-terminal) REQUIRE_TERMINAL="$2"; shift 2 ;;
     -h|--help)
       printf 'Usage: %s --url <url> --key-pem <pem> --audience <fp:...> [--item-ref <ref>] [--project-path <path>]\n' "$0"
       exit 0 ;;
@@ -53,7 +59,14 @@ BODY=$(jq -nc \
   --arg ref "$ITEM_REF" \
   --arg pp "$PROJECT_PATH" \
   --argjson p "$PARAMS_JSON" \
-  '{item_ref:$ref, project_path:$pp, parameters:$p}')
+  --argjson rb "$REF_BINDINGS_JSON" \
+  --argjson ep "$EXECUTION_POLICY_JSON" \
+  '{
+    item_ref: $ref,
+    ref_bindings: $rb,
+    project_path: $pp,
+    parameters: $p
+  } + if $ep == null then {} else {execution_policy: $ep} end')
 
 # 2. Compute signing inputs.
 TS=$(date +%s)
@@ -110,6 +123,21 @@ fi
 # 6. Assert we got at least one SSE frame.
 if ! grep -qE '^event:' "$TMP"; then
   ryeos_term_fail "no SSE event frames in response"
+  cat "$TMP" >&2
+  exit 1
+fi
+
+if [[ -n "$REQUIRE_TERMINAL" ]]; then
+  TERMINAL_COUNT=$(grep -Fxc "event: $REQUIRE_TERMINAL" "$TMP" || true)
+  if [[ "$TERMINAL_COUNT" != 1 ]]; then
+    ryeos_term_fail "expected exactly one '$REQUIRE_TERMINAL' terminal event; observed $TERMINAL_COUNT"
+    cat "$TMP" >&2
+    exit 1
+  fi
+fi
+
+if grep -Eq '^event: (thread_failed|stream_error)$|No child processes|child setup failed before publishing attachment readiness|ECHILD' "$TMP"; then
+  ryeos_term_fail "SSE stream contained a failure terminal or attachment failure"
   cat "$TMP" >&2
   exit 1
 fi

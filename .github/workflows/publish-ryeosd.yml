@@ -313,15 +313,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve immutable version tags
+      - name: Install cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+
+      - name: Resolve immutable and candidate image tags
         id: resolve-images
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
+          SOURCE_SHA: ${{ needs.qualify.outputs.source_sha }}
+          BUILD_DATE: ${{ needs.qualify.outputs.build_date }}
         run: |
-          resolve_image() {
-            local image="$1"
+          resolve_tag() {
+            local tag="$1"
             local output_prefix="$2"
-            local tag="ghcr.io/leolilley/${image}:${VERSION}"
             local error_file inspection digest
             error_file="$(mktemp)"
             if inspection="$(docker buildx imagetools inspect "$tag" 2>"$error_file")"; then
@@ -344,14 +348,34 @@ jobs:
             fi
             rm -f "$error_file"
           }
-          resolve_image ryeos-standard standard
-          resolve_image ryeos-central-host central
+          BUILD_DATE_KEY="$(printf '%s' "$BUILD_DATE" | sha256sum | cut -c1-12)"
+          CANDIDATE_SUFFIX="candidate-${VERSION}-${SOURCE_SHA}-${BUILD_DATE_KEY}"
+          STANDARD_VERSION="ghcr.io/leolilley/ryeos-standard:${VERSION}"
+          CENTRAL_VERSION="ghcr.io/leolilley/ryeos-central-host:${VERSION}"
+          STANDARD_CANDIDATE="ghcr.io/leolilley/ryeos-standard:${CANDIDATE_SUFFIX}"
+          CENTRAL_CANDIDATE="ghcr.io/leolilley/ryeos-central-host:${CANDIDATE_SUFFIX}"
+          echo "standard_candidate_tag=$STANDARD_CANDIDATE" >> "$GITHUB_OUTPUT"
+          echo "central_candidate_tag=$CENTRAL_CANDIDATE" >> "$GITHUB_OUTPUT"
+          resolve_tag "$STANDARD_VERSION" standard
+          resolve_tag "$CENTRAL_VERSION" central
+          if [[ "$(grep '^standard_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
+            resolve_tag "$STANDARD_CANDIDATE" standard_candidate
+          else
+            echo "standard_candidate_exists=false" >> "$GITHUB_OUTPUT"
+            echo "standard_candidate_digest=" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$(grep '^central_exists=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2)" != true ]]; then
+            resolve_tag "$CENTRAL_CANDIDATE" central_candidate
+          else
+            echo "central_candidate_exists=false" >> "$GITHUB_OUTPUT"
+            echo "central_candidate_digest=" >> "$GITHUB_OUTPUT"
+          fi
 
-      # Build only missing immutable tags; an existing tag remains canonical
-      # after its resolved digest passes the same checks below.
-      - name: Build and push attested immutable standard version
+      # Build once to a source/build-date-scoped candidate. Qualification and
+      # immutable promotion below operate on this exact pushed digest.
+      - name: Build and push attested standard candidate
         id: push-standard
-        if: steps.resolve-images.outputs.standard_exists != 'true'
+        if: steps.resolve-images.outputs.standard_exists != 'true' && steps.resolve-images.outputs.standard_candidate_exists != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -366,13 +390,13 @@ jobs:
           build-args: |
             VCS_REF=${{ needs.qualify.outputs.source_sha }}
             BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-          tags: ghcr.io/leolilley/ryeos-standard:${{ needs.qualify.outputs.version }}
+          tags: ${{ steps.resolve-images.outputs.standard_candidate_tag }}
           secrets: |
             "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
-      - name: Build and push attested immutable central-host version
+      - name: Build and push attested central-host candidate
         id: push-central-host
-        if: steps.resolve-images.outputs.central_exists != 'true'
+        if: steps.resolve-images.outputs.central_exists != 'true' && steps.resolve-images.outputs.central_candidate_exists != 'true'
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -387,24 +411,63 @@ jobs:
           build-args: |
             VCS_REF=${{ needs.qualify.outputs.source_sha }}
             BUILD_DATE=${{ needs.qualify.outputs.build_date }}
-          tags: ghcr.io/leolilley/ryeos-central-host:${{ needs.qualify.outputs.version }}
+          tags: ${{ steps.resolve-images.outputs.central_candidate_tag }}
           secrets: |
             "publisher-key=${{ secrets.RYEOS_PUBLISHER_KEY }}"
 
-      - name: Resolve qualified release digests
+      - name: Resolve candidate release digests
         id: release-digests
         env:
           EXISTING_STANDARD: ${{ steps.resolve-images.outputs.standard_digest }}
+          CANDIDATE_STANDARD: ${{ steps.resolve-images.outputs.standard_candidate_digest }}
           PUSHED_STANDARD: ${{ steps.push-standard.outputs.digest }}
           EXISTING_CENTRAL: ${{ steps.resolve-images.outputs.central_digest }}
+          CANDIDATE_CENTRAL: ${{ steps.resolve-images.outputs.central_candidate_digest }}
           PUSHED_CENTRAL: ${{ steps.push-central-host.outputs.digest }}
         run: |
-          STANDARD_DIGEST="${EXISTING_STANDARD:-$PUSHED_STANDARD}"
-          CENTRAL_DIGEST="${EXISTING_CENTRAL:-$PUSHED_CENTRAL}"
+          STANDARD_DIGEST="${EXISTING_STANDARD:-${CANDIDATE_STANDARD:-$PUSHED_STANDARD}}"
+          CENTRAL_DIGEST="${EXISTING_CENTRAL:-${CANDIDATE_CENTRAL:-$PUSHED_CENTRAL}}"
           [[ "$STANDARD_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$CENTRAL_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "standard=$STANDARD_DIGEST" >> "$GITHUB_OUTPUT"
           echo "central=$CENTRAL_DIGEST" >> "$GITHUB_OUTPUT"
+          [[ -z "$EXISTING_STANDARD" && -z "$CANDIDATE_STANDARD" ]] && STANDARD_CURRENT=true || STANDARD_CURRENT=false
+          [[ -z "$EXISTING_CENTRAL" && -z "$CANDIDATE_CENTRAL" ]] && CENTRAL_CURRENT=true || CENTRAL_CURRENT=false
+          echo "standard_current=$STANDARD_CURRENT" >> "$GITHUB_OUTPUT"
+          echo "central_current=$CENTRAL_CURRENT" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate recovered image digests before inspection
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          STANDARD_CURRENT: ${{ steps.release-digests.outputs.standard_current }}
+          CENTRAL_CURRENT: ${{ steps.release-digests.outputs.central_current }}
+          CURRENT_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          TAG_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/publish-ryeosd.yml@refs/tags/v${{ needs.qualify.outputs.version }}
+          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          authenticate_recovered() {
+            local image="$1"
+            local current="$2"
+            [[ "$current" != true ]] || return 0
+            if cosign verify \
+              --certificate-identity "$TAG_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$image" >/dev/null 2>&1; then
+              return 0
+            fi
+            if cosign verify \
+              --certificate-identity "$CURRENT_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$image" >/dev/null 2>&1; then
+              return 0
+            fi
+            echo "::error::Recovered image lacks an allowed workflow-identity signature: $image"
+            exit 1
+          }
+          authenticate_recovered "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}" "$STANDARD_CURRENT"
+          authenticate_recovered "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}" "$CENTRAL_CURRENT"
 
       - name: Verify release image provenance and SBOM attestations
         env:
@@ -428,85 +491,114 @@ jobs:
             jq -e 'type == "object" and length > 0' "$RUNNER_TEMP/${label}-sbom.json"
           done
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
-
-      - name: Resolve verified image signatures
-        id: image-signatures
-        env:
-          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
-          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
-          STANDARD_EXISTED: ${{ steps.resolve-images.outputs.standard_exists }}
-          CENTRAL_EXISTED: ${{ steps.resolve-images.outputs.central_exists }}
-          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
-          CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
-        run: |
-          signature_state() {
-            local label="$1"
-            local image="$2"
-            local existed="$3"
-            if cosign verify \
-              --certificate-identity "$CERTIFICATE_IDENTITY" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$image" >/dev/null 2>&1; then
-              echo "${label}=true" >> "$GITHUB_OUTPUT"
-            elif [[ "$existed" == true ]]; then
-              # Registry attestations are only authenticated after the image
-              # signature is verified. Never let a pre-positioned unsigned
-              # digest ask this trusted workflow to bless its own provenance.
-              echo "::error::Existing immutable image lacks the expected workflow signature: $image"
-              echo "::error::Treat this incomplete tag as quarantined; follow .ai/knowledge/ryeos/development/release-process.md#interrupted-release-recovery instead of signing or overwriting it."
-              exit 1
-            else
-              # This digest came directly from this run's successful push step;
-              # provenance and SBOM were validated above before signing.
-              echo "${label}=false" >> "$GITHUB_OUTPUT"
-            fi
-          }
-          signature_state standard \
-            "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}" \
-            "$STANDARD_EXISTED"
-          signature_state central \
-            "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}" \
-            "$CENTRAL_EXISTED"
-
       - name: Cosign sign newly pushed standard image
-        if: steps.image-signatures.outputs.standard != 'true' && steps.resolve-images.outputs.standard_exists != 'true'
+        if: steps.release-digests.outputs.standard_current == 'true'
         env:
           COSIGN_EXPERIMENTAL: "true"
           DIGEST: ${{ steps.release-digests.outputs.standard }}
         run: cosign sign --yes "ghcr.io/leolilley/ryeos-standard@${DIGEST}"
 
       - name: Cosign sign newly pushed central-host image
-        if: steps.image-signatures.outputs.central != 'true' && steps.resolve-images.outputs.central_exists != 'true'
+        if: steps.release-digests.outputs.central_current == 'true'
         env:
           COSIGN_EXPERIMENTAL: "true"
           DIGEST: ${{ steps.release-digests.outputs.central }}
         run: cosign sign --yes "ghcr.io/leolilley/ryeos-central-host@${DIGEST}"
 
-      - name: Verify release image signatures and immutable tag bindings
+      - name: Verify candidate image signatures
         env:
           VERSION: ${{ needs.qualify.outputs.version }}
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
-          CERTIFICATE_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          CURRENT_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          TAG_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/publish-ryeosd.yml@refs/tags/v${{ needs.qualify.outputs.version }}
           CERTIFICATE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          verify_release_signature() {
+            local image="$1"
+            if cosign verify \
+              --certificate-identity "$TAG_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$image" >/dev/null 2>&1; then
+              return 0
+            fi
+            cosign verify \
+              --certificate-identity "$CURRENT_IDENTITY" \
+              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
+              "$image"
+          }
+          for spec in \
+            "ryeos-standard $STANDARD_DIGEST" \
+            "ryeos-central-host $CENTRAL_DIGEST"
+          do
+            read -r image digest <<<"$spec"
+            verify_release_signature "ghcr.io/leolilley/${image}@${digest}"
+          done
+
+      - name: Qualify exact standard image digest
+        env:
+          DIGEST: ${{ steps.release-digests.outputs.standard }}
+        run: scripts/release/qualify-container-image.sh "ghcr.io/leolilley/ryeos-standard@${DIGEST}" standard --pid1-smoke
+
+      - name: Qualify exact central-host image digest
+        env:
+          DIGEST: ${{ steps.release-digests.outputs.central }}
+        run: scripts/release/qualify-container-image.sh "ghcr.io/leolilley/ryeos-central-host@${DIGEST}" central-host
+
+      # Re-resolve immediately before each create. GHCR does not expose a
+      # conditional create-tag API, so registry-level tag immutability remains
+      # the strict cross-workflow guarantee; this closes the long
+      # build/qualification check-use window and fails rather than overwriting
+      # any version tag observed here.
+      - name: Promote qualified digests to immutable versions
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
+          STANDARD_EXISTED: ${{ steps.resolve-images.outputs.standard_exists }}
+          CENTRAL_EXISTED: ${{ steps.resolve-images.outputs.central_exists }}
+        run: |
+          promote_immutable() {
+            local image="$1"
+            local digest="$2"
+            local existed="$3"
+            local tag="ghcr.io/leolilley/${image}:${VERSION}"
+            local error_file
+            [[ "$existed" != true ]] || return 0
+            error_file="$(mktemp)"
+            if docker buildx imagetools inspect "$tag" >/dev/null 2>"$error_file"; then
+              echo "::error::Refusing to overwrite immutable tag created during qualification: $tag"
+              exit 1
+            fi
+            if ! grep -Eqi 'manifest unknown|not found|no such manifest|404' "$error_file"; then
+              cat "$error_file" >&2
+              echo "::error::Unable to recheck immutable tag immediately before promotion: $tag"
+              exit 1
+            fi
+            rm -f "$error_file"
+            docker buildx imagetools create \
+              --tag "$tag" \
+              "ghcr.io/leolilley/${image}@${digest}"
+          }
+          promote_immutable ryeos-standard "$STANDARD_DIGEST" "$STANDARD_EXISTED"
+          promote_immutable ryeos-central-host "$CENTRAL_DIGEST" "$CENTRAL_EXISTED"
+
+      - name: Verify immutable tag bindings
+        env:
+          VERSION: ${{ needs.qualify.outputs.version }}
+          STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
+          CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
         run: |
           for spec in \
             "ryeos-standard $STANDARD_DIGEST" \
             "ryeos-central-host $CENTRAL_DIGEST"
           do
             read -r image digest <<<"$spec"
-            immutable="ghcr.io/leolilley/${image}@${digest}"
-            cosign verify \
-              --certificate-identity "$CERTIFICATE_IDENTITY" \
-              --certificate-oidc-issuer "$CERTIFICATE_OIDC_ISSUER" \
-              "$immutable"
             inspection="$(docker buildx imagetools inspect \
               "ghcr.io/leolilley/${image}:${VERSION}")"
             bound_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
             [[ "$bound_digest" == "$digest" ]] || {
-              echo "::error::Immutable tag moved during release: $image:$VERSION"
+              echo "::error::Immutable tag does not bind the qualified digest: $image:$VERSION"
               exit 1
             }
           done
@@ -518,9 +610,68 @@ jobs:
           STANDARD_DIGEST: ${{ steps.release-digests.outputs.standard }}
           CENTRAL_DIGEST: ${{ steps.release-digests.outputs.central }}
         run: |
+          resolve_latest() {
+            local image="$1"
+            local inspection error_file digest
+            error_file="$(mktemp)"
+            if inspection="$(docker buildx imagetools inspect \
+              "ghcr.io/leolilley/${image}:latest" 2>"$error_file")"; then
+              digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+                echo "::error::Could not resolve previous latest digest for $image"
+                exit 1
+              }
+              rm -f "$error_file"
+              printf '%s' "$digest"
+              return 0
+            fi
+            if grep -Eqi 'manifest unknown|not found|no such manifest|404' "$error_file"; then
+              rm -f "$error_file"
+              return 0
+            fi
+            cat "$error_file" >&2
+            echo "::error::Unable to resolve previous latest digest for $image"
+            exit 1
+          }
+          PREVIOUS_STANDARD="$(resolve_latest ryeos-standard)"
+          PREVIOUS_CENTRAL="$(resolve_latest ryeos-central-host)"
           docker buildx imagetools create \
             --tag ghcr.io/leolilley/ryeos-standard:latest \
             "ghcr.io/leolilley/ryeos-standard@${STANDARD_DIGEST}"
-          docker buildx imagetools create \
-            --tag ghcr.io/leolilley/ryeos-central-host:latest \
-            "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}"
+          if ! docker buildx imagetools create \
+              --tag ghcr.io/leolilley/ryeos-central-host:latest \
+              "ghcr.io/leolilley/ryeos-central-host@${CENTRAL_DIGEST}"; then
+            if [[ "$PREVIOUS_STANDARD" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              if docker buildx imagetools create \
+                  --tag ghcr.io/leolilley/ryeos-standard:latest \
+                  "ghcr.io/leolilley/ryeos-standard@${PREVIOUS_STANDARD}"; then
+                restored="$(docker buildx imagetools inspect \
+                  ghcr.io/leolilley/ryeos-standard:latest)"
+                restored_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$restored")"
+                if [[ "$restored_digest" == "$PREVIOUS_STANDARD" ]]; then
+                  echo "::error::Central-host latest promotion failed; standard latest was restored"
+                else
+                  echo "::error::Central-host latest promotion failed and standard rollback verification failed"
+                fi
+              else
+                echo "::error::Central-host latest promotion failed and standard rollback failed"
+              fi
+            else
+              echo "::error::Central-host latest promotion failed; no previous standard latest existed to restore"
+            fi
+            echo "::error::Previous central latest digest was ${PREVIOUS_CENTRAL:-absent}"
+            exit 1
+          fi
+          for spec in \
+            "ryeos-standard $STANDARD_DIGEST" \
+            "ryeos-central-host $CENTRAL_DIGEST"
+          do
+            read -r image digest <<<"$spec"
+            inspection="$(docker buildx imagetools inspect \
+              "ghcr.io/leolilley/${image}:latest")"
+            bound_digest="$(awk '$1 == "Digest:" { print $2; exit }' <<<"$inspection")"
+            [[ "$bound_digest" == "$digest" ]] || {
+              echo "::error::Latest channel does not bind the qualified digest: $image"
+              exit 1
+            }
+          done

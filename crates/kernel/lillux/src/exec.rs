@@ -2052,17 +2052,44 @@ fn lib_spawn_with_stdio(
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::process::CommandExt;
-        let attachment_setup = attachment_gate.as_ref().map(|gate| {
-            (
-                gate.status_writer.as_raw_fd(),
-                gate.child_status_reader_fd,
-                gate.child_release_writer_fd,
-                gate.cwd_directory
-                    .as_ref()
-                    .map(|directory| directory.as_raw_fd()),
-                gate.inherited_pending_control_fds.clone(),
-            )
-        });
+        // Resolve the initiating parent identity before fork. The post-fork
+        // hook must remain allocation-free and may only compare this plain
+        // pid_t with getppid(). PID 1 is a valid initiating parent inside a
+        // PID namespace; only a change away from this exact identity proves
+        // that the child was reparented.
+        let expected_parent_pid = if attachment_gate.is_some() {
+            let pid = libc::pid_t::try_from(process::id()).map_err(|_| {
+                spawn_failure(
+                    start,
+                    "Failed to spawn awaiting attachment: parent PID exceeds pid_t",
+                )
+            })?;
+            if pid <= 0 {
+                return Err(spawn_failure(
+                    start,
+                    "Failed to spawn awaiting attachment: parent PID is not positive",
+                ));
+            }
+            Some(pid)
+        } else {
+            None
+        };
+        let attachment_setup =
+            attachment_gate
+                .as_ref()
+                .zip(expected_parent_pid)
+                .map(|(gate, expected_parent_pid)| {
+                    (
+                        expected_parent_pid,
+                        gate.status_writer.as_raw_fd(),
+                        gate.child_status_reader_fd,
+                        gate.child_release_writer_fd,
+                        gate.cwd_directory
+                            .as_ref()
+                            .map(|directory| directory.as_raw_fd()),
+                        gate.inherited_pending_control_fds.clone(),
+                    )
+                });
         unsafe {
             command.pre_exec(move || {
                 if libc::setsid() < 0 {
@@ -2075,6 +2102,7 @@ fn lib_spawn_with_stdio(
                     }
                 }
                 if let Some((
+                    expected_parent_pid,
                     status_writer,
                     status_reader,
                     release_writer,
@@ -2083,6 +2111,7 @@ fn lib_spawn_with_stdio(
                 )) = &attachment_setup
                 {
                     direct_attachment_identity_pre_exec(
+                        *expected_parent_pid,
                         *status_writer,
                         *status_reader,
                         *release_writer,
@@ -2836,6 +2865,7 @@ fn open_attachment_cwd(path: &str, start: Instant) -> Result<std::fs::File, Subp
 /// forked child of a multithreaded daemon before Rust's normal exec path.
 #[cfg(target_os = "linux")]
 fn direct_attachment_identity_pre_exec(
+    expected_parent_pid: libc::pid_t,
     status_writer_fd: i32,
     status_reader_fd: i32,
     release_writer_fd: i32,
@@ -2849,18 +2879,13 @@ fn direct_attachment_identity_pre_exec(
             libc::close(*fd);
         }
 
-        let parent_pid = libc::getppid();
-        if parent_pid <= 1 {
-            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
-        }
+        validate_attachment_parent(libc::getppid(), expected_parent_pid)?;
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // The parent can die between getppid and prctl. Rechecking closes that
-        // window before readiness is published.
-        if libc::getppid() != parent_pid {
-            return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
-        }
+        // The initiating parent can die between getppid and prctl. Rechecking
+        // its exact identity closes that window before readiness is published.
+        validate_attachment_parent(libc::getppid(), expected_parent_pid)?;
 
         let pid = libc::getpid();
         let pgid = libc::getpgrp();
@@ -2880,6 +2905,44 @@ fn direct_attachment_identity_pre_exec(
             libc::close(cwd_directory_fd);
         }
         Ok(())
+    }
+}
+
+/// Require continuity with the exact process that initiated the fork.
+///
+/// PID 1 is intentionally valid: a daemon may legitimately be PID 1 inside a
+/// container PID namespace. A mismatch, rather than the numeric value 1,
+/// identifies an orphan/reparent race.
+#[cfg(target_os = "linux")]
+fn validate_attachment_parent(
+    observed_parent_pid: libc::pid_t,
+    expected_parent_pid: libc::pid_t,
+) -> std::io::Result<()> {
+    if expected_parent_pid <= 0 || observed_parent_pid != expected_parent_pid {
+        return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod attachment_parent_tests {
+    use super::validate_attachment_parent;
+
+    #[test]
+    fn pid_one_is_a_valid_exact_attachment_parent() {
+        validate_attachment_parent(1, 1).expect("PID 1 may legitimately initiate the fork");
+    }
+
+    #[test]
+    fn changed_attachment_parent_fails_with_echild() {
+        let error = validate_attachment_parent(1, 42).expect_err("reparenting must fail closed");
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn invalid_expected_attachment_parent_fails_with_echild() {
+        let error = validate_attachment_parent(0, 0).expect_err("PID zero is not a parent");
+        assert_eq!(error.raw_os_error(), Some(libc::ECHILD));
     }
 }
 

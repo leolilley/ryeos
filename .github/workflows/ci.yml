@@ -79,6 +79,9 @@ jobs:
       - name: Check explicit publisher trust boundaries
         run: ./scripts/ci/test-publisher-trust-policy.sh
 
+      - name: Check daemon image init boundaries
+        run: ./scripts/ci/test-daemon-image-init-policy.sh
+
       - name: Check canonical naming
         run: ./scripts/lint-naming.sh
 

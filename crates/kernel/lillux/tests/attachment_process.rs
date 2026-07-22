@@ -64,6 +64,21 @@ fn abort_pending_direct_target_never_executes_and_reaps() {
 }
 
 #[test]
+fn pending_direct_target_keeps_the_exact_initiating_parent() {
+    let pending =
+        spawn_awaiting_attachment(shell("exit 0".to_string())).expect("spawn awaiting attachment");
+    let status = std::fs::read_to_string(format!("/proc/{}/status", pending.pid()))
+        .expect("read pending target status");
+    let parent_pid = status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .expect("pending target PPid");
+    assert_eq!(parent_pid, std::process::id());
+    pending.abort_and_reap().expect("abort and reap");
+}
+
+#[test]
 fn dropping_pending_direct_target_never_executes_and_reaps() {
     let temp = tempfile::tempdir().expect("tempdir");
     let marker = temp.path().join("executed");
