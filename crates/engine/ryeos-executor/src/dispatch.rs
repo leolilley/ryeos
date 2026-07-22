@@ -404,6 +404,11 @@ pub(crate) struct VerifiedHop {
     /// P1.3: per-hop verified item. The loop verifies at every hop
     /// boundary — leaf dispatchers trust this and skip re-verification.
     pub verified: Option<VerifiedItem>,
+    /// Original item-resolution failure when this schema permits continuing
+    /// without a concrete item (for example, to produce a registry-specific
+    /// diagnostic). Root admission surfaces this cause if a verified caller
+    /// subject is ultimately required.
+    pub resolution_error: Option<String>,
     /// P1.1: thread_profile from the schema's `execution` block.
     /// Available for all executable kinds. Used by the loop to capture
     /// the root subject's profile on the first hop.
@@ -461,42 +466,43 @@ fn resolve_dispatch_hop_with_verified(
     // for runtime refs — engine.resolve produces content_hash,
     // source_path, and audit data for ALL kinds including runtime.
     // Verification failure is a hard error at the hop boundary.
-    let verified: Option<VerifiedItem> = if let Some(verified) = preverified {
-        if verified.resolved.canonical_ref != *current_ref {
-            return Err(DispatchError::InvalidRef(
-                current_ref.to_string(),
-                format!(
-                    "preverified item ref mismatch: verified '{}'",
-                    verified.resolved.canonical_ref
-                ),
-            ));
-        }
-        Some(verified)
-    } else {
-        match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
-            Ok(resolved) => {
-                let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
-                    DispatchError::InvalidRef(
-                        current_ref.to_string(),
-                        format!("verification failed: {e}"),
-                    )
-                })?;
-                tracing::debug!(
-                    item_ref = %current_ref,
-                    trust_class = ?v.trust_class,
-                    "hop verified"
-                );
-                Some(v)
+    let (verified, resolution_error): (Option<VerifiedItem>, Option<String>) =
+        if let Some(verified) = preverified {
+            if verified.resolved.canonical_ref != *current_ref {
+                return Err(DispatchError::InvalidRef(
+                    current_ref.to_string(),
+                    format!(
+                        "preverified item ref mismatch: verified '{}'",
+                        verified.resolved.canonical_ref
+                    ),
+                ));
             }
-            Err(_) => {
-                // Resolution failed — the ref may not exist on disk. This
-                // is not necessarily fatal: the schema lookup below will
-                // produce a clearer error (SchemaMisconfigured enumerating
-                // available kinds) if the kind has no items at all.
-                None
+            (Some(verified), None)
+        } else {
+            match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
+                Ok(resolved) => {
+                    let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
+                        DispatchError::InvalidRef(
+                            current_ref.to_string(),
+                            format!("verification failed: {e}"),
+                        )
+                    })?;
+                    tracing::debug!(
+                        item_ref = %current_ref,
+                        trust_class = ?v.trust_class,
+                        "hop verified"
+                    );
+                    (Some(v), None)
+                }
+                Err(error) => {
+                    // Resolution failed — the ref may not exist on disk. This
+                    // is not necessarily fatal: the schema lookup below will
+                    // produce a clearer error (SchemaMisconfigured enumerating
+                    // available kinds) if the kind has no items at all.
+                    (None, Some(error.to_string()))
+                }
             }
-        }
-    };
+        };
 
     let schema_kind: String = verified
         .as_ref()
@@ -552,6 +558,7 @@ fn resolve_dispatch_hop_with_verified(
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
+            resolution_error,
             thread_profile,
             runtime,
             next: HopAction::DispatchMethod {
@@ -578,6 +585,7 @@ fn resolve_dispatch_hop_with_verified(
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
+            resolution_error,
             thread_profile: Some(tp.to_string()),
             runtime,
             next: HopAction::Terminate(terminator.clone(), tp.to_string()),
@@ -597,6 +605,7 @@ fn resolve_dispatch_hop_with_verified(
         return Ok(VerifiedHop {
             canonical_ref: current_ref.clone(),
             verified,
+            resolution_error,
             thread_profile,
             runtime,
             next: HopAction::FollowAlias(next_ref),
@@ -633,6 +642,7 @@ fn resolve_dispatch_hop_with_verified(
                 return Ok(VerifiedHop {
                     canonical_ref: current_ref.clone(),
                     verified,
+                    resolution_error,
                     thread_profile,
                     runtime,
                     next: HopAction::UseRegistry(rt.canonical_ref.clone()),
@@ -3296,6 +3306,7 @@ async fn dispatch_inner(
             thread_profile,
             runtime,
             next,
+            ..
         } = hop;
 
         // P1.1: capture root subject from the FIRST hop that has a
@@ -3798,6 +3809,7 @@ pub fn preflight_root_dispatch(
         let VerifiedHop {
             canonical_ref: hop_ref,
             verified,
+            resolution_error,
             thread_profile,
             runtime: hop_runtime,
             next,
@@ -3806,10 +3818,14 @@ pub fn preflight_root_dispatch(
 
         if requested_subject.is_none() {
             let subject = verified.clone().ok_or_else(|| {
+                let cause = resolution_error
+                    .as_deref()
+                    .unwrap_or("item resolution returned no verified subject");
                 DispatchError::InvalidRef(
                     hop_ref.to_string(),
-                    "public root admission requires the caller-named item to resolve and verify"
-                        .to_string(),
+                    format!(
+                        "public root admission requires the caller-named item to resolve and verify: {cause}"
+                    ),
                 )
             })?;
             requested_subject = Some(subject);
