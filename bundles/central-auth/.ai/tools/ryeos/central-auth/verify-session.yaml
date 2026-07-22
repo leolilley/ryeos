@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T08:42:53Z:1bb8761fa61e7ff1ac8b12cdbd6167caeb82c777d7f6099a641519b8b90cd093:QTWBTmJYGxBgy5MlX7iDWZnPmWsfLkqrAHDQz1+UP5UQPaW+OC5PrFOwZJbQqrGFSlb22DFnHrgx8sZ6nY4LCA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
+# ryeos:signed:2026-07-21T23:12:22Z:1bb8761fa61e7ff1ac8b12cdbd6167caeb82c777d7f6099a641519b8b90cd093:edrFKa9GCjr7nGXvRDMZLmszs4CzPF4qgiRuexYXoC5QTw8EgbtmmnU4M7gyBr2MXeLnu7keKGq/Dxy0YX/jCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "verify-session"

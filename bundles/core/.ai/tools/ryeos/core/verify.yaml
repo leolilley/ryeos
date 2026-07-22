@@ -1,9 +1,9 @@
-# ryeos:signed:2026-06-07T05:18:56Z:f45f9be31a7d41930510f1938da5501e4378d83109167cf2a0030cb7e418e8d3:4NYrzYIxu0YKIws3QNwD405BQDJgsgAOSpW2kM5equ864ZA2sfwgDrRrPDsuS2lyviEoXWYzS/iaf9Nn1y1+Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-22T02:33:47Z:b5dc9275eecf4aaecf1ff78c309bb9593ff6ab0fd5db4563d8e7ca2912ee8313:/AbDAKoMZ3TFsoWur0ma95z9WlRCQd40u/hsYk9l/wRaIs6B6LS2RgA15BPM8hqKiR99DDOx9Kw4fVrIG1lZCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core"
 name: "verify"
 executor_id: "@subprocess"
 required_caps: ["bundle.read"]
-description: "Resolve and trust-verify an item via the engine"
+description: "Resolve and trust-verify one or more items via the engine"
 
 config:
   command: "bin:ryeos-core-tools"
@@ -18,8 +18,9 @@ config_schema:
   properties:
     item_ref:
       type: string
-      description: "Canonical ref to verify"
+      description: "Single canonical ref or .ai path to verify. Prefer item_refs for new callers."
+    item_refs:
+      description: "Canonical refs or .ai paths to verify. Accepts a string or array; the tool normalizes to an array."
     project_path:
       type: string
       description: "Project root path"
-  required: [item_ref]

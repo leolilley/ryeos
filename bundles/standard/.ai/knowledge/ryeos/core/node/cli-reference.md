@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T05:16:49Z:b7ac8c9798c2c21acd6a13c777794d6bb771bb6954e4cfc4bc096bf7caefcf09:EUHWbb/tf2k/TRtbOLdmM6l+lu1x+YcqVgNDGlhH0ejgAkCPITpbJ9sqbFY0Le2IDlAfFp2NZu3075PaL0OSBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-22T02:33:53Z:bbbac0c04584ce7e3b40d614f385a20c86278de3a3da8cf7ce717736f1ec11bf:tXeRkquOLVk4oNxZlBuloa3Y+3Qk9xTjGBH3IBq4SJ2tPInFMd3gZ+5Kh9mpyV7KtlYsE117dborPwL1fKr+BA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/node
 tags: [reference, cli, verbs, aliases, lifecycle]
@@ -106,7 +106,7 @@ calls emit no terminal control sequences. See [Maintenance GC](../services/maint
 - `ryeos execute <ref> [params...]` — execute an item by canonical ref.
 - `ryeos fetch <ref> [--with-content] [--verify]` — resolve/read an item. Alias: `f`.
 - `ryeos sign <ref> [--source project|user]` — sign an item. Alias: `s`.
-- `ryeos verify <ref>` — verify signature, trust, and path anchoring.
+- `ryeos verify <ref-or-.ai-path> [<ref-or-.ai-path>...]` — verify one or more items' signatures, trust, and path anchoring.
 
 ## Bundle Management
 

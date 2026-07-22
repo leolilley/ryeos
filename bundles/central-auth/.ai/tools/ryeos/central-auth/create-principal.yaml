@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T08:42:53Z:8db03228da4ff356ad71ba8051ba4f69b115d8b366f08af821bdd50b093bb299:sn28KsxbPfyxVhBg9zDUZnHyyJf+ZxC81zjeEMV7h/ycD92kpE4zrAK6EntUwNlIbf3BtKWGXIlrucjxGtc+AA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca
+# ryeos:signed:2026-07-21T23:12:22Z:8db03228da4ff356ad71ba8051ba4f69b115d8b366f08af821bdd50b093bb299:TzkkTdXR8D963+hcLu7SERPtBKXeUSywqEkiZwj944jNrYA5gy8E3ZzYZPbuaJe7aZEbDHwIQB2QpjXfwXi0Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-principal"
