@@ -9,3 +9,4 @@ forms:
 dispatch:
   kind: execute_ref
   execute: tool:ryeos/core/snapshot-show
+  availability: daemon

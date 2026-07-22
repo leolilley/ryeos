@@ -39,37 +39,43 @@ pub struct ResolutionRoots {
 }
 
 impl ResolutionRoots {
-    /// Convenience: build from flat fields.
-    /// Project roots are ordered first, then bundle roots.
-    pub fn from_flat(project: Option<PathBuf>, bundles: Vec<PathBuf>) -> Self {
+    /// Build from already-normalized `.ai` roots.
+    /// The project `.ai` root is ordered first, then bundle `.ai` roots.
+    pub fn from_flat(project_ai_root: Option<PathBuf>, bundle_ai_roots: Vec<PathBuf>) -> Self {
         let mut ordered = Vec::new();
 
-        if let Some(project_root) = project {
+        if let Some(project_ai_root) = project_ai_root {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Project,
                 label: "project".to_owned(),
-                ai_root: project_root.join(crate::AI_DIR),
+                ai_root: project_ai_root,
             });
         }
 
-        for (i, bundle_root) in bundles.iter().enumerate() {
+        for (i, bundle_ai_root) in bundle_ai_roots.iter().enumerate() {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Bundle,
                 label: format!("bundle:{i}"),
-                ai_root: bundle_root.clone(),
+                ai_root: bundle_ai_root.clone(),
             });
         }
 
         Self { ordered }
     }
 
-    pub fn from_registered(project: Option<PathBuf>, bundles: &[RegisteredBundleRoot]) -> Self {
+    /// Build from canonical source roots. Unlike [`Self::from_flat`], these
+    /// inputs are bundle/project directories, so this constructor appends
+    /// `.ai` exactly once.
+    pub fn from_registered(
+        project_root: Option<PathBuf>,
+        bundles: &[RegisteredBundleRoot],
+    ) -> Self {
         let mut ordered = Vec::new();
-        if let Some(project_root) = project {
+        if let Some(project_root) = project_root {
             ordered.push(ResolutionRoot {
                 space: ItemSpace::Project,
                 label: "project".to_owned(),
-                ai_root: project_root,
+                ai_root: project_root.join(crate::AI_DIR),
             });
         }
         ordered.extend(bundles.iter().map(|bundle| ResolutionRoot {
