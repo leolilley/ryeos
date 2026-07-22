@@ -877,6 +877,11 @@ mod tests {
             "ref_bindings": {},
             "project_path": "/tmp/proj",
             "parameters": {"name": "World"},
+            "execution_policy": serde_json::to_value(
+                ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                )
+            ).unwrap(),
         });
         let bytes = serde_json::to_vec(&body).unwrap();
         let req: LaunchRequest = serde_json::from_slice(&bytes).expect("valid body must parse");

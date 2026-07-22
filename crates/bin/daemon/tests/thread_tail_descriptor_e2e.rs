@@ -385,6 +385,9 @@ async fn thread_tail_descriptor_denied_for_non_owner() {
         "ref_bindings": {},
         "project_path": project_path,
         "parameters": { "thread_id": thread_id },
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
     let audience = format!("fp:{node_fp}");

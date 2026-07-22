@@ -27,6 +27,16 @@ use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 use serde_json::{json, Value};
 
+fn accepted_policy(has_project: bool) -> ryeos_app::execution_policy::ExecutionPolicy {
+    use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
+
+    if has_project {
+        ExecutionPolicy::local_live(ExecutionResponse::Accepted)
+    } else {
+        ExecutionPolicy::projectless(ExecutionResponse::Accepted)
+    }
+}
+
 fn unwrap_result(status: reqwest::StatusCode, body: &Value, ctx: &str) -> Value {
     assert!(
         status.is_success(),
@@ -337,7 +347,7 @@ async fn execute_launch_returns_inspectable_thread_id() {
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(false)
             }),
         )
         .await
@@ -370,7 +380,7 @@ async fn execute_launch_admits_graph_ref() {
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(true)
             }),
         )
         .await
@@ -411,7 +421,7 @@ async fn execute_launch_admits_directive_ref() {
                 "ref_bindings": { "model": "directive:test/launch" },
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(true)
             }),
         )
         .await
@@ -447,7 +457,7 @@ async fn execute_launch_admits_knowledge_query() {
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "accepted" } },
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(true)
             }),
         )
         .await
@@ -483,7 +493,7 @@ async fn execute_launch_method_missing_required_arg_is_rejected() {
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": {} },
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(true)
             }),
         )
         .await
@@ -521,7 +531,7 @@ async fn execute_launch_unsigned_knowledge_is_rejected_by_trust_policy() {
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "call": { "method": "query", "args": { "query": "x" } },
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(true)
             }),
         )
         .await
@@ -553,7 +563,7 @@ async fn execute_launch_unsigned_directive_is_rejected_by_trust_policy() {
                 "ref_bindings": { "model": "directive:test/unsigned" },
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(true)
             }),
         )
         .await
@@ -588,7 +598,7 @@ async fn execute_launch_terminal_tool_without_executor_id_is_rejected() {
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(false)
             }),
         )
         .await
@@ -625,7 +635,7 @@ async fn execute_launch_terminal_tool_bad_manifest_requires_is_rejected() {
                 "ref_bindings": {},
                 "project_path": project.path().to_str().unwrap(),
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(true)
             }),
         )
         .await
@@ -653,7 +663,7 @@ async fn execute_launch_in_process_service_is_rejected() {
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(false)
             }),
         )
         .await
@@ -683,7 +693,7 @@ async fn execute_launch_non_root_executable_ref_does_not_return_phantom_thread_i
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(false)
             }),
         )
         .await
@@ -713,7 +723,7 @@ async fn execute_launch_invalid_item_does_not_return_phantom_thread_id() {
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(false)
             }),
         )
         .await
@@ -755,7 +765,7 @@ async fn execute_launch_direct_runtime_missing_cap_is_rejected() {
                 "ref_bindings": {},
                 "project_path": null,
                 "parameters": {},
-                "launch_mode": "accepted"
+                "execution_policy": accepted_policy(false)
             }),
         )
         .await

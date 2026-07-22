@@ -1627,10 +1627,10 @@ fn admitted_root_launch_metadata(
     prepared_plan: &thread_lifecycle::PreparedItemPlan,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<ryeos_app::launch_metadata::RuntimeLaunchMetadata> {
-    let runtime_ref = params
-        .runtime_ref
-        .clone()
-        .unwrap_or_else(|| params.resolved.executor_ref.clone());
+    let runtime_ref = match &params.runtime_ref {
+        Some(runtime_ref) => runtime_ref.clone(),
+        None => prepared_plan.runtime_ref()?.to_owned(),
+    };
     let sealed = SealedRootExecutionRequest::capture(&params.resolved, runtime_ref.clone())?;
     let stable_project_identity = match &project_authority {
         ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,

@@ -162,8 +162,7 @@ description: "synth runtime for V5.3 dispatch_pin capability tests"
     common::fast_fixture::register_fixture_bundle(state_path, "pin-fixture", &bundle_root, fixture)
 }
 
-/// POST /execute with arbitrary extra top-level fields (validate_only,
-/// launch_mode, target_site_id, project_source) merged into the request body.
+/// POST /execute with arbitrary extra top-level fields merged into the request body.
 async fn post_execute_with_extras(
     h: &DaemonHarness,
     item_ref: &str,
@@ -182,6 +181,15 @@ async fn post_execute_with_extras(
         "ref_bindings": ref_bindings,
         "project_path": project_path,
         "parameters": parameters,
+        "execution_policy": if project_path.is_some() {
+            ryeos_app::execution_policy::ExecutionPolicy::local_live(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            )
+        } else {
+            ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                ryeos_app::execution_policy::ExecutionResponse::Wait,
+            )
+        },
     });
     if let (Some(obj), Some(extra_obj)) = (body.as_object_mut(), extras.as_object()) {
         for (k, v) in extra_obj {
@@ -266,9 +274,8 @@ sys.exit(0)
 
 /// Spin up a daemon with a synth `runtime:pin-fake-runtime` registered
 /// in a registered fixture bundle, then POST /execute against that ref
-/// with the given `extras` (launch_mode / target_site_id /
-/// project_source). Used by the three native-runtime capability pin
-/// tests.
+/// with the given `extras`. Used by request-contract and native-runtime
+/// capability pin tests.
 async fn native_synth_request(
     extras: serde_json::Value,
 ) -> (reqwest::StatusCode, serde_json::Value) {
@@ -341,31 +348,26 @@ async fn pin_service_validate_only() {
     );
 }
 
-// ── 2. native runtime + launch_mode=detached → 400 ─────────────────────
+// ── 2. removed independent policy fields fail closed ───────────────────
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pin_native_runtime_with_detached() {
+async fn legacy_launch_mode_field_is_rejected() {
     let (status, body) = native_synth_request(serde_json::json!({"launch_mode": "detached"})).await;
     assert_eq!(
         status,
         reqwest::StatusCode::BAD_REQUEST,
         "expected 400, got {status}: {body}"
     );
-    assert_eq!(
-        body,
-        serde_json::json!({
-            "code": "capability_rejected",
-            "error": "detached mode not yet supported for native runtimes",
-            "retryable": false
-        }),
-        "exact error body shape (V5.3 Task 0b's ProtocolCapabilities reproduces this)"
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("unknown field 'launch_mode'")),
+        "removed launch_mode field must fail strict request decoding: {body}"
     );
 }
 
-// ── 3. native runtime + target_site_id → 400 ───────────────────────────
-
 #[tokio::test(flavor = "multi_thread")]
-async fn pin_native_runtime_with_target_site_id() {
+async fn legacy_target_site_id_field_is_rejected() {
     let (status, body) =
         native_synth_request(serde_json::json!({"target_site_id": "site:other"})).await;
     assert_eq!(
@@ -373,51 +375,30 @@ async fn pin_native_runtime_with_target_site_id() {
         reqwest::StatusCode::BAD_REQUEST,
         "expected 400, got {status}: {body}"
     );
-    // Target-site forwarding v1 plans the forward BEFORE protocol
-    // dispatch (see execute_mode.rs Phase 3), so an unconfigured site
-    // is rejected as unknown_target_site — the historical
-    // "remote execution not yet supported for native runtimes"
-    // ProtocolCapabilities rejection no longer fires first.
-    assert_eq!(
-        body,
-        serde_json::json!({
-            "code": "unknown_target_site",
-            "error": "unknown target site 'site:other'; configured sites: []",
-            "retryable": false
-        }),
-        "exact error body shape (target-site forwarding v1 planning)"
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("unknown field 'target_site_id'")),
+        "removed target_site_id field must fail strict request decoding: {body}"
     );
 }
 
-// ── 4. native runtime + project_source=pushed_head → 409 ───────────────
-//
-// SURPRISE relative to V5.3-PLAN.md: the plan describes this as a
-// "current 400" produced by the inline `is_native_executor` branch's
-// pushed_head rejection. In reality the native rejection is unreachable
-// in this code path: `resolve_project_context()` for `pushed_head` runs
-// BEFORE the dispatch capability check (see `api/execute.rs` ~lines
-// 100-120) and fails with 409 "push first" because no CAS HEAD is
-// pushed for the synth project.
-//
-// V5.3 Task 0b preserves the ordering: project-source resolution still
-// runs before any schema-driven dispatch call, so the 409 still wins.
-
 #[tokio::test(flavor = "multi_thread")]
-async fn pin_native_runtime_with_pushed_head() {
+async fn legacy_project_source_field_is_rejected() {
     let (status, body) =
         native_synth_request(serde_json::json!({"project_source": {"kind": "pushed_head"}})).await;
     assert_eq!(
         status,
-        reqwest::StatusCode::CONFLICT,
-        "expected 409 (project_source resolution rejects before native check), got {status}: {body}"
+        reqwest::StatusCode::BAD_REQUEST,
+        "expected strict request rejection, got {status}: {body}"
     );
     let err = body
         .get("error")
         .and_then(|v| v.as_str())
         .expect("error str");
     assert!(
-        err.starts_with("no pushed HEAD for project ") && err.ends_with(" — push first"),
-        "exact error shape (modulo project tempdir path): {body}"
+        err.contains("unknown field 'project_source'"),
+        "removed project_source field must fail strict request decoding: {body}"
     );
 }
 
@@ -529,7 +510,7 @@ async fn pin_subprocess_via_unified_dispatch_succeeds_for_tool_ref() {
     );
     assert!(
         body.get("detached").is_none(),
-        "inline (default launch_mode) must not set `detached`: {body}"
+        "waiting execution must not set `detached`: {body}"
     );
 }
 
@@ -574,7 +555,7 @@ async fn pin_tool_over_tcp_succeeds() {
     );
     assert_eq!(
         thread.get("launch_mode").and_then(|v| v.as_str()),
-        Some("inline"),
+        Some("wait"),
         "thread.launch_mode default: {body}"
     );
     // Tool envelope MUST include lifecycle fields the service envelope

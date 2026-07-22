@@ -172,6 +172,9 @@ fn spawn_execute(
         "ref_bindings": {},
         "project_path": project_path.to_str().unwrap(),
         "parameters": {},
+        "execution_policy": ryeos_app::execution_policy::ExecutionPolicy::local_live(
+            ryeos_app::execution_policy::ExecutionResponse::Wait,
+        ),
     });
     let body_bytes = serde_json::to_vec(&body).expect("serialize body");
     let headers = build_signed_headers_for_bytes(
