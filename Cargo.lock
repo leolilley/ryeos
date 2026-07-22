@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.58"
+version = "0.5.59"
 dependencies = [
  "anyhow",
  "arc-swap",

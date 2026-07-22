@@ -12,6 +12,7 @@ use std::path::Path;
 use crate::error::CliError;
 use ryeos_app::node_config::NodeConfigSnapshot;
 use ryeos_engine::engine::Engine;
+use ryeos_runtime::CommandAvailability;
 use serde_json::Value;
 
 use crate::node_descriptors::LoadedCommandDescriptor;
@@ -246,7 +247,10 @@ pub(crate) fn resolve_selected_command_help(
     .map_err(|error| format!("{error:#}"))?
     .ok_or_else(|| format!("effective target '{execute_ref}' was not found"))?;
     let metadata = ItemHelpMetadata::from_composed(&value);
-    let is_offline = metadata.is_offline_dispatch();
+    let is_offline = command_is_offline_capable(
+        command_availability(descriptor),
+        metadata.is_offline_dispatch(),
+    );
     Ok(ResolvedCommandHelp {
         description: metadata.description,
         required_caps: metadata.required_caps,
@@ -445,7 +449,10 @@ pub(crate) fn command_rows(
                 })
                 .as_ref()
         });
-        let is_offline = metadata.is_some_and(ItemHelpMetadata::is_offline_dispatch);
+        let is_offline = command_is_offline_capable(
+            command_availability(&command),
+            metadata.is_some_and(ItemHelpMetadata::is_offline_dispatch),
+        );
         let description = metadata
             .map(|metadata| metadata.description.as_str())
             .filter(|description| !description.is_empty())
@@ -584,6 +591,45 @@ impl ItemHelpMetadata {
     }
 }
 
+fn command_availability(descriptor: &LoadedCommandDescriptor) -> Option<CommandAvailability> {
+    match &descriptor.command.dispatch {
+        ryeos_runtime::CommandDispatch::DirectExecuteItemRef { availability, .. }
+        | ryeos_runtime::CommandDispatch::ExecuteRef { availability, .. } => Some(*availability),
+        ryeos_runtime::CommandDispatch::Group
+        | ryeos_runtime::CommandDispatch::LocalHandler { .. } => None,
+    }
+}
+
+fn command_is_offline_capable(
+    availability: Option<CommandAvailability>,
+    target_is_offline_capable: bool,
+) -> bool {
+    match availability {
+        Some(CommandAvailability::Daemon) => false,
+        Some(CommandAvailability::Offline | CommandAvailability::Both) => true,
+        Some(CommandAvailability::Auto) | None => target_is_offline_capable,
+    }
+}
+
+fn command_dispatch_mode(
+    availability: Option<CommandAvailability>,
+    target_is_offline_capable: Option<bool>,
+) -> Option<&'static str> {
+    match availability {
+        Some(CommandAvailability::Daemon) => Some("daemon (requires running daemon)"),
+        Some(CommandAvailability::Offline) => Some("offline (no daemon required)"),
+        Some(CommandAvailability::Both) => Some("offline or daemon"),
+        Some(CommandAvailability::Auto) => target_is_offline_capable.map(|is_offline| {
+            if is_offline {
+                "offline (no daemon required)"
+            } else {
+                "daemon (requires running daemon)"
+            }
+        }),
+        None => None,
+    }
+}
+
 fn build_installed_command_help(
     command_tokens: &[String],
     app_root: &std::path::Path,
@@ -626,12 +672,13 @@ fn build_installed_command_help(
         .rows
         .push(crate::tty::Row::text(description.to_string()));
     document.sections.push(overview);
-    if let Some(item) = &item {
-        if item.is_offline_dispatch() {
-            document.sections.push(
-                crate::tty::Section::named("dispatch").row("mode", "offline (no daemon required)"),
-            );
-        }
+    if let Some(mode) = command_dispatch_mode(
+        command_availability(&command_descriptor),
+        item.as_ref().map(ItemHelpMetadata::is_offline_dispatch),
+    ) {
+        document
+            .sections
+            .push(crate::tty::Section::named("dispatch").row("mode", mode));
     } else if let Some(execute_ref) = execute_ref {
         document
             .sections
@@ -1046,6 +1093,39 @@ mod tests {
         assert_eq!(
             installed_usage_line(&command, None),
             "ryeos execute [--async] <item-ref>"
+        );
+    }
+
+    #[test]
+    fn command_availability_is_authoritative_over_target_offline_shape() {
+        assert!(!command_is_offline_capable(
+            Some(CommandAvailability::Daemon),
+            true
+        ));
+        assert!(command_is_offline_capable(
+            Some(CommandAvailability::Offline),
+            false
+        ));
+        assert!(command_is_offline_capable(
+            Some(CommandAvailability::Both),
+            false
+        ));
+        assert!(command_is_offline_capable(
+            Some(CommandAvailability::Auto),
+            true
+        ));
+
+        assert_eq!(
+            command_dispatch_mode(Some(CommandAvailability::Daemon), Some(true)),
+            Some("daemon (requires running daemon)")
+        );
+        assert_eq!(
+            command_dispatch_mode(Some(CommandAvailability::Offline), Some(false)),
+            Some("offline (no daemon required)")
+        );
+        assert_eq!(
+            command_dispatch_mode(Some(CommandAvailability::Both), Some(false)),
+            Some("offline or daemon")
         );
     }
 
