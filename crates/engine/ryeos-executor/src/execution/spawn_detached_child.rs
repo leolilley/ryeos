@@ -443,11 +443,13 @@ pub async fn spawn_detached_child(
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
         depth: cap.depth,
+        accounting_scope: cap.accounting_scope.clone(),
     };
     meta.follow_parent_context = Some(PersistedParentExecutionContext {
         parent_thread_id: launch_parent_context.parent_thread_id.clone(),
         hard_limits: launch_parent_context.hard_limits.clone(),
         depth: launch_parent_context.depth,
+        accounting_scope: launch_parent_context.accounting_scope.clone(),
     });
     meta.follow_launch_window = persisted_launch_window.clone();
     let prepared = crate::execution::launch::prepare_follow_child_launch(

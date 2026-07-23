@@ -646,6 +646,7 @@ fn parent_execution_context_from_capability(
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
         depth: cap.depth,
+        accounting_scope: cap.accounting_scope.clone(),
     }
 }
 

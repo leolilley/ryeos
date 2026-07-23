@@ -124,6 +124,11 @@ pub struct AppState {
     /// `EmptyVault` or when the vault public key file doesn't exist.
     /// Populated at startup from `<system>/.ai/node/vault/public_key.pem`.
     pub vault_fingerprint: Option<String>,
+    /// Daemon-owned financial accounting ledger (`accounting.sqlite3` plus
+    /// its external monotonic anchor). `None` means the ledger failed to
+    /// open or verify — every hard-budget admission then fails closed while
+    /// unrelated non-hard work continues.
+    pub accounting: Option<Arc<crate::accounting_db::AccountingDb>>,
 }
 
 #[derive(Debug, Serialize)]

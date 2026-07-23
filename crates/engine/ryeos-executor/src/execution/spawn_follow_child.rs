@@ -514,6 +514,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
         depth: cap.depth,
+        accounting_scope: cap.accounting_scope.clone(),
     };
     let mut child_thread_ids = Vec::with_capacity(children.len());
     let mut queued_child_thread_ids = Vec::new();
@@ -604,6 +605,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         parent_thread_id: cap.thread_id.clone(),
         hard_limits: cap.hard_limits.clone(),
         depth: cap.depth,
+        accounting_scope: cap.accounting_scope.clone(),
     };
     let mut child_metadata = std::collections::BTreeMap::new();
     let mut prepared_children = std::collections::BTreeMap::new();

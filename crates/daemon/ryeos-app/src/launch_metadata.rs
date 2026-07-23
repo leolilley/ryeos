@@ -213,6 +213,10 @@ pub struct PersistedParentExecutionContext {
     pub parent_thread_id: String,
     pub hard_limits: serde_json::Value,
     pub depth: u32,
+    /// Parent accounting scope captured at admission for detached follow
+    /// children admitted after the live callback context is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 }
 
 impl Default for RuntimeLaunchMetadata {
@@ -1255,6 +1259,7 @@ mod tests {
                 parent_thread_id: "follow-parent".to_string(),
                 hard_limits: serde_json::json!({"max_depth": 2}),
                 depth: 1,
+                accounting_scope: None,
             }),
             follow_launch_window: Some(FollowLaunchWindow {
                 key: "follow:source".to_string(),

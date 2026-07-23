@@ -7,7 +7,8 @@
 //! kind / id from `LaunchEnvelope.resolution.root` directly.
 
 pub use ryeos_engine::launch_envelope_types::{
-    EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, ItemDescriptor,
+    EnvelopeAccountingScope, EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots,
+    HardLimits, ItemDescriptor,
     LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeCost, RuntimeCostError, RuntimeResult,
     RuntimeResultStatus, COST_BASIS_ROLLUP,
 };

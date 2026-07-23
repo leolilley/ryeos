@@ -90,6 +90,9 @@ pub struct ParentExecutionContext {
     pub parent_thread_id: String,
     pub hard_limits: Value,
     pub depth: u32,
+    /// Parent's immutable accounting scope; paid descendants inherit this
+    /// execution budget authority (never a fresh allowance).
+    pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 }
 
 /// Single source of truth for the `runtime:` ref kind discriminator.
