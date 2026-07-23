@@ -3391,7 +3391,27 @@ async fn prepare_successor_launch(
     )
     .await?;
     let launch_metadata = if let Some(persisted) = metadata_template {
-        persisted.clone()
+        // The seed template deliberately carries no prepared-launch payload
+        // (it is thread-owned state), but the successor's OWN freshly sealed
+        // authority was just computed above — a ManagedRuntime capsule
+        // without it fails validation at birth. Fill the seed's empty slots
+        // from the fresh authority; never overwrite copied-forward values.
+        let mut merged = persisted.clone();
+        if let Some(fresh) = authority.launch_metadata.as_ref() {
+            if merged.admitted_prepared_launch.is_none() {
+                merged.admitted_prepared_launch = fresh.admitted_prepared_launch.clone();
+            }
+            if merged.admitted_artifact_identity.is_none() {
+                merged.admitted_artifact_identity = fresh.admitted_artifact_identity.clone();
+            }
+            if merged.admitted_launch_capsule_schema.is_none() {
+                merged.admitted_launch_capsule_schema = fresh.admitted_launch_capsule_schema;
+            }
+            if merged.accounting_scope.is_none() {
+                merged.accounting_scope = fresh.accounting_scope.clone();
+            }
+        }
+        merged
     } else {
         authority
             .launch_metadata

@@ -276,9 +276,19 @@ pub async fn execute_service_verified(
     // neither composes history policy nor canonicalizes a persistence-only
     // project path.
     let audit_ok = if record_thread {
+        // Recorded service roots are PROJECTLESS: the row carries no project
+        // binding and its authority projects none, so the sealed planning
+        // authority must agree. Admitting with the caller's live project
+        // context would make `create_admitted_root_thread` reject the row
+        // ("root project path does not match the sealed planning
+        // authority") for any service invoked alongside a real project path.
+        let service_plan_ctx = ryeos_engine::contracts::PlanContext {
+            project_context: ryeos_engine::contracts::ProjectContext::None,
+            ..ctx.plan_ctx.clone()
+        };
         let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
             &ctx.engine,
-            &ctx.plan_ctx,
+            &service_plan_ctx,
             verified.clone(),
             &state.node_history_policy,
             thread_profile.clone(),
