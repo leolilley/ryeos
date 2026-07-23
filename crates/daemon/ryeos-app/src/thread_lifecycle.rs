@@ -4397,12 +4397,11 @@ impl ThreadLifecycleService {
     }
 }
 
-/// Build the native managed-dispatch envelope shape
-/// (`{success, status, result, outputs, warnings, cost}`) from a runtime's RAW
-/// terminal fields, so a stored follow result classifies byte-for-byte like a live
-/// child dispatch. `raw_cost` is the runtime's own cost object (not the lossy
-/// re-serialized `FinalCost`). A failure carries its cause in `result` (the native
-/// envelope has no separate error field).
+/// Build the managed follow-terminal envelope shape
+/// (`{success, child_thread_id, status, result, outputs, warnings, cost}`) from
+/// a runtime's RAW terminal fields. `raw_cost` is the runtime's own cost object
+/// (not the lossy re-serialized `FinalCost`). A failure carries its cause in
+/// `result` because the managed envelope has no separate error field.
 pub fn managed_runtime_envelope(
     child_thread_id: &str,
     status: &str,

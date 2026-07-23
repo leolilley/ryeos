@@ -35,6 +35,19 @@ struct ManagedFollowEnvelope {
     cost: serde_json::Value,
 }
 
+/// Strictly decoded daemon-managed terminal envelope stored for follow resume
+/// and callback-authoritative subprocess reconciliation.
+#[derive(Debug)]
+pub struct FollowTerminalEnvelope {
+    pub success: bool,
+    pub child_thread_id: String,
+    pub status: RuntimeResultStatus,
+    pub result: serde_json::Value,
+    pub outputs: serde_json::Value,
+    pub warnings: Vec<String>,
+    pub cost: Option<RuntimeCost>,
+}
+
 struct RequiredNullableString(Option<String>);
 
 impl<'de> serde::Deserialize<'de> for RequiredNullableString {
@@ -239,21 +252,22 @@ pub fn envelope_succeeded(value: &serde_json::Value) -> bool {
     true
 }
 
-/// Validate the exact daemon-managed follow envelope and return its closed
-/// terminal status. This contract intentionally differs from a direct native
-/// envelope by requiring the authoritative child thread identity.
-pub fn follow_envelope_terminal_status(
+/// Decode and validate the exact daemon-managed follow envelope.
+///
+/// This contract intentionally differs from a direct native envelope by
+/// requiring the authoritative child thread identity.
+pub fn decode_follow_terminal_envelope(
     value: &serde_json::Value,
-) -> Result<RuntimeResultStatus, String> {
+) -> Result<FollowTerminalEnvelope, String> {
     let envelope: ManagedFollowEnvelope = serde_json::from_value(value.clone())
         .map_err(|error| format!("malformed follow terminal envelope: {error}"))?;
     let ManagedFollowEnvelope {
         success,
         child_thread_id,
         status,
-        result: _result,
-        outputs: _outputs,
-        warnings: _warnings,
+        result,
+        outputs,
+        warnings,
         cost,
     } = envelope;
     crate::validate_runtime_thread_id(&child_thread_id)
@@ -269,13 +283,32 @@ pub fn follow_envelope_terminal_status(
             status.as_str()
         ));
     }
-    if !cost.is_null() {
+    let cost = if cost.is_null() {
+        None
+    } else {
         let cost: RuntimeCost = serde_json::from_value(cost)
             .map_err(|error| format!("malformed follow terminal envelope cost: {error}"))?;
         cost.validate()
             .map_err(|error| format!("invalid follow terminal envelope cost: {error}"))?;
-    }
-    Ok(status)
+        Some(cost)
+    };
+    Ok(FollowTerminalEnvelope {
+        success,
+        child_thread_id,
+        status,
+        result,
+        outputs,
+        warnings,
+        cost,
+    })
+}
+
+/// Validate the exact daemon-managed follow envelope and return its closed
+/// terminal status.
+pub fn follow_envelope_terminal_status(
+    value: &serde_json::Value,
+) -> Result<RuntimeResultStatus, String> {
+    Ok(decode_follow_terminal_envelope(value)?.status)
 }
 
 #[cfg(test)]
@@ -358,6 +391,14 @@ mod tests {
             "warnings": [],
             "cost": null,
         });
+        let decoded = decode_follow_terminal_envelope(&valid).unwrap();
+        assert!(decoded.success);
+        assert_eq!(decoded.child_thread_id, "T-follow-child");
+        assert_eq!(decoded.status, RuntimeResultStatus::Completed);
+        assert_eq!(decoded.result, serde_json::Value::Null);
+        assert_eq!(decoded.outputs, serde_json::Value::Null);
+        assert!(decoded.warnings.is_empty());
+        assert!(decoded.cost.is_none());
         assert_eq!(
             follow_envelope_terminal_status(&valid).unwrap(),
             RuntimeResultStatus::Completed
@@ -380,6 +421,16 @@ mod tests {
                 "outputs": null,
                 "warnings": [],
                 "cost": null,
+            }),
+            json!({
+                "success": true,
+                "child_thread_id": "T-follow-child",
+                "status": RuntimeResultStatus::Completed,
+                "result": null,
+                "outputs": null,
+                "warnings": [],
+                "cost": null,
+                "unexpected": true,
             }),
         ] {
             assert!(follow_envelope_terminal_status(&malformed).is_err());

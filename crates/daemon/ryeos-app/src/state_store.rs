@@ -563,21 +563,15 @@ fn admit_follow_terminal_envelope(
     child_terminal_thread_id: &str,
     candidate: &Value,
 ) -> Result<(Value, bool)> {
-    let candidate_thread_id = candidate
-        .get("child_thread_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("follow terminal envelope has no child_thread_id"))?;
-    ryeos_runtime::validate_runtime_thread_id(candidate_thread_id)
-        .map_err(anyhow::Error::msg)
-        .context("follow terminal envelope has an invalid child_thread_id")?;
-    if candidate_thread_id != child_terminal_thread_id {
-        bail!(
-            "follow terminal envelope child_thread_id `{candidate_thread_id}` does not match terminal child `{child_terminal_thread_id}`"
-        );
-    }
-    ryeos_runtime::envelope::follow_envelope_terminal_status(candidate)
+    let decoded = ryeos_runtime::envelope::decode_follow_terminal_envelope(candidate)
         .map_err(anyhow::Error::msg)
         .context("validate canonical follow terminal envelope")?;
+    if decoded.child_thread_id != child_terminal_thread_id {
+        bail!(
+            "follow terminal envelope child_thread_id `{}` does not match terminal child `{child_terminal_thread_id}`",
+            decoded.child_thread_id
+        );
+    }
     match validate_prospective_follow_resume_payload(waiter, child_chain_root_id, candidate) {
         Ok(()) => Ok((candidate.clone(), false)),
         Err(candidate_error) => {
