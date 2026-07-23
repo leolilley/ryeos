@@ -51,6 +51,19 @@ launch_contract:
         - bundle
       allowed_trust:
         - trusted_bundle
+    execution:
+      kind: item
+      id: ryeos-runtime/execution
+      required: false
+      merge: deep_merge
+      allowed_spaces:
+        - bundle
+        - project
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+  financial_authority:
+    kind: provider_accounting_authority_v1
   secret_policy:
     max_requirements: 4
     allowed_names:
@@ -70,4 +83,6 @@ launch_contract:
     config_hash: {required: true, kind: string, max_bytes: 66}
     config_value_digest: {required: true, kind: string, max_bytes: 66}
     config_sources: {required: true, kind: json, max_bytes: 4096}
+    authority_digest: {required: true, kind: string, max_bytes: 66}
+    spend_bound: {required: true, kind: string, max_bytes: 32}
 description: "Interprets directive workflows by orchestrating LLM threads"

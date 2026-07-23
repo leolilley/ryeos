@@ -3164,7 +3164,7 @@ impl Runner {
             (p.clone(), PricingSource::PerModel)
         } else {
             match (pricing.input_per_million, pricing.output_per_million) {
-                (Some(0.0), Some(0.0)) => {
+                (Some(i), Some(o)) if i.is_zero() && o.is_zero() => {
                     return CostBreakdown {
                         usd: 0.0,
                         source: PricingSource::Unpriced,
@@ -3185,8 +3185,12 @@ impl Runner {
                 }
             }
         };
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * rates.input_per_million;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * rates.output_per_million;
+        // Settled reporting derives one-way presentation dollars from the
+        // fixed-point rates; this value never feeds budget authority.
+        let input_cost =
+            (input_tokens as f64 / 1_000_000.0) * rates.input_per_million.display_usd_lossy();
+        let output_cost =
+            (output_tokens as f64 / 1_000_000.0) * rates.output_per_million.display_usd_lossy();
         CostBreakdown {
             usd: input_cost + output_cost,
             source,
@@ -3376,6 +3380,10 @@ mod tests {
         CallbackClient::new(&make_callback_env(), "T-test", "/project", "tat-test")
     }
 
+    fn usd(canonical: &str) -> ryeos_accounting::UsdNanos {
+        ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
+    }
+
     fn make_policy() -> EnvelopePolicy {
         EnvelopePolicy {
             effective_caps: vec!["ryeos.execute.tool.*".to_string()],
@@ -3431,13 +3439,14 @@ mod tests {
             schemas: None,
             pricing: Some(PricingConfig {
                 explicitly_free: false,
-                input_per_million: Some(3.0),
-                output_per_million: Some(15.0),
+                input_per_million: Some(usd("3")),
+                output_per_million: Some(usd("15")),
                 models: Default::default(),
             }),
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3497,6 +3506,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3546,6 +3556,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3600,6 +3611,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -3663,6 +3675,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(1.0);
@@ -3835,6 +3848,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3879,8 +3893,8 @@ mod tests {
         models.insert(
             "claude-haiku-4-5".to_string(),
             ModelPricing {
-                input_per_million: 0.80,
-                output_per_million: 4.00,
+                input_per_million: usd("0.8"),
+                output_per_million: usd("4"),
             },
         );
         let provider = crate::directive::ProviderConfig {
@@ -3892,13 +3906,14 @@ mod tests {
             schemas: None,
             pricing: Some(PricingConfig {
                 explicitly_free: false,
-                input_per_million: Some(0.0), // would yield $0 if used
-                output_per_million: Some(0.0),
+                input_per_million: Some(usd("0")), // would yield $0 if used
+                output_per_million: Some(usd("0")),
                 models,
             }),
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3959,13 +3974,14 @@ mod tests {
             schemas: None,
             pricing: Some(PricingConfig {
                 explicitly_free: false,
-                input_per_million: Some(1.0),
-                output_per_million: Some(5.0),
+                input_per_million: Some(usd("1")),
+                output_per_million: Some(usd("5")),
                 models: Default::default(),
             }),
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -4019,6 +4035,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 

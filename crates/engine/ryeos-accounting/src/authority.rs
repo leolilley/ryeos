@@ -129,6 +129,10 @@ pub struct FinalityContract {
     /// digits may be rounded toward positive infinity for enforcement only
     /// when it is within this declared scale.
     pub max_reported_fraction_digits: u8,
+    /// A zero reported charge on a BYOK response is a covered final charge.
+    /// Never inferred from a zero or missing report without this.
+    #[serde(default)]
+    pub byok_zero_is_final: bool,
 }
 
 /// Proof kind behind a hard spend bound.
@@ -359,6 +363,9 @@ pub struct ProviderChargeCapContract {
     /// JSON pointer into the prepared request body where the server-enforced
     /// maximum total charge is set (e.g. `/max_cost_usd`).
     pub cap_field_pointer: String,
+    /// The exact cap value RyeOS writes into that field; this is the sealed
+    /// route maximum for `ProviderEnforcedChargeCap` routes.
+    pub maximum: UsdNanos,
     pub finality: FinalityContract,
 }
 
@@ -374,6 +381,9 @@ impl ProviderChargeCapContract {
         }
         if !self.cap_field_pointer.starts_with('/') {
             return Err("cap_field_pointer must be a JSON pointer".to_string());
+        }
+        if self.maximum.is_zero() {
+            return Err("charge-cap maximum must be positive".to_string());
         }
         Ok(())
     }

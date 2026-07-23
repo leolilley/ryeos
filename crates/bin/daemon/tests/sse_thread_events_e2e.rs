@@ -42,8 +42,8 @@ body_template:
 auth: {{}}
 headers: {{}}
 pricing:
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0.0"
+  output_per_million: "0.0"
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);

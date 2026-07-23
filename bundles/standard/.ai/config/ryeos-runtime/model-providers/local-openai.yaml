@@ -53,8 +53,8 @@ body_template:
 # accounting still records token counts without inventing a dollar figure.
 pricing:
   explicitly_free: true
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0"
+  output_per_million: "0"
 extra:
   stream_url: "/chat/completions"
   setup:

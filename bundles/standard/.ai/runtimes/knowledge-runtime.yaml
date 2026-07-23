@@ -19,6 +19,8 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {}
+  financial_authority:
+    kind: none
   secret_policy:
     max_requirements: 0
     allowed_names: []

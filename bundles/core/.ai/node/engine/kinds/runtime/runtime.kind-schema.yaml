@@ -69,6 +69,7 @@ composed_value_contract:
             prim: sequence
             elements: { type: single, prim: string }
           runtime_facts: { type: single, prim: mapping }
+          financial_authority: { type: single, prim: mapping }
   optional:
     default: { type: single, prim: boolean }
     required_caps:

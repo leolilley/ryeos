@@ -3483,6 +3483,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 "model_pinned": "{model}",
             })),
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -3515,6 +3516,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: Some(json!({"contents": "{messages}"})),
             body_extra: Some(json!({"generationConfig": {"maxOutputTokens": 1024}})),
+            spend_authority: None,
             profiles: vec![],
         };
         let body = super::build_request_body(
@@ -3555,6 +3557,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 "messages": "{messages}",
             })),
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3642,6 +3645,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let _ =
@@ -3666,6 +3670,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 "contents": "{messages}",
             })),
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -3712,6 +3717,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let mut body = json!({});
@@ -3756,6 +3762,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let mut body = json!({"contents": []});
@@ -4383,8 +4390,8 @@ owner = "ryeos-dev"
             .as_ref()
             .and_then(|pricing| pricing.models.get(model))
             .expect("routed OpenRouter model must have exact pricing");
-        assert!(pricing.input_per_million > 0.0);
-        assert!(pricing.output_per_million > 0.0);
+        assert!(!pricing.input_per_million.is_zero());
+        assert!(!pricing.output_per_million.is_zero());
     }
 
     struct StreamingEventRecorder {

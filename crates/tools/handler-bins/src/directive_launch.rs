@@ -3,15 +3,16 @@ use std::collections::BTreeMap;
 use ryeos_directive_core::{
     prepare_directive_launch, DirectiveDiagnosticScalar, DirectiveLaunchPreparationInput,
     DirectivePreparationError, DirectivePreparationErrorClass, ProviderConfigSource,
-    SnapshotItemSpace, SnapshotTrustClass, VerifiedConfigItem, MODEL_BINDING,
+    SnapshotItemSpace, SnapshotTrustClass, VerifiedConfigItem, EXECUTION_INPUT, MODEL_BINDING,
     MODEL_PROVIDERS_INPUT, MODEL_ROUTING_INPUT, PROVIDER_CONFIG_PREFIX, PROVIDER_SNAPSHOT_KEY,
 };
 use ryeos_handler_protocol::{
-    ConfigMergeModeWire, HandlerResponse, ItemSpaceWire, LaunchConfigContributorWire,
-    LaunchConfigInputDeclWire, LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire,
-    LaunchPrepareError, LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse,
-    LaunchPrepareSuccess, LaunchSecretOriginWire, LaunchSecretRequirement, RuntimeFactKindWire,
-    TrustClassWire, ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
+    ConfigMergeModeWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire,
+    HandlerResponse, ItemSpaceWire, LaunchConfigContributorWire, LaunchConfigInputDeclWire,
+    LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire, LaunchPrepareError,
+    LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse, LaunchPrepareSuccess,
+    LaunchSecretOriginWire, LaunchSecretRequirement, RuntimeFactKindWire, TrustClassWire,
+    ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
     ValidateLaunchPreparerConfigSuccess,
 };
 
@@ -80,13 +81,15 @@ fn prepare_inner(
             Some(MODEL_BINDING),
         ));
     }
-    if request.config_inputs.len() != 2
+    if request.config_inputs.len() != 3
         || !request.config_inputs.contains_key(MODEL_ROUTING_INPUT)
         || !request.config_inputs.contains_key(MODEL_PROVIDERS_INPUT)
+        || !request.config_inputs.contains_key(EXECUTION_INPUT)
     {
         return Err(wire_error(
             "directive_config_inputs_invalid",
-            "directive launch preparation requires exactly model_routing and model_providers",
+            "directive launch preparation requires exactly model_routing, model_providers, \
+             and execution",
             LaunchPrepareErrorClass::Internal,
             None,
         ));
@@ -110,6 +113,13 @@ fn prepare_inner(
             .expect("config key checked"),
         MODEL_PROVIDERS_INPUT,
     )?;
+    let execution = item_snapshot(
+        request
+            .config_inputs
+            .get(EXECUTION_INPUT)
+            .expect("config key checked"),
+        EXECUTION_INPUT,
+    )?;
 
     let prepared = prepare_directive_launch(DirectiveLaunchPreparationInput {
         primary_ref: &request.primary.canonical_ref,
@@ -118,6 +128,7 @@ fn prepare_inner(
         model_composed: &model_item.composed.composed,
         model_routing: routing.as_ref(),
         provider_catalog: &providers,
+        execution: execution.as_ref(),
     })
     .map_err(domain_error)?;
 
@@ -158,10 +169,22 @@ fn prepare_inner(
         })
         .collect();
 
+    let authority = serde_json::to_value(&prepared.accounting_authority).map_err(|error| {
+        wire_error(
+            "accounting_authority_serialize_failed",
+            format!("could not serialize accounting authority: {error}"),
+            LaunchPrepareErrorClass::Internal,
+            None,
+        )
+    })?;
+
     Ok(LaunchPrepareSuccess {
         runtime_data,
         required_secrets,
         runtime_facts: prepared.runtime_facts,
+        financial_authority: FinancialAuthorityResultWire::ProviderAccountingAuthorityV1 {
+            authority,
+        },
     })
 }
 
@@ -379,8 +402,11 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         ],
     )?;
 
-    if request.config_inputs.len() != 2 {
-        return Err("config_inputs must declare exactly model_routing and model_providers".into());
+    if request.config_inputs.len() != 3 {
+        return Err(
+            "config_inputs must declare exactly model_routing, model_providers, and execution"
+                .into(),
+        );
     }
     match request.config_inputs.get(MODEL_ROUTING_INPUT) {
         Some(LaunchConfigInputDeclWire::Item {
@@ -433,6 +459,38 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         }
         _ => return Err("model_providers must be the trusted-bundle provider catalog".into()),
     }
+    match request.config_inputs.get(EXECUTION_INPUT) {
+        Some(LaunchConfigInputDeclWire::Item {
+            id,
+            required,
+            merge,
+            allowed_spaces,
+            allowed_trust,
+        }) if id == "ryeos-runtime/execution"
+            && !required
+            && *merge == ConfigMergeModeWire::DeepMerge =>
+        {
+            exact_values(
+                "execution.allowed_spaces",
+                allowed_spaces,
+                &[ItemSpaceWire::Bundle, ItemSpaceWire::Project],
+            )?;
+            exact_trust_values(
+                "execution.allowed_trust",
+                allowed_trust,
+                &[
+                    TrustClassWire::TrustedBundle,
+                    TrustClassWire::TrustedProject,
+                ],
+            )?;
+        }
+        _ => return Err("execution must be the optional deep-merged execution item".into()),
+    }
+    if request.financial_authority != FinancialAuthorityDeclWire::ProviderAccountingAuthorityV1 {
+        return Err(
+            "financial_authority must declare provider_accounting_authority_v1".into(),
+        );
+    }
 
     if request.secret_policy.max_requirements != 4 {
         return Err("secret_policy.max_requirements must be 4".into());
@@ -448,8 +506,8 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         &[PROVIDER_SNAPSHOT_KEY],
     )?;
 
-    if request.runtime_facts.len() != 8 {
-        return Err("runtime_facts must declare the eight directive fact fields".into());
+    if request.runtime_facts.len() != 10 {
+        return Err("runtime_facts must declare the ten directive fact fields".into());
     }
     fact(
         request,
@@ -501,6 +559,14 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         RuntimeFactKindWire::Json,
         4096,
     )?;
+    fact(
+        request,
+        "authority_digest",
+        true,
+        RuntimeFactKindWire::String,
+        SHA256_HEX_CANONICAL_JSON_BYTES,
+    )?;
+    fact(request, "spend_bound", true, RuntimeFactKindWire::String, 32)?;
     Ok(())
 }
 

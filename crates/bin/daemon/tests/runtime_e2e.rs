@@ -96,6 +96,8 @@ launch_contract:
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
+  financial_authority:
+    kind: none
 description: "synth runtime for runtime_e2e"
 "#
     );
@@ -502,8 +504,8 @@ body_template:
 auth: {}
 headers: {}
 pricing:
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0.0"
+  output_per_million: "0.0"
 "#;
                 std::fs::write(
                     provider_dir.join("audit-noauth.yaml"),

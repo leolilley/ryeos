@@ -63,7 +63,27 @@ pub struct PreparedRuntimeLaunch {
     pub required_secrets: Vec<PreparedSecret>,
     pub runtime_facts: BTreeMap<String, Value>,
     pub binding_records: BTreeMap<String, RefBindingLaunchRecord>,
+    /// Validated financial authority sealed with this launch, exactly as
+    /// declared by the runtime launch contract. `None` for runtimes whose
+    /// contract declares no direct paid provider work.
+    pub financial_authority: Option<PreparedFinancialAuthority>,
 }
+
+/// The executor-validated, canonicalized financial authority.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedFinancialAuthority {
+    /// Always `"provider_accounting_authority_v1"` in this version.
+    pub kind: String,
+    /// The exact validated authority payload (canonical value form).
+    pub authority: Value,
+    /// sha-256 of the canonical JSON of `authority`.
+    pub authority_digest: String,
+}
+
+pub const FINANCIAL_AUTHORITY_KIND_PROVIDER_ACCOUNTING_V1: &str =
+    "provider_accounting_authority_v1";
+const MAX_FINANCIAL_AUTHORITY_BYTES: usize = 64 * 1024;
 
 pub struct PrepareRuntimeLaunchRequest<'a> {
     pub engine: &'a ryeos_engine::engine::Engine,
@@ -188,6 +208,7 @@ pub fn prepare_runtime_launch(
             runtime_data: BTreeMap::new(),
             required_secrets: Vec::new(),
             runtime_facts: BTreeMap::new(),
+            financial_authority: ryeos_handler_protocol::FinancialAuthorityResultWire::None,
         },
         LaunchPreparationDecl::Handler { config, .. } => {
             let handler_request = LaunchPrepareRequest {
@@ -211,6 +232,8 @@ pub fn prepare_runtime_launch(
     };
 
     validate_result(contract, request.ref_bindings, &config_inputs, &mut result)?;
+    let financial_authority =
+        validate_financial_authority(contract, result.financial_authority)?;
     Ok(PreparedRuntimeLaunch {
         runtime_data: result.runtime_data,
         required_secrets: result
@@ -223,7 +246,78 @@ pub fn prepare_runtime_launch(
             .collect(),
         runtime_facts: result.runtime_facts,
         binding_records,
+        financial_authority,
     })
+}
+
+/// Validate the declared financial-authority result and seal it: strict
+/// bounded shape, strict typed decode with an internal digest check,
+/// canonicalization, and hashing. No item-kind or provider-name branch —
+/// only the contract-declared kind selects the decoder.
+fn validate_financial_authority(
+    contract: &ryeos_engine::runtime_registry::LaunchContractDecl,
+    result: ryeos_handler_protocol::FinancialAuthorityResultWire,
+) -> Result<Option<PreparedFinancialAuthority>, DispatchError> {
+    use ryeos_engine::runtime_registry::FinancialAuthorityDecl;
+    use ryeos_handler_protocol::FinancialAuthorityResultWire;
+
+    match (contract.financial_authority, result) {
+        (FinancialAuthorityDecl::None, FinancialAuthorityResultWire::None) => Ok(None),
+        (
+            FinancialAuthorityDecl::ProviderAccountingAuthorityV1,
+            FinancialAuthorityResultWire::ProviderAccountingAuthorityV1 { authority },
+        ) => {
+            validate_json_value(
+                "financial_authority",
+                &authority,
+                MAX_FINANCIAL_AUTHORITY_BYTES,
+            )?;
+            let decoded: ryeos_accounting::ProviderAccountingAuthority =
+                serde_json::from_value(authority.clone()).map_err(|error| {
+                    preparation_error(
+                        "financial_authority_invalid",
+                        format!("financial authority does not decode strictly: {error}"),
+                        LaunchPrepareErrorClass::Internal,
+                    )
+                })?;
+            decoded.validate().map_err(|error| {
+                preparation_error(
+                    "financial_authority_invalid",
+                    format!("financial authority failed validation: {error}"),
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+            // Re-encode the typed value so the sealed canonical form cannot
+            // carry byte-level variance the strict decode ignored.
+            let canonical_value = serde_json::to_value(&decoded)
+                .map_err(|error| DispatchError::Internal(error.into()))?;
+            let canonical = lillux::canonical_json(&canonical_value).map_err(|error| {
+                preparation_error(
+                    "financial_authority_invalid",
+                    format!("financial authority is not canonical JSON: {error}"),
+                    LaunchPrepareErrorClass::Internal,
+                )
+            })?;
+            Ok(Some(PreparedFinancialAuthority {
+                kind: FINANCIAL_AUTHORITY_KIND_PROVIDER_ACCOUNTING_V1.to_owned(),
+                authority: canonical_value,
+                authority_digest: lillux::sha256_hex(canonical.as_bytes()),
+            }))
+        }
+        (declared, produced) => Err(preparation_error(
+            "financial_authority_mismatch",
+            format!(
+                "launch contract declares financial authority {declared:?} but preparation \
+                 produced {}",
+                match produced {
+                    FinancialAuthorityResultWire::None => "none",
+                    FinancialAuthorityResultWire::ProviderAccountingAuthorityV1 { .. } =>
+                        "provider_accounting_authority_v1",
+                }
+            ),
+            LaunchPrepareErrorClass::Internal,
+        )),
+    }
 }
 
 /// Validate daemon-wide syntax and size caps for a serialized secondary

@@ -13,11 +13,23 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use url::Url;
 
+use ryeos_accounting::{
+    BillableDimension, ChargeReconciliationAuthority, ClosedBillableDimensionSet, Currency,
+    FinalityContract, HexDigest, ProviderAccountingAuthority, ProviderChargeCapContract,
+    SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument, UsdNanos,
+};
+
 pub const MODEL_BINDING: &str = "model";
 pub const MODEL_ROUTING_INPUT: &str = "model_routing";
 pub const MODEL_PROVIDERS_INPUT: &str = "model_providers";
+pub const EXECUTION_INPUT: &str = "execution";
 pub const PROVIDER_SNAPSHOT_KEY: &str = "provider_snapshot";
 pub const PROVIDER_CONFIG_PREFIX: &str = "ryeos-runtime/model-providers";
+
+/// Shared default for `execution.max_provider_output_tokens_per_turn`.
+/// Launch preparation and the runtime must derive the same effective output
+/// bound from the same absent-field default.
+pub const DEFAULT_MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN: u64 = 32_768;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,6 +87,12 @@ pub struct ProviderConfig {
     pub schemas: Option<SchemasConfig>,
     #[serde(default)]
     pub pricing: Option<PricingConfig>,
+    /// Signed spend authority: billing subject identities plus the tariff or
+    /// provider-cap contract a hard spend certificate can be derived from.
+    /// Absent means the route is advisory-only (or explicitly free through
+    /// `pricing.explicitly_free`).
+    #[serde(default)]
+    pub spend_authority: Option<SpendAuthorityConfig>,
     #[serde(default)]
     pub extra: HashMap<String, Value>,
     #[serde(default)]
@@ -100,6 +118,8 @@ pub struct ProviderProfile {
     pub headers: Option<HashMap<String, String>>,
     #[serde(default)]
     pub schemas: Option<SchemasConfig>,
+    #[serde(default)]
+    pub spend_authority: Option<SpendAuthorityConfig>,
     #[serde(default)]
     pub extra: Option<HashMap<String, Value>>,
     #[serde(default)]
@@ -381,10 +401,12 @@ pub struct PricingConfig {
     /// Without this declaration, zero fallback rates mean untracked pricing.
     #[serde(default)]
     pub explicitly_free: bool,
+    /// Canonical USD decimal strings per million units. JSON/YAML numbers are
+    /// rejected at this boundary: authoritative money never passes `f64`.
     #[serde(default)]
-    pub input_per_million: Option<f64>,
+    pub input_per_million: Option<UsdNanos>,
     #[serde(default)]
-    pub output_per_million: Option<f64>,
+    pub output_per_million: Option<UsdNanos>,
     #[serde(default)]
     pub models: HashMap<String, ModelPricing>,
 }
@@ -392,8 +414,8 @@ pub struct PricingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelPricing {
-    pub input_per_million: f64,
-    pub output_per_million: f64,
+    pub input_per_million: UsdNanos,
+    pub output_per_million: UsdNanos,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -489,6 +511,285 @@ impl PricingConfig {
             })
         })
     }
+}
+
+/// Signed spend authority for a provider route: the stable billing subject
+/// identities plus the contract a hard spend certificate is derived from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpendAuthorityConfig {
+    /// Non-secret stable identity of the billing principal whose negotiated
+    /// pricing applies (for example an org or key alias).
+    pub billing_principal: String,
+    /// Generation label of the credential authority. Operators advance it on
+    /// rotation; an attempt freezes the generation it was admitted under.
+    pub credential_authority_generation: String,
+    /// Non-secret identity of the pricing contract subject.
+    pub pricing_contract_subject: String,
+    /// Signed tariff for `DerivedWorstCaseCharge` certificates.
+    #[serde(default)]
+    pub tariff: Option<SpendTariffDocument>,
+    /// Server-enforced request charge cap for `ProviderEnforcedChargeCap`
+    /// certificates. Preferred over the tariff when both are declared.
+    #[serde(default)]
+    pub request_charge_cap: Option<ProviderChargeCapContract>,
+    /// Contract making the provider's reported final charge authoritative
+    /// for settlement.
+    #[serde(default)]
+    pub reported_final_charge: Option<ReportedFinalChargeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReportedFinalChargeConfig {
+    pub final_on_response: bool,
+    pub max_reported_fraction_digits: u8,
+    #[serde(default)]
+    pub byok_zero_is_final: bool,
+    /// Billable dimensions the reported final charge covers.
+    pub covered_dimensions: ClosedBillableDimensionSet,
+}
+
+fn validate_subject_label(label: &str, value: &str) -> std::result::Result<(), String> {
+    if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(format!(
+            "spend_authority.{label} must be 1-256 bytes without control characters"
+        ));
+    }
+    Ok(())
+}
+
+impl SpendAuthorityConfig {
+    pub fn validate(&self, provider: &ProviderConfig) -> std::result::Result<(), String> {
+        validate_subject_label("billing_principal", &self.billing_principal)?;
+        validate_subject_label(
+            "credential_authority_generation",
+            &self.credential_authority_generation,
+        )?;
+        validate_subject_label("pricing_contract_subject", &self.pricing_contract_subject)?;
+        if let Some(tariff) = &self.tariff {
+            tariff.validate()?;
+        }
+        if let Some(cap) = &self.request_charge_cap {
+            cap.validate()?;
+        }
+        if provider
+            .pricing
+            .as_ref()
+            .is_some_and(|pricing| pricing.explicitly_free)
+            && (self.tariff.is_some() || self.request_charge_cap.is_some())
+        {
+            return Err(
+                "spend_authority tariff/cap contracts cannot be combined with \
+                 pricing.explicitly_free"
+                    .to_string(),
+            );
+        }
+        if self.reported_final_charge.is_some() {
+            let has_reported_cost_path = provider
+                .schemas
+                .as_ref()
+                .and_then(|schemas| schemas.streaming.as_ref())
+                .and_then(|streaming| streaming.metadata.as_ref())
+                .and_then(|metadata| metadata.usage.as_ref())
+                .is_some_and(|usage| usage.reported_cost_path.is_some());
+            if !has_reported_cost_path {
+                return Err(
+                    "spend_authority.reported_final_charge requires streaming metadata \
+                     usage.reported_cost_path"
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Launch-time bounds the derived worst-case certificate is computed from.
+#[derive(Debug, Clone, Copy)]
+pub struct AccountingAuthorityInputs {
+    pub context_window: u64,
+    /// Effective provider-native output-token ceiling for one attempt.
+    /// `0` means the runtime ceiling is disabled — no bounded output exists,
+    /// so no derived certificate can be issued.
+    pub max_provider_output_tokens_per_turn: u64,
+}
+
+fn subject_digest(value: &str) -> std::result::Result<HexDigest, DirectivePreparationError> {
+    HexDigest::new(lillux::sha256_hex(value.as_bytes())).map_err(|error| {
+        DirectivePreparationError::internal("accounting_authority_failed", error)
+    })
+}
+
+fn contract_digest_of<T: Serialize>(
+    contract: &T,
+) -> std::result::Result<HexDigest, DirectivePreparationError> {
+    let value = serde_json::to_value(contract).map_err(|error| {
+        DirectivePreparationError::internal("accounting_authority_failed", error.to_string())
+    })?;
+    HexDigest::of_canonical_json(&value).map_err(|error| {
+        DirectivePreparationError::internal("accounting_authority_failed", error)
+    })
+}
+
+/// Bound one billable dimension to the mechanically valid launch-time unit
+/// ceiling: prompt-side dimensions are bounded by the declared context
+/// window the provider enforces; generation-side dimensions by the bounded
+/// provider-native output ceiling of the prepared request.
+fn dimension_bound(
+    dim: BillableDimension,
+    inputs: &AccountingAuthorityInputs,
+) -> Option<(BillableDimension, u64)> {
+    match dim {
+        BillableDimension::InputTokens
+        | BillableDimension::CacheReadTokens
+        | BillableDimension::CacheWriteTokens => Some((dim, inputs.context_window)),
+        BillableDimension::OutputTokens | BillableDimension::ReasoningTokens => {
+            (inputs.max_provider_output_tokens_per_turn != 0)
+                .then_some((dim, inputs.max_provider_output_tokens_per_turn))
+        }
+        BillableDimension::PerRequest => Some((dim, 1)),
+    }
+}
+
+/// Resolve the sealed financial authority for one prepared route.
+///
+/// A raw signed maximum without a mechanically derivable proof produces
+/// `AdvisoryOnly`, never hard eligibility. Explicitly-free routes bind their
+/// zero contract to the exact signed config value digest.
+pub fn resolve_accounting_authority(
+    snapshot: &ResolvedProviderSnapshot,
+    inputs: &AccountingAuthorityInputs,
+) -> std::result::Result<ProviderAccountingAuthority, DirectivePreparationError> {
+    let provider = &snapshot.provider;
+    let spend_authority = provider.spend_authority.as_ref();
+    let config_value_digest = HexDigest::new(snapshot.config_value_digest.clone())
+        .map_err(|error| {
+            DirectivePreparationError::internal("accounting_authority_failed", error)
+        })?;
+
+    let (billing_principal_digest, credential_authority_generation, pricing_subject_digest) =
+        match spend_authority {
+            Some(sa) => (
+                subject_digest(&sa.billing_principal)?,
+                sa.credential_authority_generation.clone(),
+                subject_digest(&sa.pricing_contract_subject)?,
+            ),
+            None => (
+                subject_digest("unscoped")?,
+                "unscoped".to_string(),
+                subject_digest("unscoped")?,
+            ),
+        };
+
+    let explicitly_free = provider
+        .pricing
+        .as_ref()
+        .is_some_and(|pricing| pricing.explicitly_free);
+
+    let spend_bound = if explicitly_free {
+        SpendBoundAuthority::ExplicitlyFree {
+            contract_digest: config_value_digest.clone(),
+        }
+    } else if let Some(cap) = spend_authority.and_then(|sa| sa.request_charge_cap.as_ref()) {
+        SpendBoundAuthority::Paid {
+            maximum: cap.maximum,
+            certificate: SpendBoundCertificate::ProviderEnforcedChargeCap {
+                request_cap_contract_digest: contract_digest_of(cap)?,
+                currency: Currency::Usd,
+            },
+        }
+    } else if let Some(tariff) = spend_authority.and_then(|sa| sa.tariff.as_ref()) {
+        let bounds: Option<Vec<(BillableDimension, u64)>> = tariff
+            .covered_dimensions
+            .as_slice()
+            .iter()
+            .map(|dim| dimension_bound(*dim, inputs))
+            .collect();
+        match bounds {
+            None => SpendBoundAuthority::AdvisoryOnly,
+            Some(bounds) => {
+                let maximum = tariff.worst_case_charge(&bounds).map_err(|error| {
+                    DirectivePreparationError::configuration(
+                        "accounting_authority_invalid",
+                        format!("tariff worst-case charge failed: {error}"),
+                    )
+                })?;
+                if maximum.is_zero() {
+                    SpendBoundAuthority::AdvisoryOnly
+                } else {
+                    let request_limit_digest = contract_digest_of(&serde_json::json!({
+                        "context_window": inputs.context_window,
+                        "max_provider_output_tokens_per_turn":
+                            inputs.max_provider_output_tokens_per_turn,
+                        "output_limit_path": provider
+                            .schemas
+                            .as_ref()
+                            .and_then(|schemas| schemas.output_limit.as_ref())
+                            .map(|limit| limit.path.clone()),
+                    }))?;
+                    SpendBoundAuthority::Paid {
+                        maximum,
+                        certificate: SpendBoundCertificate::DerivedWorstCaseCharge {
+                            tariff_contract_digest: contract_digest_of(tariff)?,
+                            request_limit_digest,
+                            covered_dimensions: tariff.covered_dimensions.clone(),
+                            currency: Currency::Usd,
+                            pricing_generation: tariff.pricing_generation.clone(),
+                            expires_at_ms: tariff.expires_at_ms,
+                        },
+                    }
+                }
+            }
+        }
+    } else {
+        SpendBoundAuthority::AdvisoryOnly
+    };
+
+    let reconciliation = if let Some(rfc) =
+        spend_authority.and_then(|sa| sa.reported_final_charge.as_ref())
+    {
+        let usage_schema = provider
+            .schemas
+            .as_ref()
+            .and_then(|schemas| schemas.streaming.as_ref())
+            .and_then(|streaming| streaming.metadata.as_ref())
+            .and_then(|metadata| metadata.usage.as_ref())
+            .expect("validated: reported_final_charge requires usage schema");
+        ChargeReconciliationAuthority::ProviderReportedFinalCharge {
+            schema_digest: contract_digest_of(usage_schema)?,
+            covered_dimensions: rfc.covered_dimensions.clone(),
+            finality_contract: FinalityContract {
+                final_on_response: rfc.final_on_response,
+                max_reported_fraction_digits: rfc.max_reported_fraction_digits,
+                byok_zero_is_final: rfc.byok_zero_is_final,
+            },
+        }
+    } else if let Some(tariff) = spend_authority.and_then(|sa| sa.tariff.as_ref()) {
+        ChargeReconciliationAuthority::DeterministicTariff {
+            tariff_digest: contract_digest_of(tariff)?,
+            covered_dimensions: tariff.covered_dimensions.clone(),
+        }
+    } else {
+        ChargeReconciliationAuthority::Unavailable
+    };
+
+    let placeholder_digest = subject_digest("unsealed")?;
+    ProviderAccountingAuthority {
+        authority_digest: placeholder_digest,
+        config_hash: snapshot.config_hash.clone(),
+        config_value_digest,
+        billing_principal_digest,
+        credential_authority_generation,
+        pricing_contract_subject_digest: pricing_subject_digest,
+        provider_id: snapshot.provider_id.clone(),
+        model_name: snapshot.model_name.clone(),
+        matched_profile: snapshot.matched_profile.clone(),
+        spend_bound,
+        reconciliation,
+    }
+    .sealed()
+    .map_err(|error| DirectivePreparationError::internal("accounting_authority_failed", error))
 }
 
 impl ProviderConfig {
@@ -935,14 +1236,20 @@ impl ProviderConfig {
 
         if let Some(pricing) = self.pricing.as_ref() {
             if pricing.explicitly_free
-                && (pricing.input_per_million.is_some_and(|rate| rate != 0.0)
-                    || pricing.output_per_million.is_some_and(|rate| rate != 0.0)
+                && (pricing.input_per_million.is_some_and(|rate| !rate.is_zero())
+                    || pricing.output_per_million.is_some_and(|rate| !rate.is_zero())
                     || !pricing.models.is_empty())
             {
                 bail!(
                     "provider config{context}: pricing.explicitly_free cannot be combined with non-zero/default or per-model prices"
                 );
             }
+        }
+
+        if let Some(spend_authority) = self.spend_authority.as_ref() {
+            spend_authority
+                .validate(self)
+                .map_err(|error| anyhow::anyhow!("provider config{context}: {error}"))?;
         }
 
         match self.family {
@@ -988,6 +1295,9 @@ impl ProviderConfig {
         }
         if let Some(schemas) = &profile.schemas {
             resolved.schemas = Some(schemas.clone());
+        }
+        if let Some(spend_authority) = &profile.spend_authority {
+            resolved.spend_authority = Some(spend_authority.clone());
         }
         if let Some(extra) = &profile.extra {
             resolved.extra.extend(extra.clone());
@@ -1178,6 +1488,10 @@ pub struct DirectiveLaunchPreparationInput<'a> {
     pub model_composed: &'a Value,
     pub model_routing: Option<&'a VerifiedConfigItem>,
     pub provider_catalog: &'a BTreeMap<String, VerifiedConfigItem>,
+    /// Verified `ryeos-runtime/execution` config item, when present. The
+    /// derived worst-case spend bound freezes its provider-native output
+    /// ceiling; absence uses the shared runtime default.
+    pub execution: Option<&'a VerifiedConfigItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -1193,6 +1507,8 @@ pub struct DirectiveLaunchPreparation {
     pub snapshot: ResolvedProviderSnapshot,
     pub required_secret: Option<PreparedSecretRequirement>,
     pub runtime_facts: BTreeMap<String, Value>,
+    /// Sealed financial authority for the resolved route.
+    pub accounting_authority: ProviderAccountingAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1376,13 +1692,46 @@ pub fn prepare_directive_launch(
         config_hash,
         provider: resolved_provider,
     };
-    let runtime_facts = runtime_facts(&snapshot)?;
+    let accounting_inputs = AccountingAuthorityInputs {
+        context_window: snapshot.context_window,
+        max_provider_output_tokens_per_turn: resolve_output_ceiling(input.execution)?,
+    };
+    let accounting_authority = resolve_accounting_authority(&snapshot, &accounting_inputs)?;
+    let runtime_facts = runtime_facts(&snapshot, &accounting_authority)?;
 
     Ok(DirectiveLaunchPreparation {
         snapshot,
         required_secret,
         runtime_facts,
+        accounting_authority,
     })
+}
+
+/// Extract the provider-native output ceiling from the verified execution
+/// config item, applying the shared default when the item or field is
+/// absent. A present field with a non-integer shape is a configuration
+/// error, never a silent default.
+fn resolve_output_ceiling(
+    execution: Option<&VerifiedConfigItem>,
+) -> std::result::Result<u64, DirectivePreparationError> {
+    let Some(item) = execution else {
+        return Ok(DEFAULT_MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN);
+    };
+    let Some(object) = item.value.as_object() else {
+        return Err(DirectivePreparationError::configuration(
+            "execution_config_invalid",
+            "the execution config input must be a mapping",
+        ));
+    };
+    match object.get("max_provider_output_tokens_per_turn") {
+        None => Ok(DEFAULT_MAX_PROVIDER_OUTPUT_TOKENS_PER_TURN),
+        Some(value) => value.as_u64().ok_or_else(|| {
+            DirectivePreparationError::configuration(
+                "execution_config_invalid",
+                "execution.max_provider_output_tokens_per_turn must be an unsigned integer",
+            )
+        }),
+    }
 }
 
 fn resolve_target(
@@ -1538,8 +1887,24 @@ fn validate_digest(label: &str, value: &str) -> std::result::Result<(), Directiv
 
 fn runtime_facts(
     snapshot: &ResolvedProviderSnapshot,
+    accounting_authority: &ProviderAccountingAuthority,
 ) -> std::result::Result<BTreeMap<String, Value>, DirectivePreparationError> {
     let mut facts = BTreeMap::new();
+    facts.insert(
+        "authority_digest".to_string(),
+        Value::String(accounting_authority.authority_digest.as_str().to_string()),
+    );
+    facts.insert(
+        "spend_bound".to_string(),
+        Value::String(
+            match &accounting_authority.spend_bound {
+                SpendBoundAuthority::Paid { .. } => "paid",
+                SpendBoundAuthority::ExplicitlyFree { .. } => "explicitly_free",
+                SpendBoundAuthority::AdvisoryOnly => "advisory_only",
+            }
+            .to_string(),
+        ),
+    );
     facts.insert(
         "provider_id".to_string(),
         Value::String(snapshot.provider_id.clone()),

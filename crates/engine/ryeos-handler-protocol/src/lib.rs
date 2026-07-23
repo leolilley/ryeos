@@ -273,6 +273,31 @@ pub struct LaunchPrepareSuccess {
     pub runtime_data: BTreeMap<String, Value>,
     pub required_secrets: Vec<LaunchSecretRequirement>,
     pub runtime_facts: BTreeMap<String, Value>,
+    /// Financial authority result declared by the runtime launch contract.
+    /// Required — an absent field is a protocol error, never a default.
+    /// The executor validates the payload strictly against the declared
+    /// kind, canonicalizes it, hashes it, and seals it in the admitted
+    /// launch capsule; the handler protocol treats the payload as bounded
+    /// opaque JSON.
+    pub financial_authority: FinancialAuthorityResultWire,
+}
+
+/// Financial authority produced by launch preparation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FinancialAuthorityResultWire {
+    /// The runtime performs no direct paid provider work.
+    None,
+    /// A sealed `ProviderAccountingAuthority` (version 1) payload.
+    ProviderAccountingAuthorityV1 { authority: Value },
+}
+
+/// Contract-side declaration of the required financial authority kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FinancialAuthorityDeclWire {
+    None,
+    ProviderAccountingAuthorityV1,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +368,10 @@ pub struct ValidateLaunchPreparerConfigRequest {
     pub secret_policy: LaunchSecretPolicyDeclWire,
     pub required_runtime_data: Vec<String>,
     pub runtime_facts: BTreeMap<String, RuntimeFactDeclWire>,
+    /// Required financial-authority contract term. A preparer that does not
+    /// understand this term fails strict decoding instead of silently
+    /// acknowledging a contract it cannot satisfy.
+    pub financial_authority: FinancialAuthorityDeclWire,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

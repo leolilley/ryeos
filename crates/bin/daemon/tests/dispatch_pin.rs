@@ -153,6 +153,8 @@ launch_contract:
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
+  financial_authority:
+    kind: none
 description: "synth runtime for V5.3 dispatch_pin capability tests"
 "#
     );
