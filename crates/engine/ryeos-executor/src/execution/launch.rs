@@ -5714,7 +5714,7 @@ mod tests {
         let parent_hard_limits = HardLimits {
             turns: 6,
             tokens: 1_000,
-            spend_usd: 0.25,
+            spend_usd: ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap(),
             spawns: 2,
             depth: 3,
             duration_seconds: 45,
@@ -5731,7 +5731,7 @@ mod tests {
         let requested = LimitValues {
             turns: 20,
             tokens: 20_000,
-            spend_usd: 2.0,
+            spend_usd: ryeos_accounting::UsdNanos::parse_canonical("2").unwrap(),
             spawns: 10,
             depth: 8,
             duration_seconds: 300,
@@ -5745,7 +5745,10 @@ mod tests {
 
         assert_eq!(hard.turns, 6);
         assert_eq!(hard.tokens, 1_000);
-        assert_eq!(hard.spend_usd, 0.25);
+        assert_eq!(
+            hard.spend_usd,
+            ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap()
+        );
         assert_eq!(hard.spawns, 2);
         assert_eq!(hard.depth, 3);
         assert_eq!(hard.duration_seconds, 45);

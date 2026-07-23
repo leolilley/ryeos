@@ -31,7 +31,7 @@ pub enum MoneyError {
 ///
 /// The inner value is private so a negative amount can never be constructed;
 /// arithmetic is checked and never saturates or wraps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UsdNanos(i64);
 
 impl UsdNanos {

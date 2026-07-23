@@ -6,7 +6,7 @@ defaults:
   # execution policy, or caller overrides.
   turns: 0
   tokens: 0
-  spend_usd: 0.0
+  spend_usd: "0"
   spawns: 0
   depth: 0
   duration_seconds: 0

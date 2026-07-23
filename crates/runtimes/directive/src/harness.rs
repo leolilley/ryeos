@@ -107,10 +107,13 @@ impl Harness {
             ));
         }
 
-        if self.limits.spend_usd > 0.0 && self.spend_used >= self.limits.spend_usd {
+        if !self.limits.spend_usd.is_zero()
+            && self.spend_used >= self.limits.spend_usd.display_usd_lossy()
+        {
             return Err(format!(
                 "spend limit exceeded: ${:.4} >= ${:.4}",
-                self.spend_used, self.limits.spend_usd
+                self.spend_used,
+                self.limits.spend_usd.display_usd_lossy()
             ));
         }
 
@@ -155,10 +158,13 @@ impl Harness {
                 self.tokens_used, self.limits.tokens
             ));
         }
-        if self.limits.spend_usd > 0.0 && self.spend_used >= self.limits.spend_usd {
+        if !self.limits.spend_usd.is_zero()
+            && self.spend_used >= self.limits.spend_usd.display_usd_lossy()
+        {
             return Err(format!(
                 "spend limit exceeded before retry: ${:.4} >= ${:.4}",
-                self.spend_used, self.limits.spend_usd
+                self.spend_used,
+                self.limits.spend_usd.display_usd_lossy()
             ));
         }
         if self.limits.duration_seconds > 0 {
@@ -266,7 +272,7 @@ impl Harness {
     }
 
     pub fn spend_limit_usd(&self) -> Option<f64> {
-        (self.limits.spend_usd > 0.0).then_some(self.limits.spend_usd)
+        (!self.limits.spend_usd.is_zero()).then_some(self.limits.spend_usd.display_usd_lossy())
     }
 
     pub fn has_finite_accounting_budget(&self) -> bool {
@@ -404,7 +410,7 @@ mod tests {
             HardLimits {
                 turns: 10,
                 tokens: 1000,
-                spend_usd: 1.0,
+                spend_usd: ryeos_accounting::UsdNanos::parse_canonical("1").unwrap(),
                 spawns: 5,
                 depth: 3,
                 duration_seconds: 60,

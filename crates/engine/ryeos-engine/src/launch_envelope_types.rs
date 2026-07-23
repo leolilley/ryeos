@@ -240,8 +240,11 @@ pub struct HardLimits {
     pub turns: u32,
     #[serde(default)]
     pub tokens: u64,
+    /// Fixed-point USD as a canonical decimal string on the wire. `0` is the
+    /// unlimited sentinel, matching the other limit fields. Authoritative
+    /// money never passes through `f64`; JSON numbers are rejected here.
     #[serde(default)]
-    pub spend_usd: f64,
+    pub spend_usd: ryeos_accounting::UsdNanos,
     #[serde(default)]
     pub spawns: u32,
     #[serde(default)]
@@ -255,7 +258,7 @@ impl Default for HardLimits {
         Self {
             turns: 0,
             tokens: 0,
-            spend_usd: 0.0,
+            spend_usd: ryeos_accounting::UsdNanos::ZERO,
             spawns: 0,
             depth: 0,
             duration_seconds: 0,

@@ -1,3 +1,4 @@
+use ryeos_accounting::UsdNanos;
 use ryeos_engine::execution_policy::{PolicySourceKind, ResolvedExecutionPolicy, Sourced};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,8 +32,9 @@ pub struct LimitValues {
     pub turns: u32,
     #[serde(default = "default_tokens")]
     pub tokens: u64,
+    /// Fixed-point USD as a canonical decimal string; `"0"` = unlimited.
     #[serde(default = "default_spend")]
-    pub spend_usd: f64,
+    pub spend_usd: UsdNanos,
     #[serde(default = "default_spawns")]
     pub spawns: u32,
     #[serde(default = "default_depth")]
@@ -55,8 +57,10 @@ impl Default for LimitValues {
 }
 
 impl LimitValues {
-    fn validate(&self, source: &str) -> anyhow::Result<()> {
-        validate_spend_usd(self.spend_usd, &format!("{source}.spend_usd"))
+    fn validate(&self, _source: &str) -> anyhow::Result<()> {
+        // `UsdNanos` is non-negative fixed point by construction; the old
+        // finite/non-negative float validation is enforced by the type.
+        Ok(())
     }
 }
 
@@ -65,28 +69,16 @@ impl LimitValues {
 pub struct LimitCaps {
     pub turns: Option<u32>,
     pub tokens: Option<u64>,
-    pub spend_usd: Option<f64>,
+    pub spend_usd: Option<UsdNanos>,
     pub spawns: Option<u32>,
     pub depth: Option<u32>,
     pub duration_seconds: Option<u64>,
 }
 
 impl LimitCaps {
-    fn validate(&self, source: &str) -> anyhow::Result<()> {
-        if let Some(spend_usd) = self.spend_usd {
-            validate_spend_usd(spend_usd, &format!("{source}.spend_usd"))?;
-        }
+    fn validate(&self, _source: &str) -> anyhow::Result<()> {
         Ok(())
     }
-}
-
-fn validate_spend_usd(value: f64, source: &str) -> anyhow::Result<()> {
-    if !value.is_finite() || value < 0.0 {
-        return Err(anyhow::anyhow!(
-            "{source} must be finite and non-negative, got {value}"
-        ));
-    }
-    Ok(())
 }
 
 fn default_turns() -> u32 {
@@ -95,8 +87,8 @@ fn default_turns() -> u32 {
 fn default_tokens() -> u64 {
     0
 }
-fn default_spend() -> f64 {
-    0.0
+fn default_spend() -> UsdNanos {
+    UsdNanos::ZERO
 }
 fn default_spawns() -> u32 {
     0
@@ -124,7 +116,7 @@ pub fn compute_effective_limits(
     let mut hard = HardLimits {
         turns: sentinel_clamp(requested.turns, caps.turns.unwrap_or(0)),
         tokens: sentinel_clamp(requested.tokens, caps.tokens.unwrap_or(0)),
-        spend_usd: sentinel_clamp(requested.spend_usd, caps.spend_usd.unwrap_or(0.0)),
+        spend_usd: sentinel_clamp(requested.spend_usd, caps.spend_usd.unwrap_or(UsdNanos::ZERO)),
         spawns: sentinel_clamp(requested.spawns, caps.spawns.unwrap_or(0)),
         depth: sentinel_clamp(requested.depth, caps.depth.unwrap_or(0)),
         duration_seconds: sentinel_clamp(
@@ -151,7 +143,6 @@ pub fn compute_effective_limits(
 /// => bound 0) and parent clamps alike. A plain `min` would let a zero bound
 /// erase a bounded value into unlimited, or let a zero (unlimited) value ignore
 /// a real bound.
-#[allow(clippy::float_cmp)] // 0.0 is an exact sentinel here, not an approximation
 fn sentinel_clamp<T: Copy + PartialOrd + Default>(value: T, bound: T) -> T {
     let unlimited = T::default();
     if bound == unlimited {
@@ -183,8 +174,6 @@ pub fn merge_header_limits(base: &LimitValues, header: &Value) -> anyhow::Result
         m.insert(k.clone(), v.clone());
     }
     let result: LimitValues = serde_json::from_value(merged)?;
-    // A non-finite or negative spend value silently disables enforcement (the
-    // harness only acts when `spend_usd > 0.0`), so reject it at the source.
     result.validate("limits")?;
     Ok(result)
 }

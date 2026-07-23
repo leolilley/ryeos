@@ -127,8 +127,10 @@ pub struct LimitsSpec {
     pub turns: Option<u32>,
     #[serde(default)]
     pub tokens: Option<u64>,
+    /// Fixed-point USD as a canonical decimal string (e.g. `"0.03"`).
+    /// Authored numeric spend values are rejected at this boundary.
     #[serde(default)]
-    pub spend_usd: Option<f64>,
+    pub spend_usd: Option<ryeos_accounting::UsdNanos>,
     #[serde(default)]
     pub spawns: Option<u32>,
     #[serde(default)]

@@ -530,7 +530,7 @@ mod tests {
         let hard_limits = serde_json::json!({
             "turns": 6,
             "tokens": 1000,
-            "spend_usd": 0.25,
+            "spend_usd": "0.25",
             "spawns": 2,
             "depth": 3,
             "duration_seconds": 45,

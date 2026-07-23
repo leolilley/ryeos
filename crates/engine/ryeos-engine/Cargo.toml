@@ -11,6 +11,7 @@ base64 = { workspace = true }
 directories = { workspace = true }
 jsonschema = { workspace = true }
 lillux = { workspace = true }
+ryeos-accounting = { workspace = true }
 libc = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
