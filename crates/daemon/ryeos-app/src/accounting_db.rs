@@ -240,7 +240,9 @@ const fn col(
 }
 
 fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
-    sqlite_schema::SchemaSpec {
+    // A `const` item so every `&[...]` slice is promoted to `'static`; the
+    // same literals in a runtime body would be temporaries (E0716).
+    const SPEC: sqlite_schema::SchemaSpec = sqlite_schema::SchemaSpec {
         application_id: ACCOUNTING_APP_ID,
         tables: &[
             sqlite_schema::TableSpec {
@@ -442,7 +444,8 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
         ],
-    }
+    };
+    SPEC
 }
 
 // ---------------------------------------------------------------------------

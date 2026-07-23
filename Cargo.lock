@@ -2343,6 +2343,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "ryeos-accounting"
+version = "0.1.0"
+dependencies = [
+ "lillux",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ryeos-api"
 version = "0.1.0"
 dependencies = [
@@ -2404,6 +2414,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "rusqlite",
+ "ryeos-accounting",
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-isolation-protocol",
@@ -2588,6 +2599,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lillux",
+ "ryeos-accounting",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2607,6 +2619,7 @@ dependencies = [
  "lillux",
  "regex",
  "reqwest",
+ "ryeos-accounting",
  "ryeos-directive-core",
  "ryeos-engine",
  "ryeos-runtime",
@@ -2633,6 +2646,7 @@ dependencies = [
  "libc",
  "lillux",
  "regex",
+ "ryeos-accounting",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-tracing",
@@ -2656,6 +2670,7 @@ dependencies = [
  "libc",
  "lillux",
  "rand 0.8.6",
+ "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
@@ -2786,6 +2801,7 @@ dependencies = [
  "lillux",
  "regex",
  "rmp-serde",
+ "ryeos-accounting",
  "ryeos-engine",
  "ryeos-state",
  "serde",
@@ -2829,6 +2845,7 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "rusqlite",
+ "ryeos-accounting",
  "ryeos-tracing",
  "serde",
  "serde_json",
@@ -2933,6 +2950,7 @@ dependencies = [
  "reqwest",
  "rmp-serde",
  "rusqlite",
+ "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
  "ryeos-core-tools",
