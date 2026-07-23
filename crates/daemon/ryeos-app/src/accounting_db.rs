@@ -4625,8 +4625,10 @@ mod tests {
             schema_version: SPEND_TARIFF_SCHEMA_VERSION,
             currency: Currency::Usd,
             pricing_generation: "gen-1".to_string(),
-            input_per_million: Some(usd("3")),
-            output_per_million: Some(usd("15")),
+            // 2000/10000 nanos per unit: the canonical test bounds below
+            // reproduce the shared "0.5" sealed maximum exactly.
+            input_per_million: Some(usd("2")),
+            output_per_million: Some(usd("10")),
             reasoning_per_million: None,
             cache_read_per_million: None,
             cache_write_per_million: None,
@@ -4741,6 +4743,14 @@ mod tests {
         authority_base(tag).sealed().unwrap()
     }
 
+    /// Canonical unit bounds that reproduce the shared "0.5" maximum under
+    /// `tariff_io` (100k × $2/M + 30k × $10/M) and `tariff_tiny_with_flat`
+    /// (4.9e14 × 1 nano/M + $0.01 flat) — the daemon re-derives the sealed
+    /// maximum from these commitments.
+    const IO_INPUT_BOUND: u64 = 100_000;
+    const IO_OUTPUT_BOUND: u64 = 30_000;
+    const TINY_INPUT_BOUND: u64 = 490_000_000_000_000;
+
     fn bound_for(authority: &ProviderAccountingAuthority) -> VerifiedPreparedSpendBound {
         let (maximum, commitments) = match &authority.spend_bound {
             SpendBoundAuthority::Paid {
@@ -4749,10 +4759,32 @@ mod tests {
             } => (
                 *maximum,
                 match certificate {
-                    SpendBoundCertificate::DerivedWorstCaseCharge { .. } => {
+                    SpendBoundCertificate::DerivedWorstCaseCharge {
+                        covered_dimensions,
+                        pricing_generation,
+                        ..
+                    } => {
+                        let unit_bounds =
+                            if covered_dimensions.contains(BillableDimension::PerRequest) {
+                                vec![UnitCount {
+                                    dimension: BillableDimension::InputTokens,
+                                    units: TINY_INPUT_BOUND,
+                                }]
+                            } else {
+                                vec![
+                                    UnitCount {
+                                        dimension: BillableDimension::InputTokens,
+                                        units: IO_INPUT_BOUND,
+                                    },
+                                    UnitCount {
+                                        dimension: BillableDimension::OutputTokens,
+                                        units: IO_OUTPUT_BOUND,
+                                    },
+                                ]
+                            };
                         SpendBoundCommitments::DerivedUnits {
-                            unit_bounds: Vec::new(),
-                            pricing_generation: "gen-1".to_string(),
+                            unit_bounds,
+                            pricing_generation: pricing_generation.clone(),
                         }
                     }
                     SpendBoundCertificate::ProviderEnforcedChargeCap { .. } => {
@@ -4782,7 +4814,10 @@ mod tests {
             authority_digest: authority.authority_digest.clone(),
             maximum,
             commitments,
-            verifier_contract_digest: digest_of("verifier"),
+            verifier_contract_digest: ryeos_accounting::HexDigest::new(lillux::sha256_hex(
+                ryeos_accounting::rpc::SPEND_VERIFIER_CONTRACT_V1.as_bytes(),
+            ))
+            .expect("pinned verifier digest"),
         }
     }
 
@@ -5116,38 +5151,51 @@ mod tests {
             &attempt_id,
             "h1",
             SpendAccounting::TariffUnits {
-                unit_counts: vec![UnitCount {
-                    dimension: BillableDimension::InputTokens,
-                    units: 1000,
-                }],
+                unit_counts: vec![
+                    UnitCount {
+                        dimension: BillableDimension::InputTokens,
+                        units: 1000,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::OutputTokens,
+                        units: 0,
+                    },
+                ],
             },
             &authority,
         )
         .unwrap();
-        // $3/M × 1000 = $0.003 exactly.
+        // $2/M × 1000 = $0.002 exactly; every covered dimension is counted
+        // (an explicit zero, never an omission).
         assert_eq!(outcome.state, AttemptBudgetState::Reconciled);
-        assert_eq!(outcome.budget_charge, usd("0.003"));
-        assert_eq!(outcome.released, usd("0.497"));
+        assert_eq!(outcome.budget_charge, usd("0.002"));
+        assert_eq!(outcome.released, usd("0.498"));
         assert_eq!(outcome.charge_basis, ChargeBasis::DeterministicTariff);
         assert!(!outcome.replayed);
-        assert_amounts(&db, EXEC, "execution", "0.003", "0");
+        assert_amounts(&db, EXEC, "execution", "0.002", "0");
         // Exact idempotent replay even though the row is already terminal.
         let replay = settle(
             &db,
             &attempt_id,
             "h1",
             SpendAccounting::TariffUnits {
-                unit_counts: vec![UnitCount {
-                    dimension: BillableDimension::InputTokens,
-                    units: 1000,
-                }],
+                unit_counts: vec![
+                    UnitCount {
+                        dimension: BillableDimension::InputTokens,
+                        units: 1000,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::OutputTokens,
+                        units: 0,
+                    },
+                ],
             },
             &authority,
         )
         .unwrap();
         assert!(replay.replayed);
-        assert_eq!(replay.budget_charge, usd("0.003"));
-        assert_amounts(&db, EXEC, "execution", "0.003", "0");
+        assert_eq!(replay.budget_charge, usd("0.002"));
+        assert_amounts(&db, EXEC, "execution", "0.002", "0");
 
         // 1 nano per million × 1 unit rounds up to 1 nano and the
         // per-request flat rate is added once.

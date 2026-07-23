@@ -1568,7 +1568,7 @@ async fn prepare_managed_launch_authority(
         }
     }
     let pending_project_snapshot: Option<super::CapturedProjectGeneration> = None;
-    let mut freshly_minted_accounting_scope = false;
+    let freshly_minted_accounting_scope;
     let launch_metadata = {
         let original_pushed_head_ref =
             ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(params.provenance);
