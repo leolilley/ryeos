@@ -81,9 +81,42 @@ fn publish_one(
 ) -> anyhow::Result<()> {
     // Exact-once recovery: ordered per-attempt publication means a projected
     // row at or beyond this sequence proves a prior append reached the chain
-    // before its outbox acknowledgement was lost.
+    // before its outbox acknowledgement was lost. Runtimes cannot author this
+    // event type (the event service refuses it), so every projected row is
+    // daemon-authored; for the equal-sequence case we additionally require
+    // the projected row to match the claimed payload before acknowledging —
+    // a divergent row is an integrity failure, never a silent skip.
     if let Some(projected) = store.get_provider_attempt_budget_latest(&row.attempt_id)? {
-        if projected.transition_sequence >= i64::from(row.transition_sequence) {
+        let claimed_sequence = i64::from(row.transition_sequence);
+        if projected.transition_sequence == claimed_sequence {
+            let claimed_transition = row
+                .payload
+                .get("transition")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            let claimed_occurred = row
+                .payload
+                .get("occurred_at_ms")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_default();
+            if projected.transition != claimed_transition
+                || projected.occurred_at_ms != claimed_occurred
+            {
+                anyhow::bail!(
+                    "outbox recovery integrity failure for attempt {} sequence {}: projected \
+                     `{}`@{} contradicts the committed ledger transition `{}`@{}",
+                    row.attempt_id,
+                    claimed_sequence,
+                    projected.transition,
+                    projected.occurred_at_ms,
+                    claimed_transition,
+                    claimed_occurred
+                );
+            }
+            ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
+            return Ok(());
+        }
+        if projected.transition_sequence > claimed_sequence {
             ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
             return Ok(());
         }

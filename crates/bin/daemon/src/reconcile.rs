@@ -454,13 +454,22 @@ fn finalize_recovered_stop(
         ryeos_app::state_store::StopIntent::Cancel => "cancelled",
         ryeos_app::state_store::StopIntent::Kill => "killed",
     };
+    // Terminal admission requires the financial fence to have committed;
+    // proceeding to terminalization past a failed fence would leave held
+    // funds admissible behind a terminal thread. Skip this pass and let the
+    // next reconcile sweep retry both.
     if let Err(error) = crate::accounting_terminal::fence_accounting_for_terminal(
         state,
         thread_id,
         None,
         ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
     ) {
-        tracing::error!(thread_id, %error, "accounting fence failed during stop recovery");
+        tracing::error!(
+            thread_id,
+            %error,
+            "accounting fence failed during stop recovery; deferring terminalization"
+        );
+        return;
     }
     if let Err(error) = state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),

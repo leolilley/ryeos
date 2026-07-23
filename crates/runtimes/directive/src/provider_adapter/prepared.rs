@@ -116,6 +116,18 @@ pub fn prepare_provider_request(input: &StreamingCallInput<'_>) -> Result<Prepar
         .map_err(|e| anyhow!("serialize prepared provider request body: {e}"))?;
     let body_sha256 = streaming::sha256_hex(&body_bytes);
 
+    // Credential-generation model (plan §7.4, deliberate v1 property): the
+    // credential VALUE is frozen here, at prepare time — before reserve and
+    // issue — from the process environment the daemon injected at spawn.
+    // Within one runtime process no resolver exists that could substitute a
+    // newer generation after issue, so "transport resolves only the frozen
+    // credential generation" holds structurally. Rotation reaches new
+    // launches through a changed `credential_authority_generation` in the
+    // signed provider config (a new config hash and sealed authority).
+    // Residual, accepted: a revocation upstream between issue and send is
+    // not locally detectable — the provider rejects the dead key and the
+    // issued attempt settles at its reserved maximum, which is the same
+    // conservative outcome the plan requires for a detected revocation.
     let credential = match provider.auth.env_var.as_deref() {
         Some(env_var) => {
             let value = std::env::var(env_var).map_err(|_| {

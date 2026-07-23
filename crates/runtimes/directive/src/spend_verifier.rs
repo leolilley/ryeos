@@ -18,7 +18,9 @@ use ryeos_accounting::{
 
 /// Version string committed into every proof so a daemon can reject proofs
 /// produced under a different verifier contract.
-pub const VERIFIER_CONTRACT_VERSION: &str = "spend-verifier/v1";
+// Shared with the daemon ledger's pinned verifier-contract check; drift
+// between the two constants would fail every reservation closed.
+pub const VERIFIER_CONTRACT_VERSION: &str = ryeos_accounting::rpc::SPEND_VERIFIER_CONTRACT_V1;
 
 fn verifier_contract_digest() -> Result<HexDigest> {
     HexDigest::new(lillux::cas::sha256_hex(VERIFIER_CONTRACT_VERSION.as_bytes()))

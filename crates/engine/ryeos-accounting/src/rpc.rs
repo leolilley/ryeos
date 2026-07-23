@@ -20,6 +20,12 @@ pub const RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED: &str =
     "runtime.provider_attempt_release_unissued";
 pub const RUNTIME_PROVIDER_ATTEMPT_GET: &str = "runtime.provider_attempt_get";
 
+/// The verifier contract version both sides pin: the runtime's shared
+/// trusted verifier stamps it (as a digest) into every
+/// `VerifiedPreparedSpendBound`, and the daemon accepts exactly this
+/// version. Advancing the verifier protocol advances this constant.
+pub const SPEND_VERIFIER_CONTRACT_V1: &str = "spend-verifier/v1";
+
 /// Upper bound applied to every free-text diagnostic accepted over RPC.
 pub const MAX_DIAGNOSTIC_LEN: usize = 2048;
 /// Upper bound applied to retained provider raw decimal audit text.

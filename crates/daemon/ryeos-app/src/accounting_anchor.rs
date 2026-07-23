@@ -73,7 +73,14 @@ pub enum AnchorAgreement {
     /// (crash between COMMIT and anchor advance). Recoverable: the caller
     /// advances the anchor from the complete immutable database hash chain —
     /// no safety-critical acknowledgement was returned for those sequences.
-    DbAhead { anchor_sequence: u64 },
+    DbAhead {
+        anchor_sequence: u64,
+        /// The digest the anchor acknowledged at `anchor_sequence`. The
+        /// caller must prove the database chain contains exactly this digest
+        /// at that sequence before advancing — a longer DIVERGENT database
+        /// must never replace acknowledged history.
+        anchor_digest: String,
+    },
     /// The anchor acknowledged sequences the database does not contain: the
     /// database was rolled back. Permanently fail-closed for the epoch.
     AnchorAhead {
@@ -206,6 +213,23 @@ impl AccountingAnchor {
     /// AND its parent directory on first initialization. Holds an exclusive
     /// OS file lock for the lifetime of the returned value.
     pub fn open_or_init(dir: &Path, site_id: &str, epoch: u64) -> Result<Self> {
+        Self::open_with_policy(dir, site_id, epoch, true)
+    }
+
+    /// Open the anchor for an epoch that has already acknowledged
+    /// irreversible financial transitions. A missing anchor here is NOT
+    /// recoverable by re-creating genesis — that would launder a rollback —
+    /// so it fails closed permanently for the epoch.
+    pub fn open_requiring_existing(dir: &Path, site_id: &str, epoch: u64) -> Result<Self> {
+        Self::open_with_policy(dir, site_id, epoch, false)
+    }
+
+    fn open_with_policy(
+        dir: &Path,
+        site_id: &str,
+        epoch: u64,
+        allow_initialize: bool,
+    ) -> Result<Self> {
         if site_id.is_empty() || site_id.len() > SITE_ID_MAX {
             bail!("anchor site id must be 1..={SITE_ID_MAX} bytes");
         }
@@ -242,6 +266,12 @@ impl AccountingAnchor {
                 file
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if !allow_initialize {
+                    bail!(
+                        "financial anchor is missing for active epoch {epoch} of site                          {site_id}, which has acknowledged irreversible transitions; the                          epoch is unverifiable and hard admission is permanently                          fail-closed: {}",
+                        path.display()
+                    );
+                }
                 let mut create = OpenOptions::new();
                 create.read(true).write(true).create_new(true);
                 #[cfg(unix)]
@@ -472,6 +502,7 @@ impl AccountingAnchor {
         } else if record.financial_high_water < db_high_water {
             Ok(AnchorAgreement::DbAhead {
                 anchor_sequence: record.financial_high_water,
+                anchor_digest: record.financial_chain_digest,
             })
         } else {
             Ok(AnchorAgreement::AnchorAhead {
@@ -644,7 +675,10 @@ mod tests {
         // Database committed sequence 1 before the anchor advanced: DbAhead.
         assert_eq!(
             anchor.verify_against_db(1, Some(&digest_of("c1"))).unwrap(),
-            AnchorAgreement::DbAhead { anchor_sequence: 0 }
+            AnchorAgreement::DbAhead {
+                anchor_sequence: 0,
+                anchor_digest: genesis_chain_digest(SITE, EPOCH),
+            }
         );
         anchor
             .compare_and_advance(SITE, EPOCH, 2, &digest_of("c2"))

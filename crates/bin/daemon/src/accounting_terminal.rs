@@ -42,9 +42,23 @@ pub fn fence_accounting_for_terminal(
             log_fence(thread_id, owner, &outcome);
         }
         None => {
-            // Owner unknown (dead process, orphan recovery): close every
-            // generation this thread still holds nonterminal attempts or an
-            // open gate under.
+            // Owner unknown (dead process, orphan recovery): fence every
+            // OPEN gate for the thread. A gate with no reservation yet is
+            // still an open admission surface — sweeping only nonterminal
+            // reservations would let a racing reserve/issue callback slip
+            // in between the scan and terminal publication.
+            for generation in ledger.open_gates_for_thread(thread_id)? {
+                let outcome = ledger.fence_launch_gate_and_close_attempts(
+                    thread_id,
+                    &generation,
+                    reason,
+                    now_ms(),
+                )?;
+                log_fence(thread_id, &generation, &outcome);
+            }
+            // Belt-and-braces: nonterminal reservations whose gate row is
+            // already fenced (or predates gate bookkeeping) are closed
+            // through the same idempotent fence.
             for (attempt_id, attempt_thread, generation, state_before) in
                 ledger.nonterminal_reservations()?
             {
