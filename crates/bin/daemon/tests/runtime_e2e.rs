@@ -497,10 +497,10 @@ async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
                 let provider = r#"base_url: "http://127.0.0.1:9"
 family: chat_completions
 body_template:
-  model: "{{model}}"
-  messages: "{{messages}}"
-  tools: "{{tools}}"
-  stream: "{{stream}}"
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
 auth: {}
 headers: {}
 schemas:
