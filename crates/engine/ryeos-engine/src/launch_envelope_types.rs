@@ -64,6 +64,27 @@ pub struct LaunchEnvelope {
     /// by the serving runtime's signed launch contract; the engine treats both
     /// as opaque and only enforces the declared key set.
     pub runtime_data: BTreeMap<String, Value>,
+    /// Exact operational copy of the sealed financial authority for runtimes
+    /// whose launch contract declares one. The daemon ledger — not this copy —
+    /// is the balance/reservation authority; the runtime uses it to prepare
+    /// verifier proofs and attribute attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub financial_authority: Option<Value>,
+    /// Immutable accounting scope identities minted by the daemon. Never a
+    /// prompt parameter; never accepted back from runtime fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_scope: Option<EnvelopeAccountingScope>,
+}
+
+/// Daemon-minted budget scope identities carried to the runtime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnvelopeAccountingScope {
+    pub budget_authority_site_id: String,
+    pub ledger_epoch: u64,
+    pub execution_budget_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directive_budget_id: Option<String>,
 }
 
 /// Builder for [`LaunchEnvelope`].
@@ -99,6 +120,8 @@ pub struct LaunchEnvelopeBuilder {
     resolution: ResolutionOutput,
     inventory: HashMap<String, Vec<ItemDescriptor>>,
     runtime_data: BTreeMap<String, Value>,
+    financial_authority: Option<Value>,
+    accounting_scope: Option<EnvelopeAccountingScope>,
 }
 
 impl LaunchEnvelopeBuilder {
@@ -122,12 +145,26 @@ impl LaunchEnvelopeBuilder {
             resolution,
             inventory: HashMap::new(),
             runtime_data: BTreeMap::new(),
+            financial_authority: None,
+            accounting_scope: None,
         }
     }
 
     /// Set runtime-owned data prepared for the serving runtime.
     pub fn runtime_data(mut self, runtime_data: BTreeMap<String, Value>) -> Self {
         self.runtime_data = runtime_data;
+        self
+    }
+
+    /// Attach the sealed financial authority operational copy.
+    pub fn financial_authority(mut self, financial_authority: Option<Value>) -> Self {
+        self.financial_authority = financial_authority;
+        self
+    }
+
+    /// Attach the daemon-minted accounting scope identities.
+    pub fn accounting_scope(mut self, accounting_scope: Option<EnvelopeAccountingScope>) -> Self {
+        self.accounting_scope = accounting_scope;
         self
     }
 
@@ -149,6 +186,8 @@ impl LaunchEnvelopeBuilder {
             resolution: self.resolution,
             inventory: self.inventory,
             runtime_data: self.runtime_data,
+            financial_authority: self.financial_authority,
+            accounting_scope: self.accounting_scope,
         }
     }
 }
@@ -535,6 +574,8 @@ mod tests {
             },
             inventory: HashMap::new(),
             runtime_data: BTreeMap::new(),
+            financial_authority: None,
+            accounting_scope: None,
             resolution: ResolutionOutput {
                 root: crate::resolution::ResolvedAncestor {
                     requested_id: "directive:my/agent".to_string(),

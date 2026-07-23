@@ -7,7 +7,7 @@ model:
 limits:
   turns: 80
   tokens: 400000
-  spend_usd: 4.00
+  spend_usd: "4"
   depth: 5
 continuation:
   carry_turns: 8

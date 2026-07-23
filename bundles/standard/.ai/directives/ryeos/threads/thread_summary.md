@@ -7,7 +7,7 @@ model:
 limits:
   turns: 3
   tokens: 8192
-  spend_usd: 0.02
+  spend_usd: "0.02"
 requires:
   capabilities:
     declared:

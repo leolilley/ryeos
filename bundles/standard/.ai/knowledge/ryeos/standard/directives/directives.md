@@ -29,7 +29,7 @@ requires:
 limits:
   turns: 10
   tokens: 8000
-  spend_usd: 0.50
+  spend_usd: "0.5"
   duration_seconds: 300
 context:
   - position: system

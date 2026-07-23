@@ -182,6 +182,131 @@ impl CallbackClient {
         }
     }
 
+    /// Typed provider-attempt budget lifecycle wrappers. All five are
+    /// financial authority operations: they hard-fail when the callback
+    /// channel is absent — an attempt whose reservation state cannot be
+    /// proven must never reach a provider.
+    pub async fn provider_attempt_reserve(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptReserveParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptReserveResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_reserve",
+            params,
+            |client, thread_id, value| async move {
+                client.provider_attempt_reserve(&thread_id, value).await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_mark_issued(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptMarkIssuedParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptMarkIssuedResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_mark_issued",
+            params,
+            |client, thread_id, value| async move {
+                client.provider_attempt_mark_issued(&thread_id, value).await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_settle(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptSettleParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptSettleResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_settle",
+            params,
+            |client, thread_id, value| async move {
+                client.provider_attempt_settle(&thread_id, value).await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_release_unissued(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptReleaseUnissuedParams,
+    ) -> Result<ryeos_accounting::ProviderAttemptReleaseUnissuedResponse, CallbackError> {
+        self.provider_attempt_call(
+            "provider_attempt_release_unissued",
+            params,
+            |client, thread_id, value| async move {
+                client
+                    .provider_attempt_release_unissued(&thread_id, value)
+                    .await
+            },
+        )
+        .await
+    }
+
+    pub async fn provider_attempt_get(
+        &self,
+        params: &ryeos_accounting::ProviderAttemptGetParams,
+    ) -> Result<Option<ryeos_accounting::ProviderAttemptBudgetRecord>, CallbackError> {
+        let raw = self
+            .provider_attempt_call_raw("provider_attempt_get", params)
+            .await?;
+        if raw.is_null() {
+            return Ok(None);
+        }
+        serde_json::from_value(raw)
+            .map(Some)
+            .map_err(|e| {
+                CallbackError::Transport(anyhow::anyhow!(
+                    "invalid provider_attempt_get response from daemon: {e}"
+                ))
+            })
+    }
+
+    async fn provider_attempt_call<P, R, F, Fut>(
+        &self,
+        label: &str,
+        params: &P,
+        call: F,
+    ) -> Result<R, CallbackError>
+    where
+        P: serde::Serialize,
+        R: serde::de::DeserializeOwned,
+        F: FnOnce(Arc<dyn RuntimeCallbackAPI>, String, Value) -> Fut,
+        Fut: std::future::Future<Output = Result<Value, CallbackError>>,
+    {
+        let client = self.inner.as_ref().cloned().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "callback {label} called without an inner UDS client (socket missing); \
+                 provider attempts cannot proceed without daemon ledger authority"
+            ))
+        })?;
+        let value = serde_json::to_value(params).map_err(|e| {
+            CallbackError::Transport(anyhow::anyhow!("serialize {label} params: {e}"))
+        })?;
+        let raw = call(client, self.thread_id.clone(), value).await?;
+        serde_json::from_value(raw).map_err(|e| {
+            CallbackError::Transport(anyhow::anyhow!("invalid {label} response from daemon: {e}"))
+        })
+    }
+
+    async fn provider_attempt_call_raw<P: serde::Serialize>(
+        &self,
+        label: &str,
+        params: &P,
+    ) -> Result<Value, CallbackError> {
+        let client = self.inner.as_ref().ok_or_else(|| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "callback {label} called without an inner UDS client (socket missing); \
+                 provider attempts cannot proceed without daemon ledger authority"
+            ))
+        })?;
+        let value = serde_json::to_value(params).map_err(|e| {
+            CallbackError::Transport(anyhow::anyhow!("serialize {label} params: {e}"))
+        })?;
+        client.provider_attempt_get(&self.thread_id, value).await
+    }
+
     /// Report this process's pid so the daemon records the runtime's process
     /// group. Resume-critical: hard-fails when the callback channel is
     /// unavailable. A live runtime that cannot register its pgid must exit

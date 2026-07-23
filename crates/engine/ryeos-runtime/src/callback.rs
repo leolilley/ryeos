@@ -642,6 +642,77 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     async fn poll_input(&self, _thread_id: &str) -> Result<Value, CallbackError> {
         Ok(serde_json::json!({ "inputs": [] }))
     }
+
+    /// Provider-attempt budget lifecycle (reserve → mark issued → settle,
+    /// with unissued release and exact recovery reads). Daemon-ledger
+    /// authority: the runtime asserts intent coordinates and digests only.
+    ///
+    /// Defaults refuse: a directive test must provide explicit accounting
+    /// behavior — a missing method never silently degrades into settled mode.
+    async fn provider_attempt_reserve(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "provider_attempt_reserve is only supported by the daemon UDS client"
+                .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_mark_issued(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "provider_attempt_mark_issued is only supported by the daemon UDS client"
+                .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_settle(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "provider_attempt_settle is only supported by the daemon UDS client"
+                .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_release_unissued(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message:
+                "provider_attempt_release_unissued is only supported by the daemon UDS client"
+                    .to_string(),
+            retryable: false,
+        })
+    }
+
+    async fn provider_attempt_get(
+        &self,
+        _thread_id: &str,
+        _params: Value,
+    ) -> Result<Value, CallbackError> {
+        Err(CallbackError::ActionFailed {
+            code: "unsupported".to_string(),
+            message: "provider_attempt_get is only supported by the daemon UDS client".to_string(),
+            retryable: false,
+        })
+    }
 }
 
 pub fn client_from_env() -> Box<dyn RuntimeCallbackAPI> {

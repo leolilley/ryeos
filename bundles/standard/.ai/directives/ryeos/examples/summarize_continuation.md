@@ -7,7 +7,7 @@ model:
 limits:
   turns: 2
   tokens: 12000
-  spend_usd: 0.03
+  spend_usd: "0.03"
 continuation: false
 inputs:
   - name: reason
