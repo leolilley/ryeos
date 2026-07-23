@@ -480,6 +480,8 @@ mod tests {
             },
             inventory: HashMap::new(),
             runtime_data: BTreeMap::new(),
+            financial_authority: None,
+            accounting_scope: None,
         }
     }
 

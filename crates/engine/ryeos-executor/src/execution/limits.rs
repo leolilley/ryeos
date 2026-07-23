@@ -303,12 +303,17 @@ mod tests {
     #[test]
     fn merge_header_limits_rejects_negative_spend() {
         let base = LimitValues::default();
+        // Authoritative money never passes through JSON numbers at all.
         let err =
             merge_header_limits(&base, &serde_json::json!({ "spend_usd": -1.0 })).unwrap_err();
         assert!(
-            err.to_string().contains("must be finite and non-negative"),
+            err.to_string().contains("canonical decimal string"),
             "got {err}"
         );
+        // A signed decimal string is rejected by the canonical parser.
+        let err =
+            merge_header_limits(&base, &serde_json::json!({ "spend_usd": "-1" })).unwrap_err();
+        assert!(err.to_string().contains("not canonical"), "got {err}");
     }
 
     #[test]
@@ -317,19 +322,19 @@ mod tests {
         // their caps, not just turns/duration.
         let requested = LimitValues {
             tokens: 0,
-            spend_usd: 0.0,
+            spend_usd: UsdNanos::ZERO,
             spawns: 0,
             ..Default::default()
         };
         let caps = LimitCaps {
             tokens: Some(1000),
-            spend_usd: Some(1.5),
+            spend_usd: Some(UsdNanos::parse_canonical("1.5").unwrap()),
             spawns: Some(3),
             ..Default::default()
         };
         let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None);
         assert_eq!(hard.tokens, 1000);
-        assert_eq!(hard.spend_usd, 1.5);
+        assert_eq!(hard.spend_usd, UsdNanos::parse_canonical("1.5").unwrap());
         assert_eq!(hard.spawns, 3);
     }
 
@@ -497,7 +502,7 @@ mod tests {
         );
         let err = load_limits_config_from_loader(&loader).unwrap_err();
         assert!(
-            err.to_string().contains("must be finite and non-negative"),
+            err.to_string().contains("canonical decimal string"),
             "got {err}"
         );
     }
@@ -528,7 +533,7 @@ mod tests {
         let defaults = LimitValues {
             tokens: 123_456,
             spawns: 42,
-            spend_usd: 9.0,
+            spend_usd: UsdNanos::parse_canonical("9").unwrap(),
             ..Default::default()
         };
         let requested = apply_execution_policy_item_overrides(
@@ -545,7 +550,10 @@ mod tests {
         assert_eq!(requested.duration_seconds, 7200);
         assert_eq!(requested.tokens, 123_456);
         assert_eq!(requested.spawns, 42);
-        assert_eq!(requested.spend_usd, 9.0);
+        assert_eq!(
+            requested.spend_usd,
+            UsdNanos::parse_canonical("9").unwrap()
+        );
     }
 
     #[test]

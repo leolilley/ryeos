@@ -141,12 +141,7 @@ pub async fn handle(
 
     let (rows, next_cursor) = if req.detail {
         let limit = req.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
-        let after = req
-            .cursor
-            .as_deref()
-            .map(decode_cursor)
-            .transpose()?
-            .map(|(occurred, attempt)| (occurred, attempt));
+        let after = req.cursor.as_deref().map(decode_cursor).transpose()?;
         let after_ref = after
             .as_ref()
             .map(|(occurred, attempt)| (*occurred, attempt.as_str()));

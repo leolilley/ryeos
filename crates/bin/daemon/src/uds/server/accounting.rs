@@ -36,9 +36,9 @@ fn accounting(state: &AppState) -> Result<&Arc<AccountingDb>> {
     })
 }
 
-fn require_scope<'a>(
-    cap: &'a CallbackCapability,
-) -> Result<&'a ryeos_state::objects::AdmittedAccountingScope> {
+fn require_scope(
+    cap: &CallbackCapability,
+) -> Result<&ryeos_state::objects::AdmittedAccountingScope> {
     cap.accounting_scope.as_ref().ok_or_else(|| {
         anyhow!(
             "thread {} was admitted without an accounting scope; provider-attempt budget \

@@ -1124,6 +1124,7 @@ impl AccountingDb {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_account_prepared_in_tx(
         &self,
         conn: &Connection,

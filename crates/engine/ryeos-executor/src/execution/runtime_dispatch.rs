@@ -717,6 +717,7 @@ mod tests {
             root_content_digest: "0".repeat(64),
             hard_limits: serde_json::json!({"turns": 6, "tokens": 1000}),
             depth: 4,
+            accounting_scope: None,
         };
 
         let ctx = parent_execution_context_from_capability(&cap);
@@ -746,6 +747,7 @@ mod tests {
             root_content_digest: "0".repeat(64),
             hard_limits: serde_json::json!({}),
             depth: 0,
+            accounting_scope: None,
         };
 
         assert_eq!(

@@ -116,6 +116,9 @@ fn safe_error_body(body: &str) -> String {
 /// Returned wrapped in `anyhow::Error` so diagnostic surfaces can preserve the
 /// typed detail while the runner `downcast_ref`s to read the retry
 /// classification.
+// MidStream carries the full cut-attempt state by design; the pre-stream
+// variants are small rejection records.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProviderStreamError {
     /// The provider returned a non-success HTTP status before streaming began.
@@ -320,9 +323,16 @@ impl std::error::Error for RuntimeCallbackPublicationError {}
 #[derive(Debug, Clone)]
 pub struct CutAttemptState {
     pub usage: Option<TokenUsage>,
+    // Diagnostic parity with `AdapterResponse`; the runner consumes only
+    // `usage` since settlement moved to the daemon ledger, but cut-state
+    // provenance stays available to adapter-level tests and tracing.
+    #[allow(dead_code)]
     pub generation_header_id: Option<String>,
+    #[allow(dead_code)]
     pub response_id: Option<String>,
+    #[allow(dead_code)]
     pub requested_output_tokens: Option<u64>,
+    #[allow(dead_code)]
     pub observed_output: ObservedOutput,
 }
 
@@ -471,6 +481,7 @@ fn split_sse_events(data: &str) -> Vec<(String, String)> {
     events
 }
 
+#[allow(clippy::too_many_arguments)]
 fn provider_reported_error(
     block: &str,
     config: Option<&crate::directive::StreamErrorConfig>,
@@ -1157,6 +1168,7 @@ pub struct StreamingCallInput<'a> {
     skip(input),
     fields(adapter_type = "stream", model = %input.model, turn = input.turn)
 )]
+#[allow(dead_code)] // legacy prepare-then-send wrapper; adapter tests use it
 pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
     // Legacy single-call shape (prepare-then-send in one step) for callers
     // that do not participate in the reservation lifecycle. Ledger routes
@@ -1485,14 +1497,11 @@ pub async fn send_prepared_streaming(
         buffer.push_str(&decoded);
 
         // Drain complete SSE event blocks (separated by blank line).
-        loop {
-            // A stream may legally switch line endings between logical events.
-            // Pick the earliest delimiter of either form; `Option::or_else`
-            // would incorrectly prefer a later LF delimiter whenever one
-            // existed, merging an earlier CRLF-framed event into it.
-            let Some((idx, sep_len)) = next_sse_delimiter(&buffer) else {
-                break;
-            };
+        // A stream may legally switch line endings between logical events.
+        // Pick the earliest delimiter of either form; `Option::or_else`
+        // would incorrectly prefer a later LF delimiter whenever one
+        // existed, merging an earlier CRLF-framed event into it.
+        while let Some((idx, sep_len)) = next_sse_delimiter(&buffer) {
             if stream_frame_exceeds(execution.max_provider_stream_frame_bytes, idx) {
                 return Err(anyhow::Error::new(ProviderProtocolStreamError {
                     detail: format!(
