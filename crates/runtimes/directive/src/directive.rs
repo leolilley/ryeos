@@ -341,8 +341,6 @@ pub struct AttemptAccountingConfig {
     pub failure_policy: AccountingFailurePolicy,
     #[serde(default)]
     pub budget_mode: AccountingBudgetMode,
-    #[serde(default)]
-    pub reservation: AttemptReservationConfig,
 }
 
 impl Default for AttemptAccountingConfig {
@@ -350,7 +348,6 @@ impl Default for AttemptAccountingConfig {
         Self {
             failure_policy: AccountingFailurePolicy::Auto,
             budget_mode: AccountingBudgetMode::Settled,
-            reservation: AttemptReservationConfig::default(),
         }
     }
 }
@@ -364,21 +361,16 @@ pub enum AccountingFailurePolicy {
     FailClosed,
 }
 
+/// `Settled` reports post-attempt usage against a threshold; `Hard` requires
+/// the daemon reservation ledger and is valid only for routes whose sealed
+/// financial authority is `Paid` or `ExplicitlyFree` (checked at runtime
+/// start — configuration alone cannot prove ledger eligibility).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum AccountingBudgetMode {
     #[default]
     Settled,
     Hard,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct AttemptReservationConfig {
-    #[serde(default)]
-    pub max_tokens_per_attempt: Option<u64>,
-    #[serde(default)]
-    pub max_cost_per_attempt_usd: Option<f64>,
 }
 
 fn default_retries() -> u32 {
@@ -435,35 +427,9 @@ impl Default for ExecutionConfig {
 
 impl ExecutionConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if let Some(tokens) = self.accounting.reservation.max_tokens_per_attempt {
-            if tokens == 0 {
-                anyhow::bail!("accounting.reservation.max_tokens_per_attempt must be positive");
-            }
-        }
-        if let Some(cost) = self.accounting.reservation.max_cost_per_attempt_usd {
-            if !cost.is_finite() || cost <= 0.0 {
-                anyhow::bail!(
-                    "accounting.reservation.max_cost_per_attempt_usd must be finite and positive"
-                );
-            }
-        }
-        if self.accounting.budget_mode == AccountingBudgetMode::Hard {
-            anyhow::bail!(
-                "accounting.budget_mode=hard requires the durable reservation/reconciliation backend, which is not enabled by this runtime build"
-            );
-        }
-        if self.accounting.budget_mode == AccountingBudgetMode::Settled
-            && (self.accounting.reservation.max_tokens_per_attempt.is_some()
-                || self
-                    .accounting
-                    .reservation
-                    .max_cost_per_attempt_usd
-                    .is_some())
-        {
-            anyhow::bail!(
-                "accounting.reservation ceilings are only meaningful with accounting.budget_mode=hard"
-            );
-        }
+        // `budget_mode: hard` is structurally valid configuration; whether the
+        // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
+        // launch fact and is enforced at runtime start, not here.
         Ok(())
     }
 }

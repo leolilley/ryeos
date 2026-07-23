@@ -11,6 +11,5 @@ max_provider_stream_frame_bytes: 1048576
 accounting:
   failure_policy: auto
   budget_mode: settled
-  reservation: {}
 tool_preload: false
 retry_on_timeout: true

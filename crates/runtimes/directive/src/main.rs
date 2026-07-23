@@ -17,6 +17,7 @@ mod provider_adapter;
 mod result_guard;
 mod resume;
 mod runner;
+mod spend_verifier;
 
 use ryeos_directive_core::{ResolvedProviderSnapshot, PROVIDER_SNAPSHOT_KEY};
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
@@ -275,6 +276,60 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     let matched_profile = provider_snapshot.matched_profile.clone();
     let config_hash = provider_snapshot.config_hash.clone();
 
+    // Decode the sealed financial authority and daemon-minted accounting
+    // scope. Strictly typed and validated at startup: a ledger-eligible
+    // authority (Paid / ExplicitlyFree) without scope — or scope without such
+    // an authority — is a launch-contract violation and fails before any
+    // provider work can start.
+    let financial_authority = match envelope.financial_authority.take() {
+        Some(value) => {
+            let authority: ryeos_accounting::ProviderAccountingAuthority =
+                serde_json::from_value(value)
+                    .map_err(|e| anyhow::anyhow!("invalid launch financial_authority: {e}"))?;
+            authority
+                .validate()
+                .map_err(|e| anyhow::anyhow!("launch financial_authority failed validation: {e}"))?;
+            if authority.config_hash != config_hash {
+                anyhow::bail!(
+                    "launch financial_authority config hash `{}` contradicts the resolved \
+                     provider snapshot `{config_hash}`",
+                    authority.config_hash
+                );
+            }
+            Some(authority)
+        }
+        None => None,
+    };
+    let accounting_scope = envelope.accounting_scope.take();
+    let ledger_route = matches!(
+        financial_authority.as_ref().map(|authority| &authority.spend_bound),
+        Some(
+            ryeos_accounting::SpendBoundAuthority::Paid { .. }
+                | ryeos_accounting::SpendBoundAuthority::ExplicitlyFree { .. }
+        )
+    );
+    if ledger_route && accounting_scope.is_none() {
+        anyhow::bail!(
+            "launch-contract violation: a Paid/ExplicitlyFree financial authority requires \
+             daemon-minted accounting scope identities, but the envelope carries none"
+        );
+    }
+    if !ledger_route && accounting_scope.is_some() {
+        anyhow::bail!(
+            "launch-contract violation: the envelope carries accounting scope identities \
+             without a ledger-eligible (Paid/ExplicitlyFree) financial authority"
+        );
+    }
+    // Hard budget mode is valid only where the daemon reservation ledger
+    // backs the route; on advisory routes it must fail at startup rather
+    // than silently degrade into settled mode.
+    if execution.accounting.budget_mode == directive::AccountingBudgetMode::Hard && !ledger_route {
+        anyhow::bail!(
+            "provider_accounting_policy_invalid: accounting.budget_mode=hard requires a Paid \
+             or ExplicitlyFree sealed financial authority; this route is advisory-only"
+        );
+    }
+
     let harness = harness::Harness::new(
         &envelope.policy,
         envelope.request.depth,
@@ -393,6 +448,8 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 provider_id,
                 matched_profile,
                 config_hash,
+                financial_authority,
+                accounting_scope,
                 execution,
                 model_name,
                 thread_id: envelope.thread_id.clone(),
@@ -483,6 +540,8 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             provider_id,
             matched_profile,
             config_hash,
+            financial_authority,
+            accounting_scope,
             execution,
             model_name,
             thread_id: envelope.thread_id.clone(),

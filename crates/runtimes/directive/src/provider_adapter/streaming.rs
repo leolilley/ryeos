@@ -25,7 +25,7 @@ mod metadata;
 use metadata::harvest_chunk_meta;
 
 /// Compute a sha256 hex digest of the input bytes.
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
     format!("{:x}", h.finalize())
@@ -1158,103 +1158,56 @@ pub struct StreamingCallInput<'a> {
     fields(adapter_type = "stream", model = %input.model, turn = input.turn)
 )]
 pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
-    let StreamingCallInput {
-        client,
-        provider,
-        provider_id,
-        matched_profile,
-        config_hash,
-        execution,
-        model,
-        messages,
-        tools,
-        callback,
-        turn,
-        sampling,
-        cancel_flag: _,    // checked inside the stream loop
-        interrupt_flag: _, // checked inside the stream loop
-    } = input;
-    let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
+    // Legacy single-call shape (prepare-then-send in one step) for callers
+    // that do not participate in the reservation lifecycle. Ledger routes
+    // must prepare first, reserve against the prepared digest, and only
+    // then call `send_prepared_streaming` with the same object.
+    let prepared = super::prepared::prepare_provider_request(&input)?;
+    send_prepared_streaming(&input, &prepared).await
+}
 
-    let (converted_messages, system_prompt) =
-        crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
+/// Transport for an immutable [`super::prepared::PreparedProviderRequest`]:
+/// sends the exact prepared bytes with the frozen credential. Nothing is
+/// rebuilt, re-serialized, or re-resolved after the reservation digest was
+/// taken (§9.2) — the send path consumes `prepared.body_bytes` verbatim.
+#[tracing::instrument(
+    name = "provider:send_prepared_streaming",
+    skip(input, prepared),
+    fields(adapter_type = "stream", model = %input.model, turn = input.turn)
+)]
+pub async fn send_prepared_streaming(
+    input: &StreamingCallInput<'_>,
+    prepared: &super::prepared::PreparedProviderRequest,
+) -> Result<StreamOutcome> {
+    let client = input.client;
+    let provider = input.provider;
+    let provider_id = input.provider_id;
+    let matched_profile = input.matched_profile;
+    let config_hash = input.config_hash;
+    let execution = input.execution;
+    let callback = input.callback;
+    let turn = input.turn;
 
-    let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
-    let tools_val = crate::provider_adapter::tools::serialize_tools(tools, &tool_schema);
+    let requested_output_tokens = prepared.requested_output_tokens;
+    let request_body_sha256 = prepared.body_sha256.clone();
+    tracing::debug!(
+        url = %prepared.url,
+        request_digest = %prepared.request_digest,
+        body_sha256 = %prepared.body_sha256,
+        header_names = ?prepared.header_names,
+        "sending immutable prepared provider request"
+    );
 
-    let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
-    // Resolve {model} template in base_url (e.g. gemini profiles use
-    // `{model}:streamGenerateContent`). Stream URL semantics:
-    //   - None        → default to "/chat/completions"
-    //   - Some("")    → base_url is the full endpoint; do not append
-    //   - Some(other) → append (with leading slash if needed)
-    let base_resolved = provider.base_url.replace("{model}", model);
-    let url = match stream_url {
-        Some("") => base_resolved,
-        Some(su) => format!(
-            "{}{}",
-            base_resolved.trim_end_matches('/'),
-            if su.starts_with('/') {
-                su.to_string()
-            } else {
-                format!("/{}", su)
-            }
-        ),
-        None => format!("{}/chat/completions", base_resolved.trim_end_matches('/')),
-    };
-
-    let mut body = build_request_body(
-        provider,
-        model,
-        &converted_messages,
-        system_prompt.as_deref(),
-        &tools_val,
-        !tools.is_empty(),
-        (execution.max_provider_output_tokens_per_turn != 0)
-            .then_some(execution.max_provider_output_tokens_per_turn),
-    )?;
-
-    // Sampling parameters — gated by provider capabilities so we
-    // never send a field the upstream API will reject with a 400.
-    inject_sampling(&mut body, provider.family, sampling);
-    apply_declared_output_limit(
-        &mut body,
-        provider
-            .schemas
-            .as_ref()
-            .and_then(|schemas| schemas.output_limit.as_ref()),
-        (execution.max_provider_output_tokens_per_turn != 0)
-            .then_some(execution.max_provider_output_tokens_per_turn),
-    )?;
-    let requested_output_tokens = declared_output_limit_from_body(provider, &body)?;
-
-    // Pre-compute the request body hash for diagnostic error messages.
-    // This runs before `body` is moved into the request builder.
-    let request_body_str = serde_json::to_string(&body).unwrap_or_default();
-    let request_body_sha256 = sha256_hex(request_body_str.as_bytes());
-
-    let mut req = client.post(&url);
-
-    let auth_header = provider
-        .auth
-        .header_name
-        .as_deref()
-        .unwrap_or("Authorization");
-    let auth_prefix = provider.auth.prefix.as_deref().unwrap_or("Bearer ");
-    if let Some(ref env_var) = provider.auth.env_var {
-        let key = std::env::var(env_var).map_err(|_| {
-            anyhow!(
-                "provider auth env var {env_var} is not set; refusing to call provider \
-                 with no credentials (typed-fail-loud)"
-            )
-        })?;
-        req = req.header(auth_header, format!("{}{}", auth_prefix, key));
+    let mut req = client.request(prepared.method.clone(), &prepared.url);
+    if let Some(credential) = &prepared.credential {
+        req = req.header(
+            credential.header_name.as_str(),
+            format!("{}{}", credential.prefix, credential.value),
+        );
     }
-
-    for (k, v) in &provider.headers {
-        req = req.header(k.as_str(), v.as_str());
+    for (name, value) in &prepared.headers {
+        req = req.header(name.as_str(), value.as_str());
     }
-    req = req.header("Accept", "text/event-stream");
 
     let empty_cut_attempt = || CutAttemptState {
         usage: None,
@@ -1283,7 +1236,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
     }
 
     let send = req
-        .json(&body)
+        .body(prepared.body_bytes.clone())
         .timeout(Duration::from_secs(execution.timeout_seconds))
         .send();
     tokio::pin!(send);
@@ -2261,7 +2214,11 @@ fn enforce_per_turn_output_byte_cap(
 
 /// Inject sampling fields into the request body, gated by provider
 /// capabilities. Unknown providers get no fields (fail-closed).
-fn inject_sampling(body: &mut Value, family: ProtocolFamily, sampling: Option<&SamplingConfig>) {
+pub(crate) fn inject_sampling(
+    body: &mut Value,
+    family: ProtocolFamily,
+    sampling: Option<&SamplingConfig>,
+) {
     if let Some(s) = sampling {
         let caps = family_capabilities(family);
         if caps.supports_temperature {
@@ -2388,7 +2345,7 @@ pub fn build_request_body(
     Ok(body)
 }
 
-fn apply_declared_output_limit(
+pub(crate) fn apply_declared_output_limit(
     body: &mut Value,
     config: Option<&crate::directive::OutputLimitConfig>,
     hard_limit: Option<u64>,
@@ -2420,7 +2377,10 @@ fn apply_declared_output_limit(
     write_optional_object_path(body, &segments, Some(Value::Number(effective.into())))
 }
 
-fn declared_output_limit_from_body(provider: &ProviderConfig, body: &Value) -> Result<Option<u64>> {
+pub(crate) fn declared_output_limit_from_body(
+    provider: &ProviderConfig,
+    body: &Value,
+) -> Result<Option<u64>> {
     use ryeos_runtime::template::resolve_path;
 
     let Some(config) = provider
