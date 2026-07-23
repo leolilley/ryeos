@@ -52,6 +52,17 @@ pub struct Config {
     /// Empty by default — most deployments don't need passthrough.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_env_passthrough: Vec<String>,
+    /// Maximum issue-to-provider-acceptance interval, in milliseconds. A
+    /// time-bounded spend certificate must remain valid through this window
+    /// beyond the durable `Issued` boundary or the daemon releases the
+    /// reservation unissued instead of permitting provider contact. Never
+    /// runtime-supplied; zero is rejected at load.
+    #[serde(default = "default_accounting_issue_acceptance_window_ms")]
+    pub accounting_issue_acceptance_window_ms: u64,
+}
+
+fn default_accounting_issue_acceptance_window_ms() -> u64 {
+    60_000
 }
 
 /// Plain-data inputs for [`Config::load`]. Constructed by the daemon
@@ -81,6 +92,7 @@ struct PartialConfig {
     require_auth: Option<bool>,
     authorized_keys_dir: Option<PathBuf>,
     tool_env_passthrough: Option<Vec<String>>,
+    accounting_issue_acceptance_window_ms: Option<u64>,
 }
 
 impl Config {
@@ -233,6 +245,17 @@ impl Config {
                     .and_then(|cfg| cfg.tool_env_passthrough.clone())
                     .unwrap_or_default()
             },
+            accounting_issue_acceptance_window_ms: {
+                let window = file_cfg
+                    .as_ref()
+                    .and_then(|cfg| cfg.accounting_issue_acceptance_window_ms)
+                    .unwrap_or_else(default_accounting_issue_acceptance_window_ms);
+                anyhow::ensure!(
+                    window > 0,
+                    "accounting_issue_acceptance_window_ms must be positive"
+                );
+                window
+            },
         };
 
         Ok(cfg)
@@ -264,6 +287,8 @@ impl Config {
             require_auth: false,
             authorized_keys_dir: runtime_root.authorized_keys_dir(),
             tool_env_passthrough: Vec::new(),
+            accounting_issue_acceptance_window_ms:
+                default_accounting_issue_acceptance_window_ms(),
         })
     }
 }

@@ -112,8 +112,16 @@ widens beyond the parent fails compose.
 
 ### Limits
 - `limits.turns` — max LLM round-trips
-- `limits.tokens` — max total tokens
-- `limits.spend_usd` — max spend in USD
+- `limits.tokens` — settled provider-native token threshold (checked after
+  each attempt settles; not a pre-issue token reservation)
+- `limits.spend_usd` — hard USD budget as a canonical decimal string (e.g.
+  `"0.5"`; numeric values are rejected). A finite value requires the route to
+  carry a mechanically proven spend bound (signed tariff or provider-enforced
+  charge cap): the daemon reserves each attempt's worst-case charge before any
+  provider contact and shares one allowance across all paid descendants.
+  Routes without a proven bound reject a finite hard limit at launch.
+  Conservative reserved-maximum charges are reported distinctly from
+  provider-reported cost.
 - `limits.duration_seconds` — wall-clock timeout
 
 ### Context

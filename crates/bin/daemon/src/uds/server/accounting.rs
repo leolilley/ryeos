@@ -153,12 +153,17 @@ pub(super) fn handle_provider_attempt_mark_issued(
         anyhow::bail!("provider_attempt_mark_issued thread does not match callback capability");
     }
     let ledger = accounting(state)?;
+    // A time-bounded certificate must remain valid through the configured
+    // issue-to-provider-acceptance window beyond the durable Issued boundary.
+    let acceptance_window_ms =
+        i64::try_from(state.config.accounting_issue_acceptance_window_ms).unwrap_or(i64::MAX);
     let outcome = ledger.mark_provider_attempt_issued(
         &cap.thread_id,
         launch_owner,
         &request.attempt_id,
         &request.request_hash,
         now_ms(),
+        acceptance_window_ms,
     )?;
     let response = match outcome {
         IssueOutcome::Issued { replayed } => ProviderAttemptMarkIssuedResponse {
