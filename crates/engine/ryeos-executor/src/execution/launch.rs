@@ -13,8 +13,9 @@ use super::launch_envelope::{
     LaunchEnvelopeBuilder, RuntimeResult,
 };
 use super::limits::{
-    apply_caller_limit_overrides, apply_execution_policy_overrides, compute_effective_limits,
-    load_limits_config_from_loader, merge_header_limits,
+    apply_caller_limit_overrides, apply_execution_policy_defaults,
+    apply_execution_policy_item_overrides, compute_effective_limits,
+    load_limits_config_from_loader, merge_header_limits, policy_item_override,
 };
 use super::thread_meta::ThreadMeta;
 use crate::dispatch_error::DispatchError;
@@ -2003,10 +2004,11 @@ async fn run_claimed_thread_row_inner(
     })?;
     let limits_config = limits_config.unwrap_or_default();
     // Hard limits are computed AFTER the resolution pipeline below (see
-    // "compute effective limits"), so the directive-authored header `limits:`
-    // can be overlaid onto defaults BELOW execution-policy/caller overrides.
-    // The composed header is not available until resolution runs; `hard_limits`
-    // is still produced before the TTL / envelope consumers further down.
+    // "compute effective limits"), once the composed header is available.
+    // Execution-policy defaults are applied before that authored header;
+    // explicit item policy and caller parameters are applied after it.
+    // `hard_limits` is still produced before the TTL / envelope consumers
+    // further down.
 
     // 3. Effective capabilities derivation happens below — sourced
     //    from `resolution.composed.effective_caps` so callback
@@ -2040,12 +2042,19 @@ async fn run_claimed_thread_row_inner(
     // The item's authored `limits:` (from the composed view, any kind) overlays
     // its named fields onto the project defaults; omitted fields inherit. The
     // merge is at the JSON level, so the executor names no limit field here.
-    // Precedence: defaults → header → execution policy → caller → caps → parent.
-    let base_limits = match resolution.composed.composed.get("limits") {
-        Some(v) if !v.is_null() => merge_header_limits(&limits_config.defaults, v)?,
-        _ => limits_config.defaults.clone(),
+    // Execution defaults are fallbacks, not overrides of item-authored limits.
+    // Explicit kind/item execution policy remains authoritative above the
+    // authored item. Precedence:
+    // limit defaults → execution defaults → header → item policy → caller
+    // → caps → parent.
+    let limits_header = resolution.composed.composed.get("limits");
+    let execution_defaults =
+        apply_execution_policy_defaults(&limits_config.defaults, &execution_policy);
+    let base_limits = match limits_header {
+        Some(v) if !v.is_null() => merge_header_limits(&execution_defaults, v)?,
+        _ => execution_defaults,
     };
-    let requested_limits = apply_execution_policy_overrides(&base_limits, &execution_policy);
+    let requested_limits = apply_execution_policy_item_overrides(&base_limits, &execution_policy);
     let requested_limits = apply_caller_limit_overrides(requested_limits, parameters)?;
     // Parent budget/depth inheritance is trusted control-plane data carried
     // out-of-band (callback token → DispatchRequest). It is never read from
@@ -2063,8 +2072,22 @@ async fn run_claimed_thread_row_inner(
         &limits_config.caps,
         parent_limits.as_ref(),
     );
+    let header_has_limit = |field: &str| {
+        limits_header
+            .and_then(Value::as_object)
+            .is_some_and(|limits| limits.contains_key(field))
+    };
     let duration_source = if parameters.get("timeout").is_some() {
         "caller param `timeout`".to_string()
+    } else if policy_item_override(execution_policy.timeout.as_ref()) {
+        execution_policy
+            .timeout
+            .as_ref()
+            .expect("item override checked above")
+            .source
+            .describe()
+    } else if header_has_limit("duration_seconds") {
+        "composed item `limits.duration_seconds`".to_string()
     } else {
         execution_policy
             .timeout
@@ -2076,6 +2099,15 @@ async fn run_claimed_thread_row_inner(
     };
     let turns_source = if parameters.get("max_steps").is_some() {
         "caller param `max_steps`".to_string()
+    } else if policy_item_override(execution_policy.max_steps.as_ref()) {
+        execution_policy
+            .max_steps
+            .as_ref()
+            .expect("item override checked above")
+            .source
+            .describe()
+    } else if header_has_limit("turns") {
+        "composed item `limits.turns`".to_string()
     } else {
         execution_policy
             .max_steps
@@ -2093,8 +2125,9 @@ async fn run_claimed_thread_row_inner(
         turns = hard_limits.turns,
         turns_source = %turns_source,
         turns_cap = ?limits_config.caps.turns,
-        header_limits_present = resolution.composed.composed.get("limits").is_some_and(|v| !v.is_null()),
-        execution_policy_override = execution_policy.timeout.is_some() || execution_policy.max_steps.is_some(),
+        header_limits_present = limits_header.is_some_and(|v| !v.is_null()),
+        execution_policy_item_override = policy_item_override(execution_policy.timeout.as_ref())
+            || policy_item_override(execution_policy.max_steps.as_ref()),
         caller_limit_override = parameters.get("timeout").is_some() || parameters.get("max_steps").is_some(),
         "native launch execution policy resolved"
     );

@@ -1,4 +1,4 @@
-use ryeos_engine::execution_policy::ResolvedExecutionPolicy;
+use ryeos_engine::execution_policy::{PolicySourceKind, ResolvedExecutionPolicy, Sourced};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -205,18 +205,57 @@ pub fn load_limits_config_from_loader(
     Ok(config)
 }
 
-pub fn apply_execution_policy_overrides(
-    defaults: &LimitValues,
+fn apply_execution_policy_source(
+    base: &LimitValues,
     policy: &ResolvedExecutionPolicy,
+    source_kind: PolicySourceKind,
 ) -> LimitValues {
-    let mut requested = defaults.clone();
-    if let Some(timeout) = &policy.timeout {
+    let mut requested = base.clone();
+    if policy
+        .timeout
+        .as_ref()
+        .is_some_and(|timeout| timeout.source.kind == source_kind)
+    {
+        let timeout = policy.timeout.as_ref().expect("checked above");
         requested.duration_seconds = timeout.value;
     }
-    if let Some(max_steps) = &policy.max_steps {
+    if policy
+        .max_steps
+        .as_ref()
+        .is_some_and(|max_steps| max_steps.source.kind == source_kind)
+    {
+        let max_steps = policy.max_steps.as_ref().expect("checked above");
         requested.turns = max_steps.value;
     }
     requested
+}
+
+/// Apply execution-policy defaults before item-authored `limits`.
+///
+/// `execution.yaml.defaults` supplies launcher fallbacks. It must not overwrite
+/// an item's own runtime limits merely because both ultimately map into
+/// [`HardLimits`].
+pub fn apply_execution_policy_defaults(
+    defaults: &LimitValues,
+    policy: &ResolvedExecutionPolicy,
+) -> LimitValues {
+    apply_execution_policy_source(defaults, policy, PolicySourceKind::ExecutionYamlDefault)
+}
+
+/// Apply an explicit kind/item execution-policy override after authored limits.
+pub fn apply_execution_policy_item_overrides(
+    requested: &LimitValues,
+    policy: &ResolvedExecutionPolicy,
+) -> LimitValues {
+    apply_execution_policy_source(
+        requested,
+        policy,
+        PolicySourceKind::ExecutionYamlItemOverride,
+    )
+}
+
+pub fn policy_item_override<T>(value: Option<&Sourced<T>>) -> bool {
+    value.is_some_and(|value| value.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
 }
 
 pub fn apply_caller_limit_overrides(
@@ -490,20 +529,20 @@ mod tests {
                 &value, &item_ref, None, None,
             )
             .unwrap();
-        let limits = apply_execution_policy_overrides(&LimitValues::default(), &policy);
+        let limits = apply_execution_policy_item_overrides(&LimitValues::default(), &policy);
         assert_eq!(limits.duration_seconds, 7200);
         assert_eq!(limits.turns, 20);
     }
 
     #[test]
-    fn execution_policy_overrides_preserve_unrelated_limit_defaults() {
+    fn execution_policy_item_overrides_preserve_unrelated_limit_defaults() {
         let defaults = LimitValues {
             tokens: 123_456,
             spawns: 42,
             spend_usd: 9.0,
             ..Default::default()
         };
-        let requested = apply_execution_policy_overrides(
+        let requested = apply_execution_policy_item_overrides(
             &defaults,
             &ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
                 &serde_json::json!({"tools": {"x": {"timeout": 7200}}}),
@@ -521,6 +560,49 @@ mod tests {
     }
 
     #[test]
+    fn authored_limits_override_execution_defaults_but_not_item_policy() {
+        let item_ref =
+            ryeos_engine::canonical_ref::CanonicalRef::parse("directive:arc/hypothesize").unwrap();
+        let defaults_policy =
+            ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &serde_json::json!({
+                    "defaults": {"timeout": 86_400, "max_steps": 100}
+                }),
+                &item_ref,
+                None,
+                None,
+            )
+            .unwrap();
+        let with_execution_defaults =
+            apply_execution_policy_defaults(&LimitValues::default(), &defaults_policy);
+        let authored = merge_header_limits(
+            &with_execution_defaults,
+            &serde_json::json!({"turns": 6, "duration_seconds": 1_200}),
+        )
+        .unwrap();
+        let effective = apply_execution_policy_item_overrides(&authored, &defaults_policy);
+        assert_eq!(effective.turns, 6);
+        assert_eq!(effective.duration_seconds, 1_200);
+
+        let item_policy =
+            ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
+                &serde_json::json!({
+                    "defaults": {"timeout": 86_400, "max_steps": 100},
+                    "directives": {
+                        "arc/hypothesize": {"timeout": 1_800, "max_steps": 8}
+                    }
+                }),
+                &item_ref,
+                None,
+                None,
+            )
+            .unwrap();
+        let effective = apply_execution_policy_item_overrides(&authored, &item_policy);
+        assert_eq!(effective.turns, 8);
+        assert_eq!(effective.duration_seconds, 1_800);
+    }
+
+    #[test]
     fn caller_limit_overrides_beat_execution_policy_before_caps() {
         let policy =
             ryeos_engine::execution_policy::ExecutionPolicyResolver::resolve_from_value_for_item(
@@ -530,7 +612,7 @@ mod tests {
                 None,
             )
             .unwrap();
-        let requested = apply_execution_policy_overrides(&LimitValues::default(), &policy);
+        let requested = apply_execution_policy_defaults(&LimitValues::default(), &policy);
         let requested = apply_caller_limit_overrides(
             requested,
             &serde_json::json!({"timeout": 7200, "max_steps": 20}),
