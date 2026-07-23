@@ -514,7 +514,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
     )
     .await;
 
-    assert_pre_admission_rejection(resp, "supports launch_mode='inline' only").await;
+    assert_pre_admission_rejection(resp, "supports launch_mode='wait' only").await;
     drop(project);
 }
 
