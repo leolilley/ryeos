@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:42Z:528b30e9c466ece38a205a7d9657fe825714eb61d49c92716cb0f1f2ba825c0c:9Ump1Gc70E0YfQNH4pdhPcBRDUBiZ6ppHTeOT4pMKFkWORYDWIzQ3hhLvG2u3rMQp8EBPjxcDLeSLD4EYrciCw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, agents, identity, standing, governance, accountability]

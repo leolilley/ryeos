@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:34Z:0ec316196c89c6d68f8ea0604d3083e2e3ad293d5816cd3c03c6d9ca34237ed4:XLw4F+6uvaUaLkUiG/qkcGIwNH4RD/MjnlnF6T1nH7faah/P4jkrqt+b5Ms+7O6L0HFAuIdoPxObmPpAUdC+Cg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, series-map, derivation, vocabulary]

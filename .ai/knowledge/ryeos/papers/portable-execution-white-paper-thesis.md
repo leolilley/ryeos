@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:49Z:0bbb70aa83ca746406c0a1ab9ca1efddc1c5a4aeda75b1c1652f3a097e327a99:yPUKhkg0qqNvr/a8NS3qB2Qm50fGc1QlP/R847OLjpxjU6cDUdPfoyttVdO7qOea/YqMtM5eByrBREQD9JzmAQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [white-paper, portable-execution, cryptographic-identity, architecture]

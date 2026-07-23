@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:39Z:b469e7902fe1b588a7db4c17613474dca1c595384ee1aadc7b70122b42fedb72:16TCbgOawutyQXwcMpg1qFF5v5oOqgUSjklF+/lvRqL+73ErofCoZmYlM4AFustpToTeUe2Bf8nh0ruTQkwoCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, verification, testimony, determinism, trust, flagship]

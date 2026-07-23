@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:44Z:fb2c304e77e638fe73306a539e5573bee9e026d46a6dc9900187d0901f168d6f:tOwkiabO0IAi1WJEsdONgRt/NkMDa8Kgq3rRV2xfzlh723bEkoALhHl/vzevaX8+mkX2i4cHnMHhTsFV1o6FAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, forgetting, compaction, privacy, permanence, open-theory]

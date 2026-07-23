@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:31Z:9210f18d9c8f7d1644f5275acb7f21d926d2492b6aa924bafae58bed2bfed8fb:I2Z2ELCpgsZZmNYfMIGLbE8x7gWQIKDh2WsAFvCFuCkMZ5q1o7TiJppxJfqAGj6ydfQxB6iu7xhpYsJVzPyRDg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, research-program, index]

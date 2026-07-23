@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:37Z:6964cfb91b845545f4e58f48cada771d156d7c1350cc43ae3e41706473d315d6:E2ukYs9aEyxYVoS6SoOUWw1QA0fN7Gz2Jp3FX24WO38ozkSF1MN3XNwl686su6ISgMvzdnuQw7n4e1541t4NCg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, ontology, execution, durability, process-model]

@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T10:04:47Z:c31d47ce278deb12c0b37f616892c30fa4518b8e5977d4616a5bf2b78b307704:aIl1J7r99ChYxEzg0H4QqQFMtMNdIc017euDgKwE1E6Lqv8Hlp5MdX8A7gF6iqq9fppHVGAT7gizLN9lnrK3DQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
 ---
 category: ryeos/papers
 tags: [papers, white-paper, scope, contract]
