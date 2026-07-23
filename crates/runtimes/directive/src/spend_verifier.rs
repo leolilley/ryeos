@@ -401,10 +401,7 @@ mod tests {
                     expires_at_ms: None,
                 },
             },
-            reconciliation: ChargeReconciliationAuthority::DeterministicTariff {
-                tariff_digest: t.digest().unwrap(),
-                covered_dimensions: t.covered_dimensions,
-            },
+            reconciliation: ChargeReconciliationAuthority::DeterministicTariff { tariff: t },
         }
         .sealed()
         .unwrap()

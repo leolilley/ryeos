@@ -168,6 +168,7 @@ const LEDGER_RPC_RETRIES: usize = 2;
 
 /// Live handle to one daemon-admitted provider attempt reservation. Mirrors
 /// daemon authority but never calculates availability locally.
+#[derive(Debug)]
 struct LedgerAttempt {
     /// Daemon-minted attempt ID (keyed server-side by thread/generation/
     /// turn/attempt-number — the runner never invents this).
@@ -179,6 +180,7 @@ struct LedgerAttempt {
 }
 
 /// Outcome of ledger admission for one physical attempt.
+#[derive(Debug)]
 enum LedgerAdmission {
     /// Reserved and durably issued: the exact prepared bytes may be sent.
     Admitted(LedgerAttempt),
@@ -4642,12 +4644,27 @@ mod tests {
 
     fn tariff_reconciliation() -> ChargeReconciliationAuthority {
         ChargeReconciliationAuthority::DeterministicTariff {
-            tariff_digest: digest_of("tariff"),
-            covered_dimensions: ClosedBillableDimensionSet::new(vec![
-                ryeos_accounting::BillableDimension::InputTokens,
-                ryeos_accounting::BillableDimension::OutputTokens,
-            ])
-            .unwrap(),
+            tariff: ryeos_accounting::SpendTariffDocument {
+                schema_version: ryeos_accounting::SPEND_TARIFF_SCHEMA_VERSION,
+                currency: ryeos_accounting::Currency::Usd,
+                pricing_generation: "gen-1".to_string(),
+                input_per_million: Some(
+                    ryeos_accounting::UsdNanos::parse_canonical("3").unwrap(),
+                ),
+                output_per_million: Some(
+                    ryeos_accounting::UsdNanos::parse_canonical("15").unwrap(),
+                ),
+                reasoning_per_million: None,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+                per_request: None,
+                covered_dimensions: ClosedBillableDimensionSet::new(vec![
+                    ryeos_accounting::BillableDimension::InputTokens,
+                    ryeos_accounting::BillableDimension::OutputTokens,
+                ])
+                .unwrap(),
+                expires_at_ms: None,
+            },
         }
     }
 
