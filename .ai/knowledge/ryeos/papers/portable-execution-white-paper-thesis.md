@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:6d32fddb93c66f2d9da75bad46738997d616509b418e1c76dd31b3f3ab7af6f3:09qSUM1a2PVtTgTKFjFLOyxPe0vWDaZZZm1lWvhj3Ud/wlSfKVbXJN+w1gamJ0gW6jfZeSaUcI10gLRdHaxRBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
+category: ryeos/papers
 tags: [white-paper, portable-execution, cryptographic-identity, architecture]
-version: "0.2.0"
+version: "0.3.0"
 description: >
   Working notes for the RyeOS white paper thesis: portable verified execution
   through cryptographic identity. This is reference material, not a draft.
@@ -12,6 +12,13 @@ description: >
 These notes capture the core thesis and surrounding ideas from the white paper
 discussion. This is intentionally not a polished white paper draft. It is a
 reference document for later analysis, positioning, and writing.
+
+This document is part of the papers series in this directory. The series map
+(`series-map.md`) holds the shared derivation and vocabulary; the contract
+between this thesis and the four downstream papers is recorded in
+`white-paper-relation.md`. This document keeps its own scope: portable
+verified execution as a general systems thesis, with agents as one
+application.
 
 ## Core thesis
 
@@ -61,6 +68,28 @@ The general systems conclusion is:
 
 > Existing systems made source code, packages, containers, and data portable.
 > RyeOS targets execution itself: executable capability plus operational history.
+
+## The necessity argument
+
+The fused property should be derived, not asserted. Derivation:
+
+1. Represent an execution as data and it can leave the machine that ran it —
+   across a restart, to another node, into the future.
+2. Once an execution can outlive and leave its machine, the machine can no
+   longer serve as the authority for what the execution is or who authorized
+   it. Location-based trust does not survive portability.
+3. Therefore the data must vouch for itself: content addressing for identity,
+   signatures for authorship and authority. Self-certification is not a
+   security feature layered onto portable execution; it is the minimal
+   machinery portability forces.
+4. Once identity, authority, and history travel inside the data, the executor
+   becomes fungible: any node with the right trust can be the site of an
+   execution.
+
+Compressed: portability forces proof. Portable and verified are one property
+because the first is impossible without the second. An asserted fusion is a
+design choice; a forced fusion is a theorem, and the paper should present it
+as the latter.
 
 ## Historical lineage
 
@@ -152,6 +181,19 @@ authorization, isolationing, and deterministic replay.
 
 RyeOS is not novel because it uses hashes, signatures, registries, bundles, or
 runtimes. The novelty is the layer where those primitives are applied.
+
+There is a sharper cut than the layer distinction. The verified-execution
+lineage — Nix, build systems, deterministic replay, blockchains — verifies by
+recomputation: re-run and compare against a specification. That model
+requires an external correctness predicate for the executor. Executors that
+have no specification independent of themselves (human operators, LLM
+runtimes — see the actor model below) cannot be verified this way even in
+principle; they can only be attributed and held to account. RyeOS sits on the
+other branch: verification by signed testimony over a durable record. The
+adjacent systems below are therefore not merely at a different layer; most
+are on the other branch of verification theory, which is why none of them
+could host this class of executor by extension. The full argument is the
+second paper in this series (`testimony-not-determinism.md`).
 
 Useful positioning:
 
@@ -251,6 +293,14 @@ a key, and anything that acts, acts by signing. Trust is always a decision
 about a key, never about a machine. This is not agent framing — it is what
 remains when every component of execution is data: the only thing that can act
 on data with checkable consequence is a key.
+
+A consequence worth stating: the actor class always contained authored-output
+executors — operators. A human running a command has no external
+specification of correct behavior; their acts can only be attributed, never
+recomputed. The substrate's juridical shape (keys, signatures, grants,
+records) was therefore required before any model entered the picture, and
+model executors slot in without a single new primitive because they are the
+second member of a class humans founded.
 
 ### 5. RyeOS object model
 
@@ -704,6 +754,9 @@ microkernel.
 ## Guardrails for future writing
 
 - Do not frame RyeOS primarily as an AI agent OS.
+- Agent consequences (identity, standing, governance) belong to the paper
+  series (`the-corporate-agent.md`), not this document; keep agents in the
+  applications section here.
 - Do not say cryptographic identity alone means safe execution.
 - Do not overstate deterministic replay.
 - Do not reduce RyeOS to a package manager, tool registry, or plugin system.
