@@ -61,6 +61,10 @@ body_template:
   stream: "{{stream}}"
 auth:
 {auth_block}headers: {{}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
 pricing:
   input_per_million: "0.0"
   output_per_million: "0.0"

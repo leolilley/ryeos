@@ -42,6 +42,10 @@ body_template:
   stream: "{{stream}}"
 auth: {{}}
 headers: {{}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
 pricing:
   input_per_million: "0.0"
   output_per_million: "0.0"
@@ -797,6 +801,249 @@ async fn e2e_directive_operator_follow_up_successor_completes() {
     assert!(
         detail.to_string().contains("turn two"),
         "successor result must surface the mock's second-turn text `turn two`: {detail:#}"
+    );
+
+    drop(project);
+    drop(mock);
+}
+
+// ── Hard budget: reserve → issue → settle through the daemon ledger ────
+
+/// Mock provider carrying a signed spend authority: a
+/// `DerivedWorstCaseCharge` tariff at $2/$10 per million plus the
+/// output-limit contract the derived certificate requires. Worst case at
+/// context 200_000 and the default output ceiling 32_768:
+/// `0.4 + 0.32768 = $0.72768` reserved per attempt.
+fn plant_hard_budget_mock_provider(
+    root: &Path,
+    mock_base_url: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime/model-providers");
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        r#"base_url: "{mock_base_url}"
+family: chat_completions
+body_template:
+  model: "{{model}}"
+  messages: "{{messages}}"
+  tools: "{{tools}}"
+  stream: "{{stream}}"
+auth: {{}}
+headers: {{}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
+pricing:
+  input_per_million: "2"
+  output_per_million: "10"
+spend_authority:
+  billing_principal: e2e-mock
+  credential_authority_generation: gen-1
+  pricing_contract_subject: e2e-mock-2026-07
+  tariff:
+    schema_version: 1
+    currency: usd
+    pricing_generation: e2e-2026-07
+    input_per_million: "2"
+    output_per_million: "10"
+    covered_dimensions: [input_tokens, output_tokens]
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "#", None);
+    std::fs::write(dir.join("mock.yaml"), signed)?;
+    Ok(())
+}
+
+/// `plant_directive` plus an authored hard spend limit (canonical decimal
+/// string, per the fixed-point cut).
+fn plant_directive_with_spend_limit(
+    root: &Path,
+    rel_path: &str,
+    body_text: &str,
+    spend_usd: &str,
+    signer: &SigningKey,
+) -> anyhow::Result<()> {
+    let path = root.join(format!(".ai/directives/{rel_path}.md"));
+    std::fs::create_dir_all(path.parent().expect("directive parent dir"))?;
+    let dir_relative = Path::new(rel_path)
+        .parent()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
+    let stem = Path::new(rel_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(rel_path);
+    let body = format!(
+        r#"---
+name: {stem}
+category: "{dir_relative}"
+description: "hard budget e2e fixture"
+inputs:
+  - name: name
+    type: string
+    required: true
+model:
+  tier: general
+limits:
+  spend_usd: "{spend_usd}"
+---
+{body_text}
+"#
+    );
+    let signed = lillux::signature::sign_content(&body, signer, "<!--", Some("-->"));
+    std::fs::write(&path, signed)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
+    let mock = MockProvider::start(vec![MockResponse::Text("within budget".into())]).await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-hard-budget-model-config",
+            fixture,
+            |bundle_root| plant_hard_budget_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )
+    };
+
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with hard-budget mock provider");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+
+    // 1. A $1 hard limit fits the $0.72768 route maximum: the attempt is
+    //    reserved, durably issued, sent, and settled from the mock's usage.
+    plant_directive_with_spend_limit(
+        project.path(),
+        "test/hard_ok",
+        "Say hello to {{ name }}.",
+        "1",
+        &fixture.publisher,
+    )
+    .expect("plant admitted directive");
+    let post_fut = h.post_execute(
+        "directive:test/hard_ok",
+        project.path().to_str().unwrap(),
+        serde_json::json!({"name": "Ledger"}),
+    );
+    let (status, body) =
+        match tokio::time::timeout(std::time::Duration::from_secs(60), post_fut).await {
+            Ok(Ok(pair)) => pair,
+            Ok(Err(e)) => panic!("post /execute failed: {e}"),
+            Err(_) => {
+                let stderr = h.drain_stderr_nonblocking().await;
+                panic!("hard-budget directive timed out\n--- daemon stderr ---\n{stderr}");
+            }
+        };
+    if status != reqwest::StatusCode::OK {
+        let stderr = h.drain_stderr_nonblocking().await;
+        panic!(
+            "expected 200 OK for the admitted hard-budget directive; got {status}\nbody={body:#}\n--- daemon stderr ---\n{stderr}"
+        );
+    }
+    let result = body.get("result").cloned().expect("result envelope");
+    assert_eq!(
+        result.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "admitted hard-budget run must succeed: {body:#}"
+    );
+
+    // 2. The daemon-authored audit trail reaches the projection through the
+    //    outbox publisher; poll the durable summary service until the
+    //    settled attempt appears.
+    let mut settled_seen = false;
+    for _ in 0..40 {
+        let (s, b) = h
+            .post_execute(
+                "service:threads/accounting/summary",
+                project.path().to_str().unwrap(),
+                serde_json::json!({"detail": true}),
+            )
+            .await
+            .expect("summary service reachable");
+        assert_eq!(s, reqwest::StatusCode::OK, "summary status: {b:#}");
+        let payload = b
+            .get("result")
+            .and_then(|r| if r.get("totals").is_some() { Some(r.clone()) } else { r.get("result").cloned() })
+            .unwrap_or_default();
+        let totals = payload.get("totals").cloned().unwrap_or_default();
+        if totals.get("attempt_count").and_then(|v| v.as_i64()).unwrap_or(0) >= 1 {
+            assert!(
+                payload
+                    .get("health")
+                    .and_then(|health| health.get("ledger_available"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                "ledger must be available: {payload:#}"
+            );
+            let rows = payload.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            settled_seen = rows.iter().any(|row| {
+                row.get("transition").and_then(|v| v.as_str()) == Some("reconciled")
+            });
+            if settled_seen {
+                // Deterministic tariff: 10 in × $2/M + 5 out × $10/M = 70k nanos.
+                let reconciled = rows
+                    .iter()
+                    .find(|row| row.get("transition").and_then(|v| v.as_str()) == Some("reconciled"))
+                    .expect("reconciled row");
+                assert_eq!(
+                    reconciled.get("budget_charge_usd_nanos").and_then(|v| v.as_i64()),
+                    Some(70_000),
+                    "settled charge must be the deterministic tariff cost: {reconciled:#}"
+                );
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    assert!(
+        settled_seen,
+        "a reconciled provider attempt must reach the audit projection"
+    );
+
+    // 3. A $0.5 hard limit is below the $0.72768 route maximum: the daemon
+    //    denies the reservation durably and the provider is never contacted.
+    let requests_before_denial = mock.captured_headers().await.len();
+    plant_directive_with_spend_limit(
+        project.path(),
+        "test/hard_denied",
+        "Say hello to {{ name }}.",
+        "0.5",
+        &fixture.publisher,
+    )
+    .expect("plant denied directive");
+    let (denied_status, denied_body) = h
+        .post_execute(
+            "directive:test/hard_denied",
+            project.path().to_str().unwrap(),
+            serde_json::json!({"name": "Denied"}),
+        )
+        .await
+        .expect("post denied directive");
+    let denied_text = format!("{denied_status} {denied_body:#}");
+    assert!(
+        denied_text.contains("budget_exceeded") || denied_text.contains("denied"),
+        "the under-budget run must fail with a durable reservation denial; got {denied_text}"
+    );
+    assert_eq!(
+        mock.captured_headers().await.len(),
+        requests_before_denial,
+        "a denied reservation must never contact the provider"
     );
 
     drop(project);
