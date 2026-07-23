@@ -472,7 +472,7 @@ category: "resume_tool"
 description: "test runtime with native_resume"
 native_resume: true
 config:
-  command: "sleep"
+  command: "/usr/bin/sleep"
   args: ["60"]
 "#;
     let signed = lillux::signature::sign_content(runtime_body, signer, "#", None);
