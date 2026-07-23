@@ -1,0 +1,16 @@
+kind: service
+endpoint: threads.accounting.summary
+required_caps: ["ryeos.execute.service.threads/accounting/summary"]
+schema:
+  occurred_at_gte_ms: integer?
+  occurred_at_lt_ms: integer?
+  provider_id: string?
+  model: string?
+  profile: string?
+  transition: string?
+  execution_budget_id: string?
+  unresolved_only: boolean?
+  detail: boolean?
+  limit: integer?
+  cursor: string?
+description: "Durable provider-attempt budget aggregates, bounded drill-down, and accounting health"

@@ -143,7 +143,7 @@ pub enum RuntimeEventType {
 
     // ── Directive resilience / accounting ───────────────────────
     ProviderRetry,
-    ProviderAttemptAccounting,
+    ProviderAttemptBudgetTransitionV1,
     CostUntracked,
 
     // ── Domain events ───────────────────────────────────────────
@@ -202,7 +202,9 @@ impl RuntimeEventType {
             Self::GraphFollowSuspended => wire::GRAPH_FOLLOW_SUSPENDED,
             Self::GraphNodeRetry => wire::GRAPH_NODE_RETRY,
             Self::ProviderRetry => wire::PROVIDER_RETRY,
-            Self::ProviderAttemptAccounting => wire::PROVIDER_ATTEMPT_ACCOUNTING,
+            Self::ProviderAttemptBudgetTransitionV1 => {
+                wire::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1
+            }
             Self::CostUntracked => wire::COST_UNTRACKED,
             Self::Milestone => wire::MILESTONE,
             Self::ThreadUsage => wire::THREAD_USAGE,
@@ -254,7 +256,9 @@ impl RuntimeEventType {
             wire::GRAPH_FOLLOW_SUSPENDED => Ok(Self::GraphFollowSuspended),
             wire::GRAPH_NODE_RETRY => Ok(Self::GraphNodeRetry),
             wire::PROVIDER_RETRY => Ok(Self::ProviderRetry),
-            wire::PROVIDER_ATTEMPT_ACCOUNTING => Ok(Self::ProviderAttemptAccounting),
+            wire::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 => {
+                Ok(Self::ProviderAttemptBudgetTransitionV1)
+            }
             wire::COST_UNTRACKED => Ok(Self::CostUntracked),
             wire::MILESTONE => Ok(Self::Milestone),
             wire::THREAD_USAGE => Ok(Self::ThreadUsage),
@@ -350,7 +354,7 @@ impl RuntimeEventType {
             | Self::GraphFollowSuspended
             | Self::GraphNodeRetry
             | Self::ProviderRetry
-            | Self::ProviderAttemptAccounting
+            | Self::ProviderAttemptBudgetTransitionV1
             | Self::CostUntracked
             | Self::Milestone
             | Self::ThreadUsage => StorageClass::Indexed,
@@ -410,7 +414,7 @@ mod tests {
             RuntimeEventType::GraphFollowSuspended,
             RuntimeEventType::GraphNodeRetry,
             RuntimeEventType::ProviderRetry,
-            RuntimeEventType::ProviderAttemptAccounting,
+            RuntimeEventType::ProviderAttemptBudgetTransitionV1,
             RuntimeEventType::CostUntracked,
             RuntimeEventType::Milestone,
             RuntimeEventType::ThreadUsage,

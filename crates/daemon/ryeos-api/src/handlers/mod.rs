@@ -93,6 +93,7 @@ pub mod threads_tail;
 pub mod tool_env_check;
 pub mod trace_branch;
 pub mod trace_inspect;
+pub mod accounting_summary;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;
@@ -142,6 +143,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     seat::TOUCH_DESCRIPTOR,
     seat::CLOSE_DESCRIPTOR,
     threads_input::DESCRIPTOR,
+    accounting_summary::DESCRIPTOR,
     usage_summary::DESCRIPTOR,
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,

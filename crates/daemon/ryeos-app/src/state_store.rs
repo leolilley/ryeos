@@ -5144,6 +5144,32 @@ impl StateStore {
         queries::summarize_usage_by_subject(g.state_db.projection(), filter)
     }
 
+    pub fn get_provider_attempt_budget_latest(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<queries::ProviderAttemptBudgetRow>> {
+        let g = self.lock()?;
+        queries::get_provider_attempt_budget_latest(g.state_db.projection(), attempt_id)
+    }
+
+    pub fn summarize_provider_attempt_budget(
+        &self,
+        filter: &queries::AccountingSummaryFilter<'_>,
+    ) -> Result<queries::AccountingSummaryTotals> {
+        let g = self.lock()?;
+        queries::summarize_provider_attempt_budget(g.state_db.projection(), filter)
+    }
+
+    pub fn list_provider_attempt_budget(
+        &self,
+        filter: &queries::AccountingSummaryFilter<'_>,
+        limit: u32,
+        after: Option<(i64, &str)>,
+    ) -> Result<Vec<queries::ProviderAttemptBudgetRow>> {
+        let g = self.lock()?;
+        queries::list_provider_attempt_budget(g.state_db.projection(), filter, limit, after)
+    }
+
     pub fn list_thread_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {
         let g = self.lock()?;
         let child_rows = queries::list_thread_children(g.state_db.projection(), thread_id)?;

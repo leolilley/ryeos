@@ -774,6 +774,18 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                     );
                 }
             });
+
+            // Accounting audit outbox publisher: drains committed ledger
+            // transitions to the thread chain exactly once, in per-attempt
+            // order. Admission authority stays with the ledger; audit lag only
+            // degrades accounting health, never erases a committed
+            // reservation.
+            if let Some(ledger) = app_state.accounting.clone() {
+                let outbox_store = app_state.state_store.clone();
+                tokio::spawn(async move {
+                    ryeosd::accounting_outbox::run_publisher(ledger, outbox_store).await;
+                });
+            }
             *shutdown_drain_state
                 .lock()
                 .expect("shutdown drain state mutex poisoned") = Some(app_state.clone());

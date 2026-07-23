@@ -2203,6 +2203,225 @@ pub fn summarize_usage_by_subject(
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
+// ============= Provider attempt budget projection =============
+
+const PROVIDER_ATTEMPT_BUDGET_COLUMNS: &str = r#"
+    attempt_id, transition_sequence, budget_authority_site_id, ledger_epoch,
+    execution_budget_id, root_chain_id, audit_chain_root_id, directive_budget_id,
+    thread_id, turn, attempt_number, transition, observation,
+    reserved_usd_nanos, budget_charge_usd_nanos, provider_actual_usd_nanos,
+    released_usd_nanos, charge_basis, reason, config_hash,
+    provider_id, model, profile, occurred_at_ms, chain_seq
+"#;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderAttemptBudgetRow {
+    pub attempt_id: String,
+    pub transition_sequence: i64,
+    pub budget_authority_site_id: String,
+    pub ledger_epoch: i64,
+    pub execution_budget_id: String,
+    pub root_chain_id: String,
+    pub audit_chain_root_id: String,
+    pub directive_budget_id: Option<String>,
+    pub thread_id: String,
+    pub turn: i64,
+    pub attempt_number: i64,
+    pub transition: String,
+    pub observation: bool,
+    pub reserved_usd_nanos: i64,
+    pub budget_charge_usd_nanos: Option<i64>,
+    pub provider_actual_usd_nanos: Option<i64>,
+    pub released_usd_nanos: Option<i64>,
+    pub charge_basis: Option<String>,
+    pub reason: Option<String>,
+    pub config_hash: String,
+    pub provider_id: String,
+    pub model: String,
+    pub profile: Option<String>,
+    pub occurred_at_ms: i64,
+    pub chain_seq: i64,
+}
+
+impl ProviderAttemptBudgetRow {
+    fn from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
+        Ok(Self {
+            attempt_id: row.get("attempt_id")?,
+            transition_sequence: row.get("transition_sequence")?,
+            budget_authority_site_id: row.get("budget_authority_site_id")?,
+            ledger_epoch: row.get("ledger_epoch")?,
+            execution_budget_id: row.get("execution_budget_id")?,
+            root_chain_id: row.get("root_chain_id")?,
+            audit_chain_root_id: row.get("audit_chain_root_id")?,
+            directive_budget_id: row.get("directive_budget_id")?,
+            thread_id: row.get("thread_id")?,
+            turn: row.get("turn")?,
+            attempt_number: row.get("attempt_number")?,
+            transition: row.get("transition")?,
+            observation: row.get::<_, i64>("observation")? != 0,
+            reserved_usd_nanos: row.get("reserved_usd_nanos")?,
+            budget_charge_usd_nanos: row.get("budget_charge_usd_nanos")?,
+            provider_actual_usd_nanos: row.get("provider_actual_usd_nanos")?,
+            released_usd_nanos: row.get("released_usd_nanos")?,
+            charge_basis: row.get("charge_basis")?,
+            reason: row.get("reason")?,
+            config_hash: row.get("config_hash")?,
+            provider_id: row.get("provider_id")?,
+            model: row.get("model")?,
+            profile: row.get("profile")?,
+            occurred_at_ms: row.get("occurred_at_ms")?,
+            chain_seq: row.get("chain_seq")?,
+        })
+    }
+}
+
+pub fn get_provider_attempt_budget_latest(
+    db: &ProjectionDb,
+    attempt_id: &str,
+) -> anyhow::Result<Option<ProviderAttemptBudgetRow>> {
+    let sql = format!(
+        "SELECT {PROVIDER_ATTEMPT_BUDGET_COLUMNS} FROM provider_attempt_budget_latest \
+         WHERE attempt_id = ?"
+    );
+    let mut stmt = db
+        .connection()
+        .prepare(&sql)
+        .context("prepare get_provider_attempt_budget_latest")?;
+    stmt.query_row([attempt_id], ProviderAttemptBudgetRow::from_row)
+        .optional()
+        .context("query get_provider_attempt_budget_latest")
+}
+
+/// Bounded filter for the accounting summary/drill-down service. Money is
+/// aggregated in integer nanos; identifiers stay in bounded detail rows.
+#[derive(Debug, Clone, Default)]
+pub struct AccountingSummaryFilter<'a> {
+    pub occurred_at_gte_ms: Option<i64>,
+    pub occurred_at_lt_ms: Option<i64>,
+    pub provider_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub profile: Option<&'a str>,
+    pub transition: Option<&'a str>,
+    pub execution_budget_id: Option<&'a str>,
+    pub unresolved_only: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AccountingSummaryTotals {
+    pub attempt_count: i64,
+    pub reserved_usd_nanos: i64,
+    pub budget_charge_usd_nanos: i64,
+    pub provider_actual_usd_nanos: i64,
+    pub released_usd_nanos: i64,
+    pub reservation_denied_count: i64,
+    pub charged_reserved_maximum_count: i64,
+    pub bound_violation_count: i64,
+    pub unresolved_count: i64,
+}
+
+pub fn summarize_provider_attempt_budget(
+    db: &ProjectionDb,
+    filter: &AccountingSummaryFilter<'_>,
+) -> anyhow::Result<AccountingSummaryTotals> {
+    let sql = "SELECT
+            COUNT(*) AS attempt_count,
+            COALESCE(SUM(reserved_usd_nanos), 0) AS reserved,
+            COALESCE(SUM(COALESCE(budget_charge_usd_nanos, 0)), 0) AS charged,
+            COALESCE(SUM(COALESCE(provider_actual_usd_nanos, 0)), 0) AS actual,
+            COALESCE(SUM(COALESCE(released_usd_nanos, 0)), 0) AS released,
+            COALESCE(SUM(transition = 'reservation_denied'), 0) AS denied,
+            COALESCE(SUM(transition = 'charged_reserved_maximum'), 0) AS charged_max,
+            COALESCE(SUM(transition = 'reservation_bound_violated'), 0) AS violated,
+            COALESCE(SUM(transition IN ('reserved', 'issued')), 0) AS unresolved
+         FROM provider_attempt_budget_latest
+         WHERE (?1 IS NULL OR occurred_at_ms >= ?1)
+           AND (?2 IS NULL OR occurred_at_ms < ?2)
+           AND (?3 IS NULL OR provider_id = ?3)
+           AND (?4 IS NULL OR model = ?4)
+           AND (?5 IS NULL OR profile = ?5)
+           AND (?6 IS NULL OR transition = ?6)
+           AND (?7 IS NULL OR execution_budget_id = ?7)
+           AND (NOT ?8 OR transition IN ('reserved', 'issued'))";
+    let mut stmt = db
+        .connection()
+        .prepare(sql)
+        .context("prepare summarize_provider_attempt_budget")?;
+    stmt.query_row(
+        rusqlite::params![
+            filter.occurred_at_gte_ms,
+            filter.occurred_at_lt_ms,
+            filter.provider_id,
+            filter.model,
+            filter.profile,
+            filter.transition,
+            filter.execution_budget_id,
+            filter.unresolved_only,
+        ],
+        |row| {
+            Ok(AccountingSummaryTotals {
+                attempt_count: row.get("attempt_count")?,
+                reserved_usd_nanos: row.get("reserved")?,
+                budget_charge_usd_nanos: row.get("charged")?,
+                provider_actual_usd_nanos: row.get("actual")?,
+                released_usd_nanos: row.get("released")?,
+                reservation_denied_count: row.get("denied")?,
+                charged_reserved_maximum_count: row.get("charged_max")?,
+                bound_violation_count: row.get("violated")?,
+                unresolved_count: row.get("unresolved")?,
+            })
+        },
+    )
+    .context("query summarize_provider_attempt_budget")
+}
+
+/// Bounded drill-down rows, stably ordered by `(occurred_at_ms, attempt_id)`.
+pub fn list_provider_attempt_budget(
+    db: &ProjectionDb,
+    filter: &AccountingSummaryFilter<'_>,
+    limit: u32,
+    after: Option<(i64, &str)>,
+) -> anyhow::Result<Vec<ProviderAttemptBudgetRow>> {
+    let sql = format!(
+        "SELECT {PROVIDER_ATTEMPT_BUDGET_COLUMNS} FROM provider_attempt_budget_latest
+         WHERE (?1 IS NULL OR occurred_at_ms >= ?1)
+           AND (?2 IS NULL OR occurred_at_ms < ?2)
+           AND (?3 IS NULL OR provider_id = ?3)
+           AND (?4 IS NULL OR model = ?4)
+           AND (?5 IS NULL OR profile = ?5)
+           AND (?6 IS NULL OR transition = ?6)
+           AND (?7 IS NULL OR execution_budget_id = ?7)
+           AND (NOT ?8 OR transition IN ('reserved', 'issued'))
+           AND (?9 IS NULL OR occurred_at_ms > ?9
+                OR (occurred_at_ms = ?9 AND attempt_id > ?10))
+         ORDER BY occurred_at_ms, attempt_id
+         LIMIT ?11"
+    );
+    let mut stmt = db
+        .connection()
+        .prepare(&sql)
+        .context("prepare list_provider_attempt_budget")?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                filter.occurred_at_gte_ms,
+                filter.occurred_at_lt_ms,
+                filter.provider_id,
+                filter.model,
+                filter.profile,
+                filter.transition,
+                filter.execution_budget_id,
+                filter.unresolved_only,
+                after.map(|(occurred, _)| occurred),
+                after.map(|(_, attempt)| attempt),
+                limit,
+            ],
+            ProviderAttemptBudgetRow::from_row,
+        )
+        .context("query list_provider_attempt_budget")?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .context("collect list_provider_attempt_budget")
+}
+
 // ============= Tests =============
 
 #[cfg(test)]

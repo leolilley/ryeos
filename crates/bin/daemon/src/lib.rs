@@ -2,6 +2,7 @@
 use once_cell::sync::OnceCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+pub mod accounting_outbox;
 pub mod accounting_terminal;
 pub mod bootstrap;
 pub mod config;

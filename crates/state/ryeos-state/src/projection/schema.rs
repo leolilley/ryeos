@@ -192,6 +192,48 @@ CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_settled_at
 CREATE INDEX IF NOT EXISTS idx_thread_usage_latest_model
     ON thread_usage_latest(provider_id, model);
 
+-- Latest budget transition per provider attempt, derived from strict
+-- daemon-authored provider_attempt_budget_transition_v1 events. Historical
+-- counters and drill-down read this projection; ACTIVE reservation gauges
+-- come from the authoritative accounting ledger because audit publication
+-- may lag.
+CREATE TABLE IF NOT EXISTS provider_attempt_budget_latest (
+    attempt_id TEXT PRIMARY KEY,
+    transition_sequence INTEGER NOT NULL,
+    budget_authority_site_id TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL,
+    execution_budget_id TEXT NOT NULL,
+    root_chain_id TEXT NOT NULL,
+    audit_chain_root_id TEXT NOT NULL,
+    directive_budget_id TEXT,
+    thread_id TEXT NOT NULL,
+    turn INTEGER NOT NULL,
+    attempt_number INTEGER NOT NULL,
+    transition TEXT NOT NULL,
+    observation INTEGER NOT NULL,
+    reserved_usd_nanos INTEGER NOT NULL,
+    budget_charge_usd_nanos INTEGER,
+    provider_actual_usd_nanos INTEGER,
+    released_usd_nanos INTEGER,
+    charge_basis TEXT,
+    reason TEXT,
+    config_hash TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    profile TEXT,
+    occurred_at_ms INTEGER NOT NULL,
+    chain_seq INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_attempt_budget_execution
+    ON provider_attempt_budget_latest(execution_budget_id);
+CREATE INDEX IF NOT EXISTS idx_provider_attempt_budget_occurred
+    ON provider_attempt_budget_latest(occurred_at_ms, transition);
+CREATE INDEX IF NOT EXISTS idx_provider_attempt_budget_thread
+    ON provider_attempt_budget_latest(thread_id);
+CREATE INDEX IF NOT EXISTS idx_provider_attempt_budget_route
+    ON provider_attempt_budget_latest(provider_id, model);
+
 -- App-level usage attribution asserted by an authorized RyeOS principal at
 -- root launch time. Keyed by chain root so child/continuation usage can join
 -- back to the root app subject.
@@ -874,6 +916,161 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "provider_attempt_budget_latest",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "transition_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "budget_authority_site_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "ledger_epoch",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "execution_budget_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "root_chain_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "audit_chain_root_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "directive_budget_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "turn",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_number",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "transition",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "observation",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reserved_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "budget_charge_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "provider_actual_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "released_usd_nanos",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "charge_basis",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reason",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "config_hash",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "provider_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "model",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "profile",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "occurred_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "thread_usage_subjects",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -1045,6 +1242,30 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
             sqlite_schema::IndexSpec {
                 name: "idx_thread_usage_latest_model",
                 table: "thread_usage_latest",
+                columns: &["provider_id", "model"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_attempt_budget_execution",
+                table: "provider_attempt_budget_latest",
+                columns: &["execution_budget_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_attempt_budget_occurred",
+                table: "provider_attempt_budget_latest",
+                columns: &["occurred_at_ms", "transition"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_attempt_budget_thread",
+                table: "provider_attempt_budget_latest",
+                columns: &["thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_attempt_budget_route",
+                table: "provider_attempt_budget_latest",
                 columns: &["provider_id", "model"],
                 unique: false,
             },

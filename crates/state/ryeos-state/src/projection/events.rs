@@ -1,4 +1,5 @@
 use anyhow::Context;
+use rusqlite::OptionalExtension as _;
 
 use super::ProjectionDb;
 
@@ -148,6 +149,10 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
 
     if event.event_type == crate::event_types::THREAD_USAGE {
         project_thread_usage_latest(db, event)?;
+    }
+
+    if event.event_type == crate::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 {
+        project_provider_attempt_budget_latest(db, event)?;
     }
 
     if event.event_type == crate::event_types::THREAD_CREATED {
@@ -321,6 +326,134 @@ fn project_thread_usage_latest(
 
 fn u64_to_i64(value: u64, field: &str) -> anyhow::Result<i64> {
     i64::try_from(value).with_context(|| format!("thread_usage {field} exceeds i64"))
+}
+
+/// Latest budget transition per provider attempt. Strictly decodes only the
+/// target event type; per-attempt ordering is enforced by the daemon outbox,
+/// and this projector additionally rejects illegal regressions and
+/// contradictory duplicate terminal payloads so a rebuild over arbitrary
+/// chains reproduces exactly the terminal rows.
+fn project_provider_attempt_budget_latest(
+    db: &ProjectionDb,
+    event: &crate::ThreadEvent,
+) -> anyhow::Result<()> {
+    let transition: ryeos_accounting::ProviderAttemptBudgetTransitionV1 =
+        serde_json::from_value(event.payload.clone())
+            .context("invalid provider_attempt_budget_transition_v1 payload")?;
+    transition
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid budget transition payload: {error}"))?;
+
+    let existing: Option<(i64, String)> = db
+        .connection()
+        .query_row(
+            "SELECT transition_sequence, transition FROM provider_attempt_budget_latest
+             WHERE attempt_id = ?1",
+            rusqlite::params![&transition.attempt_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .context("read existing provider attempt budget row")?;
+    if let Some((existing_sequence, existing_transition)) = existing {
+        let incoming_sequence = i64::from(transition.transition_sequence);
+        if incoming_sequence < existing_sequence {
+            return Ok(());
+        }
+        if incoming_sequence == existing_sequence {
+            if existing_transition != transition.transition.as_str() {
+                anyhow::bail!(
+                    "contradictory duplicate budget transition for attempt {} sequence {}: \
+                     projected `{existing_transition}`, incoming `{}`",
+                    transition.attempt_id,
+                    existing_sequence,
+                    transition.transition.as_str()
+                );
+            }
+            return Ok(());
+        }
+        let previous = ryeos_accounting::AttemptBudgetState::parse(&existing_transition)
+            .ok_or_else(|| {
+                anyhow::anyhow!("projected budget row has unknown state `{existing_transition}`")
+            })?;
+        let legal = previous.may_transition_to(transition.transition)
+            || (transition.observation
+                && previous == ryeos_accounting::AttemptBudgetState::ChargedReservedMaximum);
+        if !legal {
+            anyhow::bail!(
+                "illegal budget transition regression for attempt {}: `{existing_transition}` \
+                 -> `{}`",
+                transition.attempt_id,
+                transition.transition.as_str()
+            );
+        }
+    }
+
+    db.connection()
+        .execute(
+            "INSERT INTO provider_attempt_budget_latest (
+                attempt_id, transition_sequence, budget_authority_site_id, ledger_epoch,
+                execution_budget_id, root_chain_id, audit_chain_root_id, directive_budget_id,
+                thread_id, turn, attempt_number, transition, observation,
+                reserved_usd_nanos, budget_charge_usd_nanos, provider_actual_usd_nanos,
+                released_usd_nanos, charge_basis, reason, config_hash,
+                provider_id, model, profile, occurred_at_ms, chain_seq
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(attempt_id) DO UPDATE SET
+                transition_sequence = excluded.transition_sequence,
+                budget_authority_site_id = excluded.budget_authority_site_id,
+                ledger_epoch = excluded.ledger_epoch,
+                execution_budget_id = excluded.execution_budget_id,
+                root_chain_id = excluded.root_chain_id,
+                audit_chain_root_id = excluded.audit_chain_root_id,
+                directive_budget_id = excluded.directive_budget_id,
+                thread_id = excluded.thread_id,
+                turn = excluded.turn,
+                attempt_number = excluded.attempt_number,
+                transition = excluded.transition,
+                observation = excluded.observation,
+                reserved_usd_nanos = excluded.reserved_usd_nanos,
+                budget_charge_usd_nanos = excluded.budget_charge_usd_nanos,
+                provider_actual_usd_nanos = excluded.provider_actual_usd_nanos,
+                released_usd_nanos = excluded.released_usd_nanos,
+                charge_basis = excluded.charge_basis,
+                reason = excluded.reason,
+                config_hash = excluded.config_hash,
+                provider_id = excluded.provider_id,
+                model = excluded.model,
+                profile = excluded.profile,
+                occurred_at_ms = excluded.occurred_at_ms,
+                chain_seq = excluded.chain_seq",
+            rusqlite::params![
+                &transition.attempt_id,
+                i64::from(transition.transition_sequence),
+                &transition.budget_authority_site_id,
+                u64_to_i64(transition.ledger_epoch, "ledger_epoch")?,
+                &transition.execution_budget_id,
+                &transition.root_chain_id,
+                &transition.audit_chain_root_id,
+                &transition.directive_budget_id,
+                &transition.thread_id,
+                i64::from(transition.turn),
+                i64::from(transition.attempt_number),
+                transition.transition.as_str(),
+                i64::from(transition.observation),
+                transition.reserved_usd_nanos,
+                transition.budget_charge_usd_nanos,
+                transition.provider_actual_usd_nanos,
+                transition.released_usd_nanos,
+                transition.charge_basis.map(|basis| basis.as_str()),
+                transition.reason.map(|reason| reason.as_str()),
+                &transition.config_hash,
+                &transition.provider_id,
+                &transition.model,
+                &transition.profile,
+                transition.occurred_at_ms,
+                u64_to_i64(event.chain_seq, "chain_seq")?,
+            ],
+        )
+        .context("failed to project provider_attempt_budget_latest")?;
+
+    Ok(())
 }
 
 /// Project a thread edge (parent-child relationship).
