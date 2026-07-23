@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-23T15:25:30Z:90cbe378097a17e552425da8cb6d73f6abfddd7e1cb69bd7b7b1581b9ef98a28:fRsTBXN8Lesb8BZOWzEdu8CfoiG1DAz+U+6zA0SM1MTZR/oEiUae0XTOEhxWuMOaX2FEOZDx7ZL7B+yJvoUPDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 # Directive provider accounting and hard budgets
 
 ## Status

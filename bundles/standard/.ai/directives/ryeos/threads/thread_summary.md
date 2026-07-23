@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-22T02:50:09Z:f004f824aad2fab55e9fc89f31ae79f9eccce8ae32912aaa8a5e6dc0933bd1cd:VxU9PuPBU1gs33+D2nrry6e4EZ9hwYdlllz924UYVdWkoPVaQdJ0bwP1C8TYPkBcniBzFlQyLClNK7itjgAoCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-23T15:25:30Z:ff87f12c1a560e35b5ea24c59f6333eda2c8ceb967f37e8a890bf974bb20e072:BiW2S2+URqOc4ajlmaV5DF30x0Ae6xrNzIR46OsjLgo3gACenEpg4dYJdQtei/H1XnRgNA9PrPd+w53DocRFCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Summarize a thread conversation for resume context. Returns a structured summary within a token budget."
 version: "1.0.0"
