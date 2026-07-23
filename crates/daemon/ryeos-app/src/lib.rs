@@ -3,6 +3,8 @@
 // Phase B: extraction in progress. Modules are added as files are moved
 // out of ryeosd. Each move keeps the workspace compiling.
 
+pub mod accounting_anchor;
+pub mod accounting_db;
 pub mod build_info;
 pub mod bundle_event_service;
 pub mod bundle_transaction;
