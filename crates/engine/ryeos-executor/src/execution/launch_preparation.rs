@@ -75,10 +75,42 @@ pub struct PreparedRuntimeLaunch {
 pub struct PreparedFinancialAuthority {
     /// Always `"provider_accounting_authority_v1"` in this version.
     pub kind: String,
-    /// The exact validated authority payload (canonical value form).
+    /// The exact validated authority payload (canonical value form). Opaque
+    /// past the validation boundary: generic code consumes the typed fields
+    /// below, never this payload's structure.
     pub authority: Value,
     /// sha-256 of the canonical JSON of `authority`.
     pub authority_digest: String,
+    /// Kind-neutral admission fact extracted during strict validation: what
+    /// class of spend bound this authority seals. This is the only property
+    /// the executor may branch on.
+    pub spend_bound: SealedSpendBound,
+}
+
+/// Generic classification of a sealed spend bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SealedSpendBound {
+    /// Mechanically proven paid maximum — hard-spend eligible.
+    Paid,
+    /// Explicitly-free contract — hard-spend eligible at exact zero.
+    ExplicitlyFree,
+    /// Declared bound without mechanical proof — ineligible for hard spend.
+    AdvisoryOnly,
+}
+
+impl SealedSpendBound {
+    pub const fn hard_spend_eligible(self) -> bool {
+        matches!(self, Self::Paid | Self::ExplicitlyFree)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Paid => "paid",
+            Self::ExplicitlyFree => "explicitly_free",
+            Self::AdvisoryOnly => "advisory_only",
+        }
+    }
 }
 
 pub const FINANCIAL_AUTHORITY_KIND_PROVIDER_ACCOUNTING_V1: &str =
@@ -287,6 +319,15 @@ fn validate_financial_authority(
                     LaunchPrepareErrorClass::Internal,
                 )
             })?;
+            let spend_bound = match &decoded.spend_bound {
+                ryeos_accounting::SpendBoundAuthority::Paid { .. } => SealedSpendBound::Paid,
+                ryeos_accounting::SpendBoundAuthority::ExplicitlyFree { .. } => {
+                    SealedSpendBound::ExplicitlyFree
+                }
+                ryeos_accounting::SpendBoundAuthority::AdvisoryOnly => {
+                    SealedSpendBound::AdvisoryOnly
+                }
+            };
             // Re-encode the typed value so the sealed canonical form cannot
             // carry byte-level variance the strict decode ignored.
             let canonical_value = serde_json::to_value(&decoded)
@@ -302,6 +343,7 @@ fn validate_financial_authority(
                 kind: FINANCIAL_AUTHORITY_KIND_PROVIDER_ACCOUNTING_V1.to_owned(),
                 authority: canonical_value,
                 authority_digest: lillux::sha256_hex(canonical.as_bytes()),
+                spend_bound,
             }))
         }
         (declared, produced) => Err(preparation_error(

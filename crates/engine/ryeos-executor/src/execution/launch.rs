@@ -2318,17 +2318,19 @@ async fn run_claimed_thread_row_inner(
     // provider contact; a settled post-attempt threshold is never described
     // as hard.
     if !hard_limits.spend_usd.is_zero() {
-        let spend_bound_kind = prepared_launch
+        let hard_eligible = prepared_launch
             .financial_authority
             .as_ref()
-            .and_then(|authority| authority.authority.get("spend_bound"))
-            .and_then(|bound| bound.get("kind"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("absent");
-        if spend_bound_kind != "paid" && spend_bound_kind != "explicitly_free" {
+            .is_some_and(|authority| authority.spend_bound.hard_spend_eligible());
+        if !hard_eligible {
+            let sealed_bound = prepared_launch
+                .financial_authority
+                .as_ref()
+                .map(|authority| authority.spend_bound.as_str())
+                .unwrap_or("absent");
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
                 "hard spend limit {} requires a mechanically proven spend bound; this route's \
-                 financial authority is `{spend_bound_kind}` and is ineligible for hard spend",
+                 sealed financial authority is `{sealed_bound}` and is ineligible for hard spend",
                 hard_limits.spend_usd.to_canonical_string()
             )));
         }
