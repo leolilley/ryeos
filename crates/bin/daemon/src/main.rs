@@ -673,6 +673,40 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             let authorizer = Arc::new(ryeos_runtime::authorizer::Authorizer::new());
 
+            // Financial accounting ledger. Failure to open or verify does not
+            // stop the node — it disables every hard-budget admission
+            // (fail-closed) while unrelated non-hard work continues.
+            let accounting = {
+                let accounting_dir = config.runtime_state_dir();
+                match tokio::task::spawn_blocking(move || {
+                    ryeos_app::accounting_db::AccountingDb::open_default(&accounting_dir)
+                })
+                .await
+                .context("accounting ledger open task")?
+                {
+                    Ok(ledger) => match ledger.startup_verify() {
+                        Ok(report) => {
+                            tracing::info!(?report, "accounting ledger verified");
+                            Some(Arc::new(ledger))
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                %error,
+                                "accounting ledger failed startup verification;                                  hard-budget admission is disabled"
+                            );
+                            None
+                        }
+                    },
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            "accounting ledger unavailable; hard-budget admission is disabled"
+                        );
+                        None
+                    }
+                }
+            };
+
             let mut app_state = AppState {
                 config: Arc::new(config.clone()),
                 daemon_build: build.clone(),
@@ -728,6 +762,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                         None
                     }
                 },
+                accounting,
             };
             let admission_store = app_state.state_store.clone();
             tokio::spawn(async move {
@@ -2310,6 +2345,9 @@ async fn run_service_standalone(
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
         vault_fingerprint: None,
+        // Standalone service invocations perform no paid launches; hard
+        // admission is uniformly unavailable here.
+        accounting: None,
     };
 
     let ctx = ExecutionContext {

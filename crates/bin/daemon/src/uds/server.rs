@@ -36,6 +36,7 @@ use ryeos_app::thread_lifecycle::{
 };
 use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 
+mod accounting;
 mod routing;
 mod transport;
 
@@ -283,7 +284,13 @@ pub(crate) async fn dispatch_runtime_method(
         None
     } else if matches!(
         method,
-        "runtime.poll_input" | "runtime.author_item" | "runtime.project_snapshot"
+        "runtime.poll_input"
+            | "runtime.author_item"
+            | "runtime.project_snapshot"
+            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_mark_issued"
+            | "runtime.provider_attempt_settle"
+            | "runtime.provider_attempt_release_unissued"
     ) {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
@@ -444,6 +451,45 @@ pub(crate) async fn dispatch_runtime_method(
             handle_attach_process(&clean_params, state, peer, owner).await
         }
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
+        "runtime.provider_attempt_reserve" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("provider_attempt_reserve requires a callback capability"))?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("provider_attempt_reserve requires a launch owner"))?;
+            accounting::handle_provider_attempt_reserve(&clean_params, state, cap, owner)
+        }
+        "runtime.provider_attempt_mark_issued" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_mark_issued requires a callback capability")
+            })?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("provider_attempt_mark_issued requires a launch owner"))?;
+            accounting::handle_provider_attempt_mark_issued(&clean_params, state, cap, owner)
+        }
+        "runtime.provider_attempt_settle" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("provider_attempt_settle requires a callback capability"))?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("provider_attempt_settle requires a launch owner"))?;
+            accounting::handle_provider_attempt_settle(&clean_params, state, cap, owner)
+        }
+        "runtime.provider_attempt_release_unissued" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_release_unissued requires a callback capability")
+            })?;
+            let owner = callback_launch_owner.ok_or_else(|| {
+                anyhow!("provider_attempt_release_unissued requires a launch owner")
+            })?;
+            accounting::handle_provider_attempt_release_unissued(&clean_params, state, cap, owner)
+        }
+        "runtime.provider_attempt_get" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("provider_attempt_get requires a callback capability"))?;
+            accounting::handle_provider_attempt_get(&clean_params, state, cap)
+        }
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -491,18 +537,26 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.publish_artifact"
             | "runtime.submit_command"
             | "runtime.poll_input"
+            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_mark_issued"
     )
 }
 
 fn is_stop_completion_method(method: &str) -> bool {
     matches!(
         method,
-        "runtime.finalize_thread" | "runtime.claim_commands" | "runtime.complete_command"
+        "runtime.finalize_thread"
+            | "runtime.claim_commands"
+            | "runtime.complete_command"
+            | "runtime.provider_attempt_settle"
+            | "runtime.provider_attempt_release_unissued"
     )
 }
 
 fn is_unrestricted_runtime_read_method(method: &str) -> bool {
-    is_chain_read_method(method) || method == "runtime.get_facets"
+    is_chain_read_method(method)
+        || method == "runtime.get_facets"
+        || method == "runtime.provider_attempt_get"
 }
 
 /// Reads that expose bundle state or vault material are live authority, not
@@ -831,12 +885,36 @@ fn handle_finalize(
         continuation_request: None,
         metadata: None,
     };
+    // Terminal admission closes every nonterminal financial attempt first:
+    // the accounting gate is fenced (releasing Reserved, conservatively
+    // charging Issued) before terminal thread state commits, so a racing
+    // reserve/issue callback loses to the fence inside the ledger.
+    crate::accounting_terminal::fence_accounting_for_terminal(
+        state,
+        &params.thread_id,
+        Some(launch_owner),
+        ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
+    )?;
     let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
         launch_owner,
         &completion,
         Some(managed_envelope),
     )?;
+    // Terminal thread state (the CAS publication) is durable; clear the
+    // gate's terminal-publication marker. Startup recovery completes this if
+    // we crash in between.
+    if let Err(error) = crate::accounting_terminal::confirm_terminal_accounting_publication(
+        state,
+        &params.thread_id,
+        launch_owner,
+    ) {
+        tracing::warn!(
+            thread_id = %params.thread_id,
+            %error,
+            "terminal accounting publication confirmation failed; startup recovery will repair"
+        );
+    }
     // Terminal state is authoritative even while the wrapper remains alive.
     // Revoke both in-memory credential classes immediately; an already-admitted
     // concurrent request is still bounded by the StateStore lifecycle check.

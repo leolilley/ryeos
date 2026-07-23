@@ -186,10 +186,10 @@ pub enum ChargeReconciliationAuthority {
         covered_dimensions: ClosedBillableDimensionSet,
         finality_contract: FinalityContract,
     },
-    DeterministicTariff {
-        tariff_digest: HexDigest,
-        covered_dimensions: ClosedBillableDimensionSet,
-    },
+    /// The complete signed tariff is embedded (not referenced by digest) so
+    /// the daemon ledger settles deterministic costs from the sealed
+    /// authority alone, without reaching into any runtime-owned snapshot.
+    DeterministicTariff { tariff: SpendTariffDocument },
     Unavailable,
 }
 
@@ -246,6 +246,10 @@ impl ProviderAccountingAuthority {
                         .to_string(),
                 );
             }
+        }
+        if let ChargeReconciliationAuthority::DeterministicTariff { tariff } = &self.reconciliation
+        {
+            tariff.validate()?;
         }
         Ok(())
     }
@@ -445,10 +449,7 @@ mod tests {
                     expires_at_ms: None,
                 },
             },
-            reconciliation: ChargeReconciliationAuthority::DeterministicTariff {
-                tariff_digest: t.digest().unwrap(),
-                covered_dimensions: t.covered_dimensions,
-            },
+            reconciliation: ChargeReconciliationAuthority::DeterministicTariff { tariff: t },
         }
         .sealed()
         .unwrap()

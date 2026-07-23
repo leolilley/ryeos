@@ -766,9 +766,10 @@ pub fn resolve_accounting_authority(
             },
         }
     } else if let Some(tariff) = spend_authority.and_then(|sa| sa.tariff.as_ref()) {
+        // Embed the complete signed tariff so daemon-side settlement is
+        // self-contained in the sealed authority.
         ChargeReconciliationAuthority::DeterministicTariff {
-            tariff_digest: contract_digest_of(tariff)?,
-            covered_dimensions: tariff.covered_dimensions.clone(),
+            tariff: tariff.clone(),
         }
     } else {
         ChargeReconciliationAuthority::Unavailable
