@@ -507,7 +507,24 @@ mod tests {
         let provider = provider_with(Some(spend_authority(Some(tariff()), None)));
         let prepared = prepared(serde_json::json!({"messages": []}), Some(OUTPUT_CEILING));
 
-        // A different runtime ceiling breaks the sealed request-limit digest.
+        // A raised runtime ceiling passes the request's own bound check but
+        // breaks the sealed request-limit digest — the certificate is bound
+        // to the exact admitted ceiling, not any ceiling that fits.
+        let error = verify_prepared_spend_bound(
+            &prepared,
+            &authority,
+            &provider,
+            CONTEXT_WINDOW,
+            OUTPUT_CEILING + 1,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("request-limit digest mismatch"),
+            "got: {error:#}"
+        );
+
+        // A lowered ceiling rejects even earlier: the prepared request's own
+        // output limit exceeds it.
         let error = verify_prepared_spend_bound(
             &prepared,
             &authority,
@@ -516,7 +533,10 @@ mod tests {
             OUTPUT_CEILING - 1,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("request-limit digest mismatch"));
+        assert!(
+            error.to_string().contains("exceeds the certified ceiling"),
+            "got: {error:#}"
+        );
 
         // A different resolved tariff (changed rate) breaks the contract digest.
         let mut changed = tariff();
