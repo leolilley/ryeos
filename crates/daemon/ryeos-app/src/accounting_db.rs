@@ -448,6 +448,11 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
     SPEC
 }
 
+/// Hard admission pauses while the unpublished audit outbox exceeds either
+/// bound (plan §6.7); it resumes automatically as the publisher drains.
+const MAX_UNPUBLISHED_OUTBOX_FOR_ADMISSION: i64 = 1024;
+const MAX_OUTBOX_AGE_MS_FOR_ADMISSION: i64 = 10 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // Public API types
 // ---------------------------------------------------------------------------
@@ -1308,39 +1313,32 @@ impl AccountingDb {
     ) -> Result<FenceOutcome> {
         let conn = self.lock_conn()?;
         immediate_transaction(&conn, "accounting gate fence", || {
-            // A thread that never opened an accounting gate was never
-            // admitted to reserve: fencing it is a no-op, exactly like an
-            // already-fenced generation.
-            let Some(gate) = self.load_gate(&conn, thread_id, launch_generation)? else {
-                return Ok(FenceOutcome {
-                    released_attempt_ids: Vec::new(),
-                    charged_attempt_ids: Vec::new(),
-                    replayed: true,
-                });
-            };
-            if gate.state == "fenced" {
-                return Ok(FenceOutcome {
-                    released_attempt_ids: Vec::new(),
-                    charged_attempt_ids: Vec::new(),
-                    replayed: true,
-                });
+            // Fence the gate when it exists and is open; the attempt sweep
+            // below runs REGARDLESS. A nonterminal attempt behind a missing
+            // or already-fenced gate is unreachable through normal paths,
+            // but if one ever exists its hold must still close
+            // conservatively rather than dangle forever.
+            let gate = self.load_gate(&conn, thread_id, launch_generation)?;
+            let gate_was_open = matches!(&gate, Some(gate) if gate.state == "open");
+            if gate_was_open {
+                conn.execute(
+                    "UPDATE launch_accounting_gate
+                     SET state = 'fenced', fenced_reason = ?1, terminal_publication_due = 1,
+                         updated_at_ms = ?2
+                     WHERE budget_authority_site_id = ?3 AND ledger_epoch = ?4
+                       AND thread_id = ?5 AND launch_generation = ?6",
+                    rusqlite::params![
+                        reason.as_str(),
+                        now_ms,
+                        self.site_id,
+                        self.epoch_i64(),
+                        thread_id,
+                        launch_generation,
+                    ],
+                )
+                .context("fence launch accounting gate")?;
             }
-            conn.execute(
-                "UPDATE launch_accounting_gate
-                 SET state = 'fenced', fenced_reason = ?1, terminal_publication_due = 1,
-                     updated_at_ms = ?2
-                 WHERE budget_authority_site_id = ?3 AND ledger_epoch = ?4
-                   AND thread_id = ?5 AND launch_generation = ?6",
-                rusqlite::params![
-                    reason.as_str(),
-                    now_ms,
-                    self.site_id,
-                    self.epoch_i64(),
-                    thread_id,
-                    launch_generation,
-                ],
-            )
-            .context("fence launch accounting gate")?;
+            let fence_replayed = !gate_was_open;
 
             let mut stmt = conn
                 .prepare(&format!(
@@ -1432,22 +1430,25 @@ impl AccountingDb {
                     ),
                 }
             }
-            self.insert_fact(
-                &conn,
-                "launch_gate_fenced",
-                None,
-                None,
-                Some(&gate.execution_budget_id),
-                None,
-                Some(&gate.audit_chain_root_id),
-                Some(reason.as_str()),
-                now_ms,
-                None,
-            )?;
+            if gate_was_open {
+                let gate = gate.as_ref().expect("gate_was_open implies a gate row");
+                self.insert_fact(
+                    &conn,
+                    "launch_gate_fenced",
+                    None,
+                    None,
+                    Some(&gate.execution_budget_id),
+                    None,
+                    Some(&gate.audit_chain_root_id),
+                    Some(reason.as_str()),
+                    now_ms,
+                    None,
+                )?;
+            }
             Ok(FenceOutcome {
                 released_attempt_ids,
                 charged_attempt_ids,
-                replayed: false,
+                replayed: fence_replayed,
             })
         })
     }
@@ -1511,6 +1512,75 @@ impl AccountingDb {
             .collect::<std::result::Result<Vec<_>, _>>()
             .context("collect publication-due gates")?;
         Ok(rows)
+    }
+
+    /// Whether an exact account row exists (any state).
+    pub fn account_exists(
+        &self,
+        execution_budget_id: &str,
+        account_kind: &str,
+        scope_id: &str,
+    ) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_account
+                 WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                   AND execution_budget_id = ?3 AND account_kind = ?4 AND scope_id = ?5)",
+                rusqlite::params![
+                    self.site_id,
+                    self.epoch_i64(),
+                    execution_budget_id,
+                    account_kind,
+                    scope_id
+                ],
+                |row| row.get(0),
+            )
+            .context("check account existence")?;
+        Ok(exists != 0)
+    }
+
+    /// Whether the ledger holds ANY durable history for an execution budget
+    /// identity — account rows, attempts, or operational facts. Recovery may
+    /// re-run journaled account birth ONLY when this is false: a scope sealed
+    /// at admission whose birth never committed has nothing acknowledged to
+    /// lose, whereas an identity WITH history and a missing account is an
+    /// integrity failure that must never be re-minted from configured limits.
+    pub fn execution_budget_has_history(&self, execution_budget_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_account
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND execution_budget_id = ?3)
+                 OR EXISTS(SELECT 1 FROM provider_attempt_reservation
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND execution_budget_id = ?3)
+                 OR EXISTS(SELECT 1 FROM accounting_operational_fact
+                     WHERE execution_budget_id = ?3)",
+                rusqlite::params![self.site_id, self.epoch_i64(), execution_budget_id],
+                |row| row.get(0),
+            )
+            .context("check execution budget history")?;
+        Ok(exists != 0)
+    }
+
+    /// Whether any attempt or fact references a directive budget identity.
+    pub fn directive_budget_has_history(&self, directive_budget_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        let exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM budget_account
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND account_kind = 'directive_item' AND scope_id = ?3)
+                 OR EXISTS(SELECT 1 FROM provider_attempt_reservation
+                     WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                       AND directive_budget_id = ?3)",
+                rusqlite::params![self.site_id, self.epoch_i64(), directive_budget_id],
+                |row| row.get(0),
+            )
+            .context("check directive budget history")?;
+        Ok(exists != 0)
     }
 
     /// Launch generations whose accounting gate is still OPEN for one thread.
@@ -1600,6 +1670,29 @@ impl AccountingDb {
 
         if !self.hard_admission_enabled() {
             bail!("hard-budget admission is disabled; refusing a fresh reservation");
+        }
+        // §6.7: the ledger stays internally consistent under audit lag, but
+        // beyond a bounded outbox backlog NEW hard reservations fail closed
+        // until the publisher drains. Evaluated per reservation (not
+        // latched) so admission resumes automatically.
+        let (backlog_count, backlog_oldest_ms): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(created_at_ms) FROM accounting_audit_outbox
+                 WHERE published_chain_seq IS NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .context("read outbox backlog for admission")?;
+        let backlog_age_ms = backlog_oldest_ms
+            .map(|oldest| args.now_ms.saturating_sub(oldest))
+            .unwrap_or(0);
+        if backlog_count > MAX_UNPUBLISHED_OUTBOX_FOR_ADMISSION
+            || backlog_age_ms > MAX_OUTBOX_AGE_MS_FOR_ADMISSION
+        {
+            bail!(
+                "audit outbox backlog ({backlog_count} unpublished, oldest {backlog_age_ms}ms) \
+                 exceeds the hard-admission bound; refusing a fresh reservation until it drains"
+            );
         }
 
         // Sealed authority validation. The maximum comes from the server-side
@@ -2392,10 +2485,16 @@ impl AccountingDb {
                     .unwrap_or(AnchorAction::None);
                 return Ok((outcome, action, false));
             }
-            bail!(
-                "attempt {attempt_id} settle operation exists with a different request \
-                 digest; integrity conflict"
-            );
+            if row.state != AttemptBudgetState::ChargedReservedMaximum {
+                bail!(
+                    "attempt {attempt_id} settle operation exists with a different request \
+                     digest; integrity conflict"
+                );
+            }
+            // The recorded settlement was the conservative reserved-maximum
+            // charge; a later request carrying an authoritative actual
+            // attaches as the monotonic §7.2 observation below instead of
+            // conflicting.
         }
         // A late-observation replay (§7.2) is recorded under sequence 4.
         if let Some((digest, response)) = self.load_operation(conn, attempt_id, "settle", 4)? {

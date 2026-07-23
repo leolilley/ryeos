@@ -1016,6 +1016,12 @@ impl RuntimeLaunchMetadata {
             admitted_project_authority: self.admitted_project_authority.clone(),
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
+            // A continuation is another segment of the SAME execution and
+            // retains the execution budget authority it was admitted under.
+            // Dropping this would mint a fresh allowance per segment — the
+            // exact "hard cap resets at every continuation" failure the
+            // ledger exists to prevent (plan constraint 6, §10.3).
+            accounting_scope: self.accounting_scope.clone(),
             ..Self::default()
         }
     }
@@ -1265,6 +1271,12 @@ mod tests {
                 key: "follow:source".to_string(),
                 width: 2,
             }),
+            accounting_scope: Some(ryeos_state::objects::AdmittedAccountingScope {
+                budget_authority_site_id: "S-test".to_string(),
+                ledger_epoch: 1,
+                execution_budget_id: "B-source".to_string(),
+                directive_budget_id: Some("D-source".to_string()),
+            }),
             ..RuntimeLaunchMetadata::default()
         };
         let successor_resume = resume_context(ProjectContext::SnapshotHash {
@@ -1281,6 +1293,14 @@ mod tests {
         assert!(successor.sealed_root_request.is_none());
         assert!(successor.follow_parent_context.is_none());
         assert!(successor.follow_launch_window.is_none());
+        // No allowance reset: the successor retains the exact execution
+        // budget authority it was admitted under.
+        assert_eq!(
+            successor.accounting_scope,
+            source.accounting_scope,
+            "continuation must carry the accounting scope forward"
+        );
+        assert!(successor.accounting_scope.is_some());
     }
 
     #[test]

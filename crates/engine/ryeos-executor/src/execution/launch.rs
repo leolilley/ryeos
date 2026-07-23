@@ -1206,20 +1206,30 @@ fn resolve_accounting_scope(
     metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
 ) -> Result<(Option<ryeos_state::objects::AdmittedAccountingScope>, bool), BuildAndLaunchError> {
-    let Some(financial_authority) = prepared_launch.financial_authority.as_ref() else {
-        return Ok((None, false));
-    };
     if let Some(existing) = metadata_template.and_then(|template| template.accounting_scope.clone())
     {
         return Ok((Some(existing), false));
     }
-    let accounting = params.state.accounting.as_ref().ok_or_else(|| {
-        BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "accounting ledger is unavailable; a launch carrying financial authority {} \
-             cannot be admitted",
-            financial_authority.authority_digest
-        ))
-    })?;
+    // EVERY managed execution owns an execution budget scope (plan §5.1) —
+    // not just paying runtimes. A graph parent performs no direct paid work
+    // yet its execution account is exactly what its paid descendants must
+    // share; without it two parallel children each observe the full parent
+    // maximum. The financial authority decides only whether a narrower
+    // directive-item scope exists and whether a missing ledger is fatal.
+    let accounting = match (params.state.accounting.as_ref(), &prepared_launch.financial_authority)
+    {
+        (Some(accounting), _) => accounting,
+        (None, Some(financial_authority)) => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "accounting ledger is unavailable; a launch carrying financial authority {} \
+                 cannot be admitted",
+                financial_authority.authority_digest
+            )));
+        }
+        // No ledger and no direct paid work: run unscoped (a paid descendant
+        // would fail its own admission on this node anyway).
+        (None, None) => return Ok((None, false)),
+    };
     let (site_id, ledger_epoch) = accounting.site_identity();
     let execution_budget_id = match params
         .parent_execution_context
@@ -1241,12 +1251,19 @@ fn resolve_accounting_scope(
         }
         None => mint_budget_id("B"),
     };
+    // Only a runtime that pays directly gets a narrower directive-item
+    // account; scope-owning non-paying runtimes (graph, knowledge) carry the
+    // execution identity alone.
+    let directive_budget_id = prepared_launch
+        .financial_authority
+        .as_ref()
+        .map(|_| mint_budget_id("D"));
     Ok((
         Some(ryeos_state::objects::AdmittedAccountingScope {
             budget_authority_site_id: site_id,
             ledger_epoch,
             execution_budget_id,
-            directive_budget_id: Some(mint_budget_id("D")),
+            directive_budget_id,
         }),
         true,
     ))
@@ -2318,21 +2335,20 @@ async fn run_claimed_thread_row_inner(
     // provider contact; a settled post-attempt threshold is never described
     // as hard.
     if !hard_limits.spend_usd.is_zero() {
-        let hard_eligible = prepared_launch
-            .financial_authority
-            .as_ref()
-            .is_some_and(|authority| authority.spend_bound.hard_spend_eligible());
-        if !hard_eligible {
-            let sealed_bound = prepared_launch
-                .financial_authority
-                .as_ref()
-                .map(|authority| authority.spend_bound.as_str())
-                .unwrap_or("absent");
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "hard spend limit {} requires a mechanically proven spend bound; this route's \
-                 sealed financial authority is `{sealed_bound}` and is ineligible for hard spend",
-                hard_limits.spend_usd.to_canonical_string()
-            )));
+        // A runtime that pays providers directly must hold a proven bound; a
+        // non-paying runtime (graph/knowledge) may carry a finite limit that
+        // its paid descendants enforce through the shared execution account —
+        // each descendant's own admission re-checks eligibility.
+        if let Some(authority) = prepared_launch.financial_authority.as_ref() {
+            if !authority.spend_bound.hard_spend_eligible() {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "hard spend limit {} requires a mechanically proven spend bound; this \
+                     route's sealed financial authority is `{}` and is ineligible for hard \
+                     spend",
+                    hard_limits.spend_usd.to_canonical_string(),
+                    authority.spend_bound.as_str()
+                )));
+            }
         }
         if accounting_scope.is_none() || state.accounting.is_none() {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -2352,31 +2368,76 @@ async fn run_claimed_thread_row_inner(
     if let (Some(scope), Some(accounting)) = (accounting_scope.as_ref(), state.accounting.as_ref())
     {
         let account_limit = (!hard_limits.spend_usd.is_zero()).then_some(hard_limits.spend_usd);
-        if freshly_minted_accounting_scope {
-            let inherited_execution = parent_execution_context
-                .and_then(|context| context.accounting_scope.as_ref())
-                .is_some();
-            if !inherited_execution {
-                accounting
-                    .create_execution_account_prepared(
-                        &scope.execution_budget_id,
-                        &chain_root_id,
-                        account_limit,
-                    )
+        // Journaled, crash-recoverable account birth. The scope is sealed in
+        // launch metadata at thread birth, so a crash can land between seal
+        // and birth; recovery may re-run birth ONLY while the identity has
+        // zero ledger history — an identity WITH history and a missing
+        // account is fail-closed (allowance is never re-minted from limits).
+        let execution_exists = accounting
+            .account_exists(&scope.execution_budget_id, "execution", &scope.execution_budget_id)
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "execution budget account lookup failed: {error:#}"
+                ))
+            })?;
+        if !execution_exists {
+            let may_create = freshly_minted_accounting_scope
+                || !accounting
+                    .execution_budget_has_history(&scope.execution_budget_id)
                     .map_err(|error| {
                         BuildAndLaunchError::Internal(anyhow::anyhow!(
-                            "execution budget account birth failed: {error:#}"
+                            "execution budget history lookup failed: {error:#}"
                         ))
                     })?;
-                accounting
-                    .activate_account(&scope.execution_budget_id, "execution", &scope.execution_budget_id)
-                    .map_err(|error| {
-                        BuildAndLaunchError::Internal(anyhow::anyhow!(
-                            "execution budget account activation failed: {error:#}"
-                        ))
-                    })?;
+            if !may_create {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "execution budget account {} is absent but its identity has ledger \
+                     history; refusing to re-mint allowance",
+                    scope.execution_budget_id
+                )));
             }
-            if let Some(directive_budget_id) = scope.directive_budget_id.as_ref() {
+            accounting
+                .create_execution_account_prepared(
+                    &scope.execution_budget_id,
+                    &chain_root_id,
+                    account_limit,
+                )
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "execution budget account birth failed: {error:#}"
+                    ))
+                })?;
+        }
+        accounting
+            .activate_account(&scope.execution_budget_id, "execution", &scope.execution_budget_id)
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "execution budget account activation failed: {error:#}"
+                ))
+            })?;
+        if let Some(directive_budget_id) = scope.directive_budget_id.as_ref() {
+            let directive_exists = accounting
+                .account_exists(&scope.execution_budget_id, "directive_item", directive_budget_id)
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "directive budget account lookup failed: {error:#}"
+                    ))
+                })?;
+            if !directive_exists {
+                let may_create = freshly_minted_accounting_scope
+                    || !accounting
+                        .directive_budget_has_history(directive_budget_id)
+                        .map_err(|error| {
+                            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                                "directive budget history lookup failed: {error:#}"
+                            ))
+                        })?;
+                if !may_create {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "directive budget account {directive_budget_id} is absent but its \
+                         identity has ledger history; refusing to re-mint allowance"
+                    )));
+                }
                 accounting
                     .create_directive_account_prepared(
                         &scope.execution_budget_id,
@@ -2388,14 +2449,14 @@ async fn run_claimed_thread_row_inner(
                             "directive budget account birth failed: {error:#}"
                         ))
                     })?;
-                accounting
-                    .activate_account(&scope.execution_budget_id, "directive_item", directive_budget_id)
-                    .map_err(|error| {
-                        BuildAndLaunchError::Internal(anyhow::anyhow!(
-                            "directive budget account activation failed: {error:#}"
-                        ))
-                    })?;
             }
+            accounting
+                .activate_account(&scope.execution_budget_id, "directive_item", directive_budget_id)
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "directive budget account activation failed: {error:#}"
+                    ))
+                })?;
         }
         accounting
             .open_launch_gate(&thread_id, launch_owner, &scope.execution_budget_id, &chain_root_id)

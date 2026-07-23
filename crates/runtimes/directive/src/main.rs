@@ -314,12 +314,9 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
              daemon-minted accounting scope identities, but the envelope carries none"
         );
     }
-    if !ledger_route && accounting_scope.is_some() {
-        anyhow::bail!(
-            "launch-contract violation: the envelope carries accounting scope identities \
-             without a ledger-eligible (Paid/ExplicitlyFree) financial authority"
-        );
-    }
+    // The converse is legal: every managed execution owns an accounting
+    // scope (plan §5.1) even on advisory routes — the scope simply goes
+    // unused by this runtime's attempt lifecycle.
     // Hard budget mode is valid only where the daemon reservation ledger
     // backs the route; on advisory routes it must fail at startup rather
     // than silently degrade into settled mode.

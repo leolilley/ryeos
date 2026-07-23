@@ -369,13 +369,15 @@ fn format_reported_cost_raw(value: f64) -> Option<String> {
     if !value.is_finite() || value < 0.0 {
         return None;
     }
-    let text = format!("{value:.9}");
-    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
-    let raw = if trimmed.is_empty() {
-        "0".to_string()
-    } else {
-        trimmed.to_string()
-    };
+    // Positive actual charges round toward +infinity (plan §3.1): ceil at
+    // nano resolution so the rendered decimal never understates the charge
+    // the way round-half-even formatting could.
+    let nanos = (value * 1e9).ceil();
+    if nanos > i64::MAX as f64 {
+        return None;
+    }
+    let nanos = ryeos_accounting::UsdNanos::from_nanos(nanos as i64).ok()?;
+    let raw = nanos.to_canonical_string();
     (raw.len() <= ryeos_accounting::MAX_RAW_DECIMAL_LEN).then_some(raw)
 }
 
