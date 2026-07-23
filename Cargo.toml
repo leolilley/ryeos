@@ -13,6 +13,7 @@ members = [
     "crates/clients/web",
     "crates/runtimes/directive-core",
     "crates/runtimes/directive",
+    "crates/engine/ryeos-accounting",
     "crates/engine/ryeos-engine",
     "crates/engine/ryeos-executor",
     "crates/runtimes/graph",
@@ -44,6 +45,7 @@ strip = "debuginfo"
 [workspace.dependencies]
 # Internal crates
 lillux = { path = "crates/kernel/lillux" }
+ryeos-accounting = { path = "crates/engine/ryeos-accounting" }
 ryeos-api = { path = "crates/daemon/ryeos-api" }
 ryeos-app = { path = "crates/daemon/ryeos-app" }
 ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
