@@ -4689,7 +4689,10 @@ fn load_or_create_credential_binding_key(
                  delete the file to mint a fresh key — launch gates bound under the old \
                  key will then release fail-closed before issue",
                 CREDENTIAL_BINDING_KEY_LEN * 2,
-                directory.path().join(CREDENTIAL_BINDING_KEY_FILENAME).display()
+                directory
+                    .path()
+                    .join(CREDENTIAL_BINDING_KEY_FILENAME)
+                    .display()
             )
         });
     }
@@ -5915,7 +5918,10 @@ mod tests {
             &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
         );
         issue(&db, &attempt_id, "h1").unwrap();
-        assert!(db.get_provider_attempt(THREAD, &attempt_id).unwrap().is_some());
+        assert!(db
+            .get_provider_attempt(THREAD, &attempt_id)
+            .unwrap()
+            .is_some());
         // Once hard admission is disabled, the recovery read must not
         // acknowledge the recorded Issued state — it would be a side door
         // around the anchor-coverage bail.
@@ -5948,10 +5954,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(outcome.state, AttemptBudgetState::Reconciled);
-        assert_eq!(
-            outcome.budget_charge,
-            UsdNanos::from_nanos(22_500).unwrap()
-        );
+        assert_eq!(outcome.budget_charge, UsdNanos::from_nanos(22_500).unwrap());
         assert_eq!(outcome.charge_basis, ChargeBasis::ProviderReported);
         assert_healthy_verify(&db);
     }
@@ -5983,9 +5986,8 @@ mod tests {
         // A contract signed for scale 12 accepts the same value rounded
         // toward positive infinity.
         let wide = reported_authority("b", "0.5", 12, false);
-        let attempt_id = reserved_id(
-            &reserve(&db, THREAD, GENERATION, 2, 1, "h2", &wide, EXEC, None).unwrap(),
-        );
+        let attempt_id =
+            reserved_id(&reserve(&db, THREAD, GENERATION, 2, 1, "h2", &wide, EXEC, None).unwrap());
         issue(&db, &attempt_id, "h2").unwrap();
         let outcome = settle(
             &db,
@@ -6016,7 +6018,10 @@ mod tests {
         for (turn, raw) in [(1, "99999999999999999999"), (2, "1e999")] {
             let hash = format!("h{turn}");
             let attempt_id = reserved_id(
-                &reserve(&db, THREAD, GENERATION, turn, 1, &hash, &authority, EXEC, None).unwrap(),
+                &reserve(
+                    &db, THREAD, GENERATION, turn, 1, &hash, &authority, EXEC, None,
+                )
+                .unwrap(),
             );
             issue(&db, &attempt_id, &hash).unwrap();
             let outcome = settle(
@@ -6029,7 +6034,11 @@ mod tests {
                 &authority,
             )
             .unwrap();
-            assert_eq!(outcome.state, AttemptBudgetState::ChargedReservedMaximum, "{raw}");
+            assert_eq!(
+                outcome.state,
+                AttemptBudgetState::ChargedReservedMaximum,
+                "{raw}"
+            );
             assert_eq!(outcome.budget_charge, usd("0.5"), "{raw}");
             assert!(db.hard_admission_enabled(), "{raw}");
         }

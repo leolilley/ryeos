@@ -421,7 +421,9 @@ mod tests {
                 .as_nanos(),
             1
         );
-        for bad in ["1e", "1e+", "1e-", "1e1.5", "e5", "1ee5", "1e 5", ".5e1", "5.e1"] {
+        for bad in [
+            "1e", "1e+", "1e-", "1e1.5", "e5", "1ee5", "1e 5", ".5e1", "5.e1",
+        ] {
             assert!(
                 UsdNanos::parse_reported_round_up(bad).is_err(),
                 "should reject {bad:?}"

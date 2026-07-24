@@ -23,8 +23,8 @@ pub fn fingerprint(key: &VerifyingKey) -> String {
 /// HMAC-SHA256 of `message` under `key`, rendered as lowercase hex.
 pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
     use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(key)
-        .expect("HMAC-SHA256 accepts keys of any length");
+    let mut mac =
+        <Hmac<sha2::Sha256>>::new_from_slice(key).expect("HMAC-SHA256 accepts keys of any length");
     mac.update(message);
     mac.finalize()
         .into_bytes()

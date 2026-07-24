@@ -237,20 +237,20 @@ pub async fn handle(
     let (ledger_available, hard_admission_enabled, outbox_backlog, active_reservations) =
         match &state.accounting {
             Some(ledger) => {
-                let backlog = ledger.unpublished_outbox_stats().map(
-                    |(unpublished, oldest_created_at_ms)| OutboxBacklog {
-                        unpublished,
-                        oldest_created_at_ms,
-                    },
-                );
-                let active =
+                let backlog =
                     ledger
-                        .active_reservation_stats()
-                        .map(|stats| ActiveReservations {
-                            unresolved: stats.unresolved_count,
-                            held_usd_nanos: stats.held_usd_nanos,
-                            oldest_created_at_ms: stats.oldest_created_at_ms,
+                        .unpublished_outbox_stats()
+                        .map(|(unpublished, oldest_created_at_ms)| OutboxBacklog {
+                            unpublished,
+                            oldest_created_at_ms,
                         });
+                let active = ledger
+                    .active_reservation_stats()
+                    .map(|stats| ActiveReservations {
+                        unresolved: stats.unresolved_count,
+                        held_usd_nanos: stats.held_usd_nanos,
+                        oldest_created_at_ms: stats.oldest_created_at_ms,
+                    });
                 match (backlog, active) {
                     (Ok(backlog), Ok(active)) => (
                         true,
@@ -363,8 +363,9 @@ struct Cursor {
 }
 
 fn encode_cursor(occurred_at_gte_ms: i64, occurred_at_lt_ms: i64, attempt_id: &str) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(format!("v2:{occurred_at_gte_ms}:{occurred_at_lt_ms}:{attempt_id}"))
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(
+        "v2:{occurred_at_gte_ms}:{occurred_at_lt_ms}:{attempt_id}"
+    ))
 }
 
 fn decode_cursor(cursor: &str) -> Result<Cursor, HandlerError> {

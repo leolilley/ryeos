@@ -2614,8 +2614,8 @@ mod tests {
         // integrity failure, not a benign duplicate.
         let db = test_db();
         project_event(&db, &budget_transition_event(1, "cfg")).unwrap();
-        let error = project_event(&db, &budget_transition_event_on_chain("T-other", 2, "cfg"))
-            .unwrap_err();
+        let error =
+            project_event(&db, &budget_transition_event_on_chain("T-other", 2, "cfg")).unwrap_err();
         assert!(format!("{error:#}").contains("declares audit chain"));
     }
 
