@@ -14,13 +14,14 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ryeos_accounting::{
-    ProviderAttemptGetParams, ProviderAttemptMarkIssuedParams, ProviderAttemptMarkIssuedResponse,
+    credential_binding_digest, ProviderAccountingAuthority, ProviderAttemptGetParams,
+    ProviderAttemptMarkIssuedParams, ProviderAttemptMarkIssuedResponse,
     ProviderAttemptReleaseUnissuedParams, ProviderAttemptReleaseUnissuedResponse,
     ProviderAttemptReserveParams, ProviderAttemptReserveResponse, ProviderAttemptSettleParams,
-    ProviderAttemptSettleResponse, ProviderAccountingAuthority,
+    ProviderAttemptSettleResponse,
 };
 use ryeos_app::accounting_db::{AccountingDb, IssueOutcome, ReserveArgs, ReserveOutcome};
-use ryeos_app::callback_token::CallbackCapability;
+use ryeos_app::callback_token::{CallbackCapability, ThreadAuthState};
 use ryeos_app::state::AppState;
 
 fn now_ms() -> i64 {
@@ -51,10 +52,15 @@ fn require_scope(
 /// Load the sealed financial authority for this thread from admitted launch
 /// metadata. The typed prepared-launch shape is decoded strictly; the
 /// authority payload is re-validated (digest recomputation) before use.
+struct SealedLaunchFinancialAuthority {
+    authority: ProviderAccountingAuthority,
+    required_secret_names: Vec<String>,
+}
+
 fn sealed_financial_authority(
     state: &AppState,
     thread_id: &str,
-) -> Result<ProviderAccountingAuthority> {
+) -> Result<SealedLaunchFinancialAuthority> {
     let metadata = state
         .state_store
         .get_launch_metadata(thread_id)?
@@ -73,7 +79,22 @@ fn sealed_financial_authority(
     authority
         .validate()
         .map_err(|error| anyhow!("sealed financial authority failed validation: {error}"))?;
-    Ok(authority)
+    let mut required_secret_names: Vec<String> = prepared
+        .required_secrets
+        .into_iter()
+        .map(|secret| secret.name)
+        .collect();
+    required_secret_names.sort();
+    if required_secret_names
+        .windows(2)
+        .any(|pair| pair[0] == pair[1])
+    {
+        anyhow::bail!("admitted prepared launch contains duplicate required secret names");
+    }
+    Ok(SealedLaunchFinancialAuthority {
+        authority,
+        required_secret_names,
+    })
 }
 
 pub(super) fn handle_provider_attempt_reserve(
@@ -97,7 +118,8 @@ pub(super) fn handle_provider_attempt_reserve(
         );
     }
     let scope = require_scope(cap)?;
-    let authority = sealed_financial_authority(state, &cap.thread_id)?;
+    let sealed = sealed_financial_authority(state, &cap.thread_id)?;
+    let authority = &sealed.authority;
     let outcome = ledger.reserve_provider_attempt(ReserveArgs {
         thread_id: &cap.thread_id,
         launch_generation: launch_owner,
@@ -106,7 +128,7 @@ pub(super) fn handle_provider_attempt_reserve(
         request_hash: &request.request_hash,
         config_hash: &request.config_hash,
         verified_bound: &request.verified_bound,
-        authority: &authority,
+        authority,
         execution_budget_id: &scope.execution_budget_id,
         directive_budget_id: scope.directive_budget_id.as_deref(),
         root_chain_id: &cap.chain_root_id,
@@ -146,6 +168,7 @@ pub(super) fn handle_provider_attempt_mark_issued(
     state: &AppState,
     cap: &CallbackCapability,
     launch_owner: &str,
+    thread_auth: &ThreadAuthState,
 ) -> Result<Value> {
     let request: ProviderAttemptMarkIssuedParams = serde_json::from_value(params.clone())
         .context("decode provider_attempt_mark_issued params")?;
@@ -157,11 +180,32 @@ pub(super) fn handle_provider_attempt_mark_issued(
     // issue-to-provider-acceptance window beyond the durable Issued boundary.
     let acceptance_window_ms =
         i64::try_from(state.config.accounting_issue_acceptance_window_ms).unwrap_or(i64::MAX);
-    let outcome = ledger.mark_provider_attempt_issued(
+    let sealed = sealed_financial_authority(state, &cap.thread_id)?;
+    // Re-read through the same daemon-owned principal and project authority
+    // used at launch. Any missing, revoked, or otherwise unreadable credential
+    // is represented as a non-matching binding so the ledger durably releases
+    // the reservation before provider contact.
+    let current_binding = ryeos_app::vault::read_required_secrets_with_authority(
+        state.vault.as_ref(),
+        &thread_auth.acting_principal,
+        &sealed.required_secret_names,
+        cap.provenance.project_authority(),
+    )
+    .ok()
+    .and_then(|values| {
+        let secrets = sealed
+            .required_secret_names
+            .iter()
+            .map(|name| values.get(name).cloned().map(|value| (name.clone(), value)))
+            .collect::<Option<Vec<_>>>()?;
+        credential_binding_digest(&sealed.authority, &secrets).ok()
+    });
+    let outcome = ledger.mark_provider_attempt_issued_with_credential_binding(
         &cap.thread_id,
         launch_owner,
         &request.attempt_id,
         &request.request_hash,
+        current_binding.as_ref().map(|digest| digest.as_str()),
         now_ms(),
         acceptance_window_ms,
     )?;
@@ -170,9 +214,9 @@ pub(super) fn handle_provider_attempt_mark_issued(
             state: ryeos_accounting::AttemptBudgetState::Issued,
             replayed,
         },
-        IssueOutcome::ReleasedBeforeIssue { .. } => ProviderAttemptMarkIssuedResponse {
+        IssueOutcome::ReleasedBeforeIssue { replayed, .. } => ProviderAttemptMarkIssuedResponse {
             state: ryeos_accounting::AttemptBudgetState::ReleasedUnissued,
-            replayed: false,
+            replayed,
         },
     };
     Ok(serde_json::to_value(response)?)

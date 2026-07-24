@@ -2292,6 +2292,40 @@ pub fn get_provider_attempt_budget_latest(
         .context("query get_provider_attempt_budget_latest")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAttemptBudgetTransitionIdentity {
+    pub transition_id: String,
+    pub attempt_id: String,
+    pub transition_sequence: i64,
+    pub payload_fingerprint: String,
+    pub chain_seq: i64,
+}
+
+pub fn get_provider_attempt_budget_transition_identity(
+    db: &ProjectionDb,
+    transition_id: &str,
+) -> anyhow::Result<Option<ProviderAttemptBudgetTransitionIdentity>> {
+    db.connection()
+        .query_row(
+            "SELECT transition_id, attempt_id, transition_sequence,
+                    payload_fingerprint, chain_seq
+             FROM provider_attempt_budget_transition_once
+             WHERE transition_id = ?1",
+            [transition_id],
+            |row| {
+                Ok(ProviderAttemptBudgetTransitionIdentity {
+                    transition_id: row.get(0)?,
+                    attempt_id: row.get(1)?,
+                    transition_sequence: row.get(2)?,
+                    payload_fingerprint: row.get(3)?,
+                    chain_seq: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .context("query provider attempt budget transition identity")
+}
+
 /// Bounded filter for the accounting summary/drill-down service. Money is
 /// aggregated in integer nanos; identifiers stay in bounded detail rows.
 #[derive(Debug, Clone, Default)]
@@ -2317,6 +2351,32 @@ pub struct AccountingSummaryTotals {
     pub charged_reserved_maximum_count: i64,
     pub bound_violation_count: i64,
     pub unresolved_count: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountingProjectionBounds {
+    pub retained_attempt_count: i64,
+    pub oldest_occurred_at_ms: Option<i64>,
+    pub newest_occurred_at_ms: Option<i64>,
+}
+
+pub fn provider_attempt_budget_projection_bounds(
+    db: &ProjectionDb,
+) -> anyhow::Result<AccountingProjectionBounds> {
+    db.connection()
+        .query_row(
+            "SELECT COUNT(*), MIN(occurred_at_ms), MAX(occurred_at_ms)
+             FROM provider_attempt_budget_latest",
+            [],
+            |row| {
+                Ok(AccountingProjectionBounds {
+                    retained_attempt_count: row.get(0)?,
+                    oldest_occurred_at_ms: row.get(1)?,
+                    newest_occurred_at_ms: row.get(2)?,
+                })
+            },
+        )
+        .context("query provider attempt budget projection bounds")
 }
 
 pub fn summarize_provider_attempt_budget(
@@ -2439,6 +2499,91 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
         let path = tempdir.path().join("test.db");
         ProjectionDb::open(&path).unwrap()
+    }
+
+    fn budget_transition_event(chain_seq: u64, config_hash: &str) -> crate::ThreadEvent {
+        let attempt_id = "A-projection";
+        NewEvent::new(
+            "T-root",
+            "T-runtime",
+            crate::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1,
+        )
+        .chain_seq(chain_seq)
+        .thread_seq(chain_seq)
+        .payload(
+            serde_json::to_value(ryeos_accounting::ProviderAttemptBudgetTransitionV1 {
+                version: ryeos_accounting::PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
+                transition_id: ryeos_accounting::transition_id(attempt_id, 1),
+                transition_sequence: 1,
+                attempt_id: attempt_id.to_string(),
+                budget_authority_site_id: "S-site".to_string(),
+                ledger_epoch: 1,
+                execution_budget_id: "B-execution".to_string(),
+                root_chain_id: "T-root".to_string(),
+                audit_chain_root_id: "T-root".to_string(),
+                directive_budget_id: Some("D-directive".to_string()),
+                thread_id: "T-runtime".to_string(),
+                turn: 1,
+                attempt_number: 1,
+                transition: ryeos_accounting::AttemptBudgetState::Reserved,
+                observation: false,
+                config_hash: config_hash.to_string(),
+                provider_id: "provider".to_string(),
+                model: "model".to_string(),
+                profile: None,
+                reserved_usd_nanos: 500_000_000,
+                budget_charge_usd_nanos: None,
+                provider_actual_usd_nanos: None,
+                released_usd_nanos: None,
+                charge_basis: None,
+                occurred_at_ms: 1_000,
+                reason: None,
+            })
+            .unwrap(),
+        )
+        .build_with_ts("2026-07-24T00:00:00Z".to_string())
+    }
+
+    #[test]
+    fn accounting_transition_projection_retains_exact_append_once_identity() {
+        let db = test_db();
+        assert_eq!(
+            provider_attempt_budget_projection_bounds(&db).unwrap(),
+            AccountingProjectionBounds::default()
+        );
+        let event = budget_transition_event(1, "cfg");
+        project_event(&db, &event).unwrap();
+        // Re-projecting the exact same chain event is semantically
+        // idempotent.
+        project_event(&db, &event).unwrap();
+
+        let transition_id = ryeos_accounting::transition_id("A-projection", 1);
+        let identity = get_provider_attempt_budget_transition_identity(&db, &transition_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.attempt_id, "A-projection");
+        assert_eq!(identity.transition_sequence, 1);
+        assert_eq!(identity.chain_seq, 1);
+        assert_eq!(
+            identity.payload_fingerprint,
+            lillux::sha256_hex(lillux::canonical_json(&event.payload).unwrap().as_bytes())
+        );
+        assert_eq!(
+            provider_attempt_budget_projection_bounds(&db).unwrap(),
+            AccountingProjectionBounds {
+                retained_attempt_count: 1,
+                oldest_occurred_at_ms: Some(1_000),
+                newest_occurred_at_ms: Some(1_000),
+            }
+        );
+    }
+
+    #[test]
+    fn accounting_transition_projection_rejects_reused_id_with_changed_payload() {
+        let db = test_db();
+        project_event(&db, &budget_transition_event(1, "cfg")).unwrap();
+        let error = project_event(&db, &budget_transition_event(2, "changed")).unwrap_err();
+        assert!(format!("{error:#}").contains("contradicts its projected publication identity"));
     }
 
     fn insert_thread(

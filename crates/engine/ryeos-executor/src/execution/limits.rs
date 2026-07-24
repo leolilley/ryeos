@@ -116,7 +116,10 @@ pub fn compute_effective_limits(
     let mut hard = HardLimits {
         turns: sentinel_clamp(requested.turns, caps.turns.unwrap_or(0)),
         tokens: sentinel_clamp(requested.tokens, caps.tokens.unwrap_or(0)),
-        spend_usd: sentinel_clamp(requested.spend_usd, caps.spend_usd.unwrap_or(UsdNanos::ZERO)),
+        spend_usd: sentinel_clamp(
+            requested.spend_usd,
+            caps.spend_usd.unwrap_or(UsdNanos::ZERO),
+        ),
         spawns: sentinel_clamp(requested.spawns, caps.spawns.unwrap_or(0)),
         depth: sentinel_clamp(requested.depth, caps.depth.unwrap_or(0)),
         duration_seconds: sentinel_clamp(
@@ -550,10 +553,7 @@ mod tests {
         assert_eq!(requested.duration_seconds, 7200);
         assert_eq!(requested.tokens, 123_456);
         assert_eq!(requested.spawns, 42);
-        assert_eq!(
-            requested.spend_usd,
-            UsdNanos::parse_canonical("9").unwrap()
-        );
+        assert_eq!(requested.spend_usd, UsdNanos::parse_canonical("9").unwrap());
     }
 
     #[test]

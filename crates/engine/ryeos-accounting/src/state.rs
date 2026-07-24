@@ -268,7 +268,10 @@ mod tests {
             assert_eq!(AttemptBudgetState::parse(s.as_str()), Some(s));
             let json = serde_json::to_string(&s).unwrap();
             assert_eq!(json, format!("\"{}\"", s.as_str()));
-            assert_eq!(serde_json::from_str::<AttemptBudgetState>(&json).unwrap(), s);
+            assert_eq!(
+                serde_json::from_str::<AttemptBudgetState>(&json).unwrap(),
+                s
+            );
         }
         assert_eq!(AttemptBudgetState::parse("unknown"), None);
     }

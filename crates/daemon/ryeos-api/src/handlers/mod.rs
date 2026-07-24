@@ -12,6 +12,7 @@
 
 use crate::registry::ServiceDescriptor;
 
+pub mod accounting_summary;
 pub mod admission_attestations_for_subject;
 pub mod admission_claim;
 pub mod admission_status;
@@ -93,7 +94,6 @@ pub mod threads_tail;
 pub mod tool_env_check;
 pub mod trace_branch;
 pub mod trace_inspect;
-pub mod accounting_summary;
 pub mod usage_summary;
 pub mod vault_delete;
 pub mod vault_list;

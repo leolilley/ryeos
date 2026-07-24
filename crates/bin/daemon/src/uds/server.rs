@@ -308,7 +308,12 @@ pub(crate) async fn dispatch_runtime_method(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         let thread_auth = state.thread_auth.validate(tat, thread_id)?;
-        if matches!(method, "runtime.author_item" | "runtime.project_snapshot") {
+        if matches!(
+            method,
+            "runtime.author_item"
+                | "runtime.project_snapshot"
+                | "runtime.provider_attempt_mark_issued"
+        ) {
             validated_thread_auth = Some(thread_auth);
         }
         let token = params
@@ -452,9 +457,9 @@ pub(crate) async fn dispatch_runtime_method(
         }
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
         "runtime.provider_attempt_reserve" => {
-            let cap = callback_cap
-                .as_ref()
-                .ok_or_else(|| anyhow!("provider_attempt_reserve requires a callback capability"))?;
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_reserve requires a callback capability")
+            })?;
             let owner = callback_launch_owner
                 .ok_or_else(|| anyhow!("provider_attempt_reserve requires a launch owner"))?;
             accounting::handle_provider_attempt_reserve(&clean_params, state, cap, owner)
@@ -465,7 +470,16 @@ pub(crate) async fn dispatch_runtime_method(
             })?;
             let owner = callback_launch_owner
                 .ok_or_else(|| anyhow!("provider_attempt_mark_issued requires a launch owner"))?;
-            accounting::handle_provider_attempt_mark_issued(&clean_params, state, cap, owner)
+            let thread_auth = validated_thread_auth.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_mark_issued requires validated thread authority")
+            })?;
+            accounting::handle_provider_attempt_mark_issued(
+                &clean_params,
+                state,
+                cap,
+                owner,
+                thread_auth,
+            )
         }
         "runtime.provider_attempt_settle" => {
             let cap = callback_cap

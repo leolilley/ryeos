@@ -202,9 +202,7 @@ impl RuntimeEventType {
             Self::GraphFollowSuspended => wire::GRAPH_FOLLOW_SUSPENDED,
             Self::GraphNodeRetry => wire::GRAPH_NODE_RETRY,
             Self::ProviderRetry => wire::PROVIDER_RETRY,
-            Self::ProviderAttemptBudgetTransitionV1 => {
-                wire::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1
-            }
+            Self::ProviderAttemptBudgetTransitionV1 => wire::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1,
             Self::CostUntracked => wire::COST_UNTRACKED,
             Self::Milestone => wire::MILESTONE,
             Self::ThreadUsage => wire::THREAD_USAGE,

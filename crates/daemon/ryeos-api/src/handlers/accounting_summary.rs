@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use base64::Engine as _;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -91,6 +92,7 @@ struct DetailRow {
 
 #[derive(Serialize)]
 struct Health {
+    observed_at_ms: i64,
     /// Whether hard-budget admission is currently enabled on this node.
     hard_admission_enabled: bool,
     /// Whether the authoritative accounting ledger is available at all.
@@ -98,12 +100,32 @@ struct Health {
     /// Audit outbox backlog (count, oldest entry age ms) from the ledger.
     #[serde(skip_serializing_if = "Option::is_none")]
     outbox_backlog: Option<OutboxBacklog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    active_reservations: Option<ActiveReservations>,
+    projection: ProjectionFreshness,
 }
 
 #[derive(Serialize)]
 struct OutboxBacklog {
     unpublished: u64,
     oldest_created_at_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ActiveReservations {
+    unresolved: u64,
+    held_usd_nanos: i64,
+    oldest_created_at_ms: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct ProjectionFreshness {
+    health: ryeos_app::projection_health::ThreadProjectionHealthSnapshot,
+    retained_attempt_count: i64,
+    /// Earliest accounting event still represented by the latest-row
+    /// projection. `None` means no retained accounting rows.
+    retention_floor_occurred_at_ms: Option<i64>,
+    newest_occurred_at_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +143,21 @@ pub async fn handle(
     state: Arc<AppState>,
 ) -> Result<Value, HandlerError> {
     ctx.require_verified()?;
+    validate_request(&req)?;
+    let projection_health = state.state_store.thread_projection_health();
+    if projection_health.status != ryeos_app::projection_health::ThreadProjectionState::Current
+        || projection_health.pending_transitions != 0
+    {
+        return Err(HandlerError::Structured {
+            code: "accounting_projection_unavailable".to_string(),
+            status: 503,
+            body: serde_json::json!({
+                "code": "accounting_projection_unavailable",
+                "message": "historical accounting projection is not current",
+                "projection": projection_health,
+            }),
+        });
+    }
 
     let (gte, lt) = effective_window(req.occurred_at_gte_ms, req.occurred_at_lt_ms)?;
     let filter = AccountingSummaryFilter {
@@ -138,9 +175,13 @@ pub async fn handle(
         .state_store
         .summarize_provider_attempt_budget(&filter)
         .map_err(|e| HandlerError::Internal(e.to_string()))?;
+    let projection_bounds = state
+        .state_store
+        .provider_attempt_budget_projection_bounds()
+        .map_err(|e| HandlerError::Internal(e.to_string()))?;
 
     let (rows, next_cursor) = if req.detail {
-        let limit = req.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
+        let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
         let after = req.cursor.as_deref().map(decode_cursor).transpose()?;
         let after_ref = after
             .as_ref()
@@ -150,7 +191,10 @@ pub async fn handle(
             .list_provider_attempt_budget(&filter, limit, after_ref)
             .map_err(|e| HandlerError::Internal(e.to_string()))?;
         let next_cursor = (rows.len() as u32 == limit)
-            .then(|| rows.last().map(|row| encode_cursor(row.occurred_at_ms, &row.attempt_id)))
+            .then(|| {
+                rows.last()
+                    .map(|row| encode_cursor(row.occurred_at_ms, &row.attempt_id))
+            })
             .flatten();
         let rows = rows
             .into_iter()
@@ -180,19 +224,29 @@ pub async fn handle(
         (None, None)
     };
 
-    let (ledger_available, hard_admission_enabled, outbox_backlog) = match &state.accounting {
-        Some(ledger) => {
-            let backlog = ledger
-                .unpublished_outbox_stats()
-                .ok()
-                .map(|(unpublished, oldest_created_at_ms)| OutboxBacklog {
+    let observed_at_ms = now_ms();
+    let (ledger_available, hard_admission_enabled, outbox_backlog, active_reservations) =
+        match &state.accounting {
+            Some(ledger) => {
+                let (unpublished, oldest_created_at_ms) = ledger
+                    .unpublished_outbox_stats()
+                    .map_err(|error| HandlerError::Internal(error.to_string()))?;
+                let backlog = Some(OutboxBacklog {
                     unpublished,
                     oldest_created_at_ms,
                 });
-            (true, ledger.hard_admission_enabled(), backlog)
-        }
-        None => (false, false, None),
-    };
+                let stats = ledger
+                    .active_reservation_stats()
+                    .map_err(|error| HandlerError::Internal(error.to_string()))?;
+                let active = Some(ActiveReservations {
+                    unresolved: stats.unresolved_count,
+                    held_usd_nanos: stats.held_usd_nanos,
+                    oldest_created_at_ms: stats.oldest_created_at_ms,
+                });
+                (true, ledger.hard_admission_enabled(), backlog, active)
+            }
+            None => (false, false, None, None),
+        };
 
     serde_json::to_value(Response {
         totals: Totals {
@@ -209,9 +263,17 @@ pub async fn handle(
         rows,
         next_cursor,
         health: Health {
+            observed_at_ms,
             hard_admission_enabled,
             ledger_available,
             outbox_backlog,
+            active_reservations,
+            projection: ProjectionFreshness {
+                health: projection_health,
+                retained_attempt_count: projection_bounds.retained_attempt_count,
+                retention_floor_occurred_at_ms: projection_bounds.oldest_occurred_at_ms,
+                newest_occurred_at_ms: projection_bounds.newest_occurred_at_ms,
+            },
         },
         semantics: Semantics {
             historical_source: "provider_attempt_budget_latest projection (CAS-derived; may lag the ledger)",
@@ -224,14 +286,15 @@ pub async fn handle(
     .map_err(|e| HandlerError::Internal(e.to_string()))
 }
 
-fn effective_window(
-    gte: Option<i64>,
-    lt: Option<i64>,
-) -> Result<(i64, i64), HandlerError> {
-    let now = std::time::SystemTime::now()
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0);
+        .unwrap_or(0)
+}
+
+fn effective_window(gte: Option<i64>, lt: Option<i64>) -> Result<(i64, i64), HandlerError> {
+    let now = now_ms();
     let lt = lt.unwrap_or(now);
     let gte = gte.unwrap_or_else(|| lt.saturating_sub(MAX_WINDOW_MS));
     if gte >= lt {
@@ -247,18 +310,59 @@ fn effective_window(
     Ok((gte, lt))
 }
 
+fn validate_request(req: &Request) -> Result<(), HandlerError> {
+    if let Some(limit) = req.limit {
+        if !(1..=MAX_LIMIT).contains(&limit) {
+            return Err(HandlerError::BadRequest(format!(
+                "limit must be between 1 and {MAX_LIMIT}"
+            )));
+        }
+    }
+    if let Some(transition) = req.transition.as_deref() {
+        if ryeos_accounting::AttemptBudgetState::parse(transition).is_none() {
+            return Err(HandlerError::BadRequest(
+                "transition is not a provider-attempt budget state".to_string(),
+            ));
+        }
+    }
+    if req.cursor.is_some() && !req.detail {
+        return Err(HandlerError::BadRequest(
+            "cursor requires detail=true".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn encode_cursor(occurred_at_ms: i64, attempt_id: &str) -> String {
-    format!("{occurred_at_ms}:{attempt_id}")
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!("v1:{occurred_at_ms}:{attempt_id}"))
 }
 
 fn decode_cursor(cursor: &str) -> Result<(i64, String), HandlerError> {
-    let (occurred, attempt) = cursor
+    if cursor.is_empty() || cursor.len() > 512 {
+        return Err(HandlerError::BadRequest("malformed cursor".to_string()));
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| HandlerError::BadRequest("malformed cursor".to_string()))?;
+    let decoded = std::str::from_utf8(&decoded)
+        .map_err(|_| HandlerError::BadRequest("malformed cursor".to_string()))?;
+    let (version, rest) = decoded
+        .split_once(':')
+        .ok_or_else(|| HandlerError::BadRequest("malformed cursor".to_string()))?;
+    if version != "v1" {
+        return Err(HandlerError::BadRequest("malformed cursor".to_string()));
+    }
+    let (occurred, attempt) = rest
         .split_once(':')
         .ok_or_else(|| HandlerError::BadRequest("malformed cursor".to_string()))?;
     let occurred: i64 = occurred
         .parse()
         .map_err(|_| HandlerError::BadRequest("malformed cursor".to_string()))?;
-    if attempt.is_empty() || attempt.len() > 128 {
+    if attempt.is_empty()
+        || attempt.len() > 128
+        || attempt.bytes().any(|byte| byte.is_ascii_control())
+    {
         return Err(HandlerError::BadRequest("malformed cursor".to_string()));
     }
     Ok((occurred, attempt.to_string()))
@@ -280,3 +384,35 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
         })
     },
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_round_trips_as_versioned_opaque_text() {
+        let cursor = encode_cursor(1234, "A-attempt");
+        assert!(!cursor.contains("A-attempt"));
+        assert_eq!(
+            decode_cursor(&cursor).unwrap(),
+            (1234, "A-attempt".to_string())
+        );
+        assert!(decode_cursor("1234:A-attempt").is_err());
+    }
+
+    #[test]
+    fn request_rejects_unbounded_page_and_unknown_transition() {
+        let request = Request {
+            detail: true,
+            limit: Some(MAX_LIMIT + 1),
+            ..Request::default()
+        };
+        assert!(validate_request(&request).is_err());
+
+        let request = Request {
+            transition: Some("future_state".to_string()),
+            ..Request::default()
+        };
+        assert!(validate_request(&request).is_err());
+    }
+}

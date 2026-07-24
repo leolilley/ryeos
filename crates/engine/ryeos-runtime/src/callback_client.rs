@@ -254,13 +254,11 @@ impl CallbackClient {
         if raw.is_null() {
             return Ok(None);
         }
-        serde_json::from_value(raw)
-            .map(Some)
-            .map_err(|e| {
-                CallbackError::Transport(anyhow::anyhow!(
-                    "invalid provider_attempt_get response from daemon: {e}"
-                ))
-            })
+        serde_json::from_value(raw).map(Some).map_err(|e| {
+            CallbackError::Transport(anyhow::anyhow!(
+                "invalid provider_attempt_get response from daemon: {e}"
+            ))
+        })
     }
 
     async fn provider_attempt_call<P, R, F, Fut>(

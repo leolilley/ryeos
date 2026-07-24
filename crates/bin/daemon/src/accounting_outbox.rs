@@ -6,11 +6,10 @@
 //! append after thread terminality, which ordinary runtimes cannot.
 //!
 //! Idempotency across a crash between CAS append and outbox acknowledgement:
-//! per-attempt publication is strictly ordered (the ledger only leases the
-//! lowest unpublished transition), so a projection row whose
-//! `transition_sequence` is at or beyond the claimed row proves the append
-//! already happened; the claim is then acknowledged against the recorded
-//! chain sequence instead of appending a duplicate.
+//! every projected accounting transition retains its unique transition ID,
+//! canonical payload fingerprint, attempt coordinate, and chain sequence.
+//! Retry acknowledges only that exact identity; it never infers publication
+//! from a later summary row.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,8 +32,10 @@ pub async fn run_publisher(ledger: Arc<AccountingDb>, store: Arc<StateStore>) {
     loop {
         let claimed = {
             let ledger = ledger.clone();
-            tokio::task::spawn_blocking(move || ledger.claim_next_unpublished(now_ms(), CLAIM_LEASE_MS))
-                .await
+            tokio::task::spawn_blocking(move || {
+                ledger.claim_next_unpublished(now_ms(), CLAIM_LEASE_MS)
+            })
+            .await
         };
         let row = match claimed {
             Ok(Ok(Some(row))) => row,
@@ -79,47 +80,26 @@ fn publish_one(
     store: &StateStore,
     row: ryeos_app::accounting_db::OutboxRow,
 ) -> anyhow::Result<()> {
-    // Exact-once recovery: ordered per-attempt publication means a projected
-    // row at or beyond this sequence proves a prior append reached the chain
-    // before its outbox acknowledgement was lost. Runtimes cannot author this
-    // event type (the event service refuses it), so every projected row is
-    // daemon-authored; for the equal-sequence case we additionally require
-    // the projected row to match the claimed payload before acknowledging —
-    // a divergent row is an integrity failure, never a silent skip.
-    if let Some(projected) = store.get_provider_attempt_budget_latest(&row.attempt_id)? {
-        let claimed_sequence = i64::from(row.transition_sequence);
-        if projected.transition_sequence == claimed_sequence {
-            let claimed_transition = row
-                .payload
-                .get("transition")
-                .and_then(|value| value.as_str())
-                .unwrap_or_default();
-            let claimed_occurred = row
-                .payload
-                .get("occurred_at_ms")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or_default();
-            if projected.transition != claimed_transition
-                || projected.occurred_at_ms != claimed_occurred
-            {
-                anyhow::bail!(
-                    "outbox recovery integrity failure for attempt {} sequence {}: projected \
-                     `{}`@{} contradicts the committed ledger transition `{}`@{}",
-                    row.attempt_id,
-                    claimed_sequence,
-                    projected.transition,
-                    projected.occurred_at_ms,
-                    claimed_transition,
-                    claimed_occurred
-                );
-            }
-            ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
-            return Ok(());
+    // Exact-once recovery after append-before-ack: only the complete identity
+    // recorded from the projected daemon event proves this outbox row was
+    // already appended.
+    if let Some(projected) =
+        store.get_provider_attempt_budget_transition_identity(&row.transition_id)?
+    {
+        if projected.attempt_id != row.attempt_id
+            || projected.transition_sequence != i64::from(row.transition_sequence)
+            || projected.payload_fingerprint != row.payload_fingerprint
+        {
+            anyhow::bail!(
+                "outbox recovery integrity failure for transition {}: projected identity \
+                 contradicts committed ledger row {} sequence {}",
+                row.transition_id,
+                row.attempt_id,
+                row.transition_sequence
+            );
         }
-        if projected.transition_sequence > claimed_sequence {
-            ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
-            return Ok(());
-        }
+        ledger.mark_outbox_published(row.outbox_seq, projected.chain_seq)?;
+        return Ok(());
     }
 
     let thread_id = row

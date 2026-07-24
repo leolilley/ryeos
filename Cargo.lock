@@ -2372,6 +2372,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmp-serde",
+ "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-directive-core",

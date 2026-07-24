@@ -286,9 +286,9 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
             let authority: ryeos_accounting::ProviderAccountingAuthority =
                 serde_json::from_value(value)
                     .map_err(|e| anyhow::anyhow!("invalid launch financial_authority: {e}"))?;
-            authority
-                .validate()
-                .map_err(|e| anyhow::anyhow!("launch financial_authority failed validation: {e}"))?;
+            authority.validate().map_err(|e| {
+                anyhow::anyhow!("launch financial_authority failed validation: {e}")
+            })?;
             if authority.config_hash != config_hash {
                 anyhow::bail!(
                     "launch financial_authority config hash `{}` contradicts the resolved \
@@ -302,7 +302,9 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     };
     let accounting_scope = envelope.accounting_scope.take();
     let ledger_route = matches!(
-        financial_authority.as_ref().map(|authority| &authority.spend_bound),
+        financial_authority
+            .as_ref()
+            .map(|authority| &authority.spend_bound),
         Some(
             ryeos_accounting::SpendBoundAuthority::Paid { .. }
                 | ryeos_accounting::SpendBoundAuthority::ExplicitlyFree { .. }

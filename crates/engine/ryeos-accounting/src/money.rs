@@ -82,7 +82,9 @@ impl UsdNanos {
         }
 
         let whole: i64 = int_part.parse().map_err(|_| MoneyError::Overflow)?;
-        let whole_nanos = whole.checked_mul(NANOS_PER_USD).ok_or(MoneyError::Overflow)?;
+        let whole_nanos = whole
+            .checked_mul(NANOS_PER_USD)
+            .ok_or(MoneyError::Overflow)?;
         let frac_nanos = match frac_part {
             None => 0,
             Some(frac) => {
@@ -118,7 +120,9 @@ impl UsdNanos {
         }
 
         let whole: i64 = int_part.parse().map_err(|_| MoneyError::Overflow)?;
-        let whole_nanos = whole.checked_mul(NANOS_PER_USD).ok_or(MoneyError::Overflow)?;
+        let whole_nanos = whole
+            .checked_mul(NANOS_PER_USD)
+            .ok_or(MoneyError::Overflow)?;
         let (kept, dropped) = if frac.len() > MAX_FRACTION_DIGITS as usize {
             frac.split_at(MAX_FRACTION_DIGITS as usize)
         } else {
@@ -179,7 +183,9 @@ impl UsdNanos {
             .checked_mul(i128::from(units))
             .ok_or(MoneyError::Overflow)?;
         let nanos = (product + (UNITS_PER_RATE - 1)) / UNITS_PER_RATE;
-        i64::try_from(nanos).map_err(|_| MoneyError::Overflow).map(UsdNanos)
+        i64::try_from(nanos)
+            .map_err(|_| MoneyError::Overflow)
+            .map(UsdNanos)
     }
 
     /// One-way presentation value. Never parse this back into authority.
@@ -198,9 +204,7 @@ impl<'de> Deserialize<'de> for UsdNanos {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         match value {
-            serde_json::Value::String(s) => {
-                UsdNanos::parse_canonical(&s).map_err(D::Error::custom)
-            }
+            serde_json::Value::String(s) => UsdNanos::parse_canonical(&s).map_err(D::Error::custom),
             serde_json::Value::Number(_) => Err(D::Error::custom(MoneyError::JsonNumberRejected)),
             other => Err(D::Error::custom(format!(
                 "usd amount must be a canonical decimal string, got {other}"
@@ -216,8 +220,14 @@ mod tests {
     #[test]
     fn parses_canonical_decimals() {
         assert_eq!(UsdNanos::parse_canonical("0").unwrap().as_nanos(), 0);
-        assert_eq!(UsdNanos::parse_canonical("1").unwrap().as_nanos(), NANOS_PER_USD);
-        assert_eq!(UsdNanos::parse_canonical("0.03").unwrap().as_nanos(), 30_000_000);
+        assert_eq!(
+            UsdNanos::parse_canonical("1").unwrap().as_nanos(),
+            NANOS_PER_USD
+        );
+        assert_eq!(
+            UsdNanos::parse_canonical("0.03").unwrap().as_nanos(),
+            30_000_000
+        );
         assert_eq!(
             UsdNanos::parse_canonical("0.000000001").unwrap().as_nanos(),
             1
@@ -236,8 +246,8 @@ mod tests {
     #[test]
     fn rejects_noncanonical_decimals() {
         for bad in [
-            "", ".", ".5", "5.", "-1", "+1", "1e3", "1E3", "1_000", " 1", "1 ", "01", "00.5",
-            "1.", "0x10", "NaN", "1,5",
+            "", ".", ".5", "5.", "-1", "+1", "1e3", "1E3", "1_000", " 1", "1 ", "01", "00.5", "1.",
+            "0x10", "NaN", "1,5",
         ] {
             assert!(
                 UsdNanos::parse_canonical(bad).is_err(),
@@ -301,10 +311,20 @@ mod tests {
 
     #[test]
     fn parse_render_round_trip() {
-        for s in ["0", "0.000000001", "0.03", "1", "12.5", "9223372036.854775807"] {
+        for s in [
+            "0",
+            "0.000000001",
+            "0.03",
+            "1",
+            "12.5",
+            "9223372036.854775807",
+        ] {
             let v = UsdNanos::parse_canonical(s).unwrap();
             assert_eq!(v.to_canonical_string(), s);
-            assert_eq!(UsdNanos::parse_canonical(&v.to_canonical_string()).unwrap(), v);
+            assert_eq!(
+                UsdNanos::parse_canonical(&v.to_canonical_string()).unwrap(),
+                v
+            );
         }
     }
 

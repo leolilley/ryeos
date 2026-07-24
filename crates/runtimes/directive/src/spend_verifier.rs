@@ -23,8 +23,10 @@ use ryeos_accounting::{
 pub const VERIFIER_CONTRACT_VERSION: &str = ryeos_accounting::rpc::SPEND_VERIFIER_CONTRACT_V1;
 
 fn verifier_contract_digest() -> Result<HexDigest> {
-    HexDigest::new(lillux::cas::sha256_hex(VERIFIER_CONTRACT_VERSION.as_bytes()))
-        .map_err(|error| anyhow!("verifier contract digest: {error}"))
+    HexDigest::new(lillux::cas::sha256_hex(
+        VERIFIER_CONTRACT_VERSION.as_bytes(),
+    ))
+    .map_err(|error| anyhow!("verifier contract digest: {error}"))
 }
 
 /// Mirror of launch preparation's per-dimension unit ceiling: prompt-side
@@ -206,9 +208,7 @@ pub fn verify_prepared_spend_bound(
                 // The cap is server-enforced only if the exact prepared BODY
                 // carries the contract maximum at the contract's pointer.
                 let body: serde_json::Value = serde_json::from_slice(&prepared.body_bytes)
-                    .map_err(|error| {
-                        anyhow!("prepared body bytes are not valid JSON: {error}")
-                    })?;
+                    .map_err(|error| anyhow!("prepared body bytes are not valid JSON: {error}"))?;
                 let field = body.pointer(&cap.cap_field_pointer).ok_or_else(|| {
                     anyhow!(
                         "prepared body has no value at cap pointer {}",
@@ -216,10 +216,11 @@ pub fn verify_prepared_spend_bound(
                     )
                 })?;
                 let field_value = match field {
-                    serde_json::Value::String(text) => UsdNanos::parse_canonical(text)
-                        .map_err(|error| {
+                    serde_json::Value::String(text) => {
+                        UsdNanos::parse_canonical(text).map_err(|error| {
                             anyhow!("cap field is not a canonical USD decimal: {error:?}")
-                        })?,
+                        })?
+                    }
                     // A JSON number is accepted only when its exact source
                     // text is itself a canonical decimal (no sign/exponent);
                     // anything else fails closed rather than round-tripping
@@ -356,7 +357,10 @@ mod tests {
         .unwrap()
     }
 
-    fn prepared(body: serde_json::Value, requested_output_tokens: Option<u64>) -> PreparedProviderRequest {
+    fn prepared(
+        body: serde_json::Value,
+        requested_output_tokens: Option<u64>,
+    ) -> PreparedProviderRequest {
         let body_bytes = serde_json::to_vec(&body).unwrap();
         let body_sha256 = lillux::cas::sha256_hex(&body_bytes);
         PreparedProviderRequest {
@@ -475,7 +479,10 @@ mod tests {
         let authority = derived_authority();
         let provider = provider_with(Some(spend_authority(Some(tariff()), None)));
         // Tampered prepared request asks for more output than certified.
-        let prepared = prepared(serde_json::json!({"messages": []}), Some(OUTPUT_CEILING + 1));
+        let prepared = prepared(
+            serde_json::json!({"messages": []}),
+            Some(OUTPUT_CEILING + 1),
+        );
         let error = verify_prepared_spend_bound(
             &prepared,
             &authority,
@@ -552,7 +559,9 @@ mod tests {
             OUTPUT_CEILING,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("tariff contract digest mismatch"));
+        assert!(error
+            .to_string()
+            .contains("tariff contract digest mismatch"));
     }
 
     #[test]
@@ -565,14 +574,9 @@ mod tests {
             serde_json::json!({"messages": [], "max_cost_usd": "0.25"}),
             Some(OUTPUT_CEILING),
         );
-        let verified = verify_prepared_spend_bound(
-            &ok,
-            &authority,
-            &provider,
-            CONTEXT_WINDOW,
-            OUTPUT_CEILING,
-        )
-        .unwrap();
+        let verified =
+            verify_prepared_spend_bound(&ok, &authority, &provider, CONTEXT_WINDOW, OUTPUT_CEILING)
+                .unwrap();
         match &verified.commitments {
             SpendBoundCommitments::ProviderCapField {
                 cap_field_pointer,
@@ -597,7 +601,9 @@ mod tests {
             OUTPUT_CEILING,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("does not equal the contract maximum"));
+        assert!(error
+            .to_string()
+            .contains("does not equal the contract maximum"));
 
         // Missing cap field fails.
         let missing = prepared(serde_json::json!({"messages": []}), Some(OUTPUT_CEILING));

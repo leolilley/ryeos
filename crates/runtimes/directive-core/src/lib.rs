@@ -616,9 +616,8 @@ pub struct AccountingAuthorityInputs {
 }
 
 fn subject_digest(value: &str) -> std::result::Result<HexDigest, DirectivePreparationError> {
-    HexDigest::new(lillux::sha256_hex(value.as_bytes())).map_err(|error| {
-        DirectivePreparationError::internal("accounting_authority_failed", error)
-    })
+    HexDigest::new(lillux::sha256_hex(value.as_bytes()))
+        .map_err(|error| DirectivePreparationError::internal("accounting_authority_failed", error))
 }
 
 fn contract_digest_of<T: Serialize>(
@@ -627,9 +626,8 @@ fn contract_digest_of<T: Serialize>(
     let value = serde_json::to_value(contract).map_err(|error| {
         DirectivePreparationError::internal("accounting_authority_failed", error.to_string())
     })?;
-    HexDigest::of_canonical_json(&value).map_err(|error| {
-        DirectivePreparationError::internal("accounting_authority_failed", error)
-    })
+    HexDigest::of_canonical_json(&value)
+        .map_err(|error| DirectivePreparationError::internal("accounting_authority_failed", error))
 }
 
 /// Bound one billable dimension to the mechanically valid launch-time unit
@@ -663,8 +661,8 @@ pub fn resolve_accounting_authority(
 ) -> std::result::Result<ProviderAccountingAuthority, DirectivePreparationError> {
     let provider = &snapshot.provider;
     let spend_authority = provider.spend_authority.as_ref();
-    let config_value_digest = HexDigest::new(snapshot.config_value_digest.clone())
-        .map_err(|error| {
+    let config_value_digest =
+        HexDigest::new(snapshot.config_value_digest.clone()).map_err(|error| {
             DirectivePreparationError::internal("accounting_authority_failed", error)
         })?;
 
@@ -746,34 +744,33 @@ pub fn resolve_accounting_authority(
         SpendBoundAuthority::AdvisoryOnly
     };
 
-    let reconciliation = if let Some(rfc) =
-        spend_authority.and_then(|sa| sa.reported_final_charge.as_ref())
-    {
-        let usage_schema = provider
-            .schemas
-            .as_ref()
-            .and_then(|schemas| schemas.streaming.as_ref())
-            .and_then(|streaming| streaming.metadata.as_ref())
-            .and_then(|metadata| metadata.usage.as_ref())
-            .expect("validated: reported_final_charge requires usage schema");
-        ChargeReconciliationAuthority::ProviderReportedFinalCharge {
-            schema_digest: contract_digest_of(usage_schema)?,
-            covered_dimensions: rfc.covered_dimensions.clone(),
-            finality_contract: FinalityContract {
-                final_on_response: rfc.final_on_response,
-                max_reported_fraction_digits: rfc.max_reported_fraction_digits,
-                byok_zero_is_final: rfc.byok_zero_is_final,
-            },
-        }
-    } else if let Some(tariff) = spend_authority.and_then(|sa| sa.tariff.as_ref()) {
-        // Embed the complete signed tariff so daemon-side settlement is
-        // self-contained in the sealed authority.
-        ChargeReconciliationAuthority::DeterministicTariff {
-            tariff: tariff.clone(),
-        }
-    } else {
-        ChargeReconciliationAuthority::Unavailable
-    };
+    let reconciliation =
+        if let Some(rfc) = spend_authority.and_then(|sa| sa.reported_final_charge.as_ref()) {
+            let usage_schema = provider
+                .schemas
+                .as_ref()
+                .and_then(|schemas| schemas.streaming.as_ref())
+                .and_then(|streaming| streaming.metadata.as_ref())
+                .and_then(|metadata| metadata.usage.as_ref())
+                .expect("validated: reported_final_charge requires usage schema");
+            ChargeReconciliationAuthority::ProviderReportedFinalCharge {
+                schema_digest: contract_digest_of(usage_schema)?,
+                covered_dimensions: rfc.covered_dimensions.clone(),
+                finality_contract: FinalityContract {
+                    final_on_response: rfc.final_on_response,
+                    max_reported_fraction_digits: rfc.max_reported_fraction_digits,
+                    byok_zero_is_final: rfc.byok_zero_is_final,
+                },
+            }
+        } else if let Some(tariff) = spend_authority.and_then(|sa| sa.tariff.as_ref()) {
+            // Embed the complete signed tariff so daemon-side settlement is
+            // self-contained in the sealed authority.
+            ChargeReconciliationAuthority::DeterministicTariff {
+                tariff: tariff.clone(),
+            }
+        } else {
+            ChargeReconciliationAuthority::Unavailable
+        };
 
     let placeholder_digest = subject_digest("unsealed")?;
     ProviderAccountingAuthority {
@@ -1237,8 +1234,12 @@ impl ProviderConfig {
 
         if let Some(pricing) = self.pricing.as_ref() {
             if pricing.explicitly_free
-                && (pricing.input_per_million.is_some_and(|rate| !rate.is_zero())
-                    || pricing.output_per_million.is_some_and(|rate| !rate.is_zero())
+                && (pricing
+                    .input_per_million
+                    .is_some_and(|rate| !rate.is_zero())
+                    || pricing
+                        .output_per_million
+                        .is_some_and(|rate| !rate.is_zero())
                     || !pricing.models.is_empty())
             {
                 bail!(

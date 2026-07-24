@@ -234,6 +234,23 @@ CREATE INDEX IF NOT EXISTS idx_provider_attempt_budget_thread
 CREATE INDEX IF NOT EXISTS idx_provider_attempt_budget_route
     ON provider_attempt_budget_latest(provider_id, model);
 
+-- Exact publication identities for every accounting transition, retained
+-- independently of the latest-state summary above. The daemon outbox uses
+-- this projection to recover a crash after CAS append but before ledger
+-- acknowledgement without ever inferring identity from state/sequence alone.
+CREATE TABLE IF NOT EXISTS provider_attempt_budget_transition_once (
+    transition_id TEXT PRIMARY KEY,
+    attempt_id TEXT NOT NULL,
+    transition_sequence INTEGER NOT NULL,
+    payload_fingerprint TEXT NOT NULL,
+    chain_seq INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_attempt_budget_once_coordinate
+    ON provider_attempt_budget_transition_once(attempt_id, transition_sequence);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_attempt_budget_once_fingerprint
+    ON provider_attempt_budget_transition_once(payload_fingerprint);
+
 -- App-level usage attribution asserted by an authorized RyeOS principal at
 -- root launch time. Keyed by chain root so child/continuation usage can join
 -- back to the root app subject.
@@ -1071,6 +1088,41 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 ],
             },
             sqlite_schema::TableSpec {
+                name: "provider_attempt_budget_transition_once",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "transition_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "attempt_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "transition_sequence",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "payload_fingerprint",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "chain_seq",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
                 name: "thread_usage_subjects",
                 columns: &[
                     sqlite_schema::ColumnSpec {
@@ -1268,6 +1320,18 @@ pub(super) fn projection_schema_spec() -> sqlite_schema::SchemaSpec {
                 table: "provider_attempt_budget_latest",
                 columns: &["provider_id", "model"],
                 unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_attempt_budget_once_coordinate",
+                table: "provider_attempt_budget_transition_once",
+                columns: &["attempt_id", "transition_sequence"],
+                unique: true,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_provider_attempt_budget_once_fingerprint",
+                table: "provider_attempt_budget_transition_once",
+                columns: &["payload_fingerprint"],
+                unique: true,
             },
             sqlite_schema::IndexSpec {
                 name: "idx_thread_usage_subjects_subject",

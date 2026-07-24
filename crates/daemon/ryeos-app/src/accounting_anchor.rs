@@ -216,10 +216,10 @@ impl AccountingAnchor {
         Self::open_with_policy(dir, site_id, epoch, true)
     }
 
-    /// Open the anchor for an epoch that has already acknowledged
-    /// irreversible financial transitions. A missing anchor here is NOT
-    /// recoverable by re-creating genesis — that would launder a rollback —
-    /// so it fails closed permanently for the epoch.
+    /// Open the anchor for an established active epoch. A missing anchor here
+    /// is NOT recoverable by re-creating genesis — even at sequence zero that
+    /// could revive pre-issue holds or old execution allowances — so it fails
+    /// closed permanently for the epoch.
     pub fn open_requiring_existing(dir: &Path, site_id: &str, epoch: u64) -> Result<Self> {
         Self::open_with_policy(dir, site_id, epoch, false)
     }
@@ -268,7 +268,9 @@ impl AccountingAnchor {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 if !allow_initialize {
                     bail!(
-                        "financial anchor is missing for active epoch {epoch} of site                          {site_id}, which has acknowledged irreversible transitions; the                          epoch is unverifiable and hard admission is permanently                          fail-closed: {}",
+                        "financial anchor is missing for established active epoch {epoch} of \
+                         site {site_id}; the epoch is unverifiable and hard admission is \
+                         permanently fail-closed: {}",
                         path.display()
                     );
                 }
@@ -298,15 +300,12 @@ impl AccountingAnchor {
                     .with_context(|| format!("fsync new financial anchor {}", path.display()))?;
                 File::open(dir)
                     .and_then(|d| d.sync_all())
-                    .with_context(|| {
-                        format!("fsync financial anchor parent {}", dir.display())
-                    })?;
+                    .with_context(|| format!("fsync financial anchor parent {}", dir.display()))?;
                 file
             }
             Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("open financial anchor {}", path.display())
-                });
+                return Err(error)
+                    .with_context(|| format!("open financial anchor {}", path.display()));
             }
         };
 
@@ -548,7 +547,10 @@ mod tests {
             let anchor = open(dir.path());
             let record = anchor.read_valid().unwrap();
             assert_eq!(record.financial_high_water, 0);
-            assert_eq!(record.financial_chain_digest, genesis_chain_digest(SITE, EPOCH));
+            assert_eq!(
+                record.financial_chain_digest,
+                genesis_chain_digest(SITE, EPOCH)
+            );
             anchor
                 .compare_and_advance(SITE, EPOCH, 1, &digest_of("c1"))
                 .unwrap();

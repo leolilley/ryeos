@@ -7,8 +7,8 @@ use ryeos_directive_core::{
     MODEL_PROVIDERS_INPUT, MODEL_ROUTING_INPUT, PROVIDER_CONFIG_PREFIX, PROVIDER_SNAPSHOT_KEY,
 };
 use ryeos_handler_protocol::{
-    ConfigMergeModeWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire,
-    HandlerResponse, ItemSpaceWire, LaunchConfigContributorWire, LaunchConfigInputDeclWire,
+    ConfigMergeModeWire, FinancialAuthorityDeclWire, FinancialAuthorityResultWire, HandlerResponse,
+    ItemSpaceWire, LaunchConfigContributorWire, LaunchConfigInputDeclWire,
     LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire, LaunchPrepareError,
     LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse, LaunchPrepareSuccess,
     LaunchSecretOriginWire, LaunchSecretRequirement, RuntimeFactKindWire, TrustClassWire,
@@ -487,9 +487,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         _ => return Err("execution must be the optional deep-merged execution item".into()),
     }
     if request.financial_authority != FinancialAuthorityDeclWire::ProviderAccountingAuthorityV1 {
-        return Err(
-            "financial_authority must declare provider_accounting_authority_v1".into(),
-        );
+        return Err("financial_authority must declare provider_accounting_authority_v1".into());
     }
 
     if request.secret_policy.max_requirements != 4 {
@@ -566,7 +564,13 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         RuntimeFactKindWire::String,
         SHA256_HEX_CANONICAL_JSON_BYTES,
     )?;
-    fact(request, "spend_bound", true, RuntimeFactKindWire::String, 32)?;
+    fact(
+        request,
+        "spend_bound",
+        true,
+        RuntimeFactKindWire::String,
+        32,
+    )?;
     Ok(())
 }
 

@@ -30,10 +30,7 @@ impl HexDigest {
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         {
-            return Err(format!(
-                "expected 64 lowercase hex chars, got {:?}",
-                digest
-            ));
+            return Err(format!("expected 64 lowercase hex chars, got {:?}", digest));
         }
         Ok(Self(digest))
     }
@@ -51,9 +48,7 @@ impl HexDigest {
 /// Closed set of billable dimensions a tariff or reconciliation contract can
 /// cover. Add variants only when an activated route actually bills them —
 /// no dormant policy branches.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BillableDimension {
     InputTokens,
@@ -189,7 +184,9 @@ pub enum ChargeReconciliationAuthority {
     /// The complete signed tariff is embedded (not referenced by digest) so
     /// the daemon ledger settles deterministic costs from the sealed
     /// authority alone, without reaching into any runtime-owned snapshot.
-    DeterministicTariff { tariff: SpendTariffDocument },
+    DeterministicTariff {
+        tariff: SpendTariffDocument,
+    },
     Unavailable,
 }
 
@@ -259,6 +256,36 @@ impl ProviderAccountingAuthority {
         self.authority_digest = self.compute_digest()?;
         Ok(self)
     }
+}
+
+/// Non-secret digest binding one sealed financial authority to the exact
+/// credential values resolved for its launch. Both launch and issue compute
+/// this through daemon-owned secret resolution; a runtime never supplies it.
+pub fn credential_binding_digest(
+    authority: &ProviderAccountingAuthority,
+    secrets: &[(String, String)],
+) -> Result<HexDigest, String> {
+    let mut bindings: Vec<(&str, String)> = secrets
+        .iter()
+        .map(|(name, value)| (name.as_str(), lillux::cas::sha256_hex(value.as_bytes())))
+        .collect();
+    bindings.sort_by(|left, right| left.0.cmp(right.0));
+    if bindings.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err("credential binding contains duplicate secret names".to_string());
+    }
+    let value = serde_json::json!({
+        "credential_authority_generation": &authority.credential_authority_generation,
+        "billing_principal_digest": authority.billing_principal_digest.as_str(),
+        "pricing_contract_subject_digest": authority.pricing_contract_subject_digest.as_str(),
+        "secrets": bindings
+            .into_iter()
+            .map(|(name, value_digest)| serde_json::json!({
+                "name": name,
+                "value_digest": value_digest,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    HexDigest::of_canonical_json(&value)
 }
 
 /// Signed tariff document: the content a `DerivedWorstCaseCharge`
@@ -332,7 +359,10 @@ impl SpendTariffDocument {
 
     /// Conservative worst-case charge for bounded unit counts, rounding
     /// toward positive infinity per dimension, checked throughout.
-    pub fn worst_case_charge(&self, bounds: &[(BillableDimension, u64)]) -> Result<UsdNanos, String> {
+    pub fn worst_case_charge(
+        &self,
+        bounds: &[(BillableDimension, u64)],
+    ) -> Result<UsdNanos, String> {
         let mut total = UsdNanos::ZERO;
         for dim in self.covered_dimensions.as_slice() {
             let rate = self
@@ -492,6 +522,65 @@ mod tests {
         let mut tampered = sealed.clone();
         tampered.model_name = "other-model".to_string();
         assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn credential_binding_is_order_independent_and_value_sensitive() {
+        let sealed = authority();
+        let first = credential_binding_digest(
+            &sealed,
+            &[
+                ("SECONDARY_KEY".to_string(), "two".to_string()),
+                ("API_KEY".to_string(), "one".to_string()),
+            ],
+        )
+        .unwrap();
+        let reordered = credential_binding_digest(
+            &sealed,
+            &[
+                ("API_KEY".to_string(), "one".to_string()),
+                ("SECONDARY_KEY".to_string(), "two".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(first, reordered);
+
+        let changed = credential_binding_digest(
+            &sealed,
+            &[
+                ("API_KEY".to_string(), "rotated".to_string()),
+                ("SECONDARY_KEY".to_string(), "two".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_ne!(first, changed);
+
+        let mut next_generation = sealed.clone();
+        next_generation.credential_authority_generation = "cred-gen-2".to_string();
+        next_generation = next_generation.sealed().unwrap();
+        assert_ne!(
+            first,
+            credential_binding_digest(
+                &next_generation,
+                &[
+                    ("API_KEY".to_string(), "one".to_string()),
+                    ("SECONDARY_KEY".to_string(), "two".to_string()),
+                ],
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn credential_binding_rejects_duplicate_secret_names() {
+        assert!(credential_binding_digest(
+            &authority(),
+            &[
+                ("API_KEY".to_string(), "one".to_string()),
+                ("API_KEY".to_string(), "two".to_string()),
+            ],
+        )
+        .is_err());
     }
 
     #[test]

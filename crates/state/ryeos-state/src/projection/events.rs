@@ -343,6 +343,82 @@ fn project_provider_attempt_budget_latest(
     transition
         .validate()
         .map_err(|error| anyhow::anyhow!("invalid budget transition payload: {error}"))?;
+    let payload_fingerprint = lillux::sha256_hex(
+        lillux::canonical_json(&event.payload)
+            .context("canonicalize budget transition payload")?
+            .as_bytes(),
+    );
+    let incoming_chain_seq = u64_to_i64(event.chain_seq, "chain_seq")?;
+
+    // Persist the exact append-once identity before updating the lossy
+    // latest-state summary. Re-projecting the same chain event is
+    // idempotent; reusing either its transition ID or attempt/sequence
+    // coordinate with different content is an integrity failure.
+    let existing_identity: Option<(String, i64, String, i64)> = db
+        .connection()
+        .query_row(
+            "SELECT attempt_id, transition_sequence, payload_fingerprint, chain_seq
+             FROM provider_attempt_budget_transition_once
+             WHERE transition_id = ?1",
+            rusqlite::params![&transition.transition_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .context("read accounting transition publication identity")?;
+    if let Some((attempt_id, sequence, fingerprint, chain_seq)) = existing_identity {
+        if attempt_id != transition.attempt_id
+            || sequence != i64::from(transition.transition_sequence)
+            || fingerprint != payload_fingerprint
+            || chain_seq != incoming_chain_seq
+        {
+            anyhow::bail!(
+                "accounting transition ID {} contradicts its projected publication identity",
+                transition.transition_id
+            );
+        }
+    } else {
+        let coordinate_identity: Option<(String, String)> = db
+            .connection()
+            .query_row(
+                "SELECT transition_id, payload_fingerprint
+                 FROM provider_attempt_budget_transition_once
+                 WHERE attempt_id = ?1 AND transition_sequence = ?2",
+                rusqlite::params![
+                    &transition.attempt_id,
+                    i64::from(transition.transition_sequence)
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .context("read accounting transition coordinate identity")?;
+        if let Some((transition_id, fingerprint)) = coordinate_identity {
+            anyhow::bail!(
+                "accounting transition coordinate {}/{} is already projected as ID {} \
+                 fingerprint {}, not ID {} fingerprint {}",
+                transition.attempt_id,
+                transition.transition_sequence,
+                transition_id,
+                fingerprint,
+                transition.transition_id,
+                payload_fingerprint
+            );
+        }
+        db.connection()
+            .execute(
+                "INSERT INTO provider_attempt_budget_transition_once (
+                    transition_id, attempt_id, transition_sequence,
+                    payload_fingerprint, chain_seq
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    &transition.transition_id,
+                    &transition.attempt_id,
+                    i64::from(transition.transition_sequence),
+                    &payload_fingerprint,
+                    incoming_chain_seq,
+                ],
+            )
+            .context("project accounting transition publication identity")?;
+    }
 
     let existing: Option<(i64, String)> = db
         .connection()

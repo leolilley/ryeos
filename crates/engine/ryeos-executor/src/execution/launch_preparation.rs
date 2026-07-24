@@ -264,8 +264,7 @@ pub fn prepare_runtime_launch(
     };
 
     validate_result(contract, request.ref_bindings, &config_inputs, &mut result)?;
-    let financial_authority =
-        validate_financial_authority(contract, result.financial_authority)?;
+    let financial_authority = validate_financial_authority(contract, result.financial_authority)?;
     Ok(PreparedRuntimeLaunch {
         runtime_data: result.runtime_data,
         required_secrets: result

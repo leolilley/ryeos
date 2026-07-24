@@ -192,7 +192,9 @@ enum LedgerAdmission {
     InterruptedBeforeIssue,
     /// The daemon released the reservation before issue (certificate expiry
     /// or credential unavailability). Fail closed without provider contact.
-    ReleasedByDaemon { detail: String },
+    ReleasedByDaemon {
+        detail: String,
+    },
 }
 
 impl Drop for RunGuard {
@@ -365,22 +367,6 @@ fn bound_diagnostic(text: &str) -> String {
 /// daemon settles at — then trim trailing zeros. Non-finite, negative, or
 /// over-length renderings return `None` (settled as `Unavailable` rather
 /// than inventing a charge).
-fn format_reported_cost_raw(value: f64) -> Option<String> {
-    if !value.is_finite() || value < 0.0 {
-        return None;
-    }
-    // Positive actual charges round toward +infinity (plan §3.1): ceil at
-    // nano resolution so the rendered decimal never understates the charge
-    // the way round-half-even formatting could.
-    let nanos = (value * 1e9).ceil();
-    if nanos > i64::MAX as f64 {
-        return None;
-    }
-    let nanos = ryeos_accounting::UsdNanos::from_nanos(nanos as i64).ok()?;
-    let raw = nanos.to_canonical_string();
-    (raw.len() <= ryeos_accounting::MAX_RAW_DECIMAL_LEN).then_some(raw)
-}
-
 /// Extract any provider usage carried on a typed adapter failure so the
 /// daemon settlement (and the reporting path) can preserve it.
 fn carried_usage_from_error(
@@ -470,56 +456,65 @@ fn build_ledger_settlement(
         );
     }
 
-    let spend = match &authority.reconciliation {
-        ChargeReconciliationAuthority::ProviderReportedFinalCharge { .. } => {
-            match usage
-                .and_then(|usage| usage.reported_cost_usd)
-                .and_then(format_reported_cost_raw)
-            {
-                Some(raw_decimal) => SpendAccounting::ProviderReportedFinal { raw_decimal },
-                None => SpendAccounting::Unavailable {
+    let spend =
+        match &authority.reconciliation {
+            ChargeReconciliationAuthority::ProviderReportedFinalCharge { .. } => match usage {
+                Some(usage) if !usage.spend_anomalies.is_empty() => SpendAccounting::Unavailable {
+                    diagnostic: bound_diagnostic(&usage.spend_anomalies.join("; ")),
+                },
+                Some(usage) if usage.reported_cost_usd_raw.is_some() => {
+                    SpendAccounting::ProviderReportedFinal {
+                        raw_decimal: usage
+                            .reported_cost_usd_raw
+                            .clone()
+                            .expect("guarded by is_some"),
+                    }
+                }
+                _ => SpendAccounting::Unavailable {
                     diagnostic: bound_diagnostic(
                         "provider did not report a usable final charge for the attempt",
                     ),
                 },
-            }
-        }
-        ChargeReconciliationAuthority::DeterministicTariff { .. } => match &tokens {
-            TokenAccounting::Reported {
-                input_tokens,
-                output_tokens,
-                reasoning_tokens,
-            } => {
-                let mut unit_counts = vec![
-                    UnitCount {
-                        dimension: BillableDimension::InputTokens,
-                        units: *input_tokens,
-                    },
-                    UnitCount {
-                        dimension: BillableDimension::OutputTokens,
-                        units: *output_tokens,
-                    },
-                ];
-                if let Some(reasoning) = reasoning_tokens {
-                    unit_counts.push(UnitCount {
-                        dimension: BillableDimension::ReasoningTokens,
-                        units: *reasoning,
-                    });
-                }
-                SpendAccounting::TariffUnits { unit_counts }
-            }
-            _ => SpendAccounting::Unavailable {
+            },
+            ChargeReconciliationAuthority::DeterministicTariff { tariff } => {
+                match usage.filter(|usage| usage.anomalies.is_empty()).and_then(|usage| {
+                tariff
+                    .covered_dimensions
+                    .as_slice()
+                    .iter()
+                    .map(|dimension| {
+                        let units = match dimension {
+                            BillableDimension::InputTokens => usage.input_tokens?,
+                            BillableDimension::OutputTokens => usage.output_tokens?,
+                            BillableDimension::ReasoningTokens => usage.reasoning_tokens?,
+                            BillableDimension::CacheReadTokens => usage.cache_read_tokens?,
+                            BillableDimension::CacheWriteTokens => usage.cache_write_tokens?,
+                            // The daemon adds the tariff's flat per-request
+                            // rate itself; no provider observation is needed.
+                            BillableDimension::PerRequest => return Some(None),
+                        };
+                        Some(Some(UnitCount {
+                            dimension: *dimension,
+                            units,
+                        }))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .map(|counts| counts.into_iter().flatten().collect())
+            }) {
+                Some(unit_counts) => SpendAccounting::TariffUnits { unit_counts },
+                None => SpendAccounting::Unavailable {
                 diagnostic: bound_diagnostic(
-                    "deterministic tariff settlement requires complete valid token usage",
+                        "deterministic tariff settlement is missing a covered billable dimension",
                 ),
             },
-        },
-        ChargeReconciliationAuthority::Unavailable => SpendAccounting::Unavailable {
-            diagnostic: bound_diagnostic(
-                "route declares no charge reconciliation authority for issued attempts",
-            ),
-        },
-    };
+            }
+            }
+            ChargeReconciliationAuthority::Unavailable => SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(
+                    "route declares no charge reconciliation authority for issued attempts",
+                ),
+            },
+        };
     (spend, tokens)
 }
 
@@ -911,12 +906,11 @@ impl Runner {
                         // Prepare the immutable request BEFORE budget admission:
                         // the reservation binds to these exact bytes (§9.2) and
                         // transport later sends them verbatim.
-                        let prepared = match crate::provider_adapter::prepare_provider_request(
-                            &call_input,
-                        ) {
-                            Ok(prepared) => prepared,
-                            Err(error) => break Err(error),
-                        };
+                        let prepared =
+                            match crate::provider_adapter::prepare_provider_request(&call_input) {
+                                Ok(prepared) => prepared,
+                                Err(error) => break Err(error),
+                            };
                         // Ledger admission: verify → reserve → (release on a
                         // pre-issue signal) → mark issued. No provider request
                         // may start unless the issue is durably proven.
@@ -1494,9 +1488,7 @@ impl Runner {
                                     .await
                                 {
                                     state = State::Errored {
-                                        error: format!(
-                                            "provider usage settlement failed: {e:#}"
-                                        ),
+                                        error: format!("provider usage settlement failed: {e:#}"),
                                     };
                                     continue;
                                 }
@@ -4565,7 +4557,11 @@ mod tests {
             )
         };
         assert_eq!(hash("bodybody"), hash("bodybody"), "same inputs, same hash");
-        assert_ne!(hash("bodybody"), hash("otherbody"), "changed body changes hash");
+        assert_ne!(
+            hash("bodybody"),
+            hash("otherbody"),
+            "changed body changes hash"
+        );
         assert_ne!(
             provider_attempt_request_hash(
                 "T-test",
@@ -4581,16 +4577,6 @@ mod tests {
             hash("bodybody"),
             "changed coordinate changes hash"
         );
-    }
-
-    #[test]
-    fn reported_cost_raw_formatting() {
-        assert_eq!(format_reported_cost_raw(0.0123).as_deref(), Some("0.0123"));
-        assert_eq!(format_reported_cost_raw(1.0).as_deref(), Some("1"));
-        assert_eq!(format_reported_cost_raw(0.0).as_deref(), Some("0"));
-        assert_eq!(format_reported_cost_raw(-0.5), None);
-        assert_eq!(format_reported_cost_raw(f64::NAN), None);
-        assert_eq!(format_reported_cost_raw(f64::INFINITY), None);
     }
 
     fn base_ledger_authority() -> ryeos_accounting::ProviderAccountingAuthority {
@@ -4650,9 +4636,7 @@ mod tests {
                 schema_version: ryeos_accounting::SPEND_TARIFF_SCHEMA_VERSION,
                 currency: ryeos_accounting::Currency::Usd,
                 pricing_generation: "gen-1".to_string(),
-                input_per_million: Some(
-                    ryeos_accounting::UsdNanos::parse_canonical("3").unwrap(),
-                ),
+                input_per_million: Some(ryeos_accounting::UsdNanos::parse_canonical("3").unwrap()),
                 output_per_million: Some(
                     ryeos_accounting::UsdNanos::parse_canonical("15").unwrap(),
                 ),
@@ -4676,6 +4660,7 @@ mod tests {
             output_tokens: Some(40),
             reasoning_tokens: Some(8),
             reported_cost_usd: Some(0.0123),
+            reported_cost_usd_raw: Some("0.01230000009".to_string()),
             ..Default::default()
         }
     }
@@ -4688,7 +4673,7 @@ mod tests {
         assert_eq!(
             spend,
             SpendAccounting::ProviderReportedFinal {
-                raw_decimal: "0.0123".to_string()
+                raw_decimal: "0.01230000009".to_string()
             }
         );
         assert_eq!(
@@ -4717,15 +4702,68 @@ mod tests {
                     UnitCount {
                         dimension: BillableDimension::OutputTokens,
                         units: 40
-                    },
-                    UnitCount {
-                        dimension: BillableDimension::ReasoningTokens,
-                        units: 8
-                    },
+                    }
                 ]
             }
         );
         assert!(matches!(tokens, TokenAccounting::Reported { .. }));
+
+        let mut regressed = usage.clone();
+        regressed
+            .spend_anomalies
+            .push("reported cost regressed".to_string());
+        let (spend, tokens) = build_ledger_settlement(&authority, true, Some(&regressed), None);
+        assert!(
+            matches!(spend, SpendAccounting::TariffUnits { .. }),
+            "an invalid provider-reported charge must not invalidate an independent tariff charge"
+        );
+        assert!(
+            matches!(tokens, TokenAccounting::Reported { .. }),
+            "spend validity must remain independent of complete token accounting"
+        );
+    }
+
+    #[test]
+    fn ledger_settlement_requires_and_preserves_covered_cache_dimensions() {
+        let mut reconciliation = tariff_reconciliation();
+        let ChargeReconciliationAuthority::DeterministicTariff { tariff } = &mut reconciliation
+        else {
+            unreachable!()
+        };
+        tariff.cache_read_per_million = Some(usd("0.3"));
+        tariff.covered_dimensions = ClosedBillableDimensionSet::new(vec![
+            BillableDimension::InputTokens,
+            BillableDimension::OutputTokens,
+            BillableDimension::CacheReadTokens,
+        ])
+        .unwrap();
+        let authority = paid_authority(reconciliation);
+
+        let mut usage = valid_usage();
+        let (spend, _) = build_ledger_settlement(&authority, true, Some(&usage), None);
+        assert!(matches!(spend, SpendAccounting::Unavailable { .. }));
+
+        usage.cache_read_tokens = Some(60);
+        let (spend, _) = build_ledger_settlement(&authority, true, Some(&usage), None);
+        assert_eq!(
+            spend,
+            SpendAccounting::TariffUnits {
+                unit_counts: vec![
+                    UnitCount {
+                        dimension: BillableDimension::InputTokens,
+                        units: 100,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::OutputTokens,
+                        units: 40,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::CacheReadTokens,
+                        units: 60,
+                    },
+                ],
+            }
+        );
     }
 
     #[test]
@@ -4747,14 +4785,18 @@ mod tests {
             Some(&usage),
             Some("cancelled after the issue boundary"),
         );
-        assert!(matches!(spend, SpendAccounting::Unavailable { ref diagnostic }
-            if diagnostic.contains("cancelled")));
+        assert!(
+            matches!(spend, SpendAccounting::Unavailable { ref diagnostic }
+            if diagnostic.contains("cancelled"))
+        );
 
         // Malformed token usage under a deterministic tariff cannot settle
         // tariff units; tokens carry the anomaly diagnostic independently.
         let authority = paid_authority(tariff_reconciliation());
         let mut malformed = valid_usage();
-        malformed.anomalies.push("output_tokens regressed".to_string());
+        malformed
+            .anomalies
+            .push("output_tokens regressed".to_string());
         let (spend, tokens) = build_ledger_settlement(&authority, true, Some(&malformed), None);
         assert!(matches!(spend, SpendAccounting::Unavailable { .. }));
         assert!(matches!(tokens, TokenAccounting::Invalid { ref diagnostic }
@@ -5095,6 +5137,23 @@ mod tests {
         }
     }
 
+    fn test_request_hash(
+        authority: &ryeos_accounting::ProviderAccountingAuthority,
+        prepared: &crate::provider_adapter::PreparedProviderRequest,
+    ) -> String {
+        provider_attempt_request_hash(
+            "T-test",
+            1,
+            1,
+            "test_hash",
+            "route",
+            "model",
+            prepared.requested_output_tokens,
+            authority.authority_digest.as_str(),
+            &prepared.body_sha256,
+        )
+    }
+
     fn unset_flag() -> Arc<AtomicBool> {
         Arc::new(AtomicBool::new(false))
     }
@@ -5291,6 +5350,108 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn lost_issue_reply_recovers_with_one_exact_retry() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue = MethodState::new(Script::ErrThenOk(1));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, LedgerAdmission::Admitted(_)));
+        let issues = mock.recorded("mark_issued");
+        assert_eq!(issues.len(), 2, "one failure, one exact retry");
+        assert_eq!(issues[0], issues[1], "issue retry must be byte-identical");
+    }
+
+    #[tokio::test]
+    async fn lost_issue_replies_recover_from_recorded_issued_state() {
+        let authority = base_ledger_authority();
+        let prepared = test_prepared();
+        let request_hash = test_request_hash(&authority, &prepared);
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue = MethodState::new(Script::AlwaysErr);
+        mock.get_record = Some(json!({
+            "attempt_id": "A-daemon-1",
+            "turn": 1,
+            "attempt_number": 1,
+            "state": "issued",
+            "request_hash": request_hash,
+            "authority_digest": authority.authority_digest.clone(),
+            "reserved": "0.5",
+        }));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, LedgerAdmission::Admitted(_)));
+        assert_eq!(mock.recorded("mark_issued").len(), LEDGER_RPC_RETRIES + 1);
+        assert_eq!(mock.recorded("get").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unprovable_issue_fails_before_provider_contact() {
+        let authority = base_ledger_authority();
+        let prepared = test_prepared();
+        let request_hash = test_request_hash(&authority, &prepared);
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue = MethodState::new(Script::AlwaysErr);
+        mock.get_record = Some(json!({
+            "attempt_id": "A-daemon-1",
+            "turn": 1,
+            "attempt_number": 1,
+            "state": "reserved",
+            "request_hash": request_hash,
+            "authority_digest": authority.authority_digest.clone(),
+            "reserved": "0.5",
+        }));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let verified = test_verified(&authority, &prepared);
+
+        let error = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unprovable"));
+        assert_eq!(mock.recorded("mark_issued").len(), LEDGER_RPC_RETRIES + 1);
+        assert_eq!(mock.recorded("get").len(), 1);
+    }
+
     fn test_ledger_attempt(
         authority: &ryeos_accounting::ProviderAccountingAuthority,
     ) -> LedgerAttempt {
@@ -5350,7 +5511,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(mock.recorded("settle").len(), LEDGER_RPC_RETRIES + 1);
-        assert_eq!(mock.recorded("get").len(), 1, "recorded state proven by read");
+        assert_eq!(
+            mock.recorded("get").len(),
+            1,
+            "recorded state proven by read"
+        );
     }
 
     #[tokio::test]

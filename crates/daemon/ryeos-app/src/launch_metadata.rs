@@ -1296,8 +1296,7 @@ mod tests {
         // No allowance reset: the successor retains the exact execution
         // budget authority it was admitted under.
         assert_eq!(
-            successor.accounting_scope,
-            source.accounting_scope,
+            successor.accounting_scope, source.accounting_scope,
             "continuation must carry the accounting scope forward"
         );
         assert!(successor.accounting_scope.is_some());

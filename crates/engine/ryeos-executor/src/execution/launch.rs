@@ -1216,8 +1216,10 @@ fn resolve_accounting_scope(
     // share; without it two parallel children each observe the full parent
     // maximum. The financial authority decides only whether a narrower
     // directive-item scope exists and whether a missing ledger is fatal.
-    let accounting = match (params.state.accounting.as_ref(), &prepared_launch.financial_authority)
-    {
+    let accounting = match (
+        params.state.accounting.as_ref(),
+        &prepared_launch.financial_authority,
+    ) {
         (Some(accounting), _) => accounting,
         (None, Some(financial_authority)) => {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -2374,7 +2376,11 @@ async fn run_claimed_thread_row_inner(
         // zero ledger history — an identity WITH history and a missing
         // account is fail-closed (allowance is never re-minted from limits).
         let execution_exists = accounting
-            .account_exists(&scope.execution_budget_id, "execution", &scope.execution_budget_id)
+            .account_exists(
+                &scope.execution_budget_id,
+                "execution",
+                &scope.execution_budget_id,
+            )
             .map_err(|error| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!(
                     "execution budget account lookup failed: {error:#}"
@@ -2409,7 +2415,11 @@ async fn run_claimed_thread_row_inner(
                 })?;
         }
         accounting
-            .activate_account(&scope.execution_budget_id, "execution", &scope.execution_budget_id)
+            .activate_account(
+                &scope.execution_budget_id,
+                "execution",
+                &scope.execution_budget_id,
+            )
             .map_err(|error| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!(
                     "execution budget account activation failed: {error:#}"
@@ -2417,7 +2427,11 @@ async fn run_claimed_thread_row_inner(
             })?;
         if let Some(directive_budget_id) = scope.directive_budget_id.as_ref() {
             let directive_exists = accounting
-                .account_exists(&scope.execution_budget_id, "directive_item", directive_budget_id)
+                .account_exists(
+                    &scope.execution_budget_id,
+                    "directive_item",
+                    directive_budget_id,
+                )
                 .map_err(|error| {
                     BuildAndLaunchError::Internal(anyhow::anyhow!(
                         "directive budget account lookup failed: {error:#}"
@@ -2451,15 +2465,69 @@ async fn run_claimed_thread_row_inner(
                     })?;
             }
             accounting
-                .activate_account(&scope.execution_budget_id, "directive_item", directive_budget_id)
+                .activate_account(
+                    &scope.execution_budget_id,
+                    "directive_item",
+                    directive_budget_id,
+                )
                 .map_err(|error| {
                     BuildAndLaunchError::Internal(anyhow::anyhow!(
                         "directive budget account activation failed: {error:#}"
                     ))
                 })?;
         }
+        // Bind the open gate to the exact daemon-resolved credential values
+        // that will be handed to this paid runtime. The runtime never sees or
+        // supplies this digest. `mark_issued` re-resolves the same declared
+        // names and must reproduce it before the irreversible provider-contact
+        // boundary.
+        let credential_binding = prepared_launch
+            .financial_authority
+            .as_ref()
+            .map(|financial| {
+                let authority: ryeos_accounting::ProviderAccountingAuthority =
+                    serde_json::from_value(financial.authority.clone()).map_err(|error| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "decode sealed financial authority for credential binding: {error}"
+                        ))
+                    })?;
+                authority.validate().map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "validate sealed financial authority for credential binding: {error}"
+                    ))
+                })?;
+                let secrets = prepared_launch
+                    .required_secrets
+                    .iter()
+                    .map(|required| {
+                        effective_vault
+                            .get(&required.name)
+                            .cloned()
+                            .map(|value| (required.name.clone(), value))
+                            .ok_or_else(|| {
+                                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                                    "prepared financial launch secret `{}` disappeared before \
+                                     accounting admission",
+                                    required.name
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                ryeos_accounting::credential_binding_digest(&authority, &secrets).map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "seal launch credential binding: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
         accounting
-            .open_launch_gate(&thread_id, launch_owner, &scope.execution_budget_id, &chain_root_id)
+            .open_launch_gate_with_credential_binding(
+                &thread_id,
+                launch_owner,
+                &scope.execution_budget_id,
+                &chain_root_id,
+                credential_binding.as_ref().map(|digest| digest.as_str()),
+            )
             .map_err(|error| {
                 BuildAndLaunchError::Internal(anyhow::anyhow!(
                     "launch accounting gate could not be opened: {error:#}"

@@ -5152,12 +5152,36 @@ impl StateStore {
         queries::get_provider_attempt_budget_latest(g.state_db.projection(), attempt_id)
     }
 
+    pub fn get_provider_attempt_budget_transition_identity(
+        &self,
+        transition_id: &str,
+    ) -> Result<Option<queries::ProviderAttemptBudgetTransitionIdentity>> {
+        let g = self.lock()?;
+        queries::get_provider_attempt_budget_transition_identity(
+            g.state_db.projection(),
+            transition_id,
+        )
+    }
+
     pub fn summarize_provider_attempt_budget(
         &self,
         filter: &queries::AccountingSummaryFilter<'_>,
     ) -> Result<queries::AccountingSummaryTotals> {
         let g = self.lock()?;
         queries::summarize_provider_attempt_budget(g.state_db.projection(), filter)
+    }
+
+    pub fn provider_attempt_budget_projection_bounds(
+        &self,
+    ) -> Result<queries::AccountingProjectionBounds> {
+        let g = self.lock()?;
+        queries::provider_attempt_budget_projection_bounds(g.state_db.projection())
+    }
+
+    pub fn thread_projection_health(
+        &self,
+    ) -> crate::projection_health::ThreadProjectionHealthSnapshot {
+        self.projection_health.snapshot()
     }
 
     pub fn list_provider_attempt_budget(

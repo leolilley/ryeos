@@ -2465,6 +2465,18 @@ fn merge_stream_usage_update(last_usage: &mut Option<TokenUsage>, update: &Usage
         update.reasoning_tokens,
         &mut usage.anomalies,
     );
+    merge_stream_usage_counter(
+        "cache_read_tokens",
+        &mut usage.cache_read_tokens,
+        update.cache_read_tokens,
+        &mut usage.anomalies,
+    );
+    merge_stream_usage_counter(
+        "cache_write_tokens",
+        &mut usage.cache_write_tokens,
+        update.cache_write_tokens,
+        &mut usage.anomalies,
+    );
 }
 
 fn protocol_usage_u64(usage: &Value, field: &str, anomalies: &mut Vec<String>) -> Option<u64> {
@@ -2847,7 +2859,8 @@ mod tests {
     fn anthropic_split_usage_events_form_complete_accounting() {
         let data = concat!(
             "event: message_start\n",
-            "data: {\"message\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\n",
+            "data: {\"message\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":0,",
+            "\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":3}}}\n\n",
             "event: message_delta\n",
             "data: {\"delta\":{\"stop_reason\":\"end_turn\"},",
             "\"usage\":{\"output_tokens\":9}}\n\n",
@@ -2861,6 +2874,8 @@ mod tests {
         }
         let usage = usage.expect("merged Anthropic usage");
         assert_eq!(usage.complete_token_counts(), Some((12, 9)));
+        assert_eq!(usage.cache_read_tokens, Some(7));
+        assert_eq!(usage.cache_write_tokens, Some(3));
         assert_eq!(usage.snapshots_seen, 2);
         assert!(usage.is_valid());
     }

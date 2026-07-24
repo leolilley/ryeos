@@ -42,18 +42,16 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use ryeos_accounting::{
-    transition_id, AttemptBudgetState, AuthorityHealth, ChargeBasis,
+    transition_id, AttemptBudgetState, AuthorityHealth, BillableDimension, ChargeBasis,
     ChargeReconciliationAuthority, HexDigest, MoneyError, ProviderAccountingAuthority,
     ProviderAttemptBudgetRecord, ProviderAttemptBudgetTransitionV1, ReconciliationReason,
-    SpendAccounting, SpendBoundAuthority, SpendBoundCertificate,
-    SpendTariffDocument, TokenAccounting, UsdNanos, VerifiedPreparedSpendBound,
-    BillableDimension, MAX_RAW_DECIMAL_LEN, PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
+    SpendAccounting, SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument,
+    TokenAccounting, UsdNanos, VerifiedPreparedSpendBound, MAX_RAW_DECIMAL_LEN,
+    PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
 };
 use ryeos_state::sqlite_schema;
 
-use crate::accounting_anchor::{
-    genesis_chain_digest, AccountingAnchor, AnchorAgreement,
-};
+use crate::accounting_anchor::{genesis_chain_digest, AccountingAnchor, AnchorAgreement};
 
 /// RYAC = 0x5259_4143 ("RY" + "AC" for accounting).
 const ACCOUNTING_APP_ID: i32 = 0x5259_4143;
@@ -217,6 +215,7 @@ CREATE TABLE launch_accounting_gate (
     ledger_epoch INTEGER NOT NULL,
     execution_budget_id TEXT NOT NULL,
     audit_chain_root_id TEXT NOT NULL,
+    credential_binding_digest TEXT,
     state TEXT NOT NULL CHECK (state IN ('open', 'fenced')),
     fenced_reason TEXT,
     terminal_publication_due INTEGER NOT NULL CHECK (terminal_publication_due IN (0, 1)),
@@ -399,6 +398,7 @@ fn accounting_schema_spec() -> sqlite_schema::SchemaSpec {
                     col("ledger_epoch", "INTEGER", false, true),
                     col("execution_budget_id", "TEXT", false, true),
                     col("audit_chain_root_id", "TEXT", false, true),
+                    col("credential_binding_digest", "TEXT", false, false),
                     col("state", "TEXT", false, true),
                     col("fenced_reason", "TEXT", false, false),
                     col("terminal_publication_due", "INTEGER", false, true),
@@ -551,6 +551,15 @@ pub struct AccountRow {
     pub health: AuthorityAccountHealth,
 }
 
+/// Authoritative live reservation gauges. These sum each attempt once from
+/// the reservation table, never hierarchical debit rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveReservationStats {
+    pub unresolved_count: u64,
+    pub held_usd_nanos: i64,
+    pub oldest_created_at_ms: Option<i64>,
+}
+
 /// Account health as stored (`healthy` / `violated`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthorityAccountHealth {
@@ -684,6 +693,7 @@ struct AccountRecord {
 struct GateRow {
     execution_budget_id: String,
     audit_chain_root_id: String,
+    credential_binding_digest: Option<String>,
     state: String,
 }
 
@@ -692,10 +702,15 @@ enum AnchorAction {
     None,
     /// A fresh irreversible transition committed: advance the anchor to the
     /// new chain head before acknowledging.
-    Advance { sequence: u64, digest: String },
+    Advance {
+        sequence: u64,
+        digest: String,
+    },
     /// An exact replay of a recorded irreversible transition: confirm the
     /// anchor already covers that recorded sequence before acknowledging.
-    Cover { sequence: u64 },
+    Cover {
+        sequence: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -733,7 +748,9 @@ fn canonical_json_string(value: &serde_json::Value) -> Result<String> {
 }
 
 fn canonical_fingerprint(value: &serde_json::Value) -> Result<String> {
-    Ok(lillux::cas::sha256_hex(canonical_json_string(value)?.as_bytes()))
+    Ok(lillux::cas::sha256_hex(
+        canonical_json_string(value)?.as_bytes(),
+    ))
 }
 
 /// `H(previous_digest, financial_sequence, transition_fingerprint)`.
@@ -888,6 +905,7 @@ impl AccountingDb {
                 .context("verify accounting runtime-state directory lock")?;
         }
         let marker = inspect_initialized_marker(runtime_directory)?;
+        let established_epoch = marker.is_some();
         let existing_database = runtime_directory
             .open_regular(OsStr::new(ACCOUNTING_DB_FILENAME), true)
             .with_context(|| {
@@ -926,36 +944,33 @@ impl AccountingDb {
                 directory_lock,
             )?
         };
-        let marker_file = if let Some(marker) = marker {
+        let existing_marker = if let Some(marker) = marker {
             assert_integrity(&raw.conn, &raw.path)?;
-            marker
+            Some(marker)
         } else {
             sync_initialization(&raw)?;
-            write_initialized_marker(runtime_directory)?
+            None
         };
 
         let (site_id, epoch) = establish_site_identity(&raw.conn, &raw.path)?;
-        // An epoch that has acknowledged irreversible transitions must find
-        // its anchor: silently re-creating genesis would let a same-epoch
-        // rollback (or anchor deletion) launder acknowledged history into a
-        // fresh "DbAhead" recovery. Only a ledger with zero acknowledged
-        // financial transitions may initialize a new anchor.
-        let acknowledged_high_water: i64 = raw
-            .conn
-            .query_row(
-                "SELECT financial_high_water FROM ledger_financial_sequence
-                 WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2",
-                rusqlite::params![site_id, epoch as i64],
-                |row| row.get(0),
-            )
-            .optional()
-            .context("read acknowledged financial high water")?
-            .unwrap_or(0);
-        let anchor = Arc::new(if acknowledged_high_water > 0 {
+        // Every established active epoch must find its anchor, including at
+        // sequence zero. Re-creating genesis after the initialization marker
+        // exists would let total anchor loss revive pre-issue reservations
+        // and old execution allowances. Only the same first-initialization
+        // path that created the independent marker may create the anchor.
+        let anchor = Arc::new(if established_epoch {
             AccountingAnchor::open_requiring_existing(runtime_directory.path(), &site_id, epoch)?
         } else {
             AccountingAnchor::open_or_init(runtime_directory.path(), &site_id, epoch)?
         });
+        // The initialization marker is the epoch-activation witness. Publish
+        // it only after both the database identity and external genesis
+        // anchor are durable; a crash before this point remains a retryable
+        // first initialization, while any later anchor loss fails closed.
+        let marker_file = match existing_marker {
+            Some(marker) => marker,
+            None => write_initialized_marker(runtime_directory)?,
+        };
 
         let db = AccountingDb {
             conn: Mutex::new(raw.conn),
@@ -1031,27 +1046,22 @@ impl AccountingDb {
                 }
                 // Record how far the anchor is known to cover. Monotonic:
                 // never move the recorded coverage backwards.
-                conn
-                    .execute(
-                        "UPDATE ledger_financial_sequence
+                conn.execute(
+                    "UPDATE ledger_financial_sequence
                          SET anchored_financial_sequence = ?1,
                              anchored_financial_chain_digest = ?2
                          WHERE budget_authority_site_id = ?3 AND ledger_epoch = ?4
                            AND anchored_financial_sequence < ?1",
-                        rusqlite::params![
-                            sequence as i64,
-                            digest,
-                            self.site_id,
-                            self.epoch_i64()
-                        ],
-                    )
-                    .context("record anchored financial sequence")?;
+                    rusqlite::params![sequence as i64, digest, self.site_id, self.epoch_i64()],
+                )
+                .context("record anchored financial sequence")?;
                 Ok(())
             }
             AnchorAction::Cover { sequence } => {
-                let record = self.anchor.read_valid().context(
-                    "financial anchor unreadable while confirming replay coverage",
-                )?;
+                let record = self
+                    .anchor
+                    .read_valid()
+                    .context("financial anchor unreadable while confirming replay coverage")?;
                 if record.financial_high_water < sequence {
                     self.disable_hard_admission();
                     bail!(
@@ -1244,6 +1254,23 @@ impl AccountingDb {
         execution_budget_id: &str,
         audit_chain_root_id: &str,
     ) -> Result<()> {
+        self.open_launch_gate_with_credential_binding(
+            thread_id,
+            launch_generation,
+            execution_budget_id,
+            audit_chain_root_id,
+            None,
+        )
+    }
+
+    pub fn open_launch_gate_with_credential_binding(
+        &self,
+        thread_id: &str,
+        launch_generation: &str,
+        execution_budget_id: &str,
+        audit_chain_root_id: &str,
+        credential_binding_digest: Option<&str>,
+    ) -> Result<()> {
         let conn = self.lock_conn()?;
         let now_ms = wall_clock_ms();
         immediate_transaction(&conn, "accounting gate open", || {
@@ -1256,6 +1283,7 @@ impl AccountingDb {
                 }
                 if gate.execution_budget_id != execution_budget_id
                     || gate.audit_chain_root_id != audit_chain_root_id
+                    || gate.credential_binding_digest.as_deref() != credential_binding_digest
                 {
                     bail!(
                         "launch accounting gate {thread_id}/{launch_generation} is already open \
@@ -1282,9 +1310,9 @@ impl AccountingDb {
             conn.execute(
                 "INSERT INTO launch_accounting_gate (
                     thread_id, launch_generation, budget_authority_site_id, ledger_epoch,
-                    execution_budget_id, audit_chain_root_id, state, fenced_reason,
-                    terminal_publication_due, updated_at_ms
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'open', NULL, 0, ?7)",
+                    execution_budget_id, audit_chain_root_id, credential_binding_digest,
+                    state, fenced_reason, terminal_publication_due, updated_at_ms
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'open', NULL, 0, ?8)",
                 rusqlite::params![
                     thread_id,
                     launch_generation,
@@ -1292,6 +1320,7 @@ impl AccountingDb {
                     self.epoch_i64(),
                     execution_budget_id,
                     audit_chain_root_id,
+                    credential_binding_digest,
                     now_ms,
                 ],
             )
@@ -1643,15 +1672,13 @@ impl AccountingDb {
             let (digest, response) = self
                 .load_operation(conn, &existing.attempt_id, "reserve", 1)?
                 .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "attempt {key} exists without its recorded reserve operation"
-                    )
+                    anyhow::anyhow!("attempt {key} exists without its recorded reserve operation")
                 })?;
             if digest != args.request_hash {
                 bail!("attempt {key} reserve operation digest conflicts with its row");
             }
-            let stored: StoredReserveResponse = serde_json::from_str(&response)
-                .context("decode recorded reserve response")?;
+            let stored: StoredReserveResponse =
+                serde_json::from_str(&response).context("decode recorded reserve response")?;
             self.bump_recovery_count(conn, &existing.attempt_id, "reserve", 1)?;
             return Ok(if stored.denied {
                 ReserveOutcome::Denied {
@@ -1717,9 +1744,8 @@ impl AccountingDb {
         }
         // The daemon accepts exactly the pinned verifier contract version:
         // a proof from an unknown or superseded verifier is not a proof.
-        let pinned_verifier = lillux::sha256_hex(
-            ryeos_accounting::rpc::SPEND_VERIFIER_CONTRACT_V1.as_bytes(),
-        );
+        let pinned_verifier =
+            lillux::sha256_hex(ryeos_accounting::rpc::SPEND_VERIFIER_CONTRACT_V1.as_bytes());
         if args.verified_bound.verifier_contract_digest.as_str() != pinned_verifier {
             bail!(
                 "verifier contract digest {} is not the pinned verifier contract",
@@ -1800,8 +1826,7 @@ impl AccountingDb {
                     (
                         SpendBoundCertificate::ProviderEnforcedChargeCap { .. },
                         ryeos_accounting::SpendBoundCommitments::ProviderCapField {
-                            cap_value,
-                            ..
+                            cap_value, ..
                         },
                     ) => {
                         if cap_value != maximum {
@@ -1833,9 +1858,9 @@ impl AccountingDb {
                     ryeos_accounting::SpendBoundCommitments::ExplicitlyFree {
                         contract_digest: committed,
                     } if committed == contract_digest => {}
-                    _ => bail!(
-                        "explicitly-free route requires a matching free-contract commitment"
-                    ),
+                    _ => {
+                        bail!("explicitly-free route requires a matching free-contract commitment")
+                    }
                 }
             }
             SpendBoundAuthority::AdvisoryOnly => {
@@ -1908,7 +1933,8 @@ impl AccountingDb {
         )?;
         let denied = accounts.iter().any(|account| {
             account.limit_nanos.is_some_and(|limit| {
-                (i128::from(limit) - i128::from(account.committed_nanos)
+                (i128::from(limit)
+                    - i128::from(account.committed_nanos)
                     - i128::from(account.held_nanos))
                     < i128::from(maximum_nanos)
             })
@@ -1938,8 +1964,11 @@ impl AccountingDb {
             state,
             reserved_nanos: maximum_nanos,
             budget_charge_nanos: None,
-            reconciliation_reason: denied
-                .then(|| ReconciliationReason::InsufficientBudget.as_str().to_string()),
+            reconciliation_reason: denied.then(|| {
+                ReconciliationReason::InsufficientBudget
+                    .as_str()
+                    .to_string()
+            }),
             charge_basis: None,
             authority_json,
         };
@@ -2068,6 +2097,28 @@ impl AccountingDb {
         now_ms: i64,
         acceptance_window_ms: i64,
     ) -> Result<IssueOutcome> {
+        self.mark_provider_attempt_issued_with_credential_binding(
+            thread_id,
+            launch_generation,
+            attempt_id,
+            request_hash,
+            None,
+            now_ms,
+            acceptance_window_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mark_provider_attempt_issued_with_credential_binding(
+        &self,
+        thread_id: &str,
+        launch_generation: &str,
+        attempt_id: &str,
+        request_hash: &str,
+        current_credential_binding_digest: Option<&str>,
+        now_ms: i64,
+        acceptance_window_ms: i64,
+    ) -> Result<IssueOutcome> {
         let conn = self.lock_conn()?;
         let (outcome, action) = immediate_transaction(&conn, "accounting issue", || {
             let row = self
@@ -2077,9 +2128,7 @@ impl AccountingDb {
                 bail!("attempt {attempt_id} belongs to thread {}", row.thread_id);
             }
             // §7.8 ordering: exact recorded operation wins over stale state.
-            if let Some((digest, response)) =
-                self.load_operation(&conn, attempt_id, "issue", 2)?
-            {
+            if let Some((digest, response)) = self.load_operation(&conn, attempt_id, "issue", 2)? {
                 if digest == request_hash {
                     let stored: StoredIssueResponse = serde_json::from_str(&response)
                         .context("decode recorded issue response")?;
@@ -2120,7 +2169,9 @@ impl AccountingDb {
             let gate = self
                 .load_gate(&conn, thread_id, launch_generation)?
                 .ok_or_else(|| {
-                    anyhow::anyhow!("launch accounting gate {thread_id}/{launch_generation} is absent")
+                    anyhow::anyhow!(
+                        "launch accounting gate {thread_id}/{launch_generation} is absent"
+                    )
                 })?;
             if gate.state != "open" {
                 bail!(
@@ -2134,57 +2185,63 @@ impl AccountingDb {
                     row.state.as_str()
                 );
             }
-            let authority: ProviderAccountingAuthority =
-                serde_json::from_str(&row.authority_json)
-                    .context("decode stored accounting authority")?;
-            if let Some(expires_at_ms) = certificate_expiry_ms(&authority) {
-                if expires_at_ms <= now_ms.saturating_add(acceptance_window_ms) {
-                    let reason = ReconciliationReason::AuthorityExpiredBeforeIssue;
-                    self.release_attempt_holds(&conn, attempt_id, now_ms)?;
-                    conn.execute(
-                        "UPDATE provider_attempt_reservation
+            let authority: ProviderAccountingAuthority = serde_json::from_str(&row.authority_json)
+                .context("decode stored accounting authority")?;
+            let release_reason =
+                if gate.credential_binding_digest.as_deref() != current_credential_binding_digest {
+                    Some(ReconciliationReason::CredentialUnavailableBeforeIssue)
+                } else if certificate_expiry_ms(&authority).is_some_and(|expires_at_ms| {
+                    expires_at_ms <= now_ms.saturating_add(acceptance_window_ms)
+                }) {
+                    Some(ReconciliationReason::AuthorityExpiredBeforeIssue)
+                } else {
+                    None
+                };
+            if let Some(reason) = release_reason {
+                self.release_attempt_holds(&conn, attempt_id, now_ms)?;
+                conn.execute(
+                    "UPDATE provider_attempt_reservation
                          SET state = 'released_unissued', reconciliation_reason = ?1,
                              settled_at_ms = ?2
                          WHERE attempt_id = ?3",
-                        rusqlite::params![reason.as_str(), now_ms, attempt_id],
-                    )
-                    .context("release expired reservation before issue")?;
-                    self.enqueue_transition(
-                        &conn,
-                        &row,
-                        &TransitionExtras {
-                            sequence: 2,
-                            state: AttemptBudgetState::ReleasedUnissued,
-                            observation: false,
-                            budget_charge_nanos: None,
-                            provider_actual_nanos: None,
-                            released_nanos: Some(row.reserved_nanos),
-                            charge_basis: None,
-                            reason: Some(reason),
-                            occurred_at_ms: now_ms,
-                        },
-                    )?;
-                    self.insert_operation(
-                        &conn,
-                        attempt_id,
-                        "issue",
-                        2,
-                        request_hash,
-                        &serde_json::to_string(&StoredIssueResponse {
-                            issued: false,
-                            reason: Some(reason.as_str().to_string()),
-                            financial_sequence: None,
-                        })
-                        .context("encode released issue response")?,
-                    )?;
-                    return Ok((
-                        IssueOutcome::ReleasedBeforeIssue {
-                            reason,
-                            replayed: false,
-                        },
-                        AnchorAction::None,
-                    ));
-                }
+                    rusqlite::params![reason.as_str(), now_ms, attempt_id],
+                )
+                .context("release invalid reservation before issue")?;
+                self.enqueue_transition(
+                    &conn,
+                    &row,
+                    &TransitionExtras {
+                        sequence: 2,
+                        state: AttemptBudgetState::ReleasedUnissued,
+                        observation: false,
+                        budget_charge_nanos: None,
+                        provider_actual_nanos: None,
+                        released_nanos: Some(row.reserved_nanos),
+                        charge_basis: None,
+                        reason: Some(reason),
+                        occurred_at_ms: now_ms,
+                    },
+                )?;
+                self.insert_operation(
+                    &conn,
+                    attempt_id,
+                    "issue",
+                    2,
+                    request_hash,
+                    &serde_json::to_string(&StoredIssueResponse {
+                        issued: false,
+                        reason: Some(reason.as_str().to_string()),
+                        financial_sequence: None,
+                    })
+                    .context("encode released issue response")?,
+                )?;
+                return Ok((
+                    IssueOutcome::ReleasedBeforeIssue {
+                        reason,
+                        replayed: false,
+                    },
+                    AnchorAction::None,
+                ));
             }
             conn.execute(
                 "UPDATE provider_attempt_reservation
@@ -2319,9 +2376,7 @@ fn resolve_actual(
                     raw: None,
                 },
                 Err(TariffCostError::Invalid) => ResolvedActual::Unavailable { raw: None },
-                Err(TariffCostError::Overflow) => {
-                    ResolvedActual::Unrepresentable { raw: None }
-                }
+                Err(TariffCostError::Overflow) => ResolvedActual::Unrepresentable { raw: None },
             }
         }
         SpendAccounting::ExplicitlyFree => {
@@ -2374,7 +2429,10 @@ fn tariff_cost(
             .checked_add(charge)
             .map_err(|_| TariffCostError::Overflow)?;
     }
-    if tariff.covered_dimensions.contains(BillableDimension::PerRequest) {
+    if tariff
+        .covered_dimensions
+        .contains(BillableDimension::PerRequest)
+    {
         let Some(flat) = tariff.rate_for(BillableDimension::PerRequest) else {
             return Err(TariffCostError::Invalid);
         };
@@ -2463,8 +2521,8 @@ impl AccountingDb {
         // row is already terminal.
         if let Some((digest, response)) = self.load_operation(conn, attempt_id, "settle", 3)? {
             if digest == request_digest {
-                let stored: StoredSettleResponse = serde_json::from_str(&response)
-                    .context("decode recorded settle response")?;
+                let stored: StoredSettleResponse =
+                    serde_json::from_str(&response).context("decode recorded settle response")?;
                 self.bump_recovery_count(conn, attempt_id, "settle", 3)?;
                 let state = AttemptBudgetState::parse(&stored.state)
                     .ok_or_else(|| anyhow::anyhow!("recorded settle state is unknown"))?;
@@ -2820,12 +2878,22 @@ impl AccountingDb {
                 }
                 ResolvedActual::Actual {
                     nanos, basis, raw, ..
-                } if nanos <= reserved_nanos => {
-                    (Some(nanos), reserved_nanos, basis, raw, SettleAnchoring::None)
-                }
+                } if nanos <= reserved_nanos => (
+                    Some(nanos),
+                    reserved_nanos,
+                    basis,
+                    raw,
+                    SettleAnchoring::None,
+                ),
                 ResolvedActual::Actual {
                     nanos, basis, raw, ..
-                } => (Some(nanos), nanos, basis, raw, SettleAnchoring::BoundViolation),
+                } => (
+                    Some(nanos),
+                    nanos,
+                    basis,
+                    raw,
+                    SettleAnchoring::BoundViolation,
+                ),
                 ResolvedActual::Unrepresentable { raw } => (
                     None,
                     reserved_nanos,
@@ -2977,7 +3045,9 @@ impl AccountingDb {
         };
 
         let stored = StoredSettleResponse {
-            state: AttemptBudgetState::ChargedReservedMaximum.as_str().to_string(),
+            state: AttemptBudgetState::ChargedReservedMaximum
+                .as_str()
+                .to_string(),
             budget_charge_usd_nanos: charge_nanos,
             released_usd_nanos: 0,
             charge_basis: basis.as_str().to_string(),
@@ -3211,8 +3281,7 @@ impl AccountingDb {
                 transition_sequence: u32::try_from(transition_sequence)
                     .context("stored transition sequence is not a valid u32")?,
                 transition_id,
-                payload: serde_json::from_str(&payload)
-                    .context("decode stored outbox payload")?,
+                payload: serde_json::from_str(&payload).context("decode stored outbox payload")?,
                 payload_fingerprint,
             }))
         })
@@ -3267,6 +3336,30 @@ impl AccountingDb {
             )
             .context("read unpublished outbox stats")?;
         Ok((count as u64, oldest))
+    }
+
+    /// Live unresolved count and logical held amount from the authoritative
+    /// ledger. This intentionally does not sum execution + directive debit
+    /// rows, which would double-count the same reservation.
+    pub fn active_reservation_stats(&self) -> Result<ActiveReservationStats> {
+        let conn = self.lock_conn()?;
+        let (count, held, oldest): (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), COALESCE(SUM(reserved_usd_nanos), 0), MIN(created_at_ms)
+                 FROM provider_attempt_reservation
+                 WHERE state IN ('reserved', 'issued')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .context("read active reservation stats")?;
+        if count < 0 || held < 0 {
+            bail!("active reservation aggregate is negative; ledger integrity failure");
+        }
+        Ok(ActiveReservationStats {
+            unresolved_count: count as u64,
+            held_usd_nanos: held,
+            oldest_created_at_ms: oldest,
+        })
     }
 }
 
@@ -3454,10 +3547,29 @@ impl AccountingDb {
                 }
             }
             for account_id in debit_sums.keys() {
-                reasons.push(format!(
-                    "debit rows reference absent account {account_id}"
-                ));
+                reasons.push(format!("debit rows reference absent account {account_id}"));
             }
+        }
+
+        // An authoritative charge that cannot be represented in the ledger's
+        // fixed-point domain is a persistent global fail-closed condition.
+        // The settlement transaction records both the bounded raw truth and a
+        // durable disable fact; reopening the daemon must not silently reset
+        // the in-memory admission flag merely because structural sums remain
+        // internally consistent.
+        let unrepresentable_actuals: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM provider_attempt_reservation
+                 WHERE charge_unrepresentable = 1",
+                [],
+                |row| row.get(0),
+            )
+            .context("count unrepresentable provider actuals")?;
+        if unrepresentable_actuals > 0 {
+            reasons.push(format!(
+                "{unrepresentable_actuals} provider attempt(s) retain an unrepresentable \
+                 authoritative actual; hard admission remains disabled pending repair"
+            ));
         }
 
         // Recompute the financial hash chain from genesis and compare the
@@ -3527,8 +3639,7 @@ impl AccountingDb {
                         chain_ok = false;
                     } else if digest != stored_digest {
                         reasons.push(
-                            "financial head chain digest does not match recomputation"
-                                .to_string(),
+                            "financial head chain digest does not match recomputation".to_string(),
                         );
                         chain_ok = false;
                     }
@@ -3603,8 +3714,7 @@ impl AccountingDb {
                              {sequence}: divergent history"
                         )),
                         AnchorAgreement::MissingForActiveEpoch => reasons.push(
-                            "financial anchor has no valid slot for the active epoch"
-                                .to_string(),
+                            "financial anchor has no valid slot for the active epoch".to_string(),
                         ),
                     }
                 }
@@ -3656,10 +3766,7 @@ struct TransitionExtras {
 fn certificate_expiry_ms(authority: &ProviderAccountingAuthority) -> Option<i64> {
     match &authority.spend_bound {
         SpendBoundAuthority::Paid {
-            certificate:
-                SpendBoundCertificate::DerivedWorstCaseCharge {
-                    expires_at_ms, ..
-                },
+            certificate: SpendBoundCertificate::DerivedWorstCaseCharge { expires_at_ms, .. },
             ..
         } => *expires_at_ms,
         _ => None,
@@ -3674,7 +3781,7 @@ impl AccountingDb {
         launch_generation: &str,
     ) -> Result<Option<GateRow>> {
         conn.query_row(
-            "SELECT execution_budget_id, audit_chain_root_id, state
+            "SELECT execution_budget_id, audit_chain_root_id, credential_binding_digest, state
              FROM launch_accounting_gate
              WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
                AND thread_id = ?3 AND launch_generation = ?4",
@@ -3683,7 +3790,8 @@ impl AccountingDb {
                 Ok(GateRow {
                     execution_budget_id: row.get(0)?,
                     audit_chain_root_id: row.get(1)?,
-                    state: row.get(2)?,
+                    credential_binding_digest: row.get(2)?,
+                    state: row.get(3)?,
                 })
             },
         )
@@ -3728,12 +3836,14 @@ impl AccountingDb {
         account_kind: &str,
         scope_id: &str,
     ) -> Result<AccountRecord> {
-        let account = self.load_account(conn, account_kind, scope_id)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "budget account {account_kind}/{scope_id} is absent; reservation fails closed \
+        let account = self
+            .load_account(conn, account_kind, scope_id)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "budget account {account_kind}/{scope_id} is absent; reservation fails closed \
                  and the account is never recreated from configured limits"
-            )
-        })?;
+                )
+            })?;
         if account.state != "active" {
             bail!(
                 "budget account {account_kind}/{scope_id} is {}; reservation requires an \
@@ -3941,8 +4051,7 @@ impl AccountingDb {
         event
             .validate()
             .map_err(|error| anyhow::anyhow!("audit transition invalid: {error}"))?;
-        let payload =
-            serde_json::to_value(&event).context("encode audit transition payload")?;
+        let payload = serde_json::to_value(&event).context("encode audit transition payload")?;
         let canonical = canonical_json_string(&payload)?;
         let fingerprint = lillux::cas::sha256_hex(canonical.as_bytes());
         conn.execute(
@@ -4093,14 +4202,15 @@ impl AccountingDb {
                     |row| row.get(0),
                 )
                 .context("load account hold for release")?;
-            let next_held = held.checked_sub(debit_held).filter(|v| *v >= 0).ok_or_else(
-                || {
+            let next_held = held
+                .checked_sub(debit_held)
+                .filter(|v| *v >= 0)
+                .ok_or_else(|| {
                     anyhow::anyhow!(
                         "account {account_id} hold {held} cannot release {debit_held}: \
                          invariant violation"
                     )
-                },
-            )?;
+                })?;
             conn.execute(
                 "UPDATE budget_account SET held_usd_nanos = ?1, updated_at_ms = ?2
                  WHERE account_id = ?3",
@@ -4136,18 +4246,17 @@ impl AccountingDb {
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .context("load account amounts for charge")?;
-            let next_held = held.checked_sub(debit_held).filter(|v| *v >= 0).ok_or_else(
-                || {
+            let next_held = held
+                .checked_sub(debit_held)
+                .filter(|v| *v >= 0)
+                .ok_or_else(|| {
                     anyhow::anyhow!(
                         "account {account_id} hold {held} cannot release {debit_held}: \
                          invariant violation"
                     )
-                },
-            )?;
+                })?;
             let next_committed = committed.checked_add(charge_nanos).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "account {account_id} commitment overflows the fixed-point range"
-                )
+                anyhow::anyhow!("account {account_id} commitment overflows the fixed-point range")
             })?;
             conn.execute(
                 "UPDATE budget_account
@@ -4561,7 +4670,12 @@ fn ensure_accounting_bindings(db: &AccountingDb) -> Result<()> {
     inspect_accounting_sidecars(&db._runtime_directory, name)?;
     if let Some(wal_file) = db._wal_file.as_ref() {
         let wal_name = accounting_sidecar_name(name, "-wal");
-        ensure_file_binding(&db._runtime_directory, &wal_name, wal_file, "accounting WAL")?;
+        ensure_file_binding(
+            &db._runtime_directory,
+            &wal_name,
+            wal_file,
+            "accounting WAL",
+        )?;
     }
     if let Some(shm_file) = db._shm_file.as_ref() {
         let shm_name = accounting_sidecar_name(name, "-shm");
@@ -4633,9 +4747,7 @@ fn establish_site_identity(conn: &Connection, path: &Path) -> Result<(String, u6
         .context("begin site identity transaction")?;
     let result = (|| -> Result<(String, u64)> {
         let mut stmt = conn
-            .prepare(
-                "SELECT budget_authority_site_id, ledger_epoch FROM ledger_financial_sequence",
-            )
+            .prepare("SELECT budget_authority_site_id, ledger_epoch FROM ledger_financial_sequence")
             .context("prepare site identity query")?;
         let rows: Vec<(String, i64)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
@@ -4691,8 +4803,8 @@ fn establish_site_identity(conn: &Connection, path: &Path) -> Result<(String, u6
 mod tests {
     use super::*;
     use ryeos_accounting::{
-        ClosedBillableDimensionSet, Currency, FinalityContract, SpendBoundCommitments,
-        UnitCount, SPEND_TARIFF_SCHEMA_VERSION,
+        ClosedBillableDimensionSet, Currency, FinalityContract, SpendBoundCommitments, UnitCount,
+        SPEND_TARIFF_SCHEMA_VERSION,
     };
 
     const NOW: i64 = 1_000_000;
@@ -4814,19 +4926,18 @@ mod tests {
                 currency: Currency::Usd,
             },
         };
-        authority.reconciliation =
-            ChargeReconciliationAuthority::ProviderReportedFinalCharge {
-                schema_digest: digest_of("schema"),
-                covered_dimensions: dims(vec![
-                    BillableDimension::InputTokens,
-                    BillableDimension::OutputTokens,
-                ]),
-                finality_contract: FinalityContract {
-                    final_on_response: true,
-                    max_reported_fraction_digits,
-                    byok_zero_is_final,
-                },
-            };
+        authority.reconciliation = ChargeReconciliationAuthority::ProviderReportedFinalCharge {
+            schema_digest: digest_of("schema"),
+            covered_dimensions: dims(vec![
+                BillableDimension::InputTokens,
+                BillableDimension::OutputTokens,
+            ]),
+            finality_contract: FinalityContract {
+                final_on_response: true,
+                max_reported_fraction_digits,
+                byok_zero_is_final,
+            },
+        };
         authority.sealed().unwrap()
     }
 
@@ -4929,7 +5040,8 @@ mod tests {
         if let Some(directive) = directive {
             db.create_directive_account_prepared(exec, directive, limit)
                 .unwrap();
-            db.activate_account(exec, "directive_item", directive).unwrap();
+            db.activate_account(exec, "directive_item", directive)
+                .unwrap();
         }
     }
 
@@ -4976,7 +5088,14 @@ mod tests {
     }
 
     fn issue(db: &AccountingDb, attempt_id: &str, request_hash: &str) -> Result<IssueOutcome> {
-        db.mark_provider_attempt_issued(THREAD, GENERATION, attempt_id, request_hash, NOW + 5, WINDOW)
+        db.mark_provider_attempt_issued(
+            THREAD,
+            GENERATION,
+            attempt_id,
+            request_hash,
+            NOW + 5,
+            WINDOW,
+        )
     }
 
     fn settle(
@@ -5039,16 +5158,18 @@ mod tests {
             .create_execution_account_prepared(EXEC, "other-root", Some(usd("10")))
             .is_err());
         // Activating a missing account never re-mints it.
-        assert!(db.activate_account("B-missing", "execution", "B-missing").is_err());
+        assert!(db
+            .activate_account("B-missing", "execution", "B-missing")
+            .is_err());
         assert!(db
             .create_directive_account_prepared("B-missing", "D-x", None)
             .is_err());
         open_gate(&db, THREAD, GENERATION, EXEC);
         open_gate(&db, THREAD, GENERATION, EXEC); // idempotent repeat
-        // Reserve without a gate for the generation fails closed.
+                                                  // Reserve without a gate for the generation fails closed.
         let authority = tariff_authority("a", "0.5", None, &tariff_io());
-        let error = reserve(&db, THREAD, "G-other", 1, 1, "h1", &authority, EXEC, None)
-            .unwrap_err();
+        let error =
+            reserve(&db, THREAD, "G-other", 1, 1, "h1", &authority, EXEC, None).unwrap_err();
         assert!(format!("{error:#}").contains("gate"));
         assert_healthy_verify(&db);
     }
@@ -5059,9 +5180,18 @@ mod tests {
         birth(&db, EXEC, Some(DIRECTIVE), Some("10"));
         open_gate(&db, THREAD, GENERATION, EXEC);
         let authority = tariff_authority("a", "0.5", None, &tariff_io());
-        let outcome =
-            reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, Some(DIRECTIVE))
-                .unwrap();
+        let outcome = reserve(
+            &db,
+            THREAD,
+            GENERATION,
+            1,
+            1,
+            "h1",
+            &authority,
+            EXEC,
+            Some(DIRECTIVE),
+        )
+        .unwrap();
         let ReserveOutcome::Reserved {
             attempt_id,
             reserved,
@@ -5074,10 +5204,27 @@ mod tests {
         assert!(!replayed);
         assert_amounts(&db, EXEC, "execution", "0", "0.5");
         assert_amounts(&db, EXEC, "directive_item", "0", "0.5");
+        assert_eq!(
+            db.active_reservation_stats().unwrap(),
+            ActiveReservationStats {
+                unresolved_count: 1,
+                held_usd_nanos: 500_000_000,
+                oldest_created_at_ms: Some(NOW),
+            }
+        );
         // Exact replay returns the recorded outcome and debits nothing new.
-        let replay =
-            reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, Some(DIRECTIVE))
-                .unwrap();
+        let replay = reserve(
+            &db,
+            THREAD,
+            GENERATION,
+            1,
+            1,
+            "h1",
+            &authority,
+            EXEC,
+            Some(DIRECTIVE),
+        )
+        .unwrap();
         assert_eq!(
             replay,
             ReserveOutcome::Reserved {
@@ -5089,11 +5236,23 @@ mod tests {
         assert_amounts(&db, EXEC, "execution", "0", "0.5");
         // A changed request hash on the same coordinate is an integrity
         // conflict, never a second attempt.
-        let error =
-            reserve(&db, THREAD, GENERATION, 1, 1, "h2", &authority, EXEC, Some(DIRECTIVE))
-                .unwrap_err();
+        let error = reserve(
+            &db,
+            THREAD,
+            GENERATION,
+            1,
+            1,
+            "h2",
+            &authority,
+            EXEC,
+            Some(DIRECTIVE),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("integrity"));
-        let record = db.get_provider_attempt(THREAD, &attempt_id).unwrap().unwrap();
+        let record = db
+            .get_provider_attempt(THREAD, &attempt_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(record.state, AttemptBudgetState::Reserved);
         assert_eq!(record.reserved, usd("0.5"));
         assert_healthy_verify(&db);
@@ -5107,12 +5266,22 @@ mod tests {
         // and neither account is debited.
         db.create_directive_account_prepared(EXEC, DIRECTIVE, Some(usd("0.1")))
             .unwrap();
-        db.activate_account(EXEC, "directive_item", DIRECTIVE).unwrap();
+        db.activate_account(EXEC, "directive_item", DIRECTIVE)
+            .unwrap();
         open_gate(&db, THREAD, GENERATION, EXEC);
         let authority = tariff_authority("a", "0.5", None, &tariff_io());
-        let outcome =
-            reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, Some(DIRECTIVE))
-                .unwrap();
+        let outcome = reserve(
+            &db,
+            THREAD,
+            GENERATION,
+            1,
+            1,
+            "h1",
+            &authority,
+            EXEC,
+            Some(DIRECTIVE),
+        )
+        .unwrap();
         let ReserveOutcome::Denied {
             attempt_id,
             replayed: false,
@@ -5122,16 +5291,28 @@ mod tests {
         };
         assert_amounts(&db, EXEC, "execution", "0", "0");
         assert_amounts(&db, EXEC, "directive_item", "0", "0");
-        let record = db.get_provider_attempt(THREAD, &attempt_id).unwrap().unwrap();
+        let record = db
+            .get_provider_attempt(THREAD, &attempt_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(record.state, AttemptBudgetState::ReservationDenied);
         assert_eq!(
             record.reason,
             Some(ReconciliationReason::InsufficientBudget)
         );
         // Denials replay like every other recorded operation.
-        let replay =
-            reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, Some(DIRECTIVE))
-                .unwrap();
+        let replay = reserve(
+            &db,
+            THREAD,
+            GENERATION,
+            1,
+            1,
+            "h1",
+            &authority,
+            EXEC,
+            Some(DIRECTIVE),
+        )
+        .unwrap();
         assert_eq!(
             replay,
             ReserveOutcome::Denied {
@@ -5196,6 +5377,31 @@ mod tests {
     }
 
     #[test]
+    fn established_epoch_missing_anchor_fails_closed_at_sequence_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+            birth(&db, EXEC, None, Some("10"));
+            open_gate(&db, THREAD, GENERATION, EXEC);
+            assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 0);
+        }
+
+        std::fs::remove_file(
+            dir.path()
+                .join(crate::accounting_anchor::ACCOUNTING_ANCHOR_FILENAME),
+        )
+        .unwrap();
+
+        let error = match AccountingDb::open_at_runtime_state_dir(dir.path()) {
+            Ok(_) => panic!("established epoch unexpectedly recreated its missing anchor"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("financial anchor is missing for established active epoch"));
+        assert!(message.contains("fail-closed"));
+    }
+
+    #[test]
     fn expired_certificate_releases_instead_of_issuing() {
         let (_dir, db) = setup();
         birth(&db, EXEC, None, Some("10"));
@@ -5233,6 +5439,99 @@ mod tests {
             &authority
         )
         .is_err());
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn changed_or_unavailable_credential_releases_before_issue() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        db.open_launch_gate_with_credential_binding(
+            THREAD,
+            GENERATION,
+            EXEC,
+            "audit-chain",
+            Some("launch-credential-binding"),
+        )
+        .unwrap();
+        let authority = tariff_authority("a", "0.5", None, &tariff_io());
+        let attempt_id = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
+        );
+        assert_amounts(&db, EXEC, "execution", "0", "0.5");
+
+        let outcome = db
+            .mark_provider_attempt_issued_with_credential_binding(
+                THREAD,
+                GENERATION,
+                &attempt_id,
+                "h1",
+                Some("rotated-credential-binding"),
+                NOW + 5,
+                WINDOW,
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            IssueOutcome::ReleasedBeforeIssue {
+                reason: ReconciliationReason::CredentialUnavailableBeforeIssue,
+                replayed: false,
+            }
+        );
+        assert_amounts(&db, EXEC, "execution", "0", "0");
+        assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 0);
+
+        // Exact lost-reply recovery returns the recorded release even if the
+        // original credential becomes available again.
+        assert_eq!(
+            db.mark_provider_attempt_issued_with_credential_binding(
+                THREAD,
+                GENERATION,
+                &attempt_id,
+                "h1",
+                Some("launch-credential-binding"),
+                NOW + 6,
+                WINDOW,
+            )
+            .unwrap(),
+            IssueOutcome::ReleasedBeforeIssue {
+                reason: ReconciliationReason::CredentialUnavailableBeforeIssue,
+                replayed: true,
+            }
+        );
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn exact_credential_binding_permits_issue() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        db.open_launch_gate_with_credential_binding(
+            THREAD,
+            GENERATION,
+            EXEC,
+            "audit-chain",
+            Some("launch-credential-binding"),
+        )
+        .unwrap();
+        let authority = tariff_authority("a", "0.5", None, &tariff_io());
+        let attempt_id = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
+        );
+        assert_eq!(
+            db.mark_provider_attempt_issued_with_credential_binding(
+                THREAD,
+                GENERATION,
+                &attempt_id,
+                "h1",
+                Some("launch-credential-binding"),
+                NOW + 5,
+                WINDOW,
+            )
+            .unwrap(),
+            IssueOutcome::Issued { replayed: false }
+        );
+        assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 1);
         assert_healthy_verify(&db);
     }
 
@@ -5300,9 +5599,8 @@ mod tests {
         // 1 nano per million × 1 unit rounds up to 1 nano and the
         // per-request flat rate is added once.
         let tiny = tariff_authority("b", "0.5", None, &tariff_tiny_with_flat());
-        let tiny_id = reserved_id(
-            &reserve(&db, THREAD, GENERATION, 2, 1, "h2", &tiny, EXEC, None).unwrap(),
-        );
+        let tiny_id =
+            reserved_id(&reserve(&db, THREAD, GENERATION, 2, 1, "h2", &tiny, EXEC, None).unwrap());
         issue(&db, &tiny_id, "h2").unwrap();
         let tiny_outcome = settle(
             &db,
@@ -5436,8 +5734,8 @@ mod tests {
         birth(&db, exec2, None, Some("10"));
         db.open_launch_gate("T-2", GENERATION, exec2, "audit-chain")
             .unwrap();
-        let error = reserve(&db, "T-2", GENERATION, 1, 1, "h2", &authority, exec2, None)
-            .unwrap_err();
+        let error =
+            reserve(&db, "T-2", GENERATION, 1, 1, "h2", &authority, exec2, None).unwrap_err();
         assert!(format!("{error:#}").contains("violated"));
         let other = reported_authority("b", "0.5", 9, false);
         assert!(matches!(
@@ -5448,7 +5746,7 @@ mod tests {
 
     #[test]
     fn unrepresentable_actual_quarantines_and_disables_hard_admission() {
-        let (_dir, db) = setup();
+        let (dir, db) = setup();
         birth(&db, EXEC, None, Some("10"));
         open_gate(&db, THREAD, GENERATION, EXEC);
         let authority = reported_authority("a", "0.5", 9, false);
@@ -5473,13 +5771,22 @@ mod tests {
         assert_eq!(outcome.budget_charge, usd("0.5"));
         assert!(!db.hard_admission_enabled());
         assert_eq!(db.anchor().read_valid().unwrap().financial_high_water, 2);
+
+        drop(db);
+        let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
+        let report = db.startup_verify().unwrap();
+        assert!(!report.hard_admission_enabled);
+        assert!(report
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("unrepresentable authoritative actual")));
+
         let exec2 = "B-exec-2";
         birth(&db, exec2, None, Some("10"));
         db.open_launch_gate("T-2", GENERATION, exec2, "audit-chain")
             .unwrap();
         let other = reported_authority("b", "0.5", 9, false);
-        let error =
-            reserve(&db, "T-2", GENERATION, 1, 1, "h2", &other, exec2, None).unwrap_err();
+        let error = reserve(&db, "T-2", GENERATION, 1, 1, "h2", &other, exec2, None).unwrap_err();
         assert!(format!("{error:#}").contains("hard-budget admission is disabled"));
     }
 
@@ -5507,9 +5814,8 @@ mod tests {
         assert_eq!(outcome.budget_charge, usd("0.5"));
 
         let byok = reported_authority("b", "0.5", 9, true);
-        let byok_id = reserved_id(
-            &reserve(&db, THREAD, GENERATION, 2, 1, "h2", &byok, EXEC, None).unwrap(),
-        );
+        let byok_id =
+            reserved_id(&reserve(&db, THREAD, GENERATION, 2, 1, "h2", &byok, EXEC, None).unwrap());
         issue(&db, &byok_id, "h2").unwrap();
         let outcome = settle(
             &db,
@@ -5676,10 +5982,7 @@ mod tests {
         let first = db.claim_next_unpublished(0, 1_000).unwrap().unwrap();
         assert_eq!(first.transition_sequence, 1);
         assert_eq!(first.attempt_id, attempt_id);
-        assert_eq!(
-            first.transition_id,
-            transition_id(&attempt_id, 1)
-        );
+        assert_eq!(first.transition_id, transition_id(&attempt_id, 1));
         assert!(db.claim_next_unpublished(0, 1_000).unwrap().is_none());
         // An expired lease makes the same row claimable again.
         let reclaimed = db.claim_next_unpublished(2_000, 1_000).unwrap().unwrap();
@@ -5711,8 +6014,18 @@ mod tests {
             open_gate(&db, THREAD, GENERATION, EXEC);
             let authority = tariff_authority("a", "0.5", None, &tariff_io());
             let attempt_id = reserved_id(
-                &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, Some(DIRECTIVE))
-                    .unwrap(),
+                &reserve(
+                    &db,
+                    THREAD,
+                    GENERATION,
+                    1,
+                    1,
+                    "h1",
+                    &authority,
+                    EXEC,
+                    Some(DIRECTIVE),
+                )
+                .unwrap(),
             );
             issue(&db, &attempt_id, "h1").unwrap();
             assert_healthy_verify(&db);
@@ -5751,8 +6064,7 @@ mod tests {
             issue(&db, &attempt_id, "h1").unwrap();
         }
         {
-            let conn =
-                Connection::open(dir.path().join(ACCOUNTING_DB_FILENAME)).unwrap();
+            let conn = Connection::open(dir.path().join(ACCOUNTING_DB_FILENAME)).unwrap();
             conn.execute(
                 "UPDATE financial_transition_commitment SET transition_fingerprint = 'tampered'",
                 [],
@@ -5771,8 +6083,7 @@ mod tests {
         db.open_launch_gate("T-2", GENERATION, "B-exec-2", "audit-chain")
             .unwrap();
         let authority = tariff_authority("b", "0.5", None, &tariff_io());
-        assert!(reserve(&db, "T-2", GENERATION, 1, 1, "h2", &authority, "B-exec-2", None)
-            .is_err());
+        assert!(reserve(&db, "T-2", GENERATION, 1, 1, "h2", &authority, "B-exec-2", None).is_err());
     }
 
     #[test]
@@ -5794,8 +6105,7 @@ mod tests {
         // second irreversible transition: append a valid chain entry
         // directly, leaving the anchor at sequence 1.
         {
-            let conn =
-                Connection::open(dir.path().join(ACCOUNTING_DB_FILENAME)).unwrap();
+            let conn = Connection::open(dir.path().join(ACCOUNTING_DB_FILENAME)).unwrap();
             let (site, epoch) = site_epoch;
             let head: String = conn
                 .query_row(

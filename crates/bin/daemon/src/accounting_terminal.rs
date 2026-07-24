@@ -97,11 +97,7 @@ pub fn confirm_terminal_accounting_publication(
     ledger.confirm_terminal_publication(thread_id, launch_owner)
 }
 
-fn log_fence(
-    thread_id: &str,
-    generation: &str,
-    outcome: &ryeos_app::accounting_db::FenceOutcome,
-) {
+fn log_fence(thread_id: &str, generation: &str, outcome: &ryeos_app::accounting_db::FenceOutcome) {
     tracing::info!(
         thread_id,
         generation,

@@ -909,7 +909,9 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
             state_path,
             "fixture-hard-budget-model-config",
             fixture,
-            |bundle_root| plant_hard_budget_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+            |bundle_root| {
+                plant_hard_budget_mock_provider(bundle_root, &mock_url, &fixture.publisher)
+            },
         )
     };
 
@@ -979,10 +981,21 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
         assert_eq!(s, reqwest::StatusCode::OK, "summary status: {b:#}");
         let payload = b
             .get("result")
-            .and_then(|r| if r.get("totals").is_some() { Some(r.clone()) } else { r.get("result").cloned() })
+            .and_then(|r| {
+                if r.get("totals").is_some() {
+                    Some(r.clone())
+                } else {
+                    r.get("result").cloned()
+                }
+            })
             .unwrap_or_default();
         let totals = payload.get("totals").cloned().unwrap_or_default();
-        if totals.get("attempt_count").and_then(|v| v.as_i64()).unwrap_or(0) >= 1 {
+        if totals
+            .get("attempt_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            >= 1
+        {
             assert!(
                 payload
                     .get("health")
@@ -991,18 +1004,26 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
                     .unwrap_or(false),
                 "ledger must be available: {payload:#}"
             );
-            let rows = payload.get("rows").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-            settled_seen = rows.iter().any(|row| {
-                row.get("transition").and_then(|v| v.as_str()) == Some("reconciled")
-            });
+            let rows = payload
+                .get("rows")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            settled_seen = rows
+                .iter()
+                .any(|row| row.get("transition").and_then(|v| v.as_str()) == Some("reconciled"));
             if settled_seen {
                 // Deterministic tariff: 10 in × $2/M + 5 out × $10/M = 70k nanos.
                 let reconciled = rows
                     .iter()
-                    .find(|row| row.get("transition").and_then(|v| v.as_str()) == Some("reconciled"))
+                    .find(|row| {
+                        row.get("transition").and_then(|v| v.as_str()) == Some("reconciled")
+                    })
                     .expect("reconciled row");
                 assert_eq!(
-                    reconciled.get("budget_charge_usd_nanos").and_then(|v| v.as_i64()),
+                    reconciled
+                        .get("budget_charge_usd_nanos")
+                        .and_then(|v| v.as_i64()),
                     Some(70_000),
                     "settled charge must be the deterministic tariff cost: {reconciled:#}"
                 );

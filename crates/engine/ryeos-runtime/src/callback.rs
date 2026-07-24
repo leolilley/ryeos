@@ -695,9 +695,8 @@ pub trait RuntimeCallbackAPI: Send + Sync {
     ) -> Result<Value, CallbackError> {
         Err(CallbackError::ActionFailed {
             code: "unsupported".to_string(),
-            message:
-                "provider_attempt_release_unissued is only supported by the daemon UDS client"
-                    .to_string(),
+            message: "provider_attempt_release_unissued is only supported by the daemon UDS client"
+                .to_string(),
             retryable: false,
         })
     }

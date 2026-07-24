@@ -287,8 +287,7 @@ impl Config {
             require_auth: false,
             authorized_keys_dir: runtime_root.authorized_keys_dir(),
             tool_env_passthrough: Vec::new(),
-            accounting_issue_acceptance_window_ms:
-                default_accounting_issue_acceptance_window_ms(),
+            accounting_issue_acceptance_window_ms: default_accounting_issue_acceptance_window_ms(),
         })
     }
 }

@@ -178,7 +178,9 @@ pub enum TokenAccounting {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_tokens: Option<u64>,
     },
-    Invalid { diagnostic: String },
+    Invalid {
+        diagnostic: String,
+    },
     Unavailable,
 }
 
@@ -295,8 +297,7 @@ mod tests {
         };
         params.validate().unwrap();
         let mut value = serde_json::to_value(&params).unwrap();
-        let back: ProviderAttemptReserveParams =
-            serde_json::from_value(value.clone()).unwrap();
+        let back: ProviderAttemptReserveParams = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(back, params);
         value
             .as_object_mut()

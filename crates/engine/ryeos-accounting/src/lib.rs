@@ -13,9 +13,9 @@ pub mod rpc;
 pub mod state;
 
 pub use authority::{
-    BillableDimension, ChargeReconciliationAuthority, ClosedBillableDimensionSet, Currency,
-    FinalityContract, HexDigest, ProviderAccountingAuthority, ProviderChargeCapContract,
-    SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument,
+    credential_binding_digest, BillableDimension, ChargeReconciliationAuthority,
+    ClosedBillableDimensionSet, Currency, FinalityContract, HexDigest, ProviderAccountingAuthority,
+    ProviderChargeCapContract, SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument,
     PROVIDER_CHARGE_CAP_SCHEMA_VERSION, SPEND_TARIFF_SCHEMA_VERSION,
 };
 pub use event::{
@@ -27,11 +27,10 @@ pub use rpc::{
     ProviderAttemptMarkIssuedResponse, ProviderAttemptReleaseUnissuedParams,
     ProviderAttemptReleaseUnissuedResponse, ProviderAttemptReserveParams,
     ProviderAttemptReserveResponse, ProviderAttemptSettleParams, ProviderAttemptSettleResponse,
-    SpendAccounting, SpendBoundCommitments, TokenAccounting, UnitCount,
-    VerifiedPreparedSpendBound, MAX_DIAGNOSTIC_LEN, MAX_RAW_DECIMAL_LEN,
-    RUNTIME_PROVIDER_ATTEMPT_GET, RUNTIME_PROVIDER_ATTEMPT_MARK_ISSUED,
-    RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED, RUNTIME_PROVIDER_ATTEMPT_RESERVE,
-    RUNTIME_PROVIDER_ATTEMPT_SETTLE,
+    SpendAccounting, SpendBoundCommitments, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
+    MAX_DIAGNOSTIC_LEN, MAX_RAW_DECIMAL_LEN, RUNTIME_PROVIDER_ATTEMPT_GET,
+    RUNTIME_PROVIDER_ATTEMPT_MARK_ISSUED, RUNTIME_PROVIDER_ATTEMPT_RELEASE_UNISSUED,
+    RUNTIME_PROVIDER_ATTEMPT_RESERVE, RUNTIME_PROVIDER_ATTEMPT_SETTLE,
 };
 pub use state::{
     AccountHealth, AttemptBudgetState, AuthorityHealth, ChargeBasis, ReconciliationReason,
