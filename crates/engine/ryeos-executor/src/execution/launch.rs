@@ -2312,7 +2312,7 @@ impl LaunchHandoff {
             code: error.code().to_owned(),
             message: error.to_string(),
             status: error.http_status().as_u16(),
-            body: crate::structured_error::StructuredErrorPayload::from(error).to_value(),
+            body: crate::structured_error::dispatch_error_value(error),
         }));
     }
 
@@ -2818,17 +2818,7 @@ async fn prepare_managed_launch_authority(
                 .map_err(BuildAndLaunchError::Internal)?,
             ),
         };
-        let project_authority = if matches!(
-            &params.resolved.plan_context.project_context,
-            ryeos_engine::contracts::ProjectContext::None
-        ) {
-            ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS
-        } else {
-            params
-                .provenance
-                .execution_project_authority(&effective_caps)
-                .map_err(BuildAndLaunchError::Internal)?
-        };
+        let project_authority = params.provenance.project_authority().clone();
         let local_overlay_root = matches!(
             project_authority.environment(),
             ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
@@ -3160,8 +3150,7 @@ async fn run_claimed_thread_row(
         Err(error) => {
             let terminal_error = match &error {
                 BuildAndLaunchError::LaunchPreparation(dispatch_error) => {
-                    crate::structured_error::StructuredErrorPayload::from(dispatch_error.as_ref())
-                        .to_value()
+                    crate::structured_error::dispatch_error_value(dispatch_error.as_ref())
                 }
                 other => json!({
                     "code": "launch_preparation_failed",
@@ -4365,29 +4354,45 @@ async fn prepare_follow_child_launch_inner(
     // reconstruction first could consult the daemon's current engine or create
     // a second snapshot checkout, neither of which is the admitted child source.
     let engine = provenance.request_engine();
-    let admitted_request = launch_metadata
+    let sealed_request = launch_metadata
         .sealed_root_request
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("follow-child launch metadata has no sealed root request"))?
-        .restore(
+        .ok_or_else(|| {
+            anyhow::anyhow!("follow-child launch metadata has no sealed root request")
+        })?;
+    if sealed_request.project_context() != &resume.project_context
+        || sealed_request.project_authority() != &resume.project_authority
+        || sealed_request.project_authority() != provenance.project_authority()
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "follow-child sealed, resume, and reconstructed project identities disagree"
+        )));
+    }
+    let admitted_request = sealed_request
+        .restore_for_reconstructed_provenance(
             engine,
             &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id)
                 .join("launch-capsule"),
+            &provenance,
         )
         .context("restore follow-child sealed root request")?;
-    if admitted_request.kind != resume.kind
-        || admitted_request.item_ref != resume.item_ref
-        || admitted_request.launch_mode != resume.launch_mode
-        || admitted_request.parameters != resume.parameters
-        || admitted_request.ref_bindings != resume.ref_bindings
-        || admitted_request.current_site_id != resume.current_site_id
-        || admitted_request.origin_site_id != resume.origin_site_id
-        || admitted_request.requested_by.as_deref() != Some(resume.principal_identifier())
-        || admitted_request.plan_context.requested_by != resume.requested_by
-        || admitted_request.plan_context.project_context != resume.project_context
-        || admitted_request.plan_context.execution_hints != resume.execution_hints
-        || resume.executor_ref.as_deref() != Some(admitted_request.executor_ref.as_str())
-        || resume.runtime_ref.as_deref()
+    let mut operational_resume = resume.clone();
+    operational_resume.project_context = admitted_request.plan_context.project_context.clone();
+    if admitted_request.kind != operational_resume.kind
+        || admitted_request.item_ref != operational_resume.item_ref
+        || admitted_request.launch_mode != operational_resume.launch_mode
+        || admitted_request.parameters != operational_resume.parameters
+        || admitted_request.ref_bindings != operational_resume.ref_bindings
+        || admitted_request.current_site_id != operational_resume.current_site_id
+        || admitted_request.origin_site_id != operational_resume.origin_site_id
+        || admitted_request.requested_by.as_deref()
+            != Some(operational_resume.principal_identifier())
+        || admitted_request.plan_context.requested_by != operational_resume.requested_by
+        || admitted_request.plan_context.project_context != operational_resume.project_context
+        || admitted_request.plan_context.execution_hints != operational_resume.execution_hints
+        || operational_resume.executor_ref.as_deref()
+            != Some(admitted_request.executor_ref.as_str())
+        || operational_resume.runtime_ref.as_deref()
             != launch_metadata
                 .sealed_root_request
                 .as_ref()
@@ -4398,17 +4403,17 @@ async fn prepare_follow_child_launch_inner(
             resume.item_ref
         )));
     }
-    let acting_principal = resume.principal_identifier().to_string();
+    let acting_principal = operational_resume.principal_identifier().to_string();
     let execution = crate::execution::runner::ExecutionParams {
         resolved: admitted_request,
         acting_principal,
         vault_bindings: HashMap::new(),
         parameters: resume.parameters.clone(),
         pre_minted_thread_id: None,
-        effective_caps: resume.effective_caps.clone(),
+        effective_caps: operational_resume.effective_caps.clone(),
         provenance,
-        lifecycle_authority: resume.lifecycle_authority,
-        runtime_ref: resume.runtime_ref.clone(),
+        lifecycle_authority: operational_resume.lifecycle_authority,
+        runtime_ref: operational_resume.runtime_ref.clone(),
         parent_thread_id: None,
     };
 
@@ -4445,26 +4450,27 @@ async fn prepare_follow_child_launch_inner(
         Some(launch_metadata),
     )
     .await?;
-    let mut launch_metadata =
-        if capture_project_snapshot {
+    let (launch_metadata, prepared_resume) = if capture_project_snapshot {
+        let mut prepared =
             authority.launch_metadata.as_ref().cloned().ok_or_else(|| {
                 anyhow::anyhow!("follow-child authority produced no launch metadata")
-            })?
-        } else {
-            launch_metadata.clone()
-        };
-    launch_metadata.set_sealed_root_request(
-        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_with_resolution(
-            &execution.resolved,
-            authority.selected_runtime.canonical_ref.to_string(),
-            authority.resolution.clone(),
-        )?,
-    );
-    let prepared_resume = launch_metadata
-        .resume_context
-        .as_ref()
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("follow-child authority produced no ResumeContext"))?;
+            })?;
+        let prepared_resume = prepared.resume_context.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("follow-child launch metadata lost its ResumeContext")
+        })?;
+        // The separately materialized launch workspace is operational only.
+        // Persist the admission workspace named by the original sealed pair;
+        // recovery reconstructs and transiently rebinds it from provenance.
+        prepared_resume.project_context = resume.project_context.clone();
+        let prepared_resume = prepared_resume.clone();
+        prepared.set_sealed_root_request(sealed_request.clone());
+        (prepared, prepared_resume)
+    } else {
+        // An existing child already has an immutable durable birth record.
+        // Re-drive may re-materialize its workspace, but it must not rewrite
+        // either persisted copy of that identity.
+        (launch_metadata.clone(), resume.clone())
+    };
 
     Ok(PreparedFollowChildLaunch {
         thread_id: thread_id.to_string(),

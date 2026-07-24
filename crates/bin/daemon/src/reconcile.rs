@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
@@ -382,6 +382,544 @@ fn finalize_dead(
     Ok(())
 }
 
+fn has_in_process_handler_driver(thread: &ThreadDetail) -> bool {
+    thread
+        .runtime
+        .launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.launch_driver)
+        == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+}
+
+fn repair_authoritative_recorded_service_terminal(
+    state: &AppState,
+    snapshot: &ryeos_state::objects::ThreadSnapshot,
+) -> Result<()> {
+    if !snapshot.status.is_terminal()
+        || snapshot.result_project_snapshot_hash.is_some()
+        || snapshot.budget.is_some()
+        || !snapshot.artifacts.is_empty()
+    {
+        anyhow::bail!(
+            "authoritative in-process terminal {} has an invalid recorded-service shape",
+            snapshot.thread_id
+        );
+    }
+    state
+        .threads
+        .repair_recorded_service_terminal_postcommit(&ThreadFinalizeParams {
+            thread_id: snapshot.thread_id.clone(),
+            status: snapshot.status.as_str().to_string(),
+            outcome_code: snapshot.outcome_code.clone(),
+            result: snapshot.result.clone(),
+            error: snapshot.error.clone(),
+            metadata: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            summary_json: None,
+        })
+}
+
+/// Settle and remove a terminal reservation while accepting only the benign
+/// race in which another exact owner/reconciler has already removed it.
+fn retire_terminal_in_process_reservation(state: &AppState, thread_id: &str) -> Result<bool> {
+    match state
+        .state_store
+        .settle_ownerless_in_process_handler_reservation(thread_id)
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            if state
+                .state_store
+                .in_process_handler_reservation(thread_id)?
+                .is_none()
+            {
+                return Ok(false);
+            }
+            anyhow::bail!(
+                "in-process reservation {thread_id} refused terminal settlement without disappearing"
+            );
+        }
+        Err(error) => {
+            if state
+                .state_store
+                .in_process_handler_reservation(thread_id)?
+                .is_none()
+            {
+                return Ok(false);
+            }
+            return Err(error)
+                .with_context(|| format!("settle terminal in-process reservation {thread_id}"));
+        }
+    }
+    match state
+        .state_store
+        .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
+    {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            if state
+                .state_store
+                .in_process_handler_reservation(thread_id)?
+                .is_none()
+            {
+                Ok(false)
+            } else {
+                anyhow::bail!(
+                    "terminal-confirmed in-process reservation {thread_id} refused cleanup"
+                )
+            }
+        }
+        Err(error) => {
+            if state
+                .state_store
+                .in_process_handler_reservation(thread_id)?
+                .is_none()
+            {
+                Ok(false)
+            } else {
+                Err(error)
+                    .with_context(|| format!("remove terminal in-process reservation {thread_id}"))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InProcessReservationRaceState {
+    Removed,
+    TerminalWithoutReservation,
+    Running,
+    PendingBirthPublished,
+    ActiveTerminal,
+    OwnerlessTerminal,
+    Diverged,
+}
+
+fn classify_in_process_reservation_race(
+    phase: Option<ryeos_app::runtime_db::InProcessHandlerReservationPhase>,
+    authoritative_status: Option<ryeos_state::objects::ThreadStatus>,
+    active: bool,
+) -> InProcessReservationRaceState {
+    use ryeos_app::runtime_db::InProcessHandlerReservationPhase;
+
+    match (phase, authoritative_status) {
+        (None, None) => InProcessReservationRaceState::Removed,
+        (None, Some(status)) if status.is_terminal() => {
+            InProcessReservationRaceState::TerminalWithoutReservation
+        }
+        (Some(InProcessHandlerReservationPhase::Running), Some(status))
+            if status == ryeos_state::objects::ThreadStatus::Running =>
+        {
+            InProcessReservationRaceState::Running
+        }
+        (Some(InProcessHandlerReservationPhase::Pending), Some(status))
+            if status == ryeos_state::objects::ThreadStatus::Running =>
+        {
+            InProcessReservationRaceState::PendingBirthPublished
+        }
+        (Some(_), Some(status)) if status.is_terminal() && active => {
+            InProcessReservationRaceState::ActiveTerminal
+        }
+        (Some(_), Some(status)) if status.is_terminal() => {
+            InProcessReservationRaceState::OwnerlessTerminal
+        }
+        _ => InProcessReservationRaceState::Diverged,
+    }
+}
+
+fn in_process_reservation_race_converged(
+    state: &AppState,
+    mode: ActiveReconcileMode,
+    thread_id: &str,
+    previously_active: bool,
+    operation_error: anyhow::Error,
+) -> Result<bool> {
+    let active = mode == ActiveReconcileMode::Live
+        && (previously_active || state.state_store.is_in_process_handler_active(thread_id)?);
+    let reservation = state
+        .state_store
+        .in_process_handler_reservation(thread_id)?;
+    let authoritative = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(thread_id)?;
+    let race_state = classify_in_process_reservation_race(
+        reservation.as_ref().map(|reservation| reservation.phase),
+        authoritative.as_ref().map(|snapshot| snapshot.status),
+        active,
+    );
+    match race_state {
+        InProcessReservationRaceState::Removed
+        | InProcessReservationRaceState::TerminalWithoutReservation
+        | InProcessReservationRaceState::ActiveTerminal => Ok(true),
+        InProcessReservationRaceState::Running => {
+            if !active {
+                let snapshot = authoritative
+                    .as_ref()
+                    .expect("running race state requires authoritative snapshot");
+                let _ = fail_ownerless_in_process_reservation(
+                    state,
+                    mode,
+                    thread_id,
+                    snapshot.status.as_str(),
+                )?;
+            }
+            Ok(true)
+        }
+        InProcessReservationRaceState::PendingBirthPublished => {
+            let snapshot = authoritative
+                .as_ref()
+                .expect("published birth race state requires authoritative snapshot");
+            state
+                .state_store
+                .reconcile_in_process_handler_birth_running(thread_id)?;
+            if !active {
+                let _ = fail_ownerless_in_process_reservation(
+                    state,
+                    mode,
+                    thread_id,
+                    snapshot.status.as_str(),
+                )?;
+            }
+            Ok(true)
+        }
+        InProcessReservationRaceState::OwnerlessTerminal => {
+            let snapshot = authoritative
+                .as_ref()
+                .expect("terminal race state requires authoritative snapshot");
+            repair_authoritative_recorded_service_terminal(state, snapshot)?;
+            let _ = retire_terminal_in_process_reservation(state, thread_id)?;
+            Ok(true)
+        }
+        InProcessReservationRaceState::Diverged => Err(operation_error).with_context(|| {
+            format!(
+                "in-process reservation race for {thread_id} did not converge (reservation={reservation:?}, authoritative_status={:?})",
+                authoritative.map(|snapshot| snapshot.status)
+            )
+        }),
+    }
+}
+
+fn fail_ownerless_in_process_reservation(
+    state: &AppState,
+    mode: ActiveReconcileMode,
+    thread_id: &str,
+    prior_status: &str,
+) -> Result<bool> {
+    let recovery_mode = match mode {
+        ActiveReconcileMode::Startup => "startup",
+        ActiveReconcileMode::Live => "live",
+    };
+    let params = ThreadFinalizeParams {
+        thread_id: thread_id.to_string(),
+        status: "failed".to_string(),
+        outcome_code: Some("service_interrupted".to_string()),
+        result: None,
+        error: Some(json!({
+            "code": "service_interrupted",
+            "message": "recorded in-process handler lost its daemon-owned terminal outcome",
+            "recovery_mode": recovery_mode,
+            "reconciled_from_status": prior_status,
+        })),
+        metadata: None,
+        artifacts: Vec::new(),
+        final_cost: None,
+        summary_json: None,
+    };
+    match state
+        .threads
+        .finalize_ownerless_recorded_service_if_nonterminal(&params)
+    {
+        Ok(Some(ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::Finalized(_))) => {}
+        Ok(Some(ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::AlreadyTerminal {
+            ..
+        })) => {
+            let snapshot = state
+                .state_store
+                .get_authoritative_root_thread_snapshot(thread_id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "ownerless in-process handler {thread_id} lost its authoritative terminal"
+                    )
+                })?;
+            repair_authoritative_recorded_service_terminal(state, &snapshot)?;
+        }
+        Ok(Some(
+            ryeos_app::thread_lifecycle::FinalizeIfNonterminalOutcome::PreservedForShutdown,
+        )) => {
+            return Ok(false);
+        }
+        Ok(None) => return Ok(false),
+        Err(error) => {
+            // A failed acknowledgement may follow a committed terminal write.
+            // Exact authoritative readback owns the decision; never replay the
+            // handler or overwrite a committed outcome.
+            let Some(snapshot) = state
+                .state_store
+                .get_authoritative_root_thread_snapshot(thread_id)?
+            else {
+                return Err(error);
+            };
+            if !snapshot.status.is_terminal() {
+                return Err(error);
+            }
+            repair_authoritative_recorded_service_terminal(state, &snapshot)?;
+        }
+    }
+    let _ = retire_terminal_in_process_reservation(state, thread_id)?;
+    tracing::warn!(
+        thread_id,
+        recovery_mode,
+        "failed ownerless recorded in-process handler without replay"
+    );
+    Ok(true)
+}
+
+/// Converge the durable birth reservation independently of replaceable thread
+/// projections and arbitrary launch-metadata scans.
+fn reconcile_in_process_handler_reservations(
+    state: &AppState,
+    mode: ActiveReconcileMode,
+) -> Result<usize> {
+    use ryeos_app::runtime_db::InProcessHandlerReservationPhase;
+
+    let mut reconciled = 0usize;
+    let mut after_thread_id = None;
+    loop {
+        let reservations = state.state_store.in_process_handler_reservations_after(
+            after_thread_id.as_deref(),
+            ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+        )?;
+        if reservations.is_empty() {
+            break;
+        }
+        for reservation in reservations {
+            after_thread_id = Some(reservation.thread_id.clone());
+            let active = mode == ActiveReconcileMode::Live
+                && state
+                    .state_store
+                    .is_in_process_handler_active(&reservation.thread_id)?;
+            let authoritative = state
+                .state_store
+                .get_authoritative_root_thread_snapshot(&reservation.thread_id)?;
+            match (reservation.phase, authoritative) {
+                (InProcessHandlerReservationPhase::Pending, None) if active => {
+                    // The registered owner is between its atomic RuntimeDb
+                    // reservation and CAS publication.
+                }
+                (InProcessHandlerReservationPhase::Pending, None) => {
+                    let discarded = state
+                        .state_store
+                        .discard_uncommitted_in_process_handler_birth(&reservation.thread_id);
+                    match discarded {
+                        Ok(true) => {}
+                        Ok(false)
+                            if state
+                                .state_store
+                                .in_process_handler_reservation(&reservation.thread_id)?
+                                .is_none() => {}
+                        Ok(false) => anyhow::bail!(
+                            "pending in-process reservation {} refused birth cleanup",
+                            reservation.thread_id
+                        ),
+                        Err(error) => {
+                            in_process_reservation_race_converged(
+                                state,
+                                mode,
+                                &reservation.thread_id,
+                                active,
+                                error,
+                            )?;
+                        }
+                    }
+                    reconciled += 1;
+                    tracing::warn!(
+                        thread_id = %reservation.thread_id,
+                        "discarded pending in-process birth with no authoritative root"
+                    );
+                }
+                (InProcessHandlerReservationPhase::Running, None) => {
+                    anyhow::bail!(
+                        "running in-process reservation {} has no authoritative root",
+                        reservation.thread_id
+                    );
+                }
+                (InProcessHandlerReservationPhase::TerminalConfirmed, None) => {
+                    anyhow::bail!(
+                        "terminal-confirmed in-process reservation {} has no authoritative root",
+                        reservation.thread_id
+                    );
+                }
+                (InProcessHandlerReservationPhase::Pending, Some(snapshot))
+                    if snapshot.status == ryeos_state::objects::ThreadStatus::Running =>
+                {
+                    if let Err(error) = state
+                        .state_store
+                        .reconcile_in_process_handler_birth_running(&reservation.thread_id)
+                    {
+                        in_process_reservation_race_converged(
+                            state,
+                            mode,
+                            &reservation.thread_id,
+                            active,
+                            error,
+                        )?;
+                    }
+                    reconciled += 1;
+                    if !active
+                        && fail_ownerless_in_process_reservation(
+                            state,
+                            mode,
+                            &reservation.thread_id,
+                            snapshot.status.as_str(),
+                        )?
+                    {
+                        reconciled += 1;
+                    }
+                }
+                (_, Some(snapshot)) if snapshot.status.is_terminal() && !active => {
+                    repair_authoritative_recorded_service_terminal(state, &snapshot)?;
+                    let _ = retire_terminal_in_process_reservation(state, &reservation.thread_id)?;
+                    reconciled += 1;
+                    tracing::debug!(
+                        thread_id = %reservation.thread_id,
+                        terminal_status = %snapshot.status.as_str(),
+                        "retired terminal in-process reservation"
+                    );
+                }
+                (_, Some(snapshot)) if snapshot.status.is_terminal() => {
+                    // The live owner may still be exact-confirming its authored
+                    // terminal fields. It owns reservation settlement.
+                }
+                (InProcessHandlerReservationPhase::Running, Some(snapshot))
+                    if snapshot.status == ryeos_state::objects::ThreadStatus::Running =>
+                {
+                    if !active
+                        && fail_ownerless_in_process_reservation(
+                            state,
+                            mode,
+                            &reservation.thread_id,
+                            snapshot.status.as_str(),
+                        )?
+                    {
+                        reconciled += 1;
+                    }
+                }
+                (InProcessHandlerReservationPhase::TerminalConfirmed, Some(snapshot)) => {
+                    anyhow::bail!(
+                        "terminal-confirmed in-process reservation {} contradicts authoritative status {}",
+                        reservation.thread_id,
+                        snapshot.status.as_str()
+                    );
+                }
+                (_, Some(snapshot)) => {
+                    anyhow::bail!(
+                        "in-process reservation {} in phase {:?} contradicts authoritative status {}",
+                        reservation.thread_id,
+                        reservation.phase,
+                        snapshot.status.as_str()
+                    );
+                }
+            }
+        }
+    }
+    Ok(reconciled)
+}
+
+/// Settle a recorded in-process invocation whose volatile daemon owner is no
+/// longer available. The handler is deliberately never replayed: after owner
+/// loss there is no durable authority for its bounded result or side effects.
+fn reconcile_in_process_handler(
+    state: &AppState,
+    mode: ActiveReconcileMode,
+    thread: &ThreadDetail,
+    reconciled: &mut usize,
+) -> Result<bool> {
+    if !has_in_process_handler_driver(thread) {
+        return Ok(false);
+    }
+    let authoritative = state
+        .state_store
+        .get_authoritative_root_thread_snapshot(&thread.thread_id)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "recorded in-process handler {} has no authoritative root snapshot",
+                thread.thread_id
+            )
+        })?;
+    if !authoritative.status.is_terminal()
+        && state
+            .state_store
+            .in_process_handler_reservation(&thread.thread_id)?
+            .is_none()
+    {
+        anyhow::bail!(
+            "nonterminal in-process handler {} has no durable reservation",
+            thread.thread_id
+        );
+    }
+    if mode == ActiveReconcileMode::Live
+        && state
+            .state_store
+            .is_in_process_handler_active(&thread.thread_id)?
+    {
+        tracing::debug!(
+            thread_id = %thread.thread_id,
+            status = %thread.status,
+            "recorded in-process handler remains owned by this daemon"
+        );
+        return Ok(true);
+    }
+    if ryeos_app::state_store::is_terminal_status(authoritative.status.as_str()) {
+        // Refresh the pending-transition observation here rather than merely
+        // assuming that a stale projection has a repair owner. This wakes the
+        // background repair loop when the durable journal contains the missed
+        // projection write. A mismatch with a reportedly current projection
+        // is an integrity fault, not a condition to skip forever.
+        let projection = state.state_store.projection_health_snapshot();
+        let current_projection = state.state_store.get_thread(&thread.thread_id)?;
+        if terminal_projection_integrity_fault(
+            authoritative.status.as_str(),
+            current_projection
+                .as_ref()
+                .map(|current| current.status.as_str()),
+            &projection,
+        ) {
+            let current_status = current_projection
+                .as_ref()
+                .map(|current| current.status.as_str())
+                .expect("mismatched current projection exists");
+            anyhow::bail!(
+                "recorded in-process handler {} is terminal in authoritative state ({}) but its current projection reports {} with no pending repair",
+                thread.thread_id,
+                authoritative.status.as_str(),
+                current_status
+            );
+        }
+        tracing::debug!(
+            thread_id = %thread.thread_id,
+            terminal_status = %authoritative.status.as_str(),
+            "recorded in-process handler is terminal in authoritative state; projection repair remains pending"
+        );
+        return Ok(true);
+    }
+
+    if fail_ownerless_in_process_reservation(state, mode, &thread.thread_id, &thread.status)? {
+        *reconciled += 1;
+    }
+    Ok(true)
+}
+
+fn terminal_projection_integrity_fault(
+    authoritative_status: &str,
+    current_projection_status: Option<&str>,
+    projection: &ryeos_app::projection_health::ThreadProjectionHealthSnapshot,
+) -> bool {
+    current_projection_status.is_some_and(|current| current != authoritative_status)
+        && projection.status == ryeos_app::projection_health::ThreadProjectionState::Current
+        && projection.pending_transitions == 0
+}
+
 fn finalize_recovered_stop(
     state: &AppState,
     thread_id: &str,
@@ -473,6 +1011,7 @@ async fn reconcile_active_threads_inner(
 ) -> Result<ActiveThreadReconcileReport> {
     repair_detached_spawn_links(state)?;
     let blocked_freezes = reconcile_execution_workspaces(state, mode)?;
+    let mut reconciled = reconcile_in_process_handler_reservations(state, mode)?;
     // Orphan thread cleanup.
     let mut running_threads = state
         .state_store
@@ -510,10 +1049,12 @@ async fn reconcile_active_threads_inner(
         "checking non-terminal threads"
     );
 
-    let mut reconciled = 0usize;
     let mut intents: Vec<ResumeIntent> = Vec::new();
 
     for thread in &running_threads {
+        if reconcile_in_process_handler(state, mode, thread, &mut reconciled)? {
+            continue;
+        }
         if blocked_freezes.contains(&thread.thread_id) {
             tracing::error!(
                 thread_id = %thread.thread_id,
@@ -2144,6 +2685,76 @@ mod tests {
             fingerprint: "fp:test".into(),
             scopes: vec!["execute".into()],
         })
+    }
+
+    #[test]
+    fn in_process_reservation_race_classification_covers_every_convergence_arm() {
+        use ryeos_app::runtime_db::InProcessHandlerReservationPhase::{Pending, Running};
+        use ryeos_state::objects::ThreadStatus::{Completed, Created, Running as ThreadRunning};
+
+        assert_eq!(
+            classify_in_process_reservation_race(None, None, false),
+            InProcessReservationRaceState::Removed
+        );
+        assert_eq!(
+            classify_in_process_reservation_race(None, Some(Completed), false),
+            InProcessReservationRaceState::TerminalWithoutReservation
+        );
+        assert_eq!(
+            classify_in_process_reservation_race(Some(Running), Some(ThreadRunning), false,),
+            InProcessReservationRaceState::Running
+        );
+        assert_eq!(
+            classify_in_process_reservation_race(Some(Pending), Some(ThreadRunning), false,),
+            InProcessReservationRaceState::PendingBirthPublished
+        );
+        assert_eq!(
+            classify_in_process_reservation_race(Some(Running), Some(Completed), true),
+            InProcessReservationRaceState::ActiveTerminal
+        );
+        assert_eq!(
+            classify_in_process_reservation_race(Some(Running), Some(Completed), false),
+            InProcessReservationRaceState::OwnerlessTerminal
+        );
+        assert_eq!(
+            classify_in_process_reservation_race(Some(Pending), Some(Created), false),
+            InProcessReservationRaceState::Diverged
+        );
+    }
+
+    #[test]
+    fn terminal_projection_integrity_uses_the_current_row_not_a_pass_start_status() {
+        let current = ryeos_app::projection_health::ThreadProjectionHealthSnapshot {
+            status: ryeos_app::projection_health::ThreadProjectionState::Current,
+            generation: 1,
+            pending_transitions: 0,
+            chain_root_id: None,
+            operation: None,
+            error: None,
+        };
+        assert!(
+            !terminal_projection_integrity_fault("completed", Some("completed"), &current),
+            "a current re-read that matches authoritative terminal state must defeat a stale pass-start observation"
+        );
+        assert!(
+            terminal_projection_integrity_fault("completed", Some("running"), &current),
+            "a genuine mismatch with no pending repair remains an integrity fault"
+        );
+        assert!(
+            !terminal_projection_integrity_fault("completed", None, &current),
+            "an absent row during projection rebuild is repaired rather than treated as contradictory"
+        );
+
+        let repairing = ryeos_app::projection_health::ThreadProjectionHealthSnapshot {
+            status: ryeos_app::projection_health::ThreadProjectionState::Stale,
+            pending_transitions: 1,
+            ..current
+        };
+        assert!(!terminal_projection_integrity_fault(
+            "completed",
+            Some("running"),
+            &repairing
+        ));
     }
 
     fn ctx() -> ResumeContext {

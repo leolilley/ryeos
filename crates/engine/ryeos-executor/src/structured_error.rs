@@ -145,6 +145,14 @@ impl StructuredErrorPayload {
     }
 }
 
+/// Exact public body for a typed dispatch failure.
+pub fn dispatch_error_value(error: &crate::dispatch_error::DispatchError) -> serde_json::Value {
+    match error {
+        crate::dispatch_error::DispatchError::StructuredService { body, .. } => body.clone(),
+        _ => StructuredErrorPayload::from(error).to_value(),
+    }
+}
+
 impl From<&crate::dispatch_error::DispatchError> for StructuredErrorPayload {
     fn from(e: &crate::dispatch_error::DispatchError) -> Self {
         use crate::dispatch_error::DispatchError;
@@ -227,6 +235,23 @@ mod tests {
             v.get("details").is_none(),
             "generic must not include details"
         );
+    }
+
+    #[test]
+    fn structured_service_payload_is_preserved_exactly() {
+        let body = serde_json::json!({
+            "error_code": "planning_authority_mismatch",
+            "details": {"field": "project_authority"},
+        });
+        let error = crate::dispatch_error::DispatchError::StructuredService {
+            code: "planning_authority_mismatch".to_string(),
+            status: 409,
+            body: body.clone(),
+        };
+
+        assert_eq!(dispatch_error_value(&error), body);
+        assert_eq!(error.http_status(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(error.code(), "planning_authority_mismatch");
     }
 
     #[test]

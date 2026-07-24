@@ -137,6 +137,68 @@ fn classify_follow_up(status: &str, thread_id: &str) -> FollowUpDecision {
     FollowUpDecision::Continue
 }
 
+fn ensure_execution_identity_continuity(
+    previous: &ryeos_app::state_store::ThreadDetail,
+    prior_resume: &ryeos_app::launch_metadata::ResumeContext,
+) -> Result<(), HandlerError> {
+    let mut mismatches = Vec::new();
+    if prior_resume.kind != previous.kind {
+        mismatches.push("kind");
+    }
+    if prior_resume.item_ref != previous.item_ref {
+        mismatches.push("item_ref");
+    }
+    if prior_resume.executor_ref.as_deref() != Some(previous.executor_ref.as_str()) {
+        mismatches.push("executor_ref");
+    }
+    if prior_resume.launch_mode != previous.launch_mode {
+        mismatches.push("launch_mode");
+    }
+    if prior_resume.current_site_id != previous.current_site_id {
+        mismatches.push("current_site_id");
+    }
+    if prior_resume.origin_site_id != previous.origin_site_id {
+        mismatches.push("origin_site_id");
+    }
+    if previous.requested_by.as_deref() != Some(prior_resume.principal_identifier()) {
+        mismatches.push("requested_by");
+    }
+    if previous.lifecycle_authority != Some(prior_resume.lifecycle_authority) {
+        mismatches.push("lifecycle_authority");
+    }
+
+    let row_authority = previous.project_authority.as_ref();
+    if row_authority != Some(&prior_resume.project_authority) {
+        mismatches.push("project_authority");
+    }
+    let row_root_projection = previous.project_root.as_deref().map(std::path::Path::new);
+    if row_root_projection != prior_resume.project_authority.project_root_projection()
+        || row_authority.and_then(|authority| authority.project_root_projection())
+            != row_root_projection
+    {
+        mismatches.push("project_root_projection");
+    }
+    if row_authority.and_then(|authority| authority.base_snapshot_projection())
+        != prior_resume.project_authority.base_snapshot_projection()
+    {
+        mismatches.push("base_project_snapshot_projection");
+    }
+
+    if mismatches.is_empty() {
+        return Ok(());
+    }
+    Err(HandlerError::Structured {
+        code: "execution_identity_continuity_mismatch".to_string(),
+        status: axum::http::StatusCode::CONFLICT.as_u16(),
+        body: json!({
+            "code": "execution_identity_continuity_mismatch",
+            "error": "predecessor row and persisted execution identity disagree",
+            "thread_id": previous.thread_id,
+            "mismatches": mismatches,
+        }),
+    })
+}
+
 fn authorize_execution_refs(
     item_ref: &str,
     ref_bindings: &BTreeMap<String, String>,
@@ -172,7 +234,7 @@ fn dispatch_error(error: ryeos_executor::dispatch_error::DispatchError) -> Handl
     HandlerError::Structured {
         code: error.code().to_string(),
         status: error.http_status().as_u16(),
-        body: ryeos_executor::structured_error::StructuredErrorPayload::from(&error).to_value(),
+        body: ryeos_executor::structured_error::dispatch_error_value(&error),
     }
 }
 
@@ -306,6 +368,7 @@ fn admit_fresh_launch(
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
     ref_bindings: &BTreeMap<String, String>,
     project: &ryeos_executor::execution::project_source::ResolvedProjectContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     parameters: &Value,
     ctx: &HandlerContext,
     state: &AppState,
@@ -315,6 +378,7 @@ fn admit_fresh_launch(
         state,
         item_ref,
         project,
+        provenance,
         parameters,
         ref_bindings,
         &ctx.fingerprint,
@@ -417,23 +481,24 @@ pub async fn handle(
                     &state.isolation,
                 )
                 .map_err(|error| HandlerError::Internal(error.to_string()))?;
+            let launch_provenance =
+                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+                    project_ctx.effective_path.clone(),
+                    project_ctx.request_engine.clone(),
+                    resolved_authority.project.clone(),
+                )
+                .map_err(|error| HandlerError::Internal(error.to_string()))?;
             let launch_options = admit_fresh_launch(
                 &parsed_ref,
                 &ref_bindings,
                 &project_ctx,
+                &launch_provenance,
                 &parameters,
                 &ctx,
                 &state,
                 resolved_authority.lifecycle,
             )?
             .retain_captured_generation(project_ctx.take_captured_generation());
-            let launch_provenance =
-                ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-                    project_ctx.effective_path.clone(),
-                    project_ctx.request_engine.clone(),
-                    resolved_authority.project,
-                )
-                .map_err(|error| HandlerError::Internal(error.to_string()))?;
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,
                 parsed_ref,
@@ -615,26 +680,7 @@ pub async fn handle(
                 previous.thread_id
             ))
         })?;
-    if prior_resume.kind != previous.kind
-        || prior_resume.item_ref != previous.item_ref
-        || prior_resume.launch_mode != previous.launch_mode
-        || prior_resume.current_site_id != previous.current_site_id
-        || prior_resume.origin_site_id != previous.origin_site_id
-        || prior_resume
-            .executor_ref
-            .as_deref()
-            .is_some_and(|executor_ref| executor_ref != previous.executor_ref)
-    {
-        return Err(HandlerError::Structured {
-            code: "execution_identity_continuity_mismatch".to_string(),
-            status: axum::http::StatusCode::CONFLICT.as_u16(),
-            body: json!({
-                "code": "execution_identity_continuity_mismatch",
-                "error": "predecessor row and persisted execution identity disagree",
-                "thread_id": previous.thread_id,
-            }),
-        });
-    }
+    ensure_execution_identity_continuity(&previous, &prior_resume)?;
     authorize_execution_refs(
         &prior_resume.item_ref,
         &prior_resume.ref_bindings,
@@ -831,6 +877,202 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pinned_authority(
+        realization: ryeos_state::objects::PinnedProjectRealization,
+        capability_ceiling: Vec<String>,
+    ) -> ryeos_state::objects::ExecutionProjectAuthority {
+        ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "site:test:/project/a".to_string(),
+            Some(std::path::PathBuf::from("/project/a")),
+            "a".repeat(64),
+            realization,
+            ryeos_state::objects::EnvironmentAuthority::None,
+            capability_ceiling,
+        )
+        .unwrap()
+    }
+
+    fn resume_identity(
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> ryeos_app::launch_metadata::ResumeContext {
+        ryeos_app::launch_metadata::ResumeContext {
+            kind: "directive_run".to_string(),
+            item_ref: "directive:test/identity".to_string(),
+            ref_bindings: std::collections::BTreeMap::new(),
+            launch_mode: "detached".to_string(),
+            parameters: json!({}),
+            project_context: ryeos_engine::contracts::ProjectContext::SnapshotHash {
+                hash: "a".repeat(64),
+            },
+            project_authority,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity: None,
+            local_overlay_root: None,
+            original_snapshot_hash: Some("a".repeat(64)),
+            original_pushed_head_ref: None,
+            state_root: None,
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:origin".to_string(),
+            requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                ryeos_engine::contracts::Principal {
+                    fingerprint: "user:test".to_string(),
+                    scopes: Vec::new(),
+                },
+            ),
+            execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+            effective_caps: Vec::new(),
+            parent_delegation_caps: None,
+            executor_ref: Some("executor:test/directive".to_string()),
+            runtime_ref: Some("runtime:test/directive".to_string()),
+        }
+    }
+
+    fn predecessor_identity(
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> ryeos_app::state_store::ThreadDetail {
+        ryeos_app::state_store::ThreadDetail {
+            thread_id: "T-identity".to_string(),
+            chain_root_id: "T-identity".to_string(),
+            kind: "directive_run".to_string(),
+            status: "completed".to_string(),
+            item_ref: "directive:test/identity".to_string(),
+            executor_ref: "executor:test/directive".to_string(),
+            launch_mode: "detached".to_string(),
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:origin".to_string(),
+            upstream_thread_id: None,
+            successor_thread_id: None,
+            requested_by: Some("user:test".to_string()),
+            project_root: project_authority
+                .project_root_projection()
+                .map(|path| path.display().to_string()),
+            project_authority: Some(project_authority),
+            lifecycle_authority: Some(
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            ),
+            admitted_launch_capsule_hash: None,
+            created_at: "2026-07-24T00:00:00Z".to_string(),
+            updated_at: "2026-07-24T00:00:00Z".to_string(),
+            started_at: Some("2026-07-24T00:00:00Z".to_string()),
+            finished_at: Some("2026-07-24T00:00:01Z".to_string()),
+            runtime: ryeos_app::runtime_db::RuntimeInfo::default(),
+        }
+    }
+
+    #[test]
+    fn exact_execution_identity_continuity_accepts_the_same_authority() {
+        let authority = pinned_authority(
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            Vec::new(),
+        );
+        let previous = predecessor_identity(authority.clone());
+        let resume = resume_identity(authority);
+
+        ensure_execution_identity_continuity(&previous, &resume).unwrap();
+    }
+
+    #[test]
+    fn exact_execution_identity_continuity_rejects_requested_by_mismatch() {
+        let authority = pinned_authority(
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            Vec::new(),
+        );
+        let mut previous = predecessor_identity(authority.clone());
+        previous.requested_by = Some("user:other".to_string());
+        let error = ensure_execution_identity_continuity(&previous, &resume_identity(authority))
+            .expect_err("operator continuation must retain the admitted principal");
+        match error {
+            HandlerError::Structured { code, status, body } => {
+                assert_eq!(code, "execution_identity_continuity_mismatch");
+                assert_eq!(status, axum::http::StatusCode::CONFLICT.as_u16());
+                assert_eq!(body["mismatches"], json!(["requested_by"]));
+            }
+            other => panic!("expected structured continuity conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_execution_identity_continuity_rejects_lifecycle_authority_mismatch() {
+        let authority = pinned_authority(
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            Vec::new(),
+        );
+        let mut previous = predecessor_identity(authority.clone());
+        previous.lifecycle_authority =
+            Some(ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE);
+        let error = ensure_execution_identity_continuity(&previous, &resume_identity(authority))
+            .expect_err("operator continuation must retain exact lifecycle authority");
+        match error {
+            HandlerError::Structured { code, status, body } => {
+                assert_eq!(code, "execution_identity_continuity_mismatch");
+                assert_eq!(status, axum::http::StatusCode::CONFLICT.as_u16());
+                assert_eq!(body["mismatches"], json!(["lifecycle_authority"]));
+            }
+            other => panic!("expected structured continuity conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_execution_identity_continuity_rejects_authority_only_changes() {
+        let authority = pinned_authority(
+            ryeos_state::objects::PinnedProjectRealization::ReadOnly,
+            Vec::new(),
+        );
+        let previous = predecessor_identity(authority.clone());
+        let alternatives = [
+            authority
+                .clone()
+                .with_capability_ceiling(vec!["ryeos.execute.tool.test".to_string()])
+                .unwrap(),
+            pinned_authority(
+                ryeos_state::objects::PinnedProjectRealization::Cow {
+                    terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+                },
+                Vec::new(),
+            ),
+            authority
+                .with_child_policy(
+                    ryeos_state::objects::ChildProjectAuthorityPolicy::PinAtSpawn {
+                        realization: ryeos_state::objects::PinnedChildProjectRealization::ReadOnly,
+                    },
+                )
+                .unwrap(),
+        ];
+
+        for alternative in alternatives {
+            assert_eq!(
+                alternative.project_root_projection(),
+                previous
+                    .project_authority
+                    .as_ref()
+                    .and_then(|authority| authority.project_root_projection())
+            );
+            assert_eq!(
+                alternative.base_snapshot_projection(),
+                previous
+                    .project_authority
+                    .as_ref()
+                    .and_then(|authority| authority.base_snapshot_projection())
+            );
+            let error =
+                ensure_execution_identity_continuity(&previous, &resume_identity(alternative))
+                    .unwrap_err();
+            match error {
+                HandlerError::Structured { code, status, body } => {
+                    assert_eq!(code, "execution_identity_continuity_mismatch");
+                    assert_eq!(status, axum::http::StatusCode::CONFLICT.as_u16());
+                    assert_eq!(
+                        body["mismatches"],
+                        json!(["project_authority"]),
+                        "equal root/snapshot projections must not hide structural authority drift"
+                    );
+                }
+                other => panic!("expected structured continuity conflict, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn staged_notice_reports_depth() {

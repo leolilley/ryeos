@@ -110,11 +110,25 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             })?,
         )
         .map_err(|error| RouteDispatchError::Internal(format!("captured project path: {error}")))?;
+        let resolved_authority =
+            ryeos_app::execution_policy::resolve_standard_local_live_authority(
+                &project_ctx.effective_path,
+                principal_scopes.clone(),
+                &ctx.state.isolation,
+            )
+            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
+            project_ctx.effective_path.clone(),
+            project_ctx.request_engine.clone(),
+            resolved_authority.project.clone(),
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
 
         let preflight = crate::routes::launch::preflight_dispatch_launch(
             &ctx.state,
             &item_ref,
             &project_ctx,
+            &launch_provenance,
             &parameters,
             &ref_bindings,
             &principal_id,
@@ -141,13 +155,6 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                 "threaded dispatch preflight returned no root admission".to_string(),
             )
         })?;
-        let resolved_authority =
-            ryeos_app::execution_policy::resolve_standard_local_live_authority(
-                &project_ctx.effective_path,
-                principal_scopes.clone(),
-                &ctx.state.isolation,
-            )
-            .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
             effective_project.as_path(),
@@ -170,12 +177,6 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             item_ref_kind = item_ref.kind(),
         );
 
-        let launch_provenance = ryeos_app::execution_provenance::ExecutionProvenance::root_live_fs(
-            project_ctx.effective_path.clone(),
-            project_ctx.request_engine.clone(),
-            resolved_authority.project,
-        )
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
         let (mut handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
             item_ref,
@@ -196,6 +197,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
                         code: failure.code,
                         status: failure.status,
                         body: failure.body,
+                        thread_id: None,
                     });
                 }
                 Err(_) => {
@@ -260,8 +262,8 @@ fn launch_task_error(
             RouteDispatchError::Structured {
                 code: error.code().to_string(),
                 status: error.http_status().as_u16(),
-                body: ryeos_executor::structured_error::StructuredErrorPayload::from(&error)
-                    .to_value(),
+                body: ryeos_executor::structured_error::dispatch_error_value(&error),
+                thread_id: None,
             }
         }
         Ok(Err(crate::routes::launch::LaunchSpawnError::InvalidRef { ref_str, reason })) => {
@@ -274,6 +276,7 @@ fn launch_task_error(
                 "code": error.code(),
                 "error": error.to_string(),
             }),
+            thread_id: None,
         },
         Ok(Ok(())) => RouteDispatchError::Internal(
             "launch completed without authoritative handoff".to_string(),

@@ -124,7 +124,12 @@ pub struct RouteInvocationContext {
 /// one is an `Internal` error.
 pub enum RouteInvocationResult {
     /// Synchronous JSON result (for `json` mode).
-    Json(Value),
+    Json {
+        value: Value,
+        /// Durable recorded-service identity exposed as
+        /// `x-ryeos-thread-id` without changing the authored JSON body.
+        thread_id: Option<String>,
+    },
     /// SSE event stream (for `event_stream` mode).
     Stream(RouteEventStream),
     /// Auth principal (for auth verifiers, never seen by modes).
@@ -137,12 +142,32 @@ impl RouteInvocationResult {
     /// Debug name for error messages.
     pub fn variant_name(&self) -> &'static str {
         match self {
-            Self::Json(_) => "Json",
+            Self::Json { .. } => "Json",
             Self::Stream(_) => "Stream",
             Self::Principal(_) => "Principal",
             Self::Accepted { .. } => "Accepted",
         }
     }
+}
+
+/// Attach the durable recorded-service identity without changing the authored
+/// response body. Every JSON-producing response mode uses this one framing
+/// boundary so recorded and unrecorded behavior cannot drift by mode.
+pub(crate) fn attach_recorded_thread_header(
+    response: &mut axum::response::Response,
+    thread_id: Option<&str>,
+) -> Result<(), RouteDispatchError> {
+    if let Some(thread_id) = thread_id {
+        response.headers_mut().insert(
+            "x-ryeos-thread-id",
+            axum::http::HeaderValue::from_str(thread_id).map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "recorded service produced an invalid thread id header: {error}"
+                ))
+            })?,
+        );
+    }
+    Ok(())
 }
 
 /// Envelope stream returned by streaming invokers.
@@ -271,19 +296,19 @@ pub async fn invoke_checked(
     // 4. Verify result type matches declared contract.
     let result_matches = matches!(
         (&result, contract.output),
-        (RouteInvocationResult::Json(_), RouteInvocationOutput::Json)
-            | (
-                RouteInvocationResult::Stream(_),
-                RouteInvocationOutput::Stream
-            )
-            | (
-                RouteInvocationResult::Principal(_),
-                RouteInvocationOutput::Principal
-            )
-            | (
-                RouteInvocationResult::Accepted { .. },
-                RouteInvocationOutput::Accepted
-            )
+        (
+            RouteInvocationResult::Json { .. },
+            RouteInvocationOutput::Json,
+        ) | (
+            RouteInvocationResult::Stream(_),
+            RouteInvocationOutput::Stream
+        ) | (
+            RouteInvocationResult::Principal(_),
+            RouteInvocationOutput::Principal
+        ) | (
+            RouteInvocationResult::Accepted { .. },
+            RouteInvocationOutput::Accepted
+        )
     );
 
     if !result_matches {
@@ -299,6 +324,8 @@ pub async fn invoke_checked(
 
 #[cfg(test)]
 mod origin_tests {
+    use axum::response::IntoResponse;
+
     use super::*;
 
     #[test]
@@ -322,5 +349,19 @@ mod origin_tests {
             authenticated_execution_origin(None, "site:local"),
             "site:local"
         );
+    }
+
+    #[test]
+    fn recorded_thread_header_is_present_only_for_recorded_results() {
+        let mut recorded = axum::Json(serde_json::json!({"ok": true})).into_response();
+        attach_recorded_thread_header(&mut recorded, Some("svc-test")).unwrap();
+        assert_eq!(
+            recorded.headers().get("x-ryeos-thread-id").unwrap(),
+            "svc-test"
+        );
+
+        let mut unrecorded = axum::Json(serde_json::json!({"ok": true})).into_response();
+        attach_recorded_thread_header(&mut unrecorded, None).unwrap();
+        assert!(unrecorded.headers().get("x-ryeos-thread-id").is_none());
     }
 }

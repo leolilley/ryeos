@@ -266,6 +266,13 @@ pub enum DispatchError {
     /// `Display` is the bare actionable message. Maps to 409.
     #[error("{0}")]
     Conflict(String),
+    /// Exact machine-readable error supplied by a typed service handler.
+    #[error("structured service error: {code}")]
+    StructuredService {
+        code: String,
+        status: u16,
+        body: serde_json::Value,
+    },
     // ── Target-site forwarding errors ────────────────────────────
     /// The requested target site is not configured as a remote.
     #[error("unknown target site '{target_site_id}'; configured sites: [{known_sites}]")]
@@ -323,6 +330,10 @@ pub enum DispatchError {
     /// side effect.
     #[error("hook dispatch integrity failure: {detail}")]
     HookDispatchIntegrity { detail: String },
+    /// A recorded in-process service cannot return until its exact terminal
+    /// outcome is durably confirmed.
+    #[error("recording integrity failure: {detail}")]
+    RecordingIntegrity { detail: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -387,6 +398,9 @@ impl DispatchError {
             | Self::TargetSiteUnsupported { .. }
             | Self::TargetSiteResolutionFailed { .. } => StatusCode::BAD_REQUEST,
             Self::ExecutionNotRestartEligible { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::StructuredService { status, .. } => {
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            }
             Self::LaunchPreparationFailed { classification, .. } if classification == "caller" => {
                 StatusCode::BAD_REQUEST
             }
@@ -407,6 +421,7 @@ impl DispatchError {
             }
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
             Self::HookDispatchIntegrity { .. }
+            | Self::RecordingIntegrity { .. }
             | Self::Internal(_)
             | Self::TargetSiteForwardInternal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -444,6 +459,7 @@ impl DispatchError {
             Self::MissingCap { .. } => "missing_cap",
             Self::NotFound => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::StructuredService { code, .. } => code,
             Self::UnknownMethod { .. } => "unknown_method",
             Self::MethodInvalidArg { .. } => "method_invalid_arg",
             Self::MethodFailed { .. } => "method_failed",
@@ -462,6 +478,7 @@ impl DispatchError {
             Self::HookDispatchIntegrity { .. } => {
                 ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
             }
+            Self::RecordingIntegrity { .. } => "recording_integrity",
             Self::Internal(_) => "internal",
         }
     }
@@ -552,6 +569,16 @@ mod tests {
             error.code(),
             ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
         );
+        assert!(!error.retryable());
+    }
+
+    #[test]
+    fn recording_integrity_is_internal_and_never_retryable() {
+        let error = DispatchError::RecordingIntegrity {
+            detail: "terminal outcome was not confirmed".to_string(),
+        };
+        assert_eq!(error.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code(), "recording_integrity");
         assert!(!error.retryable());
     }
 

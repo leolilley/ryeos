@@ -188,12 +188,12 @@ impl DispatchLaunchOptions {
                 execution_workspace.display()
             )
         })?;
-        if let Some(admitted_project_root) = root_admission.project_root() {
-            if admitted_project_root != project_path {
+        if let Some(admitted_workspace) = root_admission.execution_workspace() {
+            if admitted_workspace != project_path {
                 anyhow::bail!(
-                    "dispatch launch workspace {} differs from sealed project root {}",
+                    "dispatch launch workspace {} differs from sealed execution materialization {}",
                     project_path.display(),
-                    admitted_project_root.display()
+                    admitted_workspace.display()
                 );
             }
         }
@@ -233,6 +233,7 @@ pub(crate) fn preflight_dispatch_launch(
     state: &AppState,
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
     project: &ryeos_executor::execution::project_source::ResolvedProjectContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     parameters: &Value,
     ref_bindings: &BTreeMap<String, String>,
     principal_id: &str,
@@ -250,6 +251,7 @@ pub(crate) fn preflight_dispatch_launch(
         item_ref,
         project_path: &project.effective_path,
         request_engine: &project.request_engine,
+        provenance,
         parameters,
         ref_bindings,
         principal_id,
@@ -269,6 +271,7 @@ struct BorrowedDispatchPreflight<'a> {
     item_ref: &'a crate::routes::parsed_ref::ParsedItemRef,
     project_path: &'a std::path::Path,
     request_engine: &'a std::sync::Arc<ryeos_engine::engine::Engine>,
+    provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
     parameters: &'a Value,
     ref_bindings: &'a BTreeMap<String, String>,
     principal_id: &'a str,
@@ -316,6 +319,12 @@ fn preflight_dispatch_launch_core(
         plan_ctx,
         requested_call: request.call.cloned(),
     };
+    let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+        request.request_engine,
+        &exec_ctx.plan_ctx,
+        request.provenance,
+    )
+    .map_err(DispatchError::Internal)?;
     ryeos_executor::dispatch::preflight_root_dispatch(
         request.item_ref.as_str(),
         request.item_ref.kind(),
@@ -323,6 +332,7 @@ fn preflight_dispatch_launch_core(
         request.ref_bindings,
         request.usage_subject,
         request.usage_subject_asserted_by,
+        &project_binding,
         &exec_ctx,
         request.state,
         request.launch_timings,
@@ -334,6 +344,7 @@ pub(crate) struct OwnedDispatchPreflight {
     pub item_ref: crate::routes::parsed_ref::ParsedItemRef,
     pub project_path: std::path::PathBuf,
     pub request_engine: std::sync::Arc<ryeos_engine::engine::Engine>,
+    pub provenance: ryeos_app::execution_provenance::ExecutionProvenance,
     pub parameters: Value,
     pub ref_bindings: BTreeMap<String, String>,
     pub principal_id: String,
@@ -367,6 +378,7 @@ pub(crate) async fn preflight_dispatch_launch_off_thread(
             item_ref: &request.item_ref,
             project_path: &request.project_path,
             request_engine: &request.request_engine,
+            provenance: &request.provenance,
             parameters: &request.parameters,
             ref_bindings: &request.ref_bindings,
             principal_id: &request.principal_id,
@@ -503,14 +515,18 @@ fn spawn_dispatch_launch_inner(
         // cancellation and the complete background dispatch. The authoritative
         // birth/result rows become the long-lived roots before this drops.
         let _captured_generation = captured_generation;
+        root_admission
+            .ensure_matches_provenance(&provenance)
+            .map_err(DispatchError::Internal)?;
         let plan_ctx = root_admission.plan_context().clone();
+        let request_engine = root_admission.request_engine().clone();
         let current_site_id_for_failure_row = plan_ctx.current_site_id.clone();
         let origin_site_id_for_failure_row = plan_ctx.origin_site_id.clone();
 
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: principal_id.clone(),
             caller_scopes: principal_scopes,
-            engine: state_clone.engine.clone(),
+            engine: request_engine,
             plan_ctx,
             requested_call: call,
         };

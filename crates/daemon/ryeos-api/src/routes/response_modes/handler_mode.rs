@@ -27,7 +27,8 @@ use crate::routes::compile::{
     CompiledResponseMode, CompiledRoute, ResponseMode, RouteDispatchContext,
 };
 use crate::routes::invocation::{
-    InvocationCheck, RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
+    attach_recorded_thread_header, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
+    RouteInvocationResult,
 };
 use crate::routes::invokers::dispatch_invocation::{CompiledDispatchInvoker, DispatchAuthority};
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
@@ -362,7 +363,7 @@ impl CompiledResponseMode for CompiledHandlerMode {
         .await?;
 
         match result {
-            RouteInvocationResult::Json(value) => {
+            RouteInvocationResult::Json { value, thread_id } => {
                 let handler_value = handler_output_value(&value);
                 let response_value = handler_value
                     .get(&self.result_config.envelope_field)
@@ -379,7 +380,10 @@ impl CompiledResponseMode for CompiledHandlerMode {
                             self.source_ref
                         ))
                     })?;
-                envelope_to_response(envelope, self.result_config.response_bytes_max)
+                let mut response =
+                    envelope_to_response(envelope, self.result_config.response_bytes_max)?;
+                attach_recorded_thread_header(&mut response, thread_id.as_deref())?;
+                Ok(response)
             }
             _ => unreachable!("invoke_checked enforces Json"),
         }

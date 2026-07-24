@@ -404,6 +404,7 @@ pub async fn run(
     let launch_owner = launch_claim
         .canonical_owner()
         .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?;
+    let child_provenance = provenance.clone_for_borrowed_child();
     // RuntimeRegistry is built exclusively from verified bundle roots. Resolve
     // the admission subject without the caller's project overlay, then bind it
     // back to the registry entry's exact bundle and signature-stripped bytes.
@@ -428,7 +429,7 @@ pub async fn run(
         .map_err(|error| LaunchAugmentationError::RuntimeRegistry(error.to_string()))?;
     let child_thread_kind = engine
         .kinds
-        .get("runtime")
+        .get(&runtime_item_ref.kind)
         .and_then(|schema| schema.execution())
         .and_then(|exec| exec.thread_profile.as_ref())
         .map(|tp| tp.name.as_str())
@@ -438,8 +439,15 @@ pub async fn run(
             ))
         })?;
     let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
-        engine,
+        child_provenance.request_engine(),
+        plan_ctx,
         &runtime_plan_ctx,
+        ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+            child_provenance.request_engine(),
+            plan_ctx,
+            &child_provenance,
+        )
+        .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
         runtime_verified,
         &state.node_history_policy,
         child_thread_kind.to_string(),
@@ -456,11 +464,7 @@ pub async fn run(
         .create_root_thread_with_id(
             &child_thread_id,
             &admitted_request,
-            provenance
-                .project_authority()
-                .clone()
-                .for_child()
-                .map_err(|error| LaunchAugmentationError::Threads(error.to_string()))?,
+            child_provenance.project_authority().clone(),
         )
         .map_err(|e| LaunchAugmentationError::Threads(e.to_string()))?;
     let mut lifecycle_owner =
@@ -468,7 +472,6 @@ pub async fn run(
 
     // 7. Generate callback token.
     let ttl = ryeos_app::callback_token::launch_token_ttl(Some(AUGMENTATION_RUNTIME_TIMEOUT_SECS));
-    let child_provenance = provenance.clone_for_borrowed_child();
     let callback_project_path = provenance
         .state_root_override()
         .unwrap_or(project_path)

@@ -97,6 +97,9 @@ pub enum RouteDispatchError {
         code: String,
         status: u16,
         body: serde_json::Value,
+        /// Durable service invocation identity, present only after an
+        /// authoritative recorded root exists.
+        thread_id: Option<String>,
     },
 }
 
@@ -104,10 +107,22 @@ impl axum::response::IntoResponse for RouteDispatchError {
     fn into_response(self) -> axum::response::Response {
         use axum::http::StatusCode;
         match self {
-            Self::Structured { status, body, .. } => {
+            Self::Structured {
+                status,
+                body,
+                thread_id,
+                ..
+            } => {
                 let status =
                     StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-                (status, axum::Json(body)).into_response()
+                let mut response = (status, axum::Json(body)).into_response();
+                if let Err(error) = crate::routes::invocation::attach_recorded_thread_header(
+                    &mut response,
+                    thread_id.as_deref(),
+                ) {
+                    return error.into_response();
+                }
+                response
             }
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
@@ -185,10 +200,18 @@ mod tests {
             code: "contract_violation".into(),
             status: StatusCode::BAD_REQUEST.as_u16(),
             body: body.clone(),
+            thread_id: Some("svc-failed-test".to_string()),
         }
         .into_response();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-ryeos-thread-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("svc-failed-test")
+        );
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(actual, body);

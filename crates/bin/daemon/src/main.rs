@@ -1309,6 +1309,13 @@ async fn dispatch_resume_intents(
                     );
                     continue;
                 }
+                ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler => {
+                    anyhow::bail!(
+                        "recovery invariant violated: in-process handler {} reached continuation dispatch ({:?})",
+                        thread_id,
+                        intent.kind
+                    );
+                }
             }
             let outcome = match intent.kind {
                 reconcile::ResumeKind::OperatorContinuation => {
@@ -1371,6 +1378,13 @@ async fn dispatch_resume_intents(
                 continue;
             }
             ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor => {}
+            ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler => {
+                anyhow::bail!(
+                    "recovery invariant violated: in-process handler {} reached subprocess dispatch ({:?})",
+                    thread_id,
+                    intent.kind
+                );
+            }
         }
 
         let params = match state
@@ -1924,6 +1938,16 @@ async fn drain_running_threads(state: &AppState) -> bool {
             process::MAX_GRACEFUL_SHUTDOWN_GRACE_SECS,
         ))
         .unwrap_or_else(Instant::now);
+    let in_process_handlers = match state.state_store.active_in_process_handler_controls() {
+        Ok(handlers) => handlers,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to list in-process handlers during shutdown"
+            );
+            return false;
+        }
+    };
     let attached_ids = match state.state_store.list_attached_thread_ids() {
         Ok(ids) => ids,
         Err(error) => {
@@ -1931,13 +1955,12 @@ async fn drain_running_threads(state: &AppState) -> bool {
             return false;
         }
     };
-    if attached_ids.is_empty() {
-        return true;
+    if !attached_ids.is_empty() {
+        tracing::info!(
+            count = attached_ids.len(),
+            "draining attached threads concurrently"
+        );
     }
-    tracing::info!(
-        count = attached_ids.len(),
-        "draining attached threads concurrently"
-    );
 
     const HARD_KILL_PROOF_RESERVE: Duration = Duration::from_millis(250);
     let mut pending = Vec::with_capacity(attached_ids.len());
@@ -2020,7 +2043,32 @@ async fn drain_running_threads(state: &AppState) -> bool {
         }
     }
 
-    match state.state_store.list_attached_thread_ids() {
+    let mut in_process_completion_clean = true;
+    for (thread_id, control) in in_process_handlers {
+        let remaining = drain_deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, control.wait_completed()).await {
+            Ok(
+                ryeos_app::state_store::InProcessHandlerCompletion::TerminalConfirmed
+                | ryeos_app::state_store::InProcessHandlerCompletion::BirthAborted,
+            ) => {}
+            Ok(ryeos_app::state_store::InProcessHandlerCompletion::OwnerLostUnsettled) => {
+                in_process_completion_clean = false;
+                tracing::error!(
+                    thread_id,
+                    "in-process handler owner exited without a confirmed terminal state"
+                );
+            }
+            Err(_) => {
+                in_process_completion_clean = false;
+                tracing::error!(
+                    thread_id,
+                    "shutdown drain timed out waiting for in-process handler owner"
+                );
+            }
+        }
+    }
+
+    let attached_drained = match state.state_store.list_attached_thread_ids() {
         Ok(remaining) if !remaining.is_empty() => {
             tracing::error!(
                 remaining = ?remaining,
@@ -2028,12 +2076,200 @@ async fn drain_running_threads(state: &AppState) -> bool {
             );
             false
         }
-        Ok(_) => true,
+        Ok(_) => in_process_completion_clean,
         Err(error) => {
             tracing::error!(error = %error, "failed final shutdown drain audit");
             false
         }
+    };
+    let in_process_drained = match state.state_store.active_in_process_handler_controls() {
+        Ok(remaining) if !remaining.is_empty() => {
+            let thread_ids = remaining
+                .into_iter()
+                .map(|(thread_id, _)| thread_id)
+                .collect::<Vec<_>>();
+            tracing::error!(
+                remaining = ?thread_ids,
+                "shutdown drain exhausted with in-process handlers still active"
+            );
+            false
+        }
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed final in-process-handler shutdown audit"
+            );
+            false
+        }
+    };
+    // Never settle a durable reservation while its volatile owner is still
+    // active. A timed-out drain is an unclean shutdown; startup reconciliation
+    // owns the remaining reservation after this daemon exits.
+    let in_process_authoritative_clean = if !in_process_drained {
+        false
+    } else {
+        match audit_ownerless_in_process_reservations(state) {
+            Ok(clean) => clean,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed to list live in-process reservations for authoritative shutdown audit"
+                );
+                false
+            }
+        }
+    };
+    attached_drained && in_process_drained && in_process_authoritative_clean
+}
+
+fn audit_ownerless_in_process_reservations(state: &AppState) -> anyhow::Result<bool> {
+    let active = state
+        .state_store
+        .active_in_process_handler_controls()
+        .context("list active in-process owners before authoritative shutdown audit")?;
+    if !active.is_empty() {
+        anyhow::bail!("authoritative shutdown audit requires an empty in-process owner registry");
     }
+
+    let mut clean = true;
+    let mut after_thread_id = None;
+    let mut audited = 0usize;
+    loop {
+        let reservations = state.state_store.in_process_handler_reservations_after(
+            after_thread_id.as_deref(),
+            ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+        )?;
+        if reservations.is_empty() {
+            break;
+        }
+        audited = audited
+            .checked_add(reservations.len())
+            .context("in-process reservation audit count overflow")?;
+        if audited > ryeos_app::runtime_db::MAX_IN_PROCESS_HANDLER_RESERVATIONS {
+            anyhow::bail!(
+                "in-process handler reservations exceed the current-schema limit of {}",
+                ryeos_app::runtime_db::MAX_IN_PROCESS_HANDLER_RESERVATIONS
+            );
+        }
+        for reservation in reservations {
+            after_thread_id = Some(reservation.thread_id.clone());
+            let thread_id = reservation.thread_id;
+            match state
+                .state_store
+                .get_authoritative_root_thread_snapshot(&thread_id)
+            {
+                Ok(Some(snapshot))
+                    if ryeos_app::state_store::is_terminal_status(snapshot.status.as_str()) =>
+                {
+                    let postcommit_repaired =
+                        match state.threads.repair_recorded_service_terminal_postcommit(
+                            &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                                thread_id: thread_id.clone(),
+                                status: snapshot.status.as_str().to_string(),
+                                outcome_code: snapshot.outcome_code.clone(),
+                                result: snapshot.result.clone(),
+                                error: snapshot.error.clone(),
+                                metadata: None,
+                                artifacts: Vec::new(),
+                                final_cost: None,
+                                summary_json: None,
+                            },
+                        ) {
+                            Ok(()) => true,
+                            Err(error) => {
+                                clean = false;
+                                tracing::error!(
+                                    thread_id,
+                                    reservation_phase = ?reservation.phase,
+                                    error = %error,
+                                    "failed terminal postcommit repair during shutdown audit"
+                                );
+                                false
+                            }
+                        };
+                    let settled = postcommit_repaired
+                        && match state
+                            .state_store
+                            .settle_ownerless_in_process_handler_reservation(&thread_id)
+                        {
+                            Ok(true) => true,
+                            Ok(false) => {
+                                clean = false;
+                                tracing::error!(
+                                    thread_id,
+                                    reservation_phase = ?reservation.phase,
+                                    "terminal in-process reservation disappeared before shutdown settlement"
+                                );
+                                false
+                            }
+                            Err(error) => {
+                                clean = false;
+                                tracing::error!(
+                                    thread_id,
+                                    reservation_phase = ?reservation.phase,
+                                    error = %error,
+                                    "failed to settle terminal in-process reservation during shutdown audit"
+                                );
+                                false
+                            }
+                        };
+                    if settled {
+                        match state
+                            .state_store
+                            .delete_ownerless_terminal_in_process_handler_reservation(&thread_id)
+                        {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                clean = false;
+                                tracing::error!(
+                                    thread_id,
+                                    reservation_phase = ?reservation.phase,
+                                    "settled terminal in-process reservation disappeared before shutdown cleanup"
+                                );
+                            }
+                            Err(error) => {
+                                clean = false;
+                                tracing::error!(
+                                    thread_id,
+                                    reservation_phase = ?reservation.phase,
+                                    error = %error,
+                                    "failed to retire terminal in-process reservation during shutdown audit"
+                                );
+                            }
+                        }
+                    }
+                }
+                Ok(Some(snapshot)) => {
+                    clean = false;
+                    tracing::error!(
+                        thread_id,
+                        reservation_phase = ?reservation.phase,
+                        authoritative_status = %snapshot.status.as_str(),
+                        "shutdown drain left a live in-process reservation nonterminal in authoritative state"
+                    );
+                }
+                Ok(None) => {
+                    clean = false;
+                    tracing::error!(
+                        thread_id,
+                        reservation_phase = ?reservation.phase,
+                        "shutdown drain found a live in-process reservation without an authoritative root"
+                    );
+                }
+                Err(error) => {
+                    clean = false;
+                    tracing::error!(
+                        thread_id,
+                        reservation_phase = ?reservation.phase,
+                        error = %error,
+                        "failed authoritative live in-process-reservation shutdown audit"
+                    );
+                }
+            }
+        }
+    }
+    Ok(clean)
 }
 
 async fn shutdown_signal() {
@@ -2336,6 +2572,12 @@ async fn run_service_standalone(
         ExecutionMode::Standalone,
         &ctx,
         &app_state,
+        service_executor::ServiceRecordingContext {
+            authority_source:
+                service_executor::ServiceRecordingAuthoritySource::ExplicitProjectless,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+        },
     )
     .await?;
 

@@ -154,6 +154,11 @@ impl SchedulerContext for AppSchedulerContext {
             },
             requested_call: None,
         };
+        let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+            &exec_ctx.engine,
+            &exec_ctx.plan_ctx,
+            &provenance,
+        )?;
 
         let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
             &spec.item_ref,
@@ -162,6 +167,7 @@ impl SchedulerContext for AppSchedulerContext {
             &spec.ref_bindings,
             None,
             None,
+            &project_binding,
             &exec_ctx,
             &self.0,
             None,

@@ -1622,15 +1622,27 @@ mod tests {
         // `system_task` profile. Follow-reconciliation fixtures truthfully use
         // the standard bundle's `graph_run` profile without teaching the
         // production registry any hardcoded schema kinds.
-        let kind_profiles = Arc::new(KindProfileRegistry::build(None).with_test_profile(
-            "graph_run",
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: false,
-                supports_continuation: true,
-                supports_operator_followup: false,
-            },
-        ));
+        let kind_profiles = Arc::new(
+            KindProfileRegistry::build(None)
+                .with_test_profile(
+                    "graph_run",
+                    ThreadKindProfile {
+                        root_executable: true,
+                        supports_interrupt: false,
+                        supports_continuation: true,
+                        supports_operator_followup: false,
+                    },
+                )
+                .with_test_profile(
+                    "directive_run",
+                    ThreadKindProfile {
+                        root_executable: true,
+                        supports_interrupt: true,
+                        supports_continuation: true,
+                        supports_operator_followup: true,
+                    },
+                ),
+        );
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
@@ -1643,6 +1655,8 @@ mod tests {
             )
             .expect("HOSTNAME not set in test environment"),
         );
+        let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+        threads.set_live_input_queue(live_input.clone());
         let commands = Arc::new(CommandService::new(
             state_store.clone(),
             kind_profiles,
@@ -1665,7 +1679,7 @@ mod tests {
             ),
             identity: Arc::new(identity),
             threads,
-            live_input: Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new()),
+            live_input,
             events,
             event_streams,
             commands,
@@ -1811,6 +1825,194 @@ mod tests {
             .create_thread_for_test(&make_create_params(thread_id, thread_id))
             .unwrap();
         state.threads.mark_running(thread_id).unwrap();
+    }
+
+    fn create_running_directive_thread(state: &AppState, thread_id: &str) {
+        let mut params = make_create_params(thread_id, thread_id);
+        params.kind = "directive_run".to_string();
+        state.threads.create_thread_for_test(&params).unwrap();
+        state.threads.mark_running(thread_id).unwrap();
+    }
+
+    fn cognition_inputs(state: &AppState, thread_id: &str) -> Vec<String> {
+        state
+            .state_store
+            .latest_thread_events(thread_id, 32)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "cognition_in")
+            .map(|event| {
+                event.payload["content"]
+                    .as_str()
+                    .expect("cognition_in content")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn poll_input_persists_and_delivers_each_staged_input_exactly_once() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-poll-once";
+        create_running_test_thread(&state, thread_id);
+        assert!(matches!(
+            state.live_input.enqueue(
+                thread_id,
+                ryeos_state::objects::LiveInput::new(
+                    "operator once",
+                    ryeos_state::objects::LiveInputIntent::Steer,
+                ),
+            ),
+            ryeos_app::live_input_queue::EnqueueOutcome::Accepted { pending: 1 }
+        ));
+
+        let first = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        let second = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+
+        assert_eq!(first["inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            first["inputs"][0]["content"].as_str(),
+            Some("operator once")
+        );
+        assert_eq!(second, json!({"inputs": []}));
+        assert_eq!(state.live_input.pending_len(thread_id), 0);
+        assert_eq!(
+            cognition_inputs(&state, thread_id),
+            vec!["operator once".to_string()]
+        );
+    }
+
+    #[test]
+    fn poll_input_preserves_fifo_in_response_and_durable_braid() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-poll-fifo";
+        create_running_test_thread(&state, thread_id);
+        for (content, intent, pending) in [
+            ("first", ryeos_state::objects::LiveInputIntent::Steer, 1),
+            (
+                "second",
+                ryeos_state::objects::LiveInputIntent::Interrupt,
+                2,
+            ),
+        ] {
+            assert!(matches!(
+                state.live_input.enqueue(
+                    thread_id,
+                    ryeos_state::objects::LiveInput::new(content, intent),
+                ),
+                ryeos_app::live_input_queue::EnqueueOutcome::Accepted {
+                    pending: observed
+                } if observed == pending
+            ));
+        }
+
+        let response = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        let contents = response["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| input["content"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(contents, vec!["first", "second"]);
+        assert_eq!(
+            cognition_inputs(&state, thread_id),
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn poll_input_discards_staged_input_when_thread_finalized_before_poll() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-poll-terminal";
+        create_running_test_thread(&state, thread_id);
+        assert!(matches!(
+            state.live_input.enqueue(
+                thread_id,
+                ryeos_state::objects::LiveInput::new(
+                    "too late",
+                    ryeos_state::objects::LiveInputIntent::Steer,
+                ),
+            ),
+            ryeos_app::live_input_queue::EnqueueOutcome::Accepted { pending: 1 }
+        ));
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread_id.to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: Some(json!({"ok": true})),
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let response = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+
+        assert_eq!(response, json!({"inputs": []}));
+        assert!(cognition_inputs(&state, thread_id).is_empty());
+        assert!(state
+            .state_store
+            .get_thread(thread_id)
+            .unwrap()
+            .unwrap()
+            .successor_thread_id
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_process_interrupt_degrades_to_steer_and_poll_folds_once() {
+        use ryeos_app::handler_context::HandlerContext;
+
+        let (_tmp, state) = setup_app_state();
+        let state = Arc::new(state);
+        let thread_id = "T-directive-missing-process";
+        create_running_directive_thread(&state, thread_id);
+        let request: ryeos_api::handlers::threads_input::Request = serde_json::from_value(json!({
+            "input": "change course",
+            "target": {"kind": "thread", "thread_id": thread_id},
+            "intent": "interrupt",
+        }))
+        .unwrap();
+
+        let response = ryeos_api::handlers::threads_input::handle(
+            request,
+            HandlerContext::new("user:test".to_string(), Vec::new(), true),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["delivery"], "submitted");
+        assert_eq!(response["thread_id"].as_str(), Some(thread_id));
+        assert_eq!(response["pending"].as_u64(), Some(1));
+        assert!(response["notice"]
+            .as_str()
+            .unwrap()
+            .contains("missing_pgid"));
+        let first = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        let second = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        assert_eq!(first["inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            first["inputs"][0]["content"].as_str(),
+            Some("change course")
+        );
+        assert_eq!(second, json!({"inputs": []}));
+        assert_eq!(
+            cognition_inputs(&state, thread_id),
+            vec!["change course".to_string()]
+        );
+        assert!(state
+            .state_store
+            .get_thread(thread_id)
+            .unwrap()
+            .unwrap()
+            .successor_thread_id
+            .is_none());
     }
 
     fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {

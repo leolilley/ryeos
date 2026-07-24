@@ -1308,6 +1308,17 @@ impl CompiledResponseMode for CompiledExecuteMode {
             // leaf dispatch + the launch finalize-on-error net, not here.
             // In-process service kinds run synchronously and never thread a
             // pre-minted id, so they are not eligible for accepted launch.
+            let accepted_project_binding =
+                ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                    &exec_ctx.engine,
+                    &exec_ctx.plan_ctx,
+                    &provenance,
+                )
+                .map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "seal accepted-launch project authority: {error:#}"
+                    ))
+                })?;
             let accepted_preflight = match ryeos_executor::dispatch::preflight_root_dispatch(
                 item_ref,
                 root_canonical.kind.as_str(),
@@ -1315,6 +1326,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 &request.ref_bindings,
                 usage_subject.as_ref(),
                 usage_subject_asserted_by.as_deref(),
+                &accepted_project_binding,
                 &exec_ctx,
                 &state,
                 None,
@@ -1669,8 +1681,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
             Err(e) => {
                 let status = e.http_status();
-                let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);
-                Ok((status, axum::Json(payload.to_value())).into_response())
+                let payload = ryeos_executor::structured_error::dispatch_error_value(&e);
+                Ok((status, axum::Json(payload)).into_response())
             }
         }
     }
@@ -1682,8 +1694,8 @@ fn dispatch_error_response(
     e: ryeos_executor::dispatch_error::DispatchError,
 ) -> axum::response::Response {
     let status = e.http_status();
-    let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);
-    (status, axum::Json(payload.to_value())).into_response()
+    let payload = ryeos_executor::structured_error::dispatch_error_value(&e);
+    (status, axum::Json(payload)).into_response()
 }
 
 fn launch_handoff_failure_response(

@@ -1373,6 +1373,13 @@ pub(crate) async fn dispatch_method(
         ryeos_app::thread_lifecycle::admit_verified_root_execution(
             &ctx.engine,
             &ctx.plan_ctx,
+            &ctx.plan_ctx,
+            ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                &ctx.engine,
+                &ctx.plan_ctx,
+                &request.provenance,
+            )
+            .map_err(DispatchError::Internal)?,
             history_subject.clone(),
             &state.node_history_policy,
             thread_profile_str.to_string(),
@@ -2367,7 +2374,15 @@ pub async fn dispatch_service(
                 ExecutionMode::Live,
                 ctx,
                 state,
-                None,
+                service_executor::ServiceRecordingContext {
+                    authority_source:
+                        service_executor::ServiceRecordingAuthoritySource::Execution {
+                            provenance: &request.provenance,
+                        },
+                    usage_subject: request.usage_subject.as_ref(),
+                    usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
+                },
+                request.pre_minted_thread_id.as_deref(),
                 local_handler_context,
             )
             .await
@@ -3750,6 +3765,7 @@ fn finish_root_dispatch_preflight(
     ref_bindings: &BTreeMap<String, String>,
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
     ctx: &ExecutionContext,
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
@@ -3757,6 +3773,8 @@ fn finish_root_dispatch_preflight(
     let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution_with_timings(
         &ctx.engine,
         &ctx.plan_ctx,
+        &ctx.plan_ctx,
+        project_binding.clone(),
         root_subject,
         &state.node_history_policy,
         thread_profile,
@@ -3802,6 +3820,7 @@ pub fn preflight_root_dispatch(
     ref_bindings: &BTreeMap<String, String>,
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
     ctx: &ExecutionContext,
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
@@ -4051,6 +4070,7 @@ pub fn preflight_root_dispatch(
                                             ref_bindings,
                                             usage_subject,
                                             usage_subject_asserted_by,
+                                            project_binding,
                                             &inner_ctx,
                                             state,
                                             launch_timings,
@@ -4074,6 +4094,7 @@ pub fn preflight_root_dispatch(
                                 ref_bindings,
                                 usage_subject,
                                 usage_subject_asserted_by,
+                                project_binding,
                                 ctx,
                                 state,
                                 launch_timings,
@@ -4131,6 +4152,7 @@ pub fn preflight_root_dispatch(
                                 ref_bindings,
                                 usage_subject,
                                 usage_subject_asserted_by,
+                                project_binding,
                                 ctx,
                                 state,
                                 launch_timings,
@@ -4188,6 +4210,7 @@ pub fn preflight_root_dispatch(
                     ref_bindings,
                     usage_subject,
                     usage_subject_asserted_by,
+                    project_binding,
                     ctx,
                     state,
                     launch_timings,

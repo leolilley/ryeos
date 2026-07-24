@@ -1730,6 +1730,37 @@ pub struct CommittedWrite<T> {
     pub projection: ProjectionStatus,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadSnapshotReadback {
+    pub snapshot: ThreadSnapshot,
+    pub last_event: Option<(String, ThreadEvent)>,
+    pub is_chain_final_event: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadEventChainReadback {
+    pub snapshot: ThreadSnapshot,
+    pub events: Vec<(String, ThreadEvent)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthoritativeContinuationPredecessorReadback {
+    pub updated_at: String,
+    pub last_event_hash: Option<String>,
+    pub last_chain_seq: u64,
+    pub source_was_present: bool,
+    pub source_last_event_hash: Option<String>,
+    pub source_last_thread_seq: u64,
+    pub successor_was_absent: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadPairReadback {
+    pub source: Option<AuthoritativeThreadSnapshotReadback>,
+    pub successor: Option<AuthoritativeThreadEventChainReadback>,
+    pub predecessor: Option<AuthoritativeContinuationPredecessorReadback>,
+}
+
 impl<T> CommittedWrite<T> {
     fn new(value: T, projection: ProjectionStatus) -> Self {
         Self { value, projection }
@@ -3279,7 +3310,15 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
         let guard = self.pinned_authority()?.acquire_shared_guard()?;
-        self.create_chain_with_events_inner(chain_root_id, snapshot, events, signer, None, &guard)
+        self.create_chain_with_events_inner(
+            chain_root_id,
+            snapshot,
+            None,
+            events,
+            signer,
+            None,
+            &guard,
+        )
     }
 
     pub fn create_chain_with_events_admitted(
@@ -3294,6 +3333,28 @@ impl StateDb {
         self.create_chain_with_events_inner(
             chain_root_id,
             snapshot,
+            None,
+            events,
+            signer,
+            Some(runtime_liveness),
+            cas_mutation_guard,
+        )
+    }
+
+    pub fn create_chain_with_event_successor_admitted(
+        &self,
+        chain_root_id: &str,
+        genesis_snapshot: ThreadSnapshot,
+        event_successor_snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        self.create_chain_with_events_inner(
+            chain_root_id,
+            genesis_snapshot,
+            Some(event_successor_snapshot),
             events,
             signer,
             Some(runtime_liveness),
@@ -3305,6 +3366,7 @@ impl StateDb {
         &self,
         chain_root_id: &str,
         snapshot: ThreadSnapshot,
+        event_successor_snapshot: Option<ThreadSnapshot>,
         events: Vec<ThreadEvent>,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
@@ -3332,6 +3394,7 @@ impl StateDb {
             &self.refs_root,
             chain_root_id,
             snapshot,
+            event_successor_snapshot,
             events,
             signer,
             self.trust_store.as_ref(),
@@ -3361,6 +3424,7 @@ impl StateDb {
             &cache,
             chain_root_id,
             &result.chain_state_hash,
+            result.snapshot.status,
             || {
                 projection::project_thread_snapshot_with_events_in_transaction(
                     &self.projection,
@@ -4228,6 +4292,162 @@ impl StateDb {
             self.trust_store.as_ref(),
             &mut head_cache,
         )
+    }
+
+    /// Read one current snapshot and its exact last event under the same
+    /// trust-verified chain authority without consulting the projection.
+    pub fn read_authoritative_thread_snapshot_with_last_event(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<(ThreadSnapshot, Option<(String, ThreadEvent)>)>> {
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self._refs_directory,
+            &self._cas_directory,
+            &self.recovery,
+            chain_root_id,
+        )?;
+        let snapshot = {
+            let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+            chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                &chain_lock,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut head_cache,
+            )?
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        let last_event =
+            chain::read_snapshot_last_event_object(&self.cas_root, Some(&chain_lock), &snapshot)?;
+        Ok(Some((snapshot, last_event)))
+    }
+
+    /// Read the source snapshot and entry-final event plus the successor
+    /// snapshot and complete event history from one trust-verified chain head,
+    /// together with the predecessor head's global and source-thread anchors.
+    /// Holding one chain lock across the read makes the result suitable for
+    /// proving an atomic cross-thread transition without consulting the
+    /// rebuildable projection.
+    pub fn read_authoritative_continuation(
+        &self,
+        chain_root_id: &str,
+        source_thread_id: &str,
+        successor_thread_id: &str,
+    ) -> anyhow::Result<AuthoritativeThreadPairReadback> {
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self._refs_directory,
+            &self._cas_directory,
+            &self.recovery,
+            chain_root_id,
+        )?;
+        let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+        let readback = chain::read_authoritative_continuation_pair_with_trust(
+            &self.cas_root,
+            &self.refs_root,
+            &chain_lock,
+            chain::ContinuationReadIdentity {
+                chain_root_id,
+                source_thread_id,
+                successor_thread_id,
+            },
+            self.trust_store.as_ref(),
+            &mut head_cache,
+        )?;
+        Ok(AuthoritativeThreadPairReadback {
+            source: readback
+                .source
+                .map(|source| AuthoritativeThreadSnapshotReadback {
+                    snapshot: source.snapshot,
+                    last_event: source.last_event,
+                    is_chain_final_event: source.is_chain_final_event,
+                }),
+            successor: readback
+                .successor
+                .map(|successor| AuthoritativeThreadEventChainReadback {
+                    snapshot: successor.snapshot,
+                    events: successor.events,
+                }),
+            predecessor: readback.predecessor.map(|predecessor| {
+                AuthoritativeContinuationPredecessorReadback {
+                    updated_at: predecessor.updated_at,
+                    last_event_hash: predecessor.last_event_hash,
+                    last_chain_seq: predecessor.last_chain_seq,
+                    source_was_present: predecessor.source_was_present,
+                    source_last_event_hash: predecessor.source_last_event_hash,
+                    source_last_thread_seq: predecessor.source_last_thread_seq,
+                    successor_was_absent: predecessor.successor_was_absent,
+                }
+            }),
+        })
+    }
+
+    /// Reproduce the two-stage event timestamp normalization used by the
+    /// atomic add-successor/append-source transition.
+    pub fn normalize_expected_continuation_events(
+        mut successor_events: Vec<ThreadEvent>,
+        source_event: ThreadEvent,
+        predecessor_updated_at: &str,
+    ) -> anyhow::Result<(Vec<ThreadEvent>, ThreadEvent)> {
+        let successor_floor = chain::normalize_prospective_event_timestamps(
+            &mut successor_events,
+            predecessor_updated_at,
+        )?;
+        let mut source_events = vec![source_event];
+        chain::normalize_prospective_event_timestamps(&mut source_events, &successor_floor)?;
+        let source_event = source_events
+            .pop()
+            .expect("continuation source event batch is non-empty");
+        Ok((successor_events, source_event))
+    }
+
+    /// Reproduce the state-layer stamping and timestamp normalization applied
+    /// to a newly committed continuation successor for exact readback
+    /// comparison.
+    pub fn normalize_expected_continuation_successor(
+        mut expected: ThreadSnapshot,
+        committed: &ThreadSnapshot,
+        source_thread_id: &str,
+        timestamp_floor: &str,
+    ) -> anyhow::Result<ThreadSnapshot> {
+        expected
+            .last_event_hash
+            .clone_from(&committed.last_event_hash);
+        expected.last_chain_seq = committed.last_chain_seq;
+        expected.last_thread_seq = committed.last_thread_seq;
+        chain::normalize_prospective_new_thread(
+            &mut expected,
+            &committed.chain_root_id,
+            timestamp_floor,
+            Some(source_thread_id),
+        )?;
+        Ok(expected)
+    }
+
+    /// Reproduce the state-layer stamping and lifecycle timestamp
+    /// normalization applied to an existing source snapshot in a continuation
+    /// commit.
+    pub fn normalize_expected_continuation_source(
+        previous: &ThreadSnapshot,
+        mut expected: ThreadSnapshot,
+        committed: &ThreadSnapshot,
+        append_timestamp: &str,
+    ) -> anyhow::Result<ThreadSnapshot> {
+        expected
+            .last_event_hash
+            .clone_from(&committed.last_event_hash);
+        expected.last_chain_seq = committed.last_chain_seq;
+        expected.last_thread_seq = committed.last_thread_seq;
+        chain::normalize_prospective_snapshot_transition(
+            previous,
+            &mut expected,
+            append_timestamp,
+        )?;
+        Ok(expected)
     }
 
     /// Trust-verify and load the current authoritative chain closure used for a

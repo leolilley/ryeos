@@ -1587,7 +1587,8 @@ fn verify_fresh_root_admission(params: &ExecutionParams) -> Result<()> {
         // root policy; they never reinterpret mutable source content here.
         return Ok(());
     };
-    let engine = params.provenance.request_engine();
+    admission.ensure_matches_provenance(&params.provenance)?;
+    let engine = admission.request_engine();
     admission.ensure_matches_request(&params.resolved)?;
     admission.ensure_matches_subject(engine, admission.verified_subject(), &params.resolved.kind)
 }
@@ -1751,9 +1752,7 @@ pub async fn run_and_wait(
         &mut guard,
     )?;
     verify_fresh_root_admission(&params).context("revalidate exact admitted waiting root")?;
-    let wait_project_authority = params
-        .provenance
-        .execution_project_authority(&params.effective_caps)?;
+    let wait_project_authority = params.provenance.project_authority().clone();
     let wait_isolation_live_access_authority =
         params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
@@ -2413,9 +2412,7 @@ pub async fn run_detached(
         &mut guard,
     )?;
     verify_fresh_root_admission(&params).context("revalidate exact admitted detached root")?;
-    let bg_project_authority = params
-        .provenance
-        .execution_project_authority(&params.effective_caps)?;
+    let bg_project_authority = params.provenance.project_authority().clone();
     let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
     let prepared_plan = thread_lifecycle::prepare_item_plan(
@@ -3779,26 +3776,43 @@ pub fn execution_params_from_sealed_root_request(
         Some(provenance) => provenance,
         None => execution_provenance_from_resume_context(state, resume)?.0,
     };
-    let resolved = sealed.restore(
+    if sealed.project_authority() != &resume.project_authority
+        || sealed.project_authority() != provenance.project_authority()
+        || sealed.project_context() != &resume.project_context
+    {
+        anyhow::bail!(
+            "created-root sealed, resume, and reconstructed provenance identities disagree for {}",
+            resume.item_ref
+        );
+    }
+    let resolved = sealed.restore_for_reconstructed_provenance(
         provenance.request_engine(),
         &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id)
             .join("launch-capsule"),
+        &provenance,
     )?;
-    let acting_principal = resume.principal_identifier().to_string();
+    resolved
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("restored sealed root has no admission"))?
+        .ensure_matches_provenance(&provenance)?;
+    let mut operational_resume = resume.clone();
+    operational_resume.project_context = resolved.plan_context.project_context.clone();
+    let acting_principal = operational_resume.principal_identifier().to_string();
 
-    if resolved.kind != resume.kind
-        || resolved.item_ref != resume.item_ref
-        || resolved.launch_mode != resume.launch_mode
-        || resolved.parameters != resume.parameters
-        || resolved.ref_bindings != resume.ref_bindings
-        || resolved.current_site_id != resume.current_site_id
-        || resolved.origin_site_id != resume.origin_site_id
+    if resolved.kind != operational_resume.kind
+        || resolved.item_ref != operational_resume.item_ref
+        || resolved.launch_mode != operational_resume.launch_mode
+        || resolved.parameters != operational_resume.parameters
+        || resolved.ref_bindings != operational_resume.ref_bindings
+        || resolved.current_site_id != operational_resume.current_site_id
+        || resolved.origin_site_id != operational_resume.origin_site_id
         || resolved.requested_by.as_deref() != Some(acting_principal.as_str())
-        || resolved.plan_context.requested_by != resume.requested_by
-        || resolved.plan_context.project_context != resume.project_context
-        || resolved.plan_context.execution_hints != resume.execution_hints
-        || resume.executor_ref.as_deref() != Some(sealed.executor_ref())
-        || resume.runtime_ref.as_deref() != Some(sealed.runtime_ref())
+        || resolved.plan_context.requested_by != operational_resume.requested_by
+        || resolved.plan_context.project_context != operational_resume.project_context
+        || resolved.plan_context.execution_hints != operational_resume.execution_hints
+        || operational_resume.executor_ref.as_deref() != Some(sealed.executor_ref())
+        || operational_resume.runtime_ref.as_deref() != Some(sealed.runtime_ref())
     {
         anyhow::bail!(
             "created-root launch identity does not match its sealed execution request for {}",
@@ -3812,9 +3826,9 @@ pub fn execution_params_from_sealed_root_request(
         acting_principal,
         vault_bindings: HashMap::new(),
         pre_minted_thread_id: None,
-        effective_caps: resume.effective_caps.clone(),
+        effective_caps: operational_resume.effective_caps.clone(),
         provenance,
-        lifecycle_authority: resume.lifecycle_authority,
+        lifecycle_authority: operational_resume.lifecycle_authority,
         runtime_ref: Some(sealed.runtime_ref().to_string()),
         // The created row already carries any operational parent link. This
         // reconstruction must not try to attach it a second time at launch.
@@ -4133,16 +4147,10 @@ async fn run_existing_recovered_thread(
         guard.track_thread_auth_token(token);
     }
 
-    // Complete every fallible authority reconstruction while the exact launch
-    // claim is still guarded. Once `into_detached_parts` disarms the guard,
-    // there must be no error path that can leave an active row unowned.
-    let bg_project_authority = params
-        .provenance
-        .execution_project_authority(&params.effective_caps)
-        .inspect_err(|_| {
-            guard.fail_thread("recovery_project_authority_failed");
-            guard.cleanup();
-        })?;
+    // Carry the already-sealed operational authority unchanged. Effective
+    // runtime capabilities remain a separate launch fact and never rewrite
+    // project authority after admission.
+    let bg_project_authority = params.provenance.project_authority().clone();
     let parts = guard.into_detached_parts();
     let bg_state = parts.state;
     let bg_temp_dir = parts.temp_dir;

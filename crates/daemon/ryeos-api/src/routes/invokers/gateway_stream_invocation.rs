@@ -74,28 +74,14 @@ pub(crate) struct LaunchRequest {
 fn handoff_error_envelope(
     failure: ryeos_executor::execution::launch::LaunchHandoffFailure,
 ) -> RouteStreamEnvelope {
-    error_envelope_with(&failure.code, &failure.message, Some(failure.body))
-}
-
-fn dispatch_error_envelope(
-    error: ryeos_executor::dispatch_error::DispatchError,
-) -> RouteStreamEnvelope {
-    let mut payload =
-        ryeos_executor::structured_error::StructuredErrorPayload::from(&error).to_value();
-    if let Some(map) = payload.as_object_mut() {
-        map.remove("code");
-        map.remove("error");
-    }
-    let code = error.code().to_owned();
-    let message = error.to_string();
-    error_envelope_with(&code, &message, Some(payload))
+    RouteStreamEnvelope::new("stream_error", failure.body)
 }
 
 fn pre_spawn_dispatch_error(
     keep_alive_secs: u64,
     error: ryeos_executor::dispatch_error::DispatchError,
 ) -> RouteInvocationResult {
-    let envelope = dispatch_error_envelope(error);
+    let envelope = dispatch_error_envelope(&error);
     let stream = async_stream::stream! {
         yield Ok(envelope);
     };
@@ -110,12 +96,17 @@ fn completed_launch_error_envelope(
 ) -> RouteStreamEnvelope {
     match result {
         Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {
-            dispatch_error_envelope(error)
+            dispatch_error_envelope(&error)
         }
         Ok(Err(error)) => error_envelope(error.code(), &error.to_string()),
         Ok(Ok(())) => error_envelope(
             "launch_handoff_missing",
             "launch completed without authoritative handoff",
+        ),
+        Err(error) if error.is_cancelled() => dispatch_error_envelope(
+            &ryeos_executor::dispatch_error::DispatchError::LaunchCancelled {
+                stage: "authoritative thread publication",
+            },
         ),
         Err(error) => error_envelope("launch_task_failed", &error.to_string()),
     }
@@ -172,6 +163,22 @@ async fn await_launch_handoff(
             Err(_) => Err(completed_launch_error_envelope((&mut *launch_handle).await)),
         },
         result = &mut *launch_handle => Err(completed_launch_error_envelope(result)),
+    }
+}
+
+fn dispatch_error_envelope(
+    error: &ryeos_executor::dispatch_error::DispatchError,
+) -> RouteStreamEnvelope {
+    let payload = ryeos_executor::structured_error::dispatch_error_value(error);
+    if matches!(
+        error,
+        ryeos_executor::dispatch_error::DispatchError::StructuredService { .. }
+    ) {
+        // A typed handler owns its complete public body. Do not replace its
+        // code/message fields with wrapper diagnostics.
+        RouteStreamEnvelope::new("stream_error", payload)
+    } else {
+        error_envelope_with(error.code(), &error.to_string(), Some(payload))
     }
 }
 
@@ -443,6 +450,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 item_ref: item_ref.clone(),
                 project_path: project_ctx.effective_path.clone(),
                 request_engine: project_ctx.request_engine.clone(),
+                provenance: resolved_contract.provenance.clone(),
                 parameters: req.parameters.clone(),
                 ref_bindings: req.ref_bindings.clone(),
                 principal_id: principal_id.clone(),
@@ -775,24 +783,16 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                 return;
                             }
                             Ok(Err(e)) => {
-                                let extras = match &e {
-                                    crate::routes::launch::LaunchSpawnError::Dispatch(de) => {
-                                        let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(de);
-                                        // Strip `code` and `error` so the helper's explicit args win.
-                                        let mut value = payload.to_value();
-                                        if let Some(map) = value.as_object_mut() {
-                                            map.remove("code");
-                                            map.remove("error");
-                                        }
-                                        Some(value)
+                                let envelope = match &e {
+                                    crate::routes::launch::LaunchSpawnError::Dispatch(error) => {
+                                        dispatch_error_envelope(error)
                                     }
-                                    _ => None,
+                                    _ => error_envelope(
+                                        e.code(),
+                                        &format!("launch failed: {e}"),
+                                    ),
                                 };
-                                yield Ok(error_envelope_with(
-                                    e.code(),
-                                    &format!("launch failed: {e}"),
-                                    extras,
-                                ));
+                                yield Ok(envelope);
                                 return;
                             }
                             Err(_) => {
@@ -961,19 +961,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn structured_handoff_failure_is_the_first_error_envelope() {
+    async fn structured_handoff_failure_preserves_the_exact_first_error_envelope() {
         let (sender, ready) = tokio::sync::oneshot::channel();
         sender
             .send(Err(
                 ryeos_executor::execution::launch::LaunchHandoffFailure {
-                    code: "launch_preparation_failed".to_string(),
-                    message: "preparation failed".to_string(),
-                    status: 502,
+                    code: "wrapper_diagnostic".to_string(),
+                    message: "wrapper diagnostic".to_string(),
+                    status: 409,
                     body: serde_json::json!({
-                        "code": "ignored_duplicate",
-                        "error": "ignored duplicate",
-                        "retryable": true,
-                        "classification": "environment",
+                        "code": "execution_identity_continuity_mismatch",
+                        "message": "exact authored conflict",
+                        "mismatches": ["project_authority"],
                     }),
                 },
             ))
@@ -987,10 +986,14 @@ mod tests {
             panic!("structured handoff failure must be reported");
         };
         assert_eq!(envelope.event_type, "stream_error");
-        assert_eq!(envelope.payload["code"], "launch_preparation_failed");
-        assert_eq!(envelope.payload["error"], "preparation failed");
-        assert_eq!(envelope.payload["retryable"], true);
-        assert_eq!(envelope.payload["classification"], "environment");
+        assert_eq!(
+            envelope.payload,
+            serde_json::json!({
+                "code": "execution_identity_continuity_mismatch",
+                "message": "exact authored conflict",
+                "mismatches": ["project_authority"],
+            })
+        );
         launch_handle.abort();
     }
 
@@ -1013,6 +1016,24 @@ mod tests {
         assert!(envelope.payload["error"]
             .as_str()
             .is_some_and(|message| message.contains("synthetic launch panic")));
+    }
+
+    #[tokio::test]
+    async fn cancelled_launch_task_has_a_stable_launch_cancelled_error() {
+        let launch_handle = tokio::spawn(std::future::pending::<
+            Result<(), crate::routes::launch::LaunchSpawnError>,
+        >());
+        launch_handle.abort();
+
+        let envelope = completed_launch_error_envelope(launch_handle.await);
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload["code"], "launch_cancelled");
+        assert_eq!(
+            envelope.payload["error"],
+            "launch was cancelled before authoritative thread publication"
+        );
+        assert_eq!(envelope.payload["retryable"], false);
+        assert!(envelope.payload.get("thread_id").is_none());
     }
 
     #[test]
@@ -1123,5 +1144,23 @@ mod tests {
             .await
             .expect_err("stream drop must abort request-scoped launch")
             .is_cancelled());
+    }
+
+    #[test]
+    fn structured_dispatch_error_keeps_its_exact_stream_body() {
+        let body = serde_json::json!({
+            "code": "execution_identity_continuity_mismatch",
+            "message": "exact authored conflict",
+            "mismatches": ["project_authority"],
+        });
+        let envelope = dispatch_error_envelope(
+            &ryeos_executor::dispatch_error::DispatchError::StructuredService {
+                code: "execution_identity_continuity_mismatch".to_string(),
+                status: 409,
+                body: body.clone(),
+            },
+        );
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload, body);
     }
 }

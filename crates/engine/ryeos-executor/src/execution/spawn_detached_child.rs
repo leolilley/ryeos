@@ -169,9 +169,10 @@ pub async fn spawn_detached_child(
         ));
     }
 
-    let parent_project_authority = cap
-        .provenance
-        .execution_project_authority(&cap.effective_caps)?;
+    // Detached and followed children derive from the same sealed provenance.
+    // The callback's effective capabilities authorize the requested child;
+    // they are not a replacement project-authority ceiling.
+    let parent_project_authority = cap.provenance.project_authority().clone();
     let authority_already_bound = reserved_intent.child_project_authority.is_some();
     let mut explicit_child_generation = None;
     let mut child_project_authority =
@@ -208,7 +209,6 @@ pub async fn spawn_detached_child(
                         &parent_project_authority,
                         snapshot_hash,
                         realization,
-                        &cap.effective_caps,
                     )?
                 }
             }
@@ -364,21 +364,39 @@ pub async fn spawn_detached_child(
         fingerprint: thread_auth.acting_principal.clone(),
         scopes: cap.effective_caps.clone(),
     });
+    let child_project_context = match child_provenance.project_authority() {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => ProjectContext::None,
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => {
+            ProjectContext::LocalPath {
+                path: child_provenance.effective_path().to_path_buf(),
+            }
+        }
+    };
+    let child_plan_context = ryeos_engine::contracts::PlanContext {
+        requested_by: requested_by.clone(),
+        project_context: child_project_context.clone(),
+        current_site_id: parent.current_site_id.clone(),
+        origin_site_id: parent.current_site_id.clone(),
+        execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
+        validate_only: false,
+    };
     let child_preflight = ryeos_app::thread_lifecycle::preflight_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
             engine: child_engine,
+            plan_context: child_plan_context.clone(),
+            project_binding: ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                child_engine,
+                &child_plan_context,
+                &child_provenance,
+            )?,
             node_history_policy: &state.node_history_policy,
-            site_id: &parent.current_site_id,
-            project_path: child_provenance.effective_path(),
             item_ref: child_item_ref,
             launch_mode: "detached",
             parameters: child_parameters.clone(),
             ref_bindings: child_ref_bindings.clone(),
-            requested_by: thread_auth.acting_principal.clone(),
             usage_subject: None,
             usage_subject_asserted_by: None,
-            caller_scopes: cap.effective_caps.clone(),
-            validate_only: false,
             creates_chain_root: true,
         },
     )
@@ -395,14 +413,17 @@ pub async fn spawn_detached_child(
     // Build the complete immutable launch identity and authoritative generic
     // launch authority before minting any observable row. Parent delegation
     // authority is kept separate from the child's own composed capabilities.
-    let project_context = ProjectContext::LocalPath {
-        path: child_provenance.effective_path().to_path_buf(),
-    };
-    let stable_project_identity = ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-        cap.provenance.original_project_path(),
-        &parent.origin_site_id,
-    )?;
     let project_authority = child_project_authority.clone();
+    let stable_project_identity = match &project_authority {
+        ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => None,
+        ryeos_state::objects::ExecutionProjectAuthority::LiveProject { .. }
+        | ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. } => Some(
+            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                cap.provenance.original_project_path(),
+                &parent.origin_site_id,
+            )?,
+        ),
+    };
     let local_overlay_root = matches!(
         project_authority.environment(),
         ryeos_state::objects::EnvironmentAuthority::ProjectOverlay { .. }
@@ -418,10 +439,10 @@ pub async fn spawn_detached_child(
             parameters: child_parameters.clone(),
             // Resume identity derives from validated server-side provenance, never
             // the request body — same rule as follow.
-            project_context,
+            project_context: child_project_context,
             project_authority,
             lifecycle_authority: parent_lifecycle_authority,
-            stable_project_identity: Some(stable_project_identity),
+            stable_project_identity,
             local_overlay_root,
             original_snapshot_hash: inherited_snapshot_hash,
             // A detached child borrows the parent's workspace; it never owns snapshot

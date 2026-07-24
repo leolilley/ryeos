@@ -249,9 +249,22 @@ async fn execute_read_only_service(
     local_handler_context: HandlerContext,
 ) -> Result<Value> {
     let item_ref = req.item_ref();
-    let canonical = CanonicalRef::parse(item_ref)
-        .map_err(|e| HandlerError::BadRequest(format!("invalid item ref: {e}")))?;
-    if canonical.kind != "service" {
+    let schema_is_daemon_service = prepared
+        .exec_ctx
+        .engine
+        .kinds
+        .get(&verified.resolved.kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.terminator.as_ref())
+        .is_some_and(|terminator| {
+            matches!(
+                terminator,
+                ryeos_engine::kind_registry::TerminatorDecl::InProcess {
+                    registry: ryeos_engine::kind_registry::InProcessRegistryKind::Services,
+                }
+            )
+        });
+    if !schema_is_daemon_service {
         return Err(HandlerError::Forbidden(
             "ui_read_only dispatch is restricted to verified daemon services".into(),
         )
@@ -263,6 +276,20 @@ async fn execute_read_only_service(
         )
         .into());
     }
+    let thread_profile = prepared
+        .exec_ctx
+        .engine
+        .kinds
+        .get(&verified.resolved.kind)
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.thread_profile.as_ref())
+        .map(|profile| profile.name.clone())
+        .ok_or_else(|| {
+            HandlerError::Internal(format!(
+                "verified executable kind '{}' has no execution.thread_profile",
+                verified.resolved.kind
+            ))
+        })?;
 
     // Read-only UI sources are in-process daemon queries. They need the live
     // project only as a resolution/input scope; manufacturing project
@@ -277,26 +304,17 @@ async fn execute_read_only_service(
         ryeos_executor::executor::ExecutionMode::Live,
         &prepared.exec_ctx,
         state,
+        ryeos_executor::executor::ServiceRecordingContext {
+            authority_source:
+                ryeos_executor::executor::ServiceRecordingAuthoritySource::UnrecordedOnly,
+            usage_subject: None,
+            usage_subject_asserted_by: None,
+        },
         None,
         Some(local_handler_context),
     )
     .await
     .map_err(map_dispatch_error)?;
-
-    let thread_profile = prepared
-        .exec_ctx
-        .engine
-        .kinds
-        .get(&canonical.kind)
-        .and_then(|schema| schema.execution())
-        .and_then(|execution| execution.thread_profile.as_ref())
-        .map(|profile| profile.name.clone())
-        .ok_or_else(|| {
-            HandlerError::Internal(format!(
-                "verified executable kind '{}' has no execution.thread_profile",
-                canonical.kind
-            ))
-        })?;
 
     Ok(json!({
         "thread": {
@@ -381,7 +399,7 @@ fn dispatch_error_to_handler(error: ryeos_executor::dispatch_error::DispatchErro
     HandlerError::Structured {
         code: error.code().to_owned(),
         status: error.http_status().as_u16(),
-        body: ryeos_executor::structured_error::StructuredErrorPayload::from(&error).to_value(),
+        body: ryeos_executor::structured_error::dispatch_error_value(&error),
     }
 }
 
