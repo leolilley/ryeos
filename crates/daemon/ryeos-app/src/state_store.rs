@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -887,6 +887,145 @@ pub struct StateStore {
     /// Persisted claims prove fencing identity; this registry separately proves
     /// that a current task still owns the post-exit settlement window.
     active_launch_owners: Mutex<HashSet<String>>,
+    /// Recorded in-process handlers currently owned by this daemon. Durable
+    /// launch metadata identifies these rows across restart; this volatile map
+    /// proves current ownership and gives cancellation/shutdown one exact task
+    /// control instead of terminalizing a row while its handler keeps running.
+    active_in_process_handlers: Mutex<HashMap<String, InProcessHandlerControl>>,
+}
+
+struct InProcessHandlerControlInner {
+    birth_committed: AtomicBool,
+    terminal_confirmed: AtomicBool,
+    completion: AtomicU8,
+    completed_notify: tokio::sync::Notify,
+}
+
+/// Exact daemon-task control for one recorded in-process handler. Clones refer
+/// to the same owner; they do not create a second execution authority.
+#[derive(Clone)]
+pub struct InProcessHandlerControl {
+    inner: Arc<InProcessHandlerControlInner>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InProcessHandlerCompletion {
+    TerminalConfirmed,
+    OwnerLostUnsettled,
+    BirthAborted,
+}
+
+enum RootBirthOwner<'a> {
+    External,
+    InProcess(&'a InProcessHandlerControl),
+}
+
+impl InProcessHandlerControl {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(InProcessHandlerControlInner {
+                birth_committed: AtomicBool::new(false),
+                terminal_confirmed: AtomicBool::new(false),
+                completion: AtomicU8::new(0),
+                completed_notify: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    fn mark_birth_committed(&self) {
+        self.inner.birth_committed.store(true, Ordering::Release);
+    }
+
+    pub fn has_committed_birth(&self) -> bool {
+        self.inner.birth_committed.load(Ordering::Acquire)
+    }
+
+    pub fn mark_terminal_confirmed(&self) {
+        self.inner.terminal_confirmed.store(true, Ordering::Release);
+    }
+
+    pub fn has_terminal_confirmed(&self) -> bool {
+        self.inner.terminal_confirmed.load(Ordering::Acquire)
+    }
+
+    fn mark_completed(&self, completion: InProcessHandlerCompletion) {
+        let encoded = match completion {
+            InProcessHandlerCompletion::TerminalConfirmed => 1,
+            InProcessHandlerCompletion::OwnerLostUnsettled => 2,
+            InProcessHandlerCompletion::BirthAborted => 3,
+        };
+        self.inner.completion.store(encoded, Ordering::Release);
+        self.inner.completed_notify.notify_waiters();
+    }
+
+    pub fn completion(&self) -> Option<InProcessHandlerCompletion> {
+        match self.inner.completion.load(Ordering::Acquire) {
+            0 => None,
+            1 => Some(InProcessHandlerCompletion::TerminalConfirmed),
+            2 => Some(InProcessHandlerCompletion::OwnerLostUnsettled),
+            3 => Some(InProcessHandlerCompletion::BirthAborted),
+            _ => unreachable!("in-process handler completion state is closed"),
+        }
+    }
+
+    pub async fn wait_completed(&self) -> InProcessHandlerCompletion {
+        loop {
+            if let Some(completion) = self.completion() {
+                return completion;
+            }
+            let notified = self.inner.completed_notify.notified();
+            if let Some(completion) = self.completion() {
+                return completion;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InProcessHandlerStopRefusal {
+    ContradictoryAuthority,
+    MissingCancellationContract,
+    OwnerlessPendingReconciliation,
+}
+
+impl InProcessHandlerStopRefusal {
+    pub fn message(self, thread_id: &str) -> String {
+        match self {
+            Self::ContradictoryAuthority => format!(
+                "recorded in-process handler {thread_id} has contradictory durable and live owner authority"
+            ),
+            Self::MissingCancellationContract => format!(
+                "recorded in-process handler {thread_id} has no declared cancellation/drain contract"
+            ),
+            Self::OwnerlessPendingReconciliation => format!(
+                "ownerless recorded in-process handler {thread_id} is pending no-replay reconciliation"
+            ),
+        }
+    }
+}
+
+fn in_process_stop_refusal_locked(
+    active: &HashMap<String, InProcessHandlerControl>,
+    runtime: &RuntimeInfo,
+    thread_id: &str,
+) -> Option<InProcessHandlerStopRefusal> {
+    let durable_in_process = runtime
+        .launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.launch_driver)
+        == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
+    let active_in_process = active.contains_key(thread_id);
+    if active_in_process && !durable_in_process {
+        return Some(InProcessHandlerStopRefusal::ContradictoryAuthority);
+    }
+    if durable_in_process && active_in_process {
+        return Some(InProcessHandlerStopRefusal::MissingCancellationContract);
+    }
+    if durable_in_process {
+        return Some(InProcessHandlerStopRefusal::OwnerlessPendingReconciliation);
+    }
+    None
 }
 
 /// Enforces the global mutation order for every StateStore write: the
@@ -1093,6 +1232,27 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
         last_chain_seq: 0,
         last_thread_seq: 0,
     }
+}
+
+fn same_root_birth_identity(left: &ThreadSnapshot, right: &ThreadSnapshot) -> bool {
+    left.schema == right.schema
+        && left.kind == right.kind
+        && left.thread_id == right.thread_id
+        && left.chain_root_id == right.chain_root_id
+        && left.kind_name == right.kind_name
+        && left.item_ref == right.item_ref
+        && left.executor_ref == right.executor_ref
+        && left.launch_mode == right.launch_mode
+        && left.current_site_id == right.current_site_id
+        && left.origin_site_id == right.origin_site_id
+        && left.upstream_thread_id == right.upstream_thread_id
+        && left.requested_by == right.requested_by
+        && left.project_root == right.project_root
+        && left.project_authority == right.project_authority
+        && left.admitted_launch_capsule_hash == right.admitted_launch_capsule_hash
+        && left.captured_history_policy == right.captured_history_policy
+        && left.base_project_snapshot_hash == right.base_project_snapshot_hash
+        && left.created_at == right.created_at
 }
 
 fn build_continuation_snapshot(
@@ -1905,6 +2065,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             active_launch_owners: Mutex::new(HashSet::new()),
+            active_in_process_handlers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1944,6 +2105,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             active_launch_owners: Mutex::new(HashSet::new()),
+            active_in_process_handlers: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2049,7 +2211,243 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             active_launch_owners: Mutex::new(HashSet::new()),
+            active_in_process_handlers: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Publish current-daemon ownership before an in-process handler root
+    /// becomes visible. A duplicate registration would make ownership
+    /// ambiguous and therefore fails closed.
+    pub fn register_in_process_handler(&self, thread_id: &str) -> Result<InProcessHandlerControl> {
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("in-process handler registration is closed for daemon shutdown");
+        }
+        let mut active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("in-process handler registration is closed for daemon shutdown");
+        }
+        if active.contains_key(thread_id) {
+            bail!("in-process handler is already registered for thread {thread_id}");
+        }
+        let control = InProcessHandlerControl::new();
+        active.insert(thread_id.to_string(), control.clone());
+        Ok(control)
+    }
+
+    /// Retire the exact current-daemon owner after durable terminal settlement
+    /// (or before its interruption finalizer takes responsibility).
+    pub fn unregister_in_process_handler(
+        &self,
+        thread_id: &str,
+        owner: &InProcessHandlerControl,
+    ) -> Result<bool> {
+        let mut active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        let Some(current) = active.get(thread_id) else {
+            return Ok(false);
+        };
+        if !Arc::ptr_eq(&current.inner, &owner.inner) {
+            bail!("stale in-process handler owner cannot unregister thread {thread_id}");
+        }
+        let removed = active.remove(thread_id);
+        if let Some(control) = removed.as_ref() {
+            let completion = if !control.has_committed_birth() {
+                InProcessHandlerCompletion::BirthAborted
+            } else if control.inner.terminal_confirmed.load(Ordering::Acquire) {
+                InProcessHandlerCompletion::TerminalConfirmed
+            } else {
+                InProcessHandlerCompletion::OwnerLostUnsettled
+            };
+            control.mark_completed(completion);
+        }
+        Ok(removed.is_some())
+    }
+
+    pub fn is_in_process_handler_active(&self, thread_id: &str) -> Result<bool> {
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        Ok(active.contains_key(thread_id))
+    }
+
+    /// Read the durable launch driver and volatile owner registry under the
+    /// same lock order used by stop mutation. API and command front doors use
+    /// this exact fence for honest 409 diagnostics; the mutation repeats it at
+    /// its linearization point.
+    pub fn in_process_handler_stop_refusal(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<InProcessHandlerStopRefusal>> {
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        let g = self.lock()?;
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing before stop fence: {thread_id}"))?;
+        Ok(in_process_stop_refusal_locked(&active, &runtime, thread_id))
+    }
+
+    pub fn active_in_process_handler_controls(
+        &self,
+    ) -> Result<Vec<(String, InProcessHandlerControl)>> {
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        Ok(active
+            .iter()
+            .map(|(thread_id, control)| (thread_id.clone(), control.clone()))
+            .collect())
+    }
+
+    fn ensure_in_process_handler_owner(
+        &self,
+        thread_id: &str,
+        owner: &InProcessHandlerControl,
+    ) -> Result<()> {
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        let control = active
+            .get(thread_id)
+            .ok_or_else(|| anyhow!("recorded in-process handler has no active daemon owner"))?;
+        if !Arc::ptr_eq(&control.inner, &owner.inner) {
+            bail!("stale in-process handler owner for thread {thread_id}");
+        }
+        Ok(())
+    }
+
+    /// Finalize a recorded in-process service only for the exact daemon owner
+    /// that registered before root birth. The owner proof permits a naturally
+    /// completed handler to commit during shutdown drain after the general
+    /// execution-admission gate closes. Both normal completion and guard-drop
+    /// interruption must prove that this owner committed the root birth.
+    pub fn finalize_in_process_handler_owned(
+        &self,
+        thread_id: &str,
+        owner: &InProcessHandlerControl,
+        update: &FinalizeThreadRecord,
+    ) -> Result<FinalizeIfNonterminalOutcome> {
+        let permit = self.acquire_write_permit()?;
+        // Validate volatile ownership without holding the registry mutex over
+        // the CAS commit. The caller itself owns this control value; the only
+        // permitted unregister is its guard's later Drop path.
+        self.ensure_in_process_handler_owner(thread_id, owner)?;
+        if !owner.has_committed_birth() {
+            bail!(
+                "in-process handler owner cannot finalize thread {thread_id} before its birth commits"
+            );
+        }
+        let g = self.lock()?;
+        let thread_row = g
+            .state_db
+            .get_thread(thread_id)?
+            .ok_or_else(|| anyhow!("thread not found: {thread_id}"))?;
+        if is_terminal_status(&thread_row.status) {
+            return Ok(FinalizeIfNonterminalOutcome::AlreadyTerminal {
+                status: thread_row.status,
+            });
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing during finalization: {thread_id}"))?;
+        let metadata = runtime
+            .launch_metadata
+            .as_ref()
+            .ok_or_else(|| anyhow!("recorded in-process handler has no launch metadata"))?;
+        if metadata.launch_driver
+            != Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            || metadata.lifecycle_authority()?
+                != Some(ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE)
+        {
+            bail!("recorded in-process handler runtime authority is inconsistent");
+        }
+        let (persisted, effective) = self.finalize_thread_with_rows(
+            &g,
+            permit.cas_guard(),
+            thread_id,
+            thread_row,
+            runtime,
+            update,
+            true,
+        )?;
+        Ok(FinalizeIfNonterminalOutcome::Finalized {
+            persisted,
+            effective: Box::new(effective),
+        })
+    }
+
+    /// Read a root snapshot directly from authoritative CAS without requiring
+    /// its replaceable projection row to be current.
+    pub fn get_authoritative_root_thread_snapshot(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ThreadSnapshot>> {
+        let g = self.lock()?;
+        g.state_db
+            .read_authoritative_thread_snapshot(thread_id, thread_id)
+    }
+
+    /// Read the authoritative root snapshot and its exact last CAS event
+    /// without depending on the rebuildable projection.
+    pub fn get_authoritative_root_thread_snapshot_with_last_event(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<(ThreadSnapshot, Option<PersistedEventRecord>)>> {
+        let g = self.lock()?;
+        let Some((snapshot, last_event)) = g
+            .state_db
+            .read_authoritative_thread_snapshot_with_last_event(thread_id, thread_id)?
+        else {
+            return Ok(None);
+        };
+        let last_event = last_event
+            .map(|(event_hash, event)| {
+                let chain_seq = i64::try_from(event.chain_seq)
+                    .context("authoritative event chain_seq exceeds SQLite range")?;
+                let thread_seq = i64::try_from(event.thread_seq)
+                    .context("authoritative event thread_seq exceeds SQLite range")?;
+                let storage_class = match event.durability {
+                    ryeos_state::objects::EventDurability::Durable => "indexed",
+                    ryeos_state::objects::EventDurability::Journal => "journal",
+                    ryeos_state::objects::EventDurability::Ephemeral => {
+                        bail!("authoritative snapshot cannot reference an ephemeral event")
+                    }
+                };
+                Ok(PersistedEventRecord {
+                    event_id: chain_seq,
+                    event_hash: Some(event_hash),
+                    chain_root_id: event.chain_root_id,
+                    chain_seq,
+                    thread_id: event.thread_id,
+                    thread_seq,
+                    event_type: event.event_type,
+                    storage_class: storage_class.to_string(),
+                    ts: event.ts,
+                    prev_chain_event_hash: event.prev_chain_event_hash,
+                    prev_thread_event_hash: event.prev_thread_event_hash,
+                    payload: event.payload,
+                })
+            })
+            .transpose()?;
+        Ok(Some((snapshot, last_event)))
     }
 
     pub fn is_launch_owner_active(&self, launch_owner: &str) -> bool {
@@ -2370,6 +2768,49 @@ impl StateStore {
         }
     }
 
+    /// Deliberately corrupt only the replaceable thread projection so recovery
+    /// tests can prove authoritative reservation reconciliation does not
+    /// depend on projected status.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_thread_projection_status_for_test(
+        &self,
+        thread_id: &str,
+        status: &str,
+    ) -> Result<()> {
+        let g = self.lock()?;
+        let updated = g.state_db.projection().connection().execute(
+            "UPDATE threads SET status = ?2 WHERE thread_id = ?1",
+            rusqlite::params![thread_id, status],
+        )?;
+        if updated != 1 {
+            bail!("test projection mutation found no exact thread {thread_id}");
+        }
+        Ok(())
+    }
+
+    /// Remove only projected events while retaining authoritative CAS, used to
+    /// prove terminal postcommit repair does not depend on projection freshness.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn delete_thread_projection_events_for_test(&self, thread_id: &str) -> Result<usize> {
+        let g = self.lock()?;
+        Ok(g.state_db.projection().connection().execute(
+            "DELETE FROM events WHERE thread_id = ?1",
+            rusqlite::params![thread_id],
+        )?)
+    }
+
+    /// Remove the replaceable thread row after its projected events have been
+    /// removed. Authoritative CAS remains intact so terminal postcommit repair
+    /// can prove it has no projection-row dependency.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn delete_thread_projection_row_for_test(&self, thread_id: &str) -> Result<bool> {
+        let g = self.lock()?;
+        Ok(g.state_db.projection().connection().execute(
+            "DELETE FROM threads WHERE thread_id = ?1",
+            rusqlite::params![thread_id],
+        )? == 1)
+    }
+
     fn create_thread_inner(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
         if thread.thread_id == thread.chain_root_id {
             return self.create_root_thread_with_events_and_launch_metadata(
@@ -2456,6 +2897,40 @@ impl StateStore {
         initial_events: Vec<NewEventRecord>,
         launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
     ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_root_thread_with_events_and_launch_metadata_owned(
+            thread,
+            initial_events,
+            launch_metadata,
+            RootBirthOwner::External,
+        )
+    }
+
+    /// Publish an in-process root only while the exact daemon task owner is
+    /// registered. The synchronous owner task cannot drop its guard during
+    /// this call; the registry lock itself is deliberately released before
+    /// the authoritative chain/runtime commit.
+    pub fn create_in_process_root_with_events_and_launch_metadata(
+        &self,
+        thread: &NewThreadRecord,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: &crate::launch_metadata::RuntimeLaunchMetadata,
+        owner: &InProcessHandlerControl,
+    ) -> Result<Vec<PersistedEventRecord>> {
+        self.create_root_thread_with_events_and_launch_metadata_owned(
+            thread,
+            initial_events,
+            Some(launch_metadata),
+            RootBirthOwner::InProcess(owner),
+        )
+    }
+
+    fn create_root_thread_with_events_and_launch_metadata_owned(
+        &self,
+        thread: &NewThreadRecord,
+        initial_events: Vec<NewEventRecord>,
+        launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+        birth_owner: RootBirthOwner<'_>,
+    ) -> Result<Vec<PersistedEventRecord>> {
         if thread.thread_id != thread.chain_root_id || thread.upstream_thread_id.is_some() {
             bail!("create_root_thread_with_events requires a root thread record");
         }
@@ -2466,7 +2941,40 @@ impl StateStore {
             bail!("root initial events must be durable");
         }
         let permit = self.acquire_write_permit()?;
+        let is_in_process_launch = launch_metadata.and_then(|metadata| metadata.launch_driver)
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
+        match (&birth_owner, is_in_process_launch) {
+            (RootBirthOwner::External, false) => {
+                let active = self
+                    .active_in_process_handlers
+                    .lock()
+                    .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+                if active.contains_key(&thread.thread_id) {
+                    bail!(
+                        "registered in-process owner cannot publish a non-in-process root for thread {}",
+                        thread.thread_id
+                    );
+                }
+            }
+            (RootBirthOwner::External, true) => {
+                bail!("in-process root birth requires an exact registered daemon owner");
+            }
+            (RootBirthOwner::InProcess(_), false) => {
+                bail!("in-process root owner cannot authorize a different launch driver");
+            }
+            (RootBirthOwner::InProcess(owner), true) => {
+                // As above, do not serialize every StateStore writer behind a
+                // volatile registry mutex while the durable birth commits.
+                self.ensure_in_process_handler_owner(&thread.thread_id, owner)?;
+            }
+        }
         let g = self.lock()?;
+        if !self
+            .process_attachment_admission_open
+            .load(Ordering::Acquire)
+        {
+            bail!("thread creation is closed for daemon shutdown");
+        }
         // Initial facet events are subject to the same collection/key/value
         // limits as ordinary appends. The new thread is not projected yet, so
         // the validator correctly evaluates this batch against an empty set.
@@ -2499,11 +3007,35 @@ impl StateStore {
             build_snapshot(thread),
             launch_metadata,
         )?;
-        // Establish the auxiliary runtime row before the authoritative commit.
-        // If chain creation fails, remove it; an orphan auxiliary row is
-        // recoverable, while a committed launch row with no runtime ledger is
-        // not safe to hand off.
+        let event_successor_snapshot = if launch_metadata
+            .and_then(|metadata| metadata.launch_driver)
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
         {
+            if events.len() != 2 || events[1].event_type != ryeos_state::event_types::THREAD_STARTED
+            {
+                bail!("in-process root birth requires exactly one thread_started successor event");
+            }
+            let mut running = birth_snapshot.clone();
+            running.status = ThreadStatus::Running;
+            let started_at = lillux::time::iso8601_now();
+            running.started_at = Some(started_at.clone());
+            running.updated_at = started_at;
+            Some(running)
+        } else {
+            None
+        };
+        let expected_birth_snapshot = birth_snapshot.clone();
+        // Establish the auxiliary runtime row before the authoritative commit.
+        // A proven pre-commit failure removes it. Ambiguous acknowledgement or
+        // an observable committed root preserves it for exact settlement;
+        // deleting uncertain ownership would make recovery impossible.
+        if is_in_process_launch {
+            g.runtime_db.reserve_in_process_handler_birth(
+                &thread.thread_id,
+                &thread.chain_root_id,
+                launch_metadata.expect("in-process launch metadata is present"),
+            )?;
+        } else {
             g.runtime_db
                 .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
             if let Some(launch_metadata) = launch_metadata {
@@ -2516,18 +3048,91 @@ impl StateStore {
                 }
             }
         }
-        let committed = g.state_db.create_chain_with_events_admitted(
-            &thread.chain_root_id,
-            birth_snapshot,
-            thread_events,
-            g.signer.as_ref(),
-            &g.runtime_db,
-            permit.cas_guard(),
-        );
+        let committed = match event_successor_snapshot {
+            Some(successor) => g.state_db.create_chain_with_event_successor_admitted(
+                &thread.chain_root_id,
+                birth_snapshot,
+                successor,
+                thread_events,
+                g.signer.as_ref(),
+                &g.runtime_db,
+                permit.cas_guard(),
+            ),
+            None => g.state_db.create_chain_with_events_admitted(
+                &thread.chain_root_id,
+                birth_snapshot,
+                thread_events,
+                g.signer.as_ref(),
+                &g.runtime_db,
+                permit.cas_guard(),
+            ),
+        };
         let result = match committed {
             Ok(committed) => committed_value(committed),
             Err(error) => {
-                if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&thread.thread_id) {
+                let authoritative = g
+                    .state_db
+                    .read_authoritative_thread_snapshot(&thread.chain_root_id, &thread.thread_id);
+                match authoritative {
+                    Ok(Some(snapshot))
+                        if same_root_birth_identity(&snapshot, &expected_birth_snapshot) =>
+                    {
+                        if let RootBirthOwner::InProcess(owner) = &birth_owner {
+                            owner.mark_birth_committed();
+                            if snapshot.status != ThreadStatus::Running {
+                                return Err(anyhow!(
+                                    "in-process root birth returned an error after publishing contradictory authoritative status {}: {error:#}",
+                                    snapshot.status.as_str()
+                                ));
+                            }
+                            if let Err(reservation_error) = g
+                                .runtime_db
+                                .mark_in_process_handler_birth_running(&thread.thread_id)
+                            {
+                                return Err(anyhow!(
+                                    "in-process root birth committed despite its returned error, but its reservation could not advance: {reservation_error:#}; original error: {error:#}"
+                                ));
+                            }
+                        }
+                        return Err(anyhow!(
+                            "root birth committed authoritative state despite its returned error; preserving runtime ownership for reconciliation: {error:#}"
+                        ));
+                    }
+                    Ok(Some(_)) => {}
+                    Err(authority_error) => {
+                        if let RootBirthOwner::InProcess(owner) = &birth_owner {
+                            // The write acknowledgement and authoritative
+                            // readback are both ambiguous. Treat birth as
+                            // possibly committed so guard-drop exact
+                            // terminalization is attempted; startup can
+                            // discard the pending reservation if no root was
+                            // actually published.
+                            owner.mark_birth_committed();
+                        }
+                        return Err(anyhow!(
+                            "root birth failed and authoritative readback was unavailable; preserving runtime ownership for reconciliation: write error: {error:#}; readback error: {authority_error:#}"
+                        ));
+                    }
+                    Ok(None) => {}
+                }
+                let cleanup = if is_in_process_launch {
+                    g.runtime_db
+                        .discard_pending_in_process_handler_birth(&thread.thread_id)
+                        .and_then(|deleted| {
+                            if deleted {
+                                Ok(())
+                            } else {
+                                bail!(
+                                    "pending in-process birth reservation disappeared before failed-root cleanup"
+                                )
+                            }
+                        })
+                } else {
+                    g.runtime_db
+                        .delete_thread_runtime(&thread.thread_id)
+                        .map(|_| ())
+                };
+                if let Err(cleanup_error) = cleanup {
                     tracing::error!(
                         thread_id = %thread.thread_id,
                         error = %cleanup_error,
@@ -2537,6 +3142,21 @@ impl StateStore {
                 return Err(error);
             }
         };
+        if let RootBirthOwner::InProcess(owner) = birth_owner {
+            // CAS publication is the irreversible birth boundary. Mark the
+            // volatile owner first so any later error invokes exact terminal
+            // settlement rather than treating this as an aborted collision.
+            owner.mark_birth_committed();
+            g.runtime_db
+                .mark_in_process_handler_birth_running(&thread.thread_id)
+                .with_context(|| {
+                    format!(
+                        "advance committed in-process birth reservation for {}",
+                        thread.thread_id
+                    )
+                })?;
+        }
+        drop(g);
         persisted_from_add_thread_with_events(&result, &events)
     }
 
@@ -2892,6 +3512,124 @@ impl StateStore {
             persisted,
             effective: Box::new(effective),
         })
+    }
+
+    /// Reservation-qualified no-replay finalization driven exclusively by the
+    /// authoritative root snapshot. Replaceable projection status must not
+    /// decide whether an ownerless in-process service remains running.
+    ///
+    /// `None` means a live owner appeared before the mutation lock and retains
+    /// terminal authority.
+    pub fn finalize_ownerless_in_process_handler_if_nonterminal(
+        &self,
+        thread_id: &str,
+        update: &FinalizeThreadRecord,
+    ) -> Result<Option<FinalizeIfNonterminalOutcome>> {
+        let permit = self.acquire_write_permit()?;
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        if active.contains_key(thread_id) {
+            return Ok(None);
+        }
+        let g = self.lock()?;
+        let reservation = g
+            .runtime_db
+            .in_process_handler_reservation(thread_id)?
+            .ok_or_else(|| {
+                anyhow!("ownerless in-process handler {thread_id} has no durable reservation")
+            })?;
+        if reservation.phase == runtime_db::InProcessHandlerReservationPhase::TerminalConfirmed {
+            let snapshot = g
+                .state_db
+                .read_authoritative_thread_snapshot(thread_id, thread_id)?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "terminal-confirmed in-process handler {thread_id} has no authoritative root"
+                    )
+                })?;
+            if !snapshot.status.is_terminal() {
+                bail!(
+                    "terminal-confirmed in-process handler {thread_id} contradicts authoritative status {}",
+                    snapshot.status.as_str()
+                );
+            }
+            return Ok(Some(FinalizeIfNonterminalOutcome::AlreadyTerminal {
+                status: snapshot.status.as_str().to_string(),
+            }));
+        }
+        let snapshot = g
+            .state_db
+            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .ok_or_else(|| {
+                anyhow!("ownerless in-process handler {thread_id} has no authoritative root")
+            })?;
+        if snapshot.status.is_terminal() {
+            return Ok(Some(FinalizeIfNonterminalOutcome::AlreadyTerminal {
+                status: snapshot.status.as_str().to_string(),
+            }));
+        }
+        if snapshot.status != ThreadStatus::Running {
+            bail!(
+                "ownerless in-process handler {thread_id} has authoritative status {} instead of running",
+                snapshot.status.as_str()
+            );
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing during finalization: {thread_id}"))?;
+        let metadata = runtime
+            .launch_metadata
+            .as_ref()
+            .ok_or_else(|| anyhow!("ownerless in-process handler has no launch metadata"))?;
+        if metadata.launch_driver
+            != Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            || metadata.lifecycle_authority()?
+                != Some(ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE)
+        {
+            bail!("ownerless in-process handler runtime authority is inconsistent");
+        }
+        let thread_row = queries::ThreadRow {
+            thread_id: snapshot.thread_id.clone(),
+            chain_root_id: snapshot.chain_root_id.clone(),
+            kind: snapshot.kind_name.clone(),
+            status: snapshot.status.as_str().to_string(),
+            item_ref: snapshot.item_ref.clone(),
+            executor_ref: snapshot.executor_ref.clone(),
+            launch_mode: snapshot.launch_mode.clone(),
+            current_site_id: snapshot.current_site_id.clone(),
+            origin_site_id: snapshot.origin_site_id.clone(),
+            upstream_thread_id: snapshot.upstream_thread_id.clone(),
+            requested_by: snapshot.requested_by.clone(),
+            project_root: snapshot
+                .project_root
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            project_authority: snapshot.project_authority.clone(),
+            admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash.clone(),
+            base_project_snapshot_hash: snapshot.base_project_snapshot_hash.clone(),
+            result_project_snapshot_hash: snapshot.result_project_snapshot_hash.clone(),
+            captured_history_policy: snapshot.captured_history_policy.clone(),
+            created_at: snapshot.created_at.clone(),
+            updated_at: snapshot.updated_at.clone(),
+            started_at: snapshot.started_at.clone(),
+            finished_at: snapshot.finished_at.clone(),
+        };
+        let (persisted, effective) = self.finalize_thread_with_rows(
+            &g,
+            permit.cas_guard(),
+            thread_id,
+            thread_row,
+            runtime,
+            update,
+            false,
+        )?;
+        Ok(Some(FinalizeIfNonterminalOutcome::Finalized {
+            persisted,
+            effective: Box::new(effective),
+        }))
     }
 
     /// Owner-qualified form of [`Self::finalize_if_nonterminal`] for daemon
@@ -4042,8 +4780,9 @@ impl StateStore {
         let lifecycle_authority = runtime
             .launch_metadata
             .as_ref()
-            .and_then(|metadata| metadata.resume_context.as_ref())
-            .map(|resume| resume.lifecycle_authority);
+            .map(|metadata| metadata.lifecycle_authority())
+            .transpose()?
+            .flatten();
         let project_authority = g
             .state_db
             .read_authoritative_thread_snapshot(&thread_row.chain_root_id, thread_id)?
@@ -4125,8 +4864,9 @@ impl StateStore {
         let lifecycle_authority = runtime
             .launch_metadata
             .as_ref()
-            .and_then(|metadata| metadata.resume_context.as_ref())
-            .map(|resume| resume.lifecycle_authority);
+            .map(|metadata| metadata.lifecycle_authority())
+            .transpose()?
+            .flatten();
         Ok(Some(ThreadDetail {
             thread_id: snapshot.thread_id,
             chain_root_id: snapshot.chain_root_id,
@@ -5176,8 +5916,9 @@ impl StateStore {
                 lifecycle_authority: runtime
                     .launch_metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.resume_context.as_ref())
-                    .map(|resume| resume.lifecycle_authority),
+                    .map(|metadata| metadata.lifecycle_authority())
+                    .transpose()?
+                    .flatten(),
                 admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -5222,8 +5963,9 @@ impl StateStore {
                 lifecycle_authority: runtime
                     .launch_metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.resume_context.as_ref())
-                    .map(|resume| resume.lifecycle_authority),
+                    .map(|metadata| metadata.lifecycle_authority())
+                    .transpose()?
+                    .flatten(),
                 admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -5286,8 +6028,9 @@ impl StateStore {
                 lifecycle_authority: runtime
                     .launch_metadata
                     .as_ref()
-                    .and_then(|metadata| metadata.resume_context.as_ref())
-                    .map(|resume| resume.lifecycle_authority),
+                    .map(|metadata| metadata.lifecycle_authority())
+                    .transpose()?
+                    .flatten(),
                 admitted_launch_capsule_hash: row.admitted_launch_capsule_hash,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
@@ -5664,9 +6407,15 @@ impl StateStore {
     }
 
     /// Close process attachment admission at the shutdown serialization point.
-    /// Taking the StateStore lock first waits for every prior attach to commit;
-    /// every later attach acquires the lock and observes the closed gate.
+    /// The volatile owner registry and StateStore lock jointly serialize both
+    /// subprocess attachment and in-process owner registration: every owner
+    /// registered first is visible to the drain, and every later registration
+    /// observes the closed gate.
     pub fn close_process_attachment_admission(&self) -> Result<()> {
+        let _active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
         let _g = self.lock()?;
         self.process_attachment_admission_open
             .store(false, Ordering::Release);
@@ -5764,7 +6513,18 @@ impl StateStore {
         thread_id: &str,
         intent: runtime_db::StopIntent,
     ) -> Result<RuntimeInfo> {
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
         let g = self.lock()?;
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing before stop request: {thread_id}"))?;
+        if let Some(refusal) = in_process_stop_refusal_locked(&active, &runtime, thread_id) {
+            bail!("{}", refusal.message(thread_id));
+        }
         g.runtime_db.request_thread_stop(thread_id, intent)
     }
 
@@ -5779,6 +6539,10 @@ impl StateStore {
         thread_id: &str,
         intent: runtime_db::StopIntent,
     ) -> Result<StopIfAdmissionOpenOutcome> {
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
         let g = self.lock()?;
         let thread = g
             .state_db
@@ -5786,6 +6550,13 @@ impl StateStore {
             .ok_or_else(|| anyhow!("thread not found before owner-drop stop: {thread_id}"))?;
         if is_terminal_status(&thread.status) {
             return Ok(StopIfAdmissionOpenOutcome::AlreadyTerminal);
+        }
+        let runtime = g
+            .runtime_db
+            .get_runtime_info(thread_id)?
+            .ok_or_else(|| anyhow!("runtime row missing before owner-drop stop: {thread_id}"))?;
+        if let Some(refusal) = in_process_stop_refusal_locked(&active, &runtime, thread_id) {
+            bail!("{}", refusal.message(thread_id));
         }
         // A durable follow waiter transfers lifecycle ownership to the daemon.
         // Keep this check under the same store lock as the stop tombstone so a
@@ -5841,6 +6612,158 @@ impl StateStore {
     pub fn list_attached_thread_ids(&self) -> Result<Vec<String>> {
         let g = self.lock()?;
         g.runtime_db.list_attached_thread_ids()
+    }
+
+    pub fn in_process_handler_reservations_after(
+        &self,
+        after_thread_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<runtime_db::InProcessHandlerReservation>> {
+        let g = self.lock()?;
+        g.runtime_db
+            .in_process_handler_reservations_after(after_thread_id, limit)
+    }
+
+    pub fn in_process_handler_reservation(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<runtime_db::InProcessHandlerReservation>> {
+        let g = self.lock()?;
+        g.runtime_db.in_process_handler_reservation(thread_id)
+    }
+
+    /// Reconcile a pending reservation whose CAS lookup proved that no root was
+    /// ever published. The absence check and the atomic RuntimeDb cleanup share
+    /// the StateStore lock, so a concurrent birth cannot appear between them.
+    pub fn discard_uncommitted_in_process_handler_birth(&self, thread_id: &str) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        if g.state_db
+            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .is_some()
+        {
+            bail!("refusing to discard in-process birth `{thread_id}` with an authoritative root");
+        }
+        g.runtime_db
+            .discard_pending_in_process_handler_birth(thread_id)
+    }
+
+    /// Complete pending→running reconciliation only after reading the
+    /// authoritative Running root under the same mutation lock.
+    pub fn reconcile_in_process_handler_birth_running(&self, thread_id: &str) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let snapshot = g
+            .state_db
+            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .ok_or_else(|| {
+                anyhow!("in-process reservation `{thread_id}` has no authoritative root")
+            })?;
+        if snapshot.status != ThreadStatus::Running {
+            bail!(
+                "pending in-process reservation `{thread_id}` has authoritative status {} instead of running",
+                snapshot.status.as_str()
+            );
+        }
+        g.runtime_db
+            .mark_in_process_handler_birth_running(thread_id)
+    }
+
+    /// Caller must hold the global write permit before entering this helper.
+    fn settle_in_process_handler_reservation_under_write_permit(
+        &self,
+        thread_id: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        let snapshot = g
+            .state_db
+            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .ok_or_else(|| {
+                anyhow!("in-process reservation `{thread_id}` has no authoritative root")
+            })?;
+        if !snapshot.status.is_terminal() {
+            bail!(
+                "cannot settle in-process reservation `{thread_id}` at authoritative status {}",
+                snapshot.status.as_str()
+            );
+        }
+        g.runtime_db
+            .settle_in_process_handler_reservation(thread_id)
+    }
+
+    /// Transition a terminal reservation for the exact registered handler
+    /// owner. Exact readback retries use this while their volatile owner is
+    /// intentionally still present.
+    pub fn settle_in_process_handler_reservation_owned(
+        &self,
+        thread_id: &str,
+        owner: &InProcessHandlerControl,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        self.ensure_in_process_handler_owner(thread_id, owner)?;
+        self.settle_in_process_handler_reservation_under_write_permit(thread_id)
+    }
+
+    /// Transition a terminal reservation only while no volatile handler owner
+    /// exists. The registry lock remains held across the durable mutation so
+    /// shutdown/reconciliation cannot steal settlement from a live owner.
+    pub fn settle_ownerless_in_process_handler_reservation(&self, thread_id: &str) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        if active.contains_key(thread_id) {
+            bail!("cannot settle in-process reservation `{thread_id}` while its owner is active");
+        }
+        self.settle_in_process_handler_reservation_under_write_permit(thread_id)
+    }
+
+    /// Caller must hold the global write permit before entering this helper.
+    fn delete_terminal_in_process_handler_reservation_under_write_permit(
+        &self,
+        thread_id: &str,
+    ) -> Result<bool> {
+        let g = self.lock()?;
+        let snapshot = g
+            .state_db
+            .read_authoritative_thread_snapshot(thread_id, thread_id)?
+            .ok_or_else(|| {
+                anyhow!("in-process reservation `{thread_id}` has no authoritative root")
+            })?;
+        if !snapshot.status.is_terminal() {
+            bail!(
+                "cannot delete in-process reservation `{thread_id}` at authoritative status {}",
+                snapshot.status.as_str()
+            );
+        }
+        g.runtime_db
+            .delete_terminal_in_process_handler_reservation(thread_id)
+    }
+
+    pub fn delete_terminal_in_process_handler_reservation_owned(
+        &self,
+        thread_id: &str,
+        owner: &InProcessHandlerControl,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        self.ensure_in_process_handler_owner(thread_id, owner)?;
+        self.delete_terminal_in_process_handler_reservation_under_write_permit(thread_id)
+    }
+
+    pub fn delete_ownerless_terminal_in_process_handler_reservation(
+        &self,
+        thread_id: &str,
+    ) -> Result<bool> {
+        let _permit = self.acquire_write_permit()?;
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
+        if active.contains_key(thread_id) {
+            bail!("cannot delete in-process reservation `{thread_id}` while its owner is active");
+        }
+        self.delete_terminal_in_process_handler_reservation_under_write_permit(thread_id)
     }
 
     /// Read the auto-resume attempt counter for a thread.
@@ -7198,11 +8121,26 @@ impl StateStore {
         relation: &str,
     ) -> Result<Option<StopIntent>> {
         let _permit = self.acquire_write_permit()?;
+        let active = self
+            .active_in_process_handlers
+            .lock()
+            .map_err(|_| anyhow!("active in-process-handler registry poisoned"))?;
         let g = self.lock()?;
         if !self
             .process_attachment_admission_open
             .load(Ordering::Acquire)
         {
+            let runtime = g
+                .runtime_db
+                .get_runtime_info(child_thread_id)?
+                .ok_or_else(|| {
+                    anyhow!("child runtime row missing before shutdown stop: {child_thread_id}")
+                })?;
+            if let Some(refusal) =
+                in_process_stop_refusal_locked(&active, &runtime, child_thread_id)
+            {
+                bail!("{}", refusal.message(child_thread_id));
+            }
             // The shutdown gate may close after a callback created its child but
             // before it reached this second durable mutation. Tombstone the child
             // first so no later attach can win, then preserve operational lineage
@@ -7271,6 +8209,19 @@ impl StateStore {
         } else {
             runtime_db::ChildLinkStopPolicy::None
         };
+        if stop_policy != runtime_db::ChildLinkStopPolicy::None {
+            let runtime = g
+                .runtime_db
+                .get_runtime_info(child_thread_id)?
+                .ok_or_else(|| {
+                    anyhow!("child runtime row missing before inherited stop: {child_thread_id}")
+                })?;
+            if let Some(refusal) =
+                in_process_stop_refusal_locked(&active, &runtime, child_thread_id)
+            {
+                bail!("{}", refusal.message(child_thread_id));
+            }
+        }
         let (_, effective_stop) = g.runtime_db.record_child_link_with_stop_policy(
             parent_thread_id,
             child_thread_id,
@@ -7648,6 +8599,507 @@ mod tests {
             .into_iter()
             .map(|event| event.event_type)
             .collect()
+    }
+
+    fn in_process_launch_metadata() -> crate::launch_metadata::RuntimeLaunchMetadata {
+        crate::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            .with_in_process_lifecycle_authority(
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+            )
+    }
+
+    #[test]
+    fn in_process_root_birth_atomically_publishes_created_genesis_and_running_head() {
+        let store = test_store();
+        let thread_id = "T-in-process-root-birth";
+        let metadata = in_process_launch_metadata();
+        let owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register in-process owner");
+
+        let persisted = store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                vec![NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: json!({}),
+                }],
+                &metadata,
+                &owner,
+            )
+            .expect("atomically publish in-process root birth");
+
+        assert_eq!(
+            persisted
+                .iter()
+                .map(|event| event.event_type.as_str())
+                .collect::<Vec<_>>(),
+            [
+                ryeos_state::event_types::THREAD_CREATED,
+                ryeos_state::event_types::THREAD_STARTED,
+            ]
+        );
+        let projected = store
+            .get_thread(thread_id)
+            .expect("read projected in-process root")
+            .expect("projected in-process root");
+        assert_eq!(projected.status, ThreadStatus::Running.as_str());
+        assert!(projected.started_at.is_some());
+        let projected_metadata = projected
+            .runtime
+            .launch_metadata
+            .expect("in-process launch metadata");
+        assert_eq!(
+            projected_metadata.launch_driver,
+            Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        );
+        assert_eq!(
+            projected_metadata.in_process_lifecycle_authority,
+            Some(ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE)
+        );
+        assert_eq!(
+            replayed_event_types(&store, thread_id),
+            ["thread_created", "thread_started"]
+        );
+        assert_eq!(
+            store
+                .in_process_handler_reservations_after(
+                    None,
+                    runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+                )
+                .expect("list live reservations"),
+            [runtime_db::InProcessHandlerReservation {
+                thread_id: thread_id.to_string(),
+                phase: runtime_db::InProcessHandlerReservationPhase::Running,
+            }]
+        );
+
+        let inner = store.lock().expect("lock state store");
+        let head_ref = inner
+            .state_db
+            .read_generic_head_ref("chains", thread_id)
+            .expect("read signed chain head")
+            .expect("signed chain head");
+        assert!(
+            !head_ref.target_hash.is_empty(),
+            "atomic birth must publish a signed CAS head"
+        );
+        let cas = store.state_authority.cas_store().expect("open pinned CAS");
+        let head_state: ryeos_state::ChainState = serde_json::from_value(
+            cas.get_object(&head_ref.target_hash)
+                .expect("load current ChainState")
+                .expect("current ChainState object"),
+        )
+        .expect("decode current ChainState");
+        head_state.validate().expect("validate current ChainState");
+        assert_eq!(head_state.last_chain_seq, 2);
+        let running_entry = head_state
+            .threads
+            .get(thread_id)
+            .expect("running ChainState entry");
+        assert_eq!(running_entry.status, ThreadStatus::Running);
+        assert_eq!(running_entry.last_thread_seq, 2);
+        let started_event_hash = persisted[1]
+            .event_hash
+            .as_deref()
+            .expect("durable thread_started event hash");
+        assert_eq!(
+            head_state.last_event_hash.as_deref(),
+            Some(started_event_hash)
+        );
+        assert_eq!(
+            running_entry.last_event_hash.as_deref(),
+            Some(started_event_hash)
+        );
+
+        let authoritative = authoritative_snapshot_for_transition(&inner, thread_id, thread_id)
+            .expect("read authoritative running snapshot");
+        assert_eq!(authoritative.status, ThreadStatus::Running);
+        assert!(authoritative.started_at.is_some());
+        assert_eq!(authoritative.last_chain_seq, 2);
+        assert_eq!(authoritative.last_thread_seq, 2);
+        assert_eq!(
+            authoritative.last_event_hash.as_deref(),
+            Some(started_event_hash)
+        );
+
+        let genesis_hash = head_state
+            .prev_chain_state_hash
+            .as_deref()
+            .expect("event successor must retain the genesis ChainState");
+        let genesis_state: ryeos_state::ChainState = serde_json::from_value(
+            cas.get_object(genesis_hash)
+                .expect("load genesis ChainState")
+                .expect("genesis ChainState object"),
+        )
+        .expect("decode genesis ChainState");
+        genesis_state
+            .validate()
+            .expect("validate genesis ChainState");
+        assert_eq!(genesis_state.last_chain_seq, 0);
+        assert!(genesis_state.last_event_hash.is_none());
+        assert!(genesis_state.prev_chain_state_hash.is_none());
+        let created_entry = genesis_state
+            .threads
+            .get(thread_id)
+            .expect("created genesis entry");
+        assert_eq!(created_entry.status, ThreadStatus::Created);
+        assert_eq!(created_entry.last_thread_seq, 0);
+        assert!(created_entry.last_event_hash.is_none());
+
+        let genesis_snapshot = ThreadSnapshot::from_current_value(
+            cas.get_object(&created_entry.snapshot_hash)
+                .expect("load genesis snapshot")
+                .expect("genesis snapshot object"),
+        )
+        .expect("decode current genesis snapshot");
+        assert_eq!(genesis_snapshot.status, ThreadStatus::Created);
+        assert!(genesis_snapshot.started_at.is_none());
+        assert_eq!(genesis_snapshot.last_chain_seq, 0);
+        assert_eq!(genesis_snapshot.last_thread_seq, 0);
+        assert!(genesis_snapshot.last_event_hash.is_none());
+    }
+
+    #[test]
+    fn shutdown_gate_rejects_new_in_process_owner_registration() {
+        let store = test_store();
+        store
+            .close_process_attachment_admission()
+            .expect("close shutdown admission");
+        let error = store
+            .register_in_process_handler("T-after-shutdown-gate")
+            .err()
+            .expect("shutdown gate must reject a late in-process owner");
+        assert!(error.to_string().contains("closed for daemon shutdown"));
+    }
+
+    #[test]
+    fn in_process_root_birth_rejects_noncanonical_event_shape_without_partial_rows() {
+        let store = test_store();
+        let thread_id = "T-in-process-root-birth-rejected";
+        let owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register in-process owner");
+        let error = store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                Vec::new(),
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect_err("missing thread_started event must fail closed");
+        assert!(error
+            .to_string()
+            .contains("requires exactly one thread_started successor event"));
+        assert!(store
+            .get_thread(thread_id)
+            .expect("inspect rejected root")
+            .is_none());
+        let inner = store.lock().expect("lock state store");
+        assert!(inner
+            .runtime_db
+            .get_runtime_info(thread_id)
+            .expect("inspect rejected runtime row")
+            .is_none());
+        assert!(inner
+            .runtime_db
+            .in_process_handler_reservations_after(
+                None,
+                runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+            )
+            .expect("inspect rejected reservation")
+            .is_empty());
+        assert!(inner
+            .state_db
+            .read_generic_head_ref("chains", thread_id)
+            .expect("inspect rejected chain head")
+            .is_none());
+    }
+
+    #[test]
+    fn in_process_root_birth_requires_the_exact_registered_owner() {
+        let store = test_store();
+        let thread_id = "T-in-process-root-owner-qualified";
+        let metadata = in_process_launch_metadata();
+        let stale = InProcessHandlerControl::new();
+        let events = || {
+            vec![NewEventRecord {
+                event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+                storage_class: "indexed".to_string(),
+                payload: json!({}),
+            }]
+        };
+
+        let error = store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                events(),
+                &metadata,
+                &stale,
+            )
+            .expect_err("unregistered owner must not publish an in-process root");
+        assert!(error
+            .to_string()
+            .contains("recorded in-process handler has no active daemon owner"));
+
+        let owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register exact in-process owner");
+        let error = store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                events(),
+                &metadata,
+                &stale,
+            )
+            .expect_err("stale owner must not publish an in-process root");
+        assert!(error.to_string().contains("stale in-process handler owner"));
+        assert!(store
+            .get_thread(thread_id)
+            .expect("inspect owner-rejected root")
+            .is_none());
+
+        store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                events(),
+                &metadata,
+                &owner,
+            )
+            .expect("exact registered owner publishes the root");
+    }
+
+    #[test]
+    fn failed_duplicate_birth_owner_cannot_adopt_or_terminalize_existing_root() {
+        let store = test_store();
+        let thread_id = "T-in-process-duplicate-birth";
+        let metadata = in_process_launch_metadata();
+        let started = || {
+            vec![NewEventRecord {
+                event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+                storage_class: "indexed".to_string(),
+                payload: json!({}),
+            }]
+        };
+        let original_owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register original owner");
+        store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                started(),
+                &metadata,
+                &original_owner,
+            )
+            .expect("publish original root");
+        assert!(original_owner.has_committed_birth());
+        assert!(store
+            .unregister_in_process_handler(thread_id, &original_owner)
+            .expect("simulate loss of original volatile owner"));
+        assert_eq!(
+            original_owner.completion(),
+            Some(InProcessHandlerCompletion::OwnerLostUnsettled)
+        );
+
+        let colliding_owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register colliding owner");
+        let error = store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                started(),
+                &metadata,
+                &colliding_owner,
+            )
+            .expect_err("duplicate birth must fail");
+        assert!(!error.to_string().is_empty());
+        assert!(!colliding_owner.has_committed_birth());
+
+        let terminal = FinalizeThreadRecord {
+            status: ThreadStatus::Failed.as_str().to_string(),
+            outcome_code: Some("service_interrupted".to_string()),
+            result_json: None,
+            error_json: Some(json!({"error": "must not be adopted"})),
+            artifacts: Vec::new(),
+            final_cost: None,
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+        };
+        let error = store
+            .finalize_in_process_handler_owned(thread_id, &colliding_owner, &terminal)
+            .expect_err("pre-commit owner cannot terminalize an existing root");
+        assert!(error.to_string().contains("before its birth commits"));
+        let existing = store
+            .get_thread(thread_id)
+            .expect("read existing root")
+            .expect("existing root remains");
+        assert_eq!(existing.status, ThreadStatus::Running.as_str());
+        let authoritative = store
+            .get_authoritative_root_thread_snapshot(thread_id)
+            .expect("read authoritative existing root")
+            .expect("authoritative existing root remains");
+        assert_eq!(authoritative.outcome_code, None);
+        assert_eq!(
+            replayed_event_types(&store, thread_id),
+            ["thread_created", "thread_started"]
+        );
+        assert!(store
+            .unregister_in_process_handler(thread_id, &colliding_owner)
+            .expect("retire rejected colliding owner"));
+        assert_eq!(
+            colliding_owner.completion(),
+            Some(InProcessHandlerCompletion::BirthAborted)
+        );
+    }
+
+    #[test]
+    fn in_process_terminal_settlement_requires_the_exact_registered_owner() {
+        let store = test_store();
+        let thread_id = "T-in-process-exact-owner";
+        let owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register in-process owner");
+        let duplicate = store
+            .register_in_process_handler(thread_id)
+            .err()
+            .expect("duplicate in-process owner must fail closed");
+        assert!(duplicate.to_string().contains("already registered"));
+        store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                vec![NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: json!({}),
+                }],
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("publish in-process root");
+
+        let terminal = FinalizeThreadRecord {
+            status: ThreadStatus::Completed.as_str().to_string(),
+            outcome_code: Some(ThreadStatus::Completed.as_str().to_string()),
+            result_json: Some(json!({"ok": true})),
+            error_json: None,
+            artifacts: Vec::new(),
+            final_cost: None,
+            managed_envelope: None,
+            result_project_snapshot_hash: None,
+        };
+        let stale = InProcessHandlerControl::new();
+        let error = store
+            .finalize_in_process_handler_owned(thread_id, &stale, &terminal)
+            .expect_err("stale in-process owner must not settle the root");
+        assert!(error.to_string().contains("stale in-process handler owner"));
+        assert_eq!(
+            store
+                .get_thread(thread_id)
+                .expect("read root after rejected settlement")
+                .expect("root after rejected settlement")
+                .status,
+            ThreadStatus::Running.as_str()
+        );
+
+        assert!(matches!(
+            store
+                .finalize_in_process_handler_owned(thread_id, &owner, &terminal)
+                .expect("exact owner settles root"),
+            FinalizeIfNonterminalOutcome::Finalized { .. }
+        ));
+        assert_eq!(
+            store
+                .get_thread(thread_id)
+                .expect("read settled root")
+                .expect("settled root")
+                .status,
+            ThreadStatus::Completed.as_str()
+        );
+        let error = store
+            .settle_ownerless_in_process_handler_reservation(thread_id)
+            .expect_err("shutdown settlement must not steal from an active owner");
+        assert!(error.to_string().contains("while its owner is active"));
+        assert!(store
+            .settle_in_process_handler_reservation_owned(thread_id, &owner)
+            .expect("exact owner settles terminal reservation"));
+        let error = store
+            .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
+            .expect_err("shutdown cleanup must not delete an active owner's reservation");
+        assert!(error.to_string().contains("while its owner is active"));
+        owner.mark_terminal_confirmed();
+        assert!(store
+            .unregister_in_process_handler(thread_id, &owner)
+            .expect("unregister exact owner"));
+        assert!(!store
+            .is_in_process_handler_active(thread_id)
+            .expect("inspect active owner"));
+        assert_eq!(
+            owner.completion(),
+            Some(InProcessHandlerCompletion::TerminalConfirmed)
+        );
+        assert!(store
+            .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
+            .expect("ownerless shutdown cleanup deletes terminal reservation residue"));
+        assert!(store
+            .in_process_handler_reservations_after(
+                None,
+                runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+            )
+            .expect("list settled reservations")
+            .is_empty());
+    }
+
+    #[test]
+    fn primary_stop_boundary_rejects_cancel_and_kill_for_active_in_process_owner() {
+        let store = test_store();
+        let thread_id = "T-in-process-stop-fenced";
+        let owner = store
+            .register_in_process_handler(thread_id)
+            .expect("register in-process owner");
+        store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(thread_id, thread_id),
+                vec![NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: json!({}),
+                }],
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("publish in-process root");
+
+        assert_eq!(
+            store
+                .in_process_handler_stop_refusal(thread_id)
+                .expect("read shared API/command stop fence"),
+            Some(InProcessHandlerStopRefusal::MissingCancellationContract)
+        );
+        for intent in [StopIntent::Cancel, StopIntent::Kill] {
+            let error = store
+                .request_thread_stop(thread_id, intent)
+                .expect_err("active in-process owner has no admitted stop contract");
+            assert!(error
+                .to_string()
+                .contains("has no declared cancellation/drain contract"));
+            let detail = store
+                .get_thread(thread_id)
+                .expect("read stop-fenced root")
+                .expect("stop-fenced root");
+            assert_eq!(detail.status, ThreadStatus::Running.as_str());
+            assert_eq!(detail.runtime.stop_intent, None);
+        }
+
+        assert_eq!(
+            replayed_event_types(&store, thread_id),
+            ["thread_created", "thread_started"],
+            "rejected stop requests must not append terminal or tombstone events"
+        );
+        assert!(store
+            .unregister_in_process_handler(thread_id, &owner)
+            .expect("unregister in-process owner"));
     }
 
     #[test]
@@ -8117,6 +9569,54 @@ mod tests {
             .expect("read child")
             .expect("child row");
         assert_eq!(child.runtime.stop_intent, Some(StopIntent::Kill));
+    }
+
+    #[test]
+    fn inherited_child_stop_rejects_active_in_process_owner_without_linking_or_tombstoning() {
+        let store = test_store();
+        let parent_id = "T-parent-stop-fenced";
+        let child_id = "T-in-process-child-stop-fenced";
+        store
+            .create_thread_for_test(&thread_record(parent_id, parent_id))
+            .expect("parent thread");
+        let owner = store
+            .register_in_process_handler(child_id)
+            .expect("register in-process child owner");
+        store
+            .create_in_process_root_with_events_and_launch_metadata(
+                &thread_record(child_id, child_id),
+                vec![NewEventRecord {
+                    event_type: ryeos_state::event_types::THREAD_STARTED.to_string(),
+                    storage_class: "indexed".to_string(),
+                    payload: json!({}),
+                }],
+                &in_process_launch_metadata(),
+                &owner,
+            )
+            .expect("publish in-process child");
+        store
+            .request_thread_stop(parent_id, StopIntent::Kill)
+            .expect("tombstone parent");
+
+        let error = store
+            .record_child_link(parent_id, child_id, "dispatch")
+            .expect_err("active in-process child cannot inherit undeclared stop authority");
+        assert!(error
+            .to_string()
+            .contains("has no declared cancellation/drain contract"));
+        let child = store
+            .get_thread(child_id)
+            .expect("read fenced child")
+            .expect("fenced child row");
+        assert_eq!(child.status, ThreadStatus::Running.as_str());
+        assert_eq!(child.runtime.stop_intent, None);
+        assert!(store
+            .descendant_thread_ids(parent_id)
+            .expect("read parent descendants")
+            .is_empty());
+        assert!(store
+            .unregister_in_process_handler(child_id, &owner)
+            .expect("unregister in-process child owner"));
     }
 
     #[test]

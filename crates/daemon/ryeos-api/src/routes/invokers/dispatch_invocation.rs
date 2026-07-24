@@ -223,6 +223,9 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
         .await
         .map_err(|e| RouteDispatchError::Internal(format!("dispatch failed: {e}")))?;
 
-        Ok(RouteInvocationResult::Json(result))
+        Ok(RouteInvocationResult::Json {
+            value: result,
+            thread_id: None,
+        })
     }
 }

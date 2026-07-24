@@ -15,6 +15,7 @@ pub(crate) fn project_initial_root_committed_chain(
     cache: &HeadCache,
     chain_root_id: &str,
     committed_hash: &str,
+    expected_root_status: crate::objects::ThreadStatus,
     project_rows: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let cached = cache
@@ -46,10 +47,11 @@ pub(crate) fn project_initial_root_committed_chain(
         || cached.chain_state.last_event_hash.is_none()
         || root_entry.last_thread_seq != cached.chain_state.last_chain_seq
         || root_entry.last_event_hash != cached.chain_state.last_event_hash
-        || root_entry.status != crate::objects::ThreadStatus::Created
+        || root_entry.status != expected_root_status
     {
         anyhow::bail!(
-            "initial root committed head {committed_hash} does not describe one created root advancing its internal genesis {predecessor}"
+            "initial root committed head {committed_hash} does not describe one root at expected status {} advancing its internal genesis {predecessor}",
+            expected_root_status.as_str()
         );
     }
 
@@ -123,7 +125,10 @@ mod tests {
 
     const ROOT: &str = "T-root";
 
-    fn initial_root_cache(predecessor: Option<String>) -> (HeadCache, String) {
+    fn initial_root_cache(
+        predecessor: Option<String>,
+        status: ThreadStatus,
+    ) -> (HeadCache, String) {
         let event_hash = "b".repeat(64);
         let state = ChainStateBuilder::new(ROOT)
             .prev_chain_state_hash(predecessor)
@@ -136,7 +141,7 @@ mod tests {
                     snapshot_hash: "a".repeat(64),
                     last_event_hash: Some(event_hash),
                     last_thread_seq: 1,
-                    status: ThreadStatus::Created,
+                    status,
                 },
             )
             .build();
@@ -149,13 +154,21 @@ mod tests {
     #[test]
     fn initial_root_projection_advances_only_from_absent_and_is_idempotent() {
         let db = ProjectionDb::open_transient().unwrap();
-        let (cache, committed_hash) = initial_root_cache(Some("c".repeat(64)));
+        let (cache, committed_hash) =
+            initial_root_cache(Some("c".repeat(64)), ThreadStatus::Created);
         let calls = Cell::new(0usize);
 
-        project_initial_root_committed_chain(&db, &cache, ROOT, &committed_hash, || {
-            calls.set(calls.get() + 1);
-            Ok(())
-        })
+        project_initial_root_committed_chain(
+            &db,
+            &cache,
+            ROOT,
+            &committed_hash,
+            ThreadStatus::Created,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(calls.get(), 1);
         assert_eq!(
@@ -166,10 +179,17 @@ mod tests {
             committed_hash
         );
 
-        project_initial_root_committed_chain(&db, &cache, ROOT, &committed_hash, || {
-            calls.set(calls.get() + 1);
-            Ok(())
-        })
+        project_initial_root_committed_chain(
+            &db,
+            &cache,
+            ROOT,
+            &committed_hash,
+            ThreadStatus::Created,
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(
             calls.get(),
@@ -181,12 +201,14 @@ mod tests {
     #[test]
     fn initial_root_projection_rejects_missing_genesis_or_existing_cursor() {
         let db = ProjectionDb::open_transient().unwrap();
-        let (without_genesis, without_genesis_hash) = initial_root_cache(None);
+        let (without_genesis, without_genesis_hash) =
+            initial_root_cache(None, ThreadStatus::Created);
         let error = project_initial_root_committed_chain(
             &db,
             &without_genesis,
             ROOT,
             &without_genesis_hash,
+            ThreadStatus::Created,
             || Ok(()),
         )
         .unwrap_err();
@@ -198,10 +220,46 @@ mod tests {
             updated_at: "2026-07-16T00:00:00Z".to_string(),
         })
         .unwrap();
-        let (cache, committed_hash) = initial_root_cache(Some("c".repeat(64)));
-        let error =
-            project_initial_root_committed_chain(&db, &cache, ROOT, &committed_hash, || Ok(()))
-                .unwrap_err();
+        let (cache, committed_hash) =
+            initial_root_cache(Some("c".repeat(64)), ThreadStatus::Created);
+        let error = project_initial_root_committed_chain(
+            &db,
+            &cache,
+            ROOT,
+            &committed_hash,
+            ThreadStatus::Created,
+            || Ok(()),
+        )
+        .unwrap_err();
         assert!(format!("{error:#}").contains("expected absent cursor"));
+    }
+
+    #[test]
+    fn initial_root_projection_requires_the_exact_published_successor_status() {
+        let db = ProjectionDb::open_transient().unwrap();
+        let (cache, committed_hash) =
+            initial_root_cache(Some("c".repeat(64)), ThreadStatus::Running);
+
+        project_initial_root_committed_chain(
+            &db,
+            &cache,
+            ROOT,
+            &committed_hash,
+            ThreadStatus::Running,
+            || Ok(()),
+        )
+        .unwrap();
+
+        let other_db = ProjectionDb::open_transient().unwrap();
+        let error = project_initial_root_committed_chain(
+            &other_db,
+            &cache,
+            ROOT,
+            &committed_hash,
+            ThreadStatus::Created,
+            || Ok(()),
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("expected status created"));
     }
 }

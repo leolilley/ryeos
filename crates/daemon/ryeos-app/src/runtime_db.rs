@@ -94,9 +94,34 @@ pub struct IncompatibleLaunchMetadata {
     pub admitted_launch_capsule_schema: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InProcessHandlerReservationPhase {
+    Pending,
+    Running,
+    TerminalConfirmed,
+}
+
+impl InProcessHandlerReservationPhase {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw {
+            "pending" => Ok(Self::Pending),
+            "running" => Ok(Self::Running),
+            "terminal_confirmed" => Ok(Self::TerminalConfirmed),
+            _ => bail!("invalid in-process handler reservation phase `{raw}`"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InProcessHandlerReservation {
+    pub thread_id: String,
+    pub phase: InProcessHandlerReservationPhase,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct RuntimeThreadHistoryDiscardReport {
     pub thread_runtime: usize,
+    pub in_process_handler_reservations: usize,
     pub thread_commands: usize,
     pub hook_dispatch_ledger: usize,
     pub detached_spawn_intents: usize,
@@ -114,6 +139,7 @@ pub struct RuntimeThreadHistoryDiscardReport {
 impl RuntimeThreadHistoryDiscardReport {
     pub fn total_rows(&self) -> usize {
         self.thread_runtime
+            + self.in_process_handler_reservations
             + self.thread_commands
             + self.hook_dispatch_ledger
             + self.detached_spawn_intents
@@ -139,6 +165,7 @@ pub struct ChainRecoveryPins {
     /// truth. These are retained as a structural pin rather than silently
     /// orphaned by deleting the signed head.
     pub runtime_membership_conflicts: u64,
+    pub in_process_handler_reservations: u64,
     pub live_processes: u64,
     pub launch_claims: u64,
     /// Active launch claims whose persisted launch contract is resume- or
@@ -163,6 +190,7 @@ pub struct ChainRecoveryPins {
 impl ChainRecoveryPins {
     pub fn is_empty(&self) -> bool {
         self.runtime_membership_conflicts == 0
+            && self.in_process_handler_reservations == 0
             && self.live_processes == 0
             && self.launch_claims == 0
             && self.recovery_capable_launch_claims == 0
@@ -254,6 +282,8 @@ pub const MAX_COMMAND_CLAIM_ITEMS: usize = 32;
 pub const MAX_COMMAND_CLAIM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const CONTINUATION_SEED_MARKER: &[u8] = b"continuation_seed";
 pub(crate) const CONTINUATION_SEED_RECONCILE_PAGE_SIZE: usize = 512;
+pub const IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE: usize = 512;
+pub const MAX_IN_PROCESS_HANDLER_RESERVATIONS: usize = 4_096;
 
 /// A live thread cannot accumulate unbounded terminalization work.
 pub const MAX_OPEN_COMMANDS_PER_THREAD: usize = 128;
@@ -711,6 +741,16 @@ CREATE TABLE IF NOT EXISTS thread_runtime (
 CREATE INDEX IF NOT EXISTS idx_thread_runtime_chain_root
     ON thread_runtime(chain_root_id);
 
+CREATE TABLE IF NOT EXISTS in_process_handler_reservation (
+    thread_id TEXT PRIMARY KEY,
+    phase TEXT NOT NULL CHECK (phase IN ('pending', 'running', 'terminal_confirmed')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_in_process_handler_reservation_phase_thread
+    ON in_process_handler_reservation(phase, thread_id);
+
 CREATE TABLE IF NOT EXISTS thread_commands (
     command_id INTEGER PRIMARY KEY AUTOINCREMENT,
     thread_id TEXT NOT NULL,
@@ -957,6 +997,35 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                         col_type: "TEXT",
                         pk: false,
                         not_null: false,
+                    },
+                ],
+            },
+            sqlite_schema::TableSpec {
+                name: "in_process_handler_reservation",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "thread_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "phase",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
                     },
                 ],
             },
@@ -1617,6 +1686,12 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 unique: false,
             },
             sqlite_schema::IndexSpec {
+                name: "idx_in_process_handler_reservation_phase_thread",
+                table: "in_process_handler_reservation",
+                columns: &["phase", "thread_id"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
                 name: "idx_execution_workspace_thread",
                 table: "execution_workspace",
                 columns: &["thread_id"],
@@ -1893,6 +1968,53 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
     for (owner, owner_id, raw) in rows {
         decode_stored_launch_metadata(&raw)
             .with_context(|| format!("validate launch metadata for {owner} row `{owner_id}`"))?;
+    }
+    let reservation_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM in_process_handler_reservation",
+        [],
+        |row| row.get(0),
+    )?;
+    if usize::try_from(reservation_count)
+        .context("in-process handler reservation count is invalid")?
+        > MAX_IN_PROCESS_HANDLER_RESERVATIONS
+    {
+        bail!(
+            "in-process handler reservations exceed the current-schema limit of {MAX_IN_PROCESS_HANDLER_RESERVATIONS}"
+        );
+    }
+    let reservations = {
+        let mut statement = tx.prepare(
+            "SELECT reservation.thread_id, reservation.phase, runtime.launch_metadata
+               FROM in_process_handler_reservation AS reservation
+               LEFT JOIN thread_runtime AS runtime
+                 ON runtime.thread_id = reservation.thread_id
+              ORDER BY reservation.thread_id",
+        )?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    for (thread_id, phase, raw) in reservations {
+        InProcessHandlerReservationPhase::parse(&phase)
+            .with_context(|| format!("validate reservation for thread `{thread_id}`"))?;
+        let raw = raw.ok_or_else(|| {
+            anyhow!("in-process handler reservation `{thread_id}` has no runtime launch metadata")
+        })?;
+        let metadata = decode_current_launch_metadata(&raw).with_context(|| {
+            format!("validate reserved in-process launch metadata for thread `{thread_id}`")
+        })?;
+        if metadata.launch_driver
+            != Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("in-process handler reservation `{thread_id}` has a different launch driver");
+        }
     }
     let authorities = {
         let mut statement = tx.prepare(
@@ -2309,6 +2431,10 @@ impl RuntimeDb {
         if dry_run {
             return Ok(RuntimeThreadHistoryDiscardReport {
                 thread_runtime: count(&self.conn, "thread_runtime")?,
+                in_process_handler_reservations: count(
+                    &self.conn,
+                    "in_process_handler_reservation",
+                )?,
                 thread_commands: count(&self.conn, "thread_commands")?,
                 hook_dispatch_ledger: count(&self.conn, "hook_dispatch_ledger")?,
                 detached_spawn_intents: count(&self.conn, "detached_spawn_intent")?,
@@ -2326,6 +2452,8 @@ impl RuntimeDb {
 
         let conn = self.conn.unchecked_transaction()?;
         let report = RuntimeThreadHistoryDiscardReport {
+            in_process_handler_reservations: conn
+                .execute("DELETE FROM in_process_handler_reservation", [])?,
             follow_waiter_children: conn.execute("DELETE FROM follow_waiter_child", [])?,
             follow_waiters: conn.execute("DELETE FROM follow_waiter", [])?,
             thread_commands: conn.execute("DELETE FROM thread_commands", [])?,
@@ -3098,6 +3226,212 @@ impl RuntimeDb {
         Ok(())
     }
 
+    /// Atomically create the auxiliary runtime row and the current-schema
+    /// durable reservation which makes an in-process birth reconcilable across
+    /// a crash before its authoritative CAS head is published.
+    pub fn reserve_in_process_handler_birth(
+        &self,
+        thread_id: &str,
+        chain_root_id: &str,
+        launch_metadata: &RuntimeLaunchMetadata,
+    ) -> Result<()> {
+        launch_metadata.validate()?;
+        if launch_metadata.launch_driver
+            != Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("in-process birth reservation requires the in-process launch driver");
+        }
+        let launch_metadata = encode_current_launch_metadata(launch_metadata)
+            .context("encode in-process birth launch metadata")?;
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let reservations: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM in_process_handler_reservation",
+            [],
+            |row| row.get(0),
+        )?;
+        if usize::try_from(reservations)
+            .context("in-process handler reservation count is invalid")?
+            >= MAX_IN_PROCESS_HANDLER_RESERVATIONS
+        {
+            bail!(
+                "in-process handler reservations reached the current-schema limit of {MAX_IN_PROCESS_HANDLER_RESERVATIONS}"
+            );
+        }
+        tx.execute(
+            "INSERT INTO thread_runtime (
+                thread_id, chain_root_id, pid, pgid, metadata, launch_metadata
+             ) VALUES (?1, ?2, NULL, NULL, NULL, ?3)",
+            params![thread_id, chain_root_id, launch_metadata],
+        )?;
+        tx.execute(
+            "INSERT INTO in_process_handler_reservation (
+                thread_id, phase, created_at_ms, updated_at_ms
+             ) VALUES (?1, 'pending', ?2, ?2)",
+            params![thread_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Advance the exact pending reservation after the CAS root has committed.
+    /// Repeating the transition is idempotent; a missing or contradictory row
+    /// is an integrity failure.
+    pub fn mark_in_process_handler_birth_running(&self, thread_id: &str) -> Result<()> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let updated = self.conn.execute(
+            "UPDATE in_process_handler_reservation
+                SET phase = 'running', updated_at_ms = ?2
+              WHERE thread_id = ?1 AND phase = 'pending'",
+            params![thread_id, now],
+        )?;
+        if updated == 1 {
+            return Ok(());
+        }
+        let phase = self
+            .conn
+            .query_row(
+                "SELECT phase FROM in_process_handler_reservation WHERE thread_id = ?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match phase.as_deref() {
+            Some("running") => Ok(()),
+            Some(other) => {
+                bail!("in-process handler reservation `{thread_id}` has invalid phase `{other}`")
+            }
+            None => bail!("in-process handler reservation `{thread_id}` is missing"),
+        }
+    }
+
+    /// Remove a birth which never acquired an authoritative CAS root. Both
+    /// rows are deleted in one SQLite transaction, and only a pending
+    /// reservation may authorize this cleanup.
+    pub fn discard_pending_in_process_handler_birth(&self, thread_id: &str) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let phase = tx
+            .query_row(
+                "SELECT phase FROM in_process_handler_reservation WHERE thread_id = ?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(phase) = phase else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if phase != "pending" {
+            bail!("refusing to discard in-process handler birth `{thread_id}` in phase `{phase}`");
+        }
+        let runtime_deleted = tx.execute(
+            "DELETE FROM thread_runtime WHERE thread_id = ?1",
+            params![thread_id],
+        )?;
+        if runtime_deleted != 1 {
+            bail!("pending in-process handler birth `{thread_id}` has no exact runtime row");
+        }
+        let reservation_deleted = tx.execute(
+            "DELETE FROM in_process_handler_reservation WHERE thread_id = ?1 AND phase = 'pending'",
+            params![thread_id],
+        )?;
+        if reservation_deleted != 1 {
+            bail!("pending in-process handler reservation `{thread_id}` disappeared");
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Persist exact terminal confirmation as an idempotent reservation phase.
+    /// Cleanup is separate so an ambiguous acknowledgement can be retried
+    /// without interpreting absence as success.
+    pub fn settle_in_process_handler_reservation(&self, thread_id: &str) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let updated = self.conn.execute(
+            "UPDATE in_process_handler_reservation
+                SET phase = 'terminal_confirmed', updated_at_ms = ?2
+              WHERE thread_id = ?1 AND phase IN ('pending', 'running')",
+            params![thread_id, now],
+        )?;
+        if updated == 1 {
+            return Ok(true);
+        }
+        let phase = self
+            .conn
+            .query_row(
+                "SELECT phase FROM in_process_handler_reservation WHERE thread_id = ?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match phase.as_deref() {
+            Some("terminal_confirmed") => Ok(true),
+            Some(other) => bail!(
+                "in-process handler reservation `{thread_id}` has invalid terminal phase `{other}`"
+            ),
+            None => Ok(false),
+        }
+    }
+
+    pub fn delete_terminal_in_process_handler_reservation(&self, thread_id: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM in_process_handler_reservation
+              WHERE thread_id = ?1 AND phase = 'terminal_confirmed'",
+            params![thread_id],
+        )? > 0)
+    }
+
+    pub fn in_process_handler_reservations_after(
+        &self,
+        after_thread_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<InProcessHandlerReservation>> {
+        if limit == 0 || limit > IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE {
+            bail!(
+                "in-process handler reservation limit must be 1..={IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE}"
+            );
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT thread_id, phase
+               FROM in_process_handler_reservation
+              WHERE (?1 IS NULL OR thread_id > ?1)
+              ORDER BY thread_id
+              LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after_thread_id, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.map(|row| {
+            let (thread_id, phase) = row?;
+            Ok(InProcessHandlerReservation {
+                thread_id,
+                phase: InProcessHandlerReservationPhase::parse(&phase)?,
+            })
+        })
+        .collect()
+    }
+
+    pub fn in_process_handler_reservation(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<InProcessHandlerReservation>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT phase FROM in_process_handler_reservation WHERE thread_id = ?1",
+                params![thread_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        row.map(|phase| {
+            Ok(InProcessHandlerReservation {
+                thread_id: thread_id.to_string(),
+                phase: InProcessHandlerReservationPhase::parse(&phase)?,
+            })
+        })
+        .transpose()
+    }
+
     /// Atomically seed the runtime identity for a continuation successor.
     ///
     /// A daemon crash may leave this row behind before the authoritative state
@@ -3109,6 +3443,11 @@ impl RuntimeDb {
         chain_root_id: &str,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
+        if launch_metadata.launch_driver
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("in-process handlers cannot use continuation runtime seeding");
+        }
         let launch_metadata_json = encode_current_launch_metadata(launch_metadata)
             .context("failed to encode continuation launch_metadata")?;
         let tx = self.conn.unchecked_transaction()?;
@@ -3288,7 +3627,12 @@ impl RuntimeDb {
 
     pub fn delete_thread_runtime(&self, thread_id: &str) -> Result<usize> {
         Ok(self.conn.execute(
-            "DELETE FROM thread_runtime WHERE thread_id = ?1",
+            "DELETE FROM thread_runtime
+              WHERE thread_id = ?1
+                AND NOT EXISTS (
+                    SELECT 1 FROM in_process_handler_reservation
+                     WHERE in_process_handler_reservation.thread_id = thread_runtime.thread_id
+                )",
             params![thread_id],
         )?)
     }
@@ -3450,6 +3794,10 @@ impl RuntimeDb {
                 "SELECT COUNT(*) FROM thread_launch_claim WHERE thread_id=?1",
                 thread_id,
             )?;
+            let in_process_handler_reservations = count_thread(
+                "SELECT COUNT(*) FROM in_process_handler_reservation WHERE thread_id=?1",
+                thread_id,
+            )?;
             let pending_commands = count_thread(
                 "SELECT COUNT(*) FROM thread_commands
                  WHERE thread_id=?1 AND status IN ('pending','claimed')",
@@ -3467,6 +3815,11 @@ impl RuntimeDb {
                 open_control_commands,
             );
             add_pin_count(&mut pins.launch_claims, launch_claims, "launch-claim")?;
+            add_pin_count(
+                &mut pins.in_process_handler_reservations,
+                in_process_handler_reservations,
+                "in-process-handler-reservation",
+            )?;
             add_pin_count(
                 &mut pins.recovery_capable_launch_claims,
                 owners.recovery_capable_launch_claims,
@@ -3566,6 +3919,10 @@ impl RuntimeDb {
                 )?;
                 deleted += self.conn.execute(
                     "DELETE FROM thread_launch_claim WHERE thread_id=?1",
+                    params![&thread_id],
+                )?;
+                deleted += self.conn.execute(
+                    "DELETE FROM in_process_handler_reservation WHERE thread_id=?1",
                     params![&thread_id],
                 )?;
                 deleted += self.conn.execute(
@@ -3670,6 +4027,11 @@ impl RuntimeDb {
         launch_metadata: &RuntimeLaunchMetadata,
         require_empty: bool,
     ) -> Result<()> {
+        if launch_metadata.launch_driver
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("in-process handlers cannot attach an external process identity");
+        }
         if process_identity.schema_version != PROCESS_IDENTITY_SCHEMA_VERSION
             || process_identity.target_pid != pid
             || process_identity.group_leader_pid != pgid
@@ -3719,6 +4081,13 @@ impl RuntimeDb {
                 Some(launch_metadata.clone())
             }
         };
+        if merged_launch_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.launch_driver)
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("in-process handlers cannot attach an external process identity");
+        }
         if let Some(existing_identity) = existing_identity {
             if require_empty {
                 bail!(
@@ -3884,6 +4253,11 @@ impl RuntimeDb {
         thread_id: &str,
         launch_metadata: &RuntimeLaunchMetadata,
     ) -> Result<()> {
+        if launch_metadata.launch_driver
+            == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            bail!("in-process launch metadata must be installed by the atomic birth reservation");
+        }
         let lm_json = encode_current_launch_metadata(launch_metadata)
             .context("failed to encode launch_metadata")?;
         let updated = self.conn.execute(
@@ -6214,6 +6588,172 @@ mod tests {
         (tmp, db)
     }
 
+    fn in_process_launch_metadata() -> RuntimeLaunchMetadata {
+        RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            .with_in_process_lifecycle_authority(
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+            )
+    }
+
+    #[test]
+    fn in_process_birth_reservation_is_atomic_typed_and_settleable() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_in_process_handler_birth(
+            "T-service",
+            "T-service",
+            &in_process_launch_metadata(),
+        )
+        .unwrap();
+        assert_eq!(
+            db.in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+                .unwrap(),
+            [InProcessHandlerReservation {
+                thread_id: "T-service".to_string(),
+                phase: InProcessHandlerReservationPhase::Pending,
+            }]
+        );
+        assert!(db.get_runtime_info("T-service").unwrap().is_some());
+        let attach_error = db
+            .attach_process(
+                "T-service",
+                1234,
+                1234,
+                &fake_process_identity(1234, 1234),
+                &RuntimeLaunchMetadata::default(),
+            )
+            .unwrap_err();
+        assert!(attach_error
+            .to_string()
+            .contains("cannot attach an external process"));
+
+        db.mark_in_process_handler_birth_running("T-service")
+            .unwrap();
+        db.mark_in_process_handler_birth_running("T-service")
+            .unwrap();
+        assert_eq!(
+            db.in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+                .unwrap()[0]
+                .phase,
+            InProcessHandlerReservationPhase::Running
+        );
+        let pins = db
+            .inspect_chain_recovery_pins("T-service", &["T-service".to_string()])
+            .unwrap();
+        assert_eq!(pins.in_process_handler_reservations, 1);
+        assert!(!pins.is_empty());
+        assert!(db
+            .settle_in_process_handler_reservation("T-service")
+            .unwrap());
+        assert!(db
+            .settle_in_process_handler_reservation("T-service")
+            .unwrap());
+        assert_eq!(
+            db.in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+                .unwrap()[0]
+                .phase,
+            InProcessHandlerReservationPhase::TerminalConfirmed
+        );
+        assert!(db
+            .delete_terminal_in_process_handler_reservation("T-service")
+            .unwrap());
+        assert!(db
+            .in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+            .unwrap()
+            .is_empty());
+        assert!(
+            db.get_runtime_info("T-service").unwrap().is_some(),
+            "terminal settlement retains historical runtime diagnostics"
+        );
+        assert!(db
+            .inspect_chain_recovery_pins("T-service", &["T-service".to_string()])
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn pending_in_process_birth_cleanup_removes_both_rows_and_running_refuses_cleanup() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_in_process_handler_birth(
+            "T-pending",
+            "T-pending",
+            &in_process_launch_metadata(),
+        )
+        .unwrap();
+        assert!(db
+            .discard_pending_in_process_handler_birth("T-pending")
+            .unwrap());
+        assert!(db.get_runtime_info("T-pending").unwrap().is_none());
+        assert!(db
+            .in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+            .unwrap()
+            .is_empty());
+
+        db.reserve_in_process_handler_birth(
+            "T-running",
+            "T-running",
+            &in_process_launch_metadata(),
+        )
+        .unwrap();
+        db.mark_in_process_handler_birth_running("T-running")
+            .unwrap();
+        let error = db
+            .discard_pending_in_process_handler_birth("T-running")
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to discard"));
+        assert!(db.get_runtime_info("T-running").unwrap().is_some());
+    }
+
+    #[test]
+    fn runtime_schema_without_in_process_reservation_contract_requires_explicit_reset() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("runtime.db");
+        let db = RuntimeDb::open(&path).unwrap();
+        db.conn
+            .execute_batch(
+                "DROP INDEX idx_in_process_handler_reservation_phase_thread;
+                 DROP TABLE in_process_handler_reservation;",
+            )
+            .unwrap();
+        drop(db);
+
+        let error = RuntimeDb::open(&path)
+            .err()
+            .expect("missing current reservation contract must fail closed");
+        assert!(error.to_string().contains("explicit no-backcompat reset"));
+        let read_only =
+            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let table_count: i64 = read_only
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'in_process_handler_reservation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table_count, 0, "ordinary open must not migrate the store");
+    }
+
+    #[test]
+    fn generic_launch_metadata_writer_cannot_bypass_in_process_reservation() {
+        let (_tmp, db) = fresh_db();
+        db.insert_thread_runtime("T-generic", "T-generic").unwrap();
+        let error = db
+            .set_launch_metadata("T-generic", &in_process_launch_metadata())
+            .unwrap_err();
+        assert!(error.to_string().contains("atomic birth reservation"));
+        assert!(db
+            .get_runtime_info("T-generic")
+            .unwrap()
+            .unwrap()
+            .launch_metadata
+            .is_none());
+        assert!(db
+            .in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+            .unwrap()
+            .is_empty());
+    }
+
     #[test]
     fn project_authority_envelope_roundtrips_exact_current_contract() {
         let authority = ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS;
@@ -7656,9 +8196,7 @@ mod tests {
         let (tmp, db) = fresh_db();
         db.conn
             .execute_batch(
-                "INSERT INTO thread_runtime (thread_id, chain_root_id)
-                     VALUES ('T-root', 'T-root');
-                 INSERT INTO thread_commands
+                "INSERT INTO thread_commands
                      (thread_id, command_type, status, created_at)
                      VALUES ('T-root', 'cancel', 'pending', '2026-07-15T00:00:00Z');
                  INSERT INTO hook_dispatch_ledger
@@ -7697,16 +8235,21 @@ mod tests {
                      VALUES ('T-seat', 'owner', 'terminal', 'client', 1);",
             )
             .unwrap();
+        db.reserve_in_process_handler_birth("T-root", "T-root", &in_process_launch_metadata())
+            .unwrap();
+        db.mark_in_process_handler_birth_running("T-root").unwrap();
 
         let preview = db.discard_all_thread_history(true).unwrap();
-        assert_eq!(preview.total_rows(), 11);
+        assert_eq!(preview.in_process_handler_reservations, 1);
+        assert_eq!(preview.total_rows(), 12);
         assert_eq!(
             db.discard_all_thread_history(true).unwrap().total_rows(),
-            11
+            12
         );
 
         let removed = db.discard_all_thread_history(false).unwrap();
-        assert_eq!(removed.total_rows(), 11);
+        assert_eq!(removed.in_process_handler_reservations, 1);
+        assert_eq!(removed.total_rows(), 12);
         assert_eq!(db.discard_all_thread_history(true).unwrap().total_rows(), 0);
         drop(db);
 

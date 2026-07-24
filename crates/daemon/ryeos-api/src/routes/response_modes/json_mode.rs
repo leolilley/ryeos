@@ -23,8 +23,8 @@ use crate::routes::compile::{
 };
 use crate::routes::interpolation;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
-    RouteInvocationResult,
+    attach_recorded_thread_header, CompiledRouteInvocation, InvocationCheck,
+    RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_app::route_raw::RawRouteSpec;
 
@@ -209,7 +209,7 @@ impl CompiledResponseMode for CompiledJsonMode {
         .await?;
 
         match result {
-            RouteInvocationResult::Json(value) => {
+            RouteInvocationResult::Json { value, thread_id } => {
                 if value.is_null() {
                     // A null result is a legitimate "absent resource" only for
                     // reads. GET → 404. For a mutation (any non-GET) a null is
@@ -229,11 +229,13 @@ impl CompiledResponseMode for CompiledJsonMode {
                             source = %self.source_ref,
                             "json route source returned null; mapping to HTTP 404"
                         );
-                        Ok((
+                        let mut response = (
                             StatusCode::NOT_FOUND,
                             axum::Json(serde_json::json!({ "error": "not found" })),
                         )
-                            .into_response())
+                            .into_response();
+                        attach_recorded_thread_header(&mut response, thread_id.as_deref())?;
+                        Ok(response)
                     } else {
                         tracing::error!(
                             route_id = %compiled.id,
@@ -248,7 +250,9 @@ impl CompiledResponseMode for CompiledJsonMode {
                         )))
                     }
                 } else {
-                    Ok(axum::Json(value).into_response())
+                    let mut response = axum::Json(value).into_response();
+                    attach_recorded_thread_header(&mut response, thread_id.as_deref())?;
+                    Ok(response)
                 }
             }
             // invoke_checked guarantees Json; any other variant is already

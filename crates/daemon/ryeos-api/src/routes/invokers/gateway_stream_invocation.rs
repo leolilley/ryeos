@@ -108,21 +108,30 @@ fn pre_spawn_dispatch_error(
     keep_alive_secs: u64,
     error: ryeos_executor::dispatch_error::DispatchError,
 ) -> RouteInvocationResult {
-    let mut payload =
-        ryeos_executor::structured_error::StructuredErrorPayload::from(&error).to_value();
-    if let Some(map) = payload.as_object_mut() {
-        map.remove("code");
-        map.remove("error");
-    }
-    let code = error.code().to_owned();
-    let message = error.to_string();
+    let envelope = dispatch_error_envelope(&error);
     let stream = async_stream::stream! {
-        yield Ok(error_envelope_with(&code, &message, Some(payload)));
+        yield Ok(envelope);
     };
     RouteInvocationResult::Stream(RouteEventStream {
         events: Box::pin(stream),
         keep_alive_secs,
     })
+}
+
+fn dispatch_error_envelope(
+    error: &ryeos_executor::dispatch_error::DispatchError,
+) -> RouteStreamEnvelope {
+    let payload = ryeos_executor::structured_error::dispatch_error_value(error);
+    if matches!(
+        error,
+        ryeos_executor::dispatch_error::DispatchError::StructuredService { .. }
+    ) {
+        // A typed handler owns its complete public body. Do not replace its
+        // code/message fields with wrapper diagnostics.
+        RouteStreamEnvelope::new("stream_error", payload)
+    } else {
+        error_envelope_with(error.code(), &error.to_string(), Some(payload))
+    }
 }
 static GATEWAY_CONTRACT: RouteInvocationContract = RouteInvocationContract {
     output: RouteInvocationOutput::Stream,
@@ -358,6 +367,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             &ctx.state,
             &item_ref,
             &project_ctx,
+            &resolved_contract.provenance,
             &req.parameters,
             &req.ref_bindings,
             &principal_id,
@@ -679,24 +689,16 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                 return;
                             }
                             Ok(Err(e)) => {
-                                let extras = match &e {
-                                    crate::routes::launch::LaunchSpawnError::Dispatch(de) => {
-                                        let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(de);
-                                        // Strip `code` and `error` so the helper's explicit args win.
-                                        let mut value = payload.to_value();
-                                        if let Some(map) = value.as_object_mut() {
-                                            map.remove("code");
-                                            map.remove("error");
-                                        }
-                                        Some(value)
+                                let envelope = match &e {
+                                    crate::routes::launch::LaunchSpawnError::Dispatch(error) => {
+                                        dispatch_error_envelope(error)
                                     }
-                                    _ => None,
+                                    _ => error_envelope(
+                                        e.code(),
+                                        &format!("launch failed: {e}"),
+                                    ),
                                 };
-                                yield Ok(error_envelope_with(
-                                    e.code(),
-                                    &format!("launch failed: {e}"),
-                                    extras,
-                                ));
+                                yield Ok(envelope);
                                 return;
                             }
                             Err(_) => {
@@ -806,5 +808,23 @@ mod tests {
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
         assert!(req.call.is_none());
+    }
+
+    #[test]
+    fn structured_dispatch_error_keeps_its_exact_stream_body() {
+        let body = serde_json::json!({
+            "code": "execution_identity_continuity_mismatch",
+            "message": "exact authored conflict",
+            "mismatches": ["project_authority"],
+        });
+        let envelope = dispatch_error_envelope(
+            &ryeos_executor::dispatch_error::DispatchError::StructuredService {
+                code: "execution_identity_continuity_mismatch".to_string(),
+                status: 409,
+                body: body.clone(),
+            },
+        );
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload, body);
     }
 }

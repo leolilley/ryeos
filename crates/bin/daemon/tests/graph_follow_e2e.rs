@@ -176,6 +176,18 @@ fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
     .unwrap_or_default()
 }
 
+fn all_threads(state_path: &Path) -> Vec<ryeos_state::queries::ThreadRow> {
+    let projection_path = match common::selected_projection_path(state_path) {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+    let projection = match ryeos_state::projection::ProjectionDb::open(&projection_path) {
+        Ok(projection) => projection,
+        Err(_) => return Vec::new(),
+    };
+    ryeos_state::queries::list_threads(&projection, 200).unwrap_or_default()
+}
+
 /// True iff `thread_id` has an event of `event_type` whose payload `node` == `node`.
 fn thread_ran_node(
     events: &[(String, String, Value)],
@@ -828,6 +840,14 @@ body_template:
   stream: "{{stream}}"
 auth: {{}}
 headers: {{}}
+schemas:
+  accounting:
+    require_usage: true
+  streaming:
+    mode: delta_merge
+  output_limit:
+    path: max_tokens
+    semantics: provider_native_output_tokens
 pricing:
   input_per_million: 0.0
   output_per_million: 0.0
@@ -1040,5 +1060,289 @@ async fn graph_follow_child_cost_flows_into_resumed_parent() {
         fetch_receipt["metadata"]["error"],
         serde_json::Value::Null,
         "the followed child succeeded, so the fetch receipt must carry no error; receipt={fetch_receipt:#}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn graph_follow_live_input_records_service_under_the_callers_exact_project_authority() {
+    // Hold the followed directive inside its provider call long enough to
+    // exercise the running-thread input path. The second response covers the
+    // additional turn if the queued interrupt is folded before the child settles.
+    let mock = MockProvider::start_with_response_delay(
+        vec![
+            MockResponse::Text("first child turn".into()),
+            MockResponse::Text("interrupted child turn".into()),
+        ],
+        Duration::from_secs(3),
+    )
+    .await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+        register_standard_bundle(state_path, fixture)?;
+        register_config_fixture_bundle(
+            state_path,
+            "fixture-follow-live-input-model-config",
+            fixture,
+            |bundle_root| plant_mock_provider(bundle_root, &mock_url, &fixture.publisher),
+        )?;
+        plant_vault_with_zen_key(state_path)?;
+        Ok(())
+    };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                "info,ryeosd=debug,ryeos_graph_runtime=debug,ryeos_directive_runtime=debug".into()
+            }),
+        );
+    })
+    .await
+    .expect("start daemon with delayed mock provider + standard bundle");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    plant_cost_directive_child(project.path(), &fixture.publisher).expect("plant child directive");
+    plant_parent_cost_graph(project.path(), &fixture.publisher).expect("plant parent graph");
+    let project_path = project.path().to_str().expect("utf-8 project path");
+    let input_project = tempfile::tempdir().expect("operator input project tempdir");
+    std::fs::create_dir(input_project.path().join(".ai"))
+        .expect("create operator input project descriptor root");
+    let input_project_root = input_project
+        .path()
+        .canonicalize()
+        .expect("canonical operator input project");
+    let input_project_path = input_project_root
+        .to_str()
+        .expect("utf-8 operator input project path");
+
+    let (status, body) = h
+        .post_execute("graph:parent_cost", project_path, serde_json::json!({}))
+        .await
+        .expect("launch graph-follow parent");
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.pointer("/result/status").and_then(Value::as_str),
+        Some("continued"),
+        "parent must suspend while the directive child runs; body={body:#}"
+    );
+    let parent_id = body
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .expect("parent thread id")
+        .to_string();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (parent, child) = loop {
+        let threads = all_threads(&h.state_path);
+        let parent = threads.iter().find(|thread| thread.thread_id == parent_id);
+        let child = threads
+            .iter()
+            .find(|thread| thread.item_ref == "directive:costchild" && thread.status == "running");
+        if let (Some(parent), Some(child)) = (parent, child) {
+            break (parent.clone(), child.clone());
+        }
+        if Instant::now() >= deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "followed directive child never became observably running.\n\
+                 threads={threads:#?}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        child.project_authority, parent.project_authority,
+        "the default inherited follow path must retain the sealed parent authority; callback effective caps must not rewrite its ceiling"
+    );
+
+    let (input_status, input_body) = h
+        .post_execute(
+            "service:threads/input",
+            input_project_path,
+            serde_json::json!({
+                "input": "incorporate this public ARC observation",
+                "target": {
+                    "kind": "thread",
+                    "thread_id": child.thread_id.clone(),
+                },
+                "intent": "interrupt",
+            }),
+        )
+        .await
+        .expect("submit live input to followed directive child");
+    assert_eq!(
+        input_status,
+        reqwest::StatusCode::OK,
+        "recorded threads.input invocation must reach its handler; body={input_body:#}"
+    );
+    assert_eq!(
+        input_body
+            .pointer("/result/delivery")
+            .and_then(Value::as_str),
+        Some("submitted"),
+        "running child input must use the live delivery path; body={input_body:#}"
+    );
+    assert_eq!(
+        input_body
+            .pointer("/result/thread_id")
+            .and_then(Value::as_str),
+        Some(child.thread_id.as_str()),
+        "live input must target the existing followed child without minting a successor"
+    );
+    assert!(
+        input_body
+            .pointer("/result/notice")
+            .and_then(Value::as_str)
+            .is_some_and(|notice| notice.starts_with("Input queued")),
+        "the valid persisted child process identity must receive the interrupt without steer degradation; body={input_body:#}"
+    );
+    let service_id = input_body
+        .pointer("/thread/thread_id")
+        .and_then(Value::as_str)
+        .expect("recorded service invocation thread id")
+        .to_string();
+    assert_ne!(
+        service_id, child.thread_id,
+        "the service audit root is distinct from the unchanged target child"
+    );
+
+    let input_text = "incorporate this public ARC observation";
+    let completion_deadline = Instant::now() + Duration::from_secs(90);
+    let (successor_id, terminal_events) = loop {
+        let events = all_events(&h.state_path);
+        let projected_threads = all_threads(&h.state_path);
+        let child_completed = thread_has_event(&events, &child.thread_id, "thread_completed");
+        let successor = events
+            .iter()
+            .find(|(thread_id, event_type, _)| {
+                event_type == "graph_completed" && thread_id != &parent_id
+            })
+            .map(|(thread_id, _, _)| thread_id.clone());
+        let child_projection_completed = projected_threads
+            .iter()
+            .any(|thread| thread.thread_id == child.thread_id && thread.status == "completed");
+        let successor_projection_completed = successor.as_ref().is_some_and(|successor_id| {
+            projected_threads
+                .iter()
+                .any(|thread| thread.thread_id == *successor_id && thread.status == "completed")
+        });
+        let folded_inputs = events
+            .iter()
+            .filter(|(thread_id, event_type, payload)| {
+                thread_id == &child.thread_id
+                    && event_type == "cognition_in"
+                    && payload.get("content").and_then(Value::as_str) == Some(input_text)
+            })
+            .count();
+        if child_completed
+            && child_projection_completed
+            && successor_projection_completed
+            && folded_inputs == 1
+        {
+            break (successor.expect("checked successor"), events);
+        }
+        if Instant::now() >= completion_deadline {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "live input did not fold exactly once through child completion and graph resume.\n\
+                 folded_inputs={folded_inputs}\n\
+                 child_completed={child_completed}\n\
+                 child_projection_completed={child_projection_completed}\n\
+                 successor_projection_completed={successor_projection_completed}\n\
+                 projected_threads={projected_threads:#?}\n\
+                 events={events:#?}\n--- daemon stderr ---\n{stderr}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    assert_ne!(successor_id, parent_id);
+    assert_ne!(successor_id, child.thread_id);
+    assert!(
+        thread_has_event(&terminal_events, &child.thread_id, "thread_completed"),
+        "the authentic followed child must complete before graph resumption"
+    );
+    assert_eq!(
+        terminal_events
+            .iter()
+            .filter(|(thread_id, event_type, payload)| {
+                thread_id == &child.thread_id
+                    && event_type == "cognition_in"
+                    && payload.get("content").and_then(Value::as_str) == Some(input_text)
+            })
+            .count(),
+        1,
+        "the submitted operator input must be folded exactly once"
+    );
+
+    let threads = all_threads(&h.state_path);
+    let service = threads
+        .iter()
+        .find(|thread| thread.thread_id == service_id)
+        .unwrap_or_else(|| panic!("recorded service root {service_id} missing: {threads:#?}"));
+    assert_eq!(service.item_ref, "service:threads/input");
+    assert_eq!(service.status, "completed");
+    assert_ne!(
+        service.project_authority, parent.project_authority,
+        "the service audit root must use the input caller's project rather than copying target authority"
+    );
+    assert_eq!(
+        service.project_root.as_deref(),
+        Some(
+            input_project_root
+                .to_str()
+                .expect("utf-8 canonical input root")
+        ),
+        "recorded service root must project the input caller's canonical project root"
+    );
+    assert_ne!(
+        service.project_root, parent.project_root,
+        "service audit authority and target execution authority must remain distinct"
+    );
+    assert!(service.base_project_snapshot_hash.is_none());
+
+    let matching_children = threads
+        .iter()
+        .filter(|thread| thread.item_ref == "directive:costchild")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_children.len(),
+        1,
+        "live input must not create a second directive child: {matching_children:#?}"
+    );
+    assert_eq!(matching_children[0].thread_id, child.thread_id);
+    assert_eq!(
+        matching_children[0].chain_root_id, child.chain_root_id,
+        "live input must not change the followed child's chain root"
+    );
+    assert_eq!(
+        matching_children[0].upstream_thread_id, child.upstream_thread_id,
+        "live input must not change the followed child's upstream lineage"
+    );
+    assert_eq!(
+        matching_children[0].project_authority, child.project_authority,
+        "live input must not change the followed child's execution authority"
+    );
+    assert_eq!(
+        matching_children[0].status, "completed",
+        "the interrupted child must resume cognition and settle normally"
+    );
+    let original_parent = threads
+        .iter()
+        .find(|thread| thread.thread_id == parent_id)
+        .expect("original suspended parent row");
+    assert_eq!(
+        original_parent.status, "continued",
+        "the original graph parent remains the suspended predecessor"
+    );
+    let successor = threads
+        .iter()
+        .find(|thread| thread.thread_id == successor_id)
+        .expect("resumed graph successor row");
+    assert_eq!(successor.status, "completed");
+    assert_eq!(
+        successor.project_authority, parent.project_authority,
+        "graph resumption must preserve the parent execution authority"
     );
 }

@@ -203,15 +203,6 @@ pub fn isolation_live_access_authority_for_project(
 }
 
 impl ExecutionProvenance {
-    pub fn execution_project_authority(
-        &self,
-        capability_ceiling: &[String],
-    ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
-        self.project_authority()
-            .clone()
-            .with_capability_ceiling(capability_ceiling.to_vec())
-    }
-
     /// Construct Root provenance for a live filesystem execution.
     pub fn root_live_fs(
         project_path: PathBuf,

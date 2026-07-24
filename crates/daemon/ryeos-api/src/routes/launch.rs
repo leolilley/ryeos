@@ -106,12 +106,12 @@ impl DispatchLaunchOptions {
                 execution_workspace.display()
             )
         })?;
-        if let Some(admitted_project_root) = root_admission.project_root() {
-            if admitted_project_root != project_path {
+        if let Some(admitted_workspace) = root_admission.execution_workspace() {
+            if admitted_workspace != project_path {
                 anyhow::bail!(
-                    "dispatch launch workspace {} differs from sealed project root {}",
+                    "dispatch launch workspace {} differs from sealed execution materialization {}",
                     project_path.display(),
-                    admitted_project_root.display()
+                    admitted_workspace.display()
                 );
             }
         }
@@ -149,6 +149,7 @@ pub(crate) fn preflight_dispatch_launch(
     state: &AppState,
     item_ref: &crate::routes::parsed_ref::ParsedItemRef,
     project: &ryeos_executor::execution::project_source::ResolvedProjectContext,
+    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     parameters: &Value,
     ref_bindings: &BTreeMap<String, String>,
     principal_id: &str,
@@ -191,6 +192,12 @@ pub(crate) fn preflight_dispatch_launch(
         plan_ctx,
         requested_call: call,
     };
+    let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+        &project.request_engine,
+        &exec_ctx.plan_ctx,
+        provenance,
+    )
+    .map_err(DispatchError::Internal)?;
     ryeos_executor::dispatch::preflight_root_dispatch(
         item_ref.as_str(),
         item_ref.kind(),
@@ -198,6 +205,7 @@ pub(crate) fn preflight_dispatch_launch(
         ref_bindings,
         usage_subject,
         usage_subject_asserted_by,
+        &project_binding,
         &exec_ctx,
         state,
     )
@@ -294,14 +302,18 @@ fn spawn_dispatch_launch_inner(
         // cancellation and the complete background dispatch. The authoritative
         // birth/result rows become the long-lived roots before this drops.
         let _captured_generation = captured_generation;
+        root_admission
+            .ensure_matches_provenance(&provenance)
+            .map_err(DispatchError::Internal)?;
         let plan_ctx = root_admission.plan_context().clone();
+        let request_engine = root_admission.request_engine().clone();
         let current_site_id_for_failure_row = plan_ctx.current_site_id.clone();
         let origin_site_id_for_failure_row = plan_ctx.origin_site_id.clone();
 
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: principal_id.clone(),
             caller_scopes: principal_scopes,
-            engine: state_clone.engine.clone(),
+            engine: request_engine,
             plan_ctx,
             requested_call: call,
         };

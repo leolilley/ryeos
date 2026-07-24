@@ -16,8 +16,8 @@ use crate::routes::compile::{
 };
 use crate::routes::interpolation;
 use crate::routes::invocation::{
-    CompiledRouteInvocation, InvocationCheck, RouteInvocationContext, RouteInvocationOutput,
-    RouteInvocationResult,
+    attach_recorded_thread_header, CompiledRouteInvocation, InvocationCheck,
+    RouteInvocationContext, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_app::route_raw::RawRouteSpec;
 
@@ -130,7 +130,7 @@ impl CompiledResponseMode for CompiledBrowserLaunchMode {
         )
         .await?;
 
-        let RouteInvocationResult::Json(value) = result else {
+        let RouteInvocationResult::Json { value, thread_id } = result else {
             unreachable!("invoke_checked enforces Json")
         };
 
@@ -159,6 +159,7 @@ impl CompiledResponseMode for CompiledBrowserLaunchMode {
                 RouteDispatchError::Internal(format!("invalid browser_launch cookie: {e}"))
             })?,
         );
+        attach_recorded_thread_header(&mut response, thread_id.as_deref())?;
         Ok(response)
     }
 }

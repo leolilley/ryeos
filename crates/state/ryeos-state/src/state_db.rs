@@ -3279,7 +3279,15 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
         let guard = self.pinned_authority()?.acquire_shared_guard()?;
-        self.create_chain_with_events_inner(chain_root_id, snapshot, events, signer, None, &guard)
+        self.create_chain_with_events_inner(
+            chain_root_id,
+            snapshot,
+            None,
+            events,
+            signer,
+            None,
+            &guard,
+        )
     }
 
     pub fn create_chain_with_events_admitted(
@@ -3294,6 +3302,28 @@ impl StateDb {
         self.create_chain_with_events_inner(
             chain_root_id,
             snapshot,
+            None,
+            events,
+            signer,
+            Some(runtime_liveness),
+            cas_mutation_guard,
+        )
+    }
+
+    pub fn create_chain_with_event_successor_admitted(
+        &self,
+        chain_root_id: &str,
+        genesis_snapshot: ThreadSnapshot,
+        event_successor_snapshot: ThreadSnapshot,
+        events: Vec<ThreadEvent>,
+        signer: &dyn Signer,
+        runtime_liveness: &dyn RuntimeLivenessInspector,
+        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+    ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        self.create_chain_with_events_inner(
+            chain_root_id,
+            genesis_snapshot,
+            Some(event_successor_snapshot),
             events,
             signer,
             Some(runtime_liveness),
@@ -3305,6 +3335,7 @@ impl StateDb {
         &self,
         chain_root_id: &str,
         snapshot: ThreadSnapshot,
+        event_successor_snapshot: Option<ThreadSnapshot>,
         events: Vec<ThreadEvent>,
         signer: &dyn Signer,
         runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
@@ -3332,6 +3363,7 @@ impl StateDb {
             &self.refs_root,
             chain_root_id,
             snapshot,
+            event_successor_snapshot,
             events,
             signer,
             self.trust_store.as_ref(),
@@ -3361,6 +3393,7 @@ impl StateDb {
             &cache,
             chain_root_id,
             &result.chain_state_hash,
+            result.snapshot.status,
             || {
                 projection::project_thread_snapshot_with_events_in_transaction(
                     &self.projection,
@@ -4228,6 +4261,39 @@ impl StateDb {
             self.trust_store.as_ref(),
             &mut head_cache,
         )
+    }
+
+    /// Read one current snapshot and its exact last event under the same
+    /// trust-verified chain authority without consulting the projection.
+    pub fn read_authoritative_thread_snapshot_with_last_event(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<(ThreadSnapshot, Option<(String, ThreadEvent)>)>> {
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self._refs_directory,
+            &self._cas_directory,
+            &self.recovery,
+            chain_root_id,
+        )?;
+        let snapshot = {
+            let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+            chain::read_thread_snapshot_with_trust(
+                &self.cas_root,
+                &self.refs_root,
+                &chain_lock,
+                chain_root_id,
+                thread_id,
+                self.trust_store.as_ref(),
+                &mut head_cache,
+            )?
+        };
+        let Some(snapshot) = snapshot else {
+            return Ok(None);
+        };
+        let last_event =
+            chain::read_snapshot_last_event_object(&self.cas_root, Some(&chain_lock), &snapshot)?;
+        Ok(Some((snapshot, last_event)))
     }
 
     /// Trust-verify and load the current authoritative chain closure used for a

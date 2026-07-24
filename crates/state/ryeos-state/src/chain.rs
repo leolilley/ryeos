@@ -590,8 +590,19 @@ fn validate_snapshot_last_event_object(
     chain_lock: Option<&ChainLock>,
     snapshot: &ThreadSnapshot,
 ) -> anyhow::Result<()> {
+    read_snapshot_last_event_object(cas_root, chain_lock, snapshot).map(|_| ())
+}
+
+/// Load and validate the exact event named by an authoritative thread
+/// snapshot. This is projection-independent so postcommit repair can replay a
+/// CAS-committed terminal even when SQLite projection application was lost.
+pub(crate) fn read_snapshot_last_event_object(
+    cas_root: &Path,
+    chain_lock: Option<&ChainLock>,
+    snapshot: &ThreadSnapshot,
+) -> anyhow::Result<Option<(String, ThreadEvent)>> {
     let Some(event_hash) = snapshot.last_event_hash.as_deref() else {
-        return Ok(());
+        return Ok(None);
     };
     let event: ThreadEvent =
         read_cas_object(cas_root, chain_lock, event_hash, "snapshot last event")?;
@@ -603,7 +614,8 @@ fn validate_snapshot_last_event_object(
             "snapshot last event is not canonically encoded: expected {event_hash}, canonical {canonical_hash}"
         );
     }
-    validation::validate_snapshot_last_event(snapshot, event_hash, &event)
+    validation::validate_snapshot_last_event(snapshot, event_hash, &event)?;
+    Ok(Some((event_hash.to_string(), event)))
 }
 
 pub(crate) fn prospective_mutation_timestamp_floor(
@@ -956,6 +968,7 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
     refs_root: &Path,
     chain_root_id: &str,
     mut initial_snapshot: ThreadSnapshot,
+    mut event_successor_snapshot: Option<ThreadSnapshot>,
     mut events: Vec<ThreadEvent>,
     signer: &dyn Signer,
     trust_store: &TrustStore,
@@ -1068,6 +1081,50 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
         status: initial_snapshot.status,
     };
 
+    let (root_entry, published_snapshot) = if let Some(mut successor) =
+        event_successor_snapshot.take()
+    {
+        validation::validate_snapshot_transition_identity(&initial_snapshot, &successor)?;
+        let prospective_entry = ChainThreadEntry {
+            snapshot_hash: String::new(),
+            last_event_hash: root_entry.last_event_hash.clone(),
+            last_thread_seq: root_entry.last_thread_seq,
+            status: successor.status,
+        };
+        validation::stamp_snapshot_position(&mut successor, &prospective_entry, event_count_u64);
+        validation::normalize_and_validate_snapshot_transition(
+            &initial_snapshot,
+            &mut successor,
+            &append_timestamp,
+        )?;
+        let expected_hash = successor
+            .last_event_hash
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("root successor is missing its final event hash"))?;
+        validation::validate_snapshot_last_event(
+            &successor,
+            expected_hash,
+            stored_events
+                .last()
+                .expect("root creation rejects an empty event list"),
+        )?;
+        let successor_json = lillux::canonical_json(&successor.to_value())
+            .context("failed to canonicalize initial root successor snapshot")?;
+        let successor_hash = lillux::sha256_hex(successor_json.as_bytes());
+        let successor_path = lillux::shard_path(cas_root, "objects", &successor_hash, ".json");
+        pending_writes.push((successor_path, successor_json.into_bytes()));
+        (
+            ChainThreadEntry {
+                snapshot_hash: successor_hash,
+                ..prospective_entry
+            },
+            successor,
+        )
+    } else {
+        (root_entry, initial_snapshot.clone())
+    };
+
+    let published_snapshot_hash = root_entry.snapshot_hash.clone();
     let mut threads = BTreeMap::new();
     threads.insert(chain_root_id.to_string(), root_entry);
     let chain_state = ChainState {
@@ -1119,8 +1176,8 @@ pub(crate) fn create_chain_with_events_and_trust_under_lock(
 
     Ok(AddThreadWithEventsResult {
         chain_state_hash,
-        snapshot_hash,
-        snapshot: initial_snapshot,
+        snapshot_hash: published_snapshot_hash,
+        snapshot: published_snapshot,
         first_chain_seq: 1,
         event_count: stored_events.len(),
         events: stored_events,
@@ -2421,6 +2478,7 @@ mod tests {
             refs_root,
             chain_root_id,
             initial_snapshot,
+            None,
             events,
             signer,
             &trust_store,

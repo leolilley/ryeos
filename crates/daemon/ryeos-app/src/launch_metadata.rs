@@ -61,7 +61,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // Exact durable launch metadata contract. Changes to any embedded authority
 // shape require a new epoch so startup rejects the old store before nested
 // deserialization can reinterpret (or partially decode) that authority.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 10;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 12;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -113,6 +113,13 @@ pub struct RuntimeLaunchMetadata {
     /// refs, or canonical-ref prefixes.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub launch_driver: Option<ryeos_state::objects::ExecutionLaunchDriver>,
+
+    /// Exact ownership/recovery authority for an in-process handler. Managed
+    /// subprocess launches carry this inside `resume_context`; in-process
+    /// handlers have no resume capsule and therefore require this dedicated,
+    /// current-schema field.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub in_process_lifecycle_authority: Option<ryeos_state::objects::ExecutionLifecycleAuthority>,
 
     /// Cancellation policy resolved at decorate-spec time and snapshotted
     /// here so the daemon can route cancellation without re-loading the spec.
@@ -168,7 +175,7 @@ pub struct RuntimeLaunchMetadata {
     pub admitted_artifact_identity: Option<ryeos_state::objects::AdmittedLaunchArtifactIdentity>,
 
     /// Exact wire schema of the CAS-rooted admitted launch capsule.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub admitted_launch_capsule_schema: Option<u32>,
 
     /// Exact secret-free managed launch-preparation result rooted in the
@@ -213,6 +220,7 @@ impl Default for RuntimeLaunchMetadata {
         Self {
             schema_version: LAUNCH_METADATA_SCHEMA_VERSION,
             launch_driver: None,
+            in_process_lifecycle_authority: None,
             cancellation_mode: None,
             native_resume: None,
             checkpoint_dir: None,
@@ -584,9 +592,7 @@ impl ResumeContext {
                     snapshot_hash,
                     ..
                 },
-                ProjectContext::LocalPath { .. }
-                | ProjectContext::SnapshotHash { .. }
-                | ProjectContext::ProjectRef { .. },
+                ProjectContext::LocalPath { .. } | ProjectContext::SnapshotHash { .. },
             ) => {
                 if self.durable_project_snapshot_hash() != Some(snapshot_hash.as_str()) {
                     anyhow::bail!("pinned project authority contradicts durable launch snapshot");
@@ -594,7 +600,7 @@ impl ResumeContext {
                 Ok((display_path.clone(), Some(snapshot_hash.clone())))
             }
             _ => anyhow::bail!(
-                "project_context {:?} contradicts typed execution project authority",
+                "project_context {:?} has no exact immutable execution authority",
                 self.project_context
             ),
         }
@@ -602,6 +608,34 @@ impl ResumeContext {
 }
 
 impl RuntimeLaunchMetadata {
+    pub fn lifecycle_authority(
+        &self,
+    ) -> anyhow::Result<Option<ryeos_state::objects::ExecutionLifecycleAuthority>> {
+        match (
+            self.launch_driver,
+            self.in_process_lifecycle_authority,
+            self.resume_context
+                .as_ref()
+                .map(|resume| resume.lifecycle_authority),
+        ) {
+            (
+                Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler),
+                Some(authority),
+                None,
+            ) => {
+                authority.validate()?;
+                Ok(Some(authority))
+            }
+            (Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler), _, _) => {
+                anyhow::bail!("in-process launch has contradictory lifecycle authority")
+            }
+            (_, None, authority) => Ok(authority),
+            (_, Some(_), _) => {
+                anyhow::bail!("non-in-process launch carries in-process lifecycle authority")
+            }
+        }
+    }
+
     /// Merge subprocess-produced attempt facts into launch authority already
     /// seeded at admission. Overlapping durable fields must agree exactly;
     /// missing attempt fields inherit the authoritative value. Isolation is an
@@ -632,6 +666,11 @@ impl RuntimeLaunchMetadata {
         let merged = Self {
             schema_version: LAUNCH_METADATA_SCHEMA_VERSION,
             launch_driver: exact("launch driver", &self.launch_driver, &attempt.launch_driver)?,
+            in_process_lifecycle_authority: exact(
+                "in-process lifecycle authority",
+                &self.in_process_lifecycle_authority,
+                &attempt.in_process_lifecycle_authority,
+            )?,
             cancellation_mode: exact(
                 "cancellation policy",
                 &self.cancellation_mode,
@@ -704,6 +743,42 @@ impl RuntimeLaunchMetadata {
                 "launch metadata schema {} is not current schema {}",
                 self.schema_version,
                 LAUNCH_METADATA_SCHEMA_VERSION
+            );
+        }
+        if self.launch_driver == Some(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+        {
+            let lifecycle_authority = self.in_process_lifecycle_authority.ok_or_else(|| {
+                anyhow::anyhow!("in-process handler launch metadata has no lifecycle authority")
+            })?;
+            lifecycle_authority.validate()?;
+            if lifecycle_authority
+                != ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE
+            {
+                anyhow::bail!(
+                    "in-process handler lifecycle authority must be daemon-owned and non-recoverable"
+                );
+            }
+            if self.cancellation_mode.is_some()
+                || self.native_resume.is_some()
+                || self.checkpoint_dir.is_some()
+                || self.resume_context.is_some()
+                || self.continuation_source_thread_id.is_some()
+                || self.sealed_root_request.is_some()
+                || self.admitted_project_authority.is_some()
+                || self.admitted_artifact_identity.is_some()
+                || self.admitted_launch_capsule_schema.is_some()
+                || self.admitted_prepared_launch.is_some()
+                || self.follow_parent_context.is_some()
+                || self.follow_launch_window.is_some()
+                || self.isolation.is_some()
+            {
+                anyhow::bail!(
+                    "in-process handler launch metadata contains subprocess-only authority"
+                );
+            }
+        } else if self.in_process_lifecycle_authority.is_some() {
+            anyhow::bail!(
+                "in-process lifecycle authority requires the in-process handler launch driver"
             );
         }
         if let Some(resume) = &self.resume_context {
@@ -792,6 +867,7 @@ impl RuntimeLaunchMetadata {
             // boundary owns it. The caller seals ManagedRuntime versus
             // DirectItemExecutor before thread birth.
             launch_driver: None,
+            in_process_lifecycle_authority: None,
             cancellation_mode: spec
                 .execution
                 .native_async
@@ -819,6 +895,7 @@ impl RuntimeLaunchMetadata {
     pub fn is_empty(&self) -> bool {
         self.cancellation_mode.is_none()
             && self.launch_driver.is_none()
+            && self.in_process_lifecycle_authority.is_none()
             && self.native_resume.is_none()
             && self.checkpoint_dir.is_none()
             && self.resume_context.is_none()
@@ -855,6 +932,18 @@ impl RuntimeLaunchMetadata {
         {
             anyhow::bail!("sealed program and resume launch identity disagree");
         }
+        if sealed.project_authority() != &resume.project_authority {
+            anyhow::bail!("sealed invocation and resume project authority disagree");
+        }
+        let admitted_project_authority = self
+            .admitted_project_authority
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("sealed launch has no admitted project authority"))?;
+        if self.continuation_source_thread_id.is_none()
+            && sealed.project_authority() != admitted_project_authority
+        {
+            anyhow::bail!("fresh sealed invocation and admitted project authority disagree");
+        }
         let mut effective_caps = resume.effective_caps.clone();
         effective_caps.sort();
         effective_caps.dedup();
@@ -867,9 +956,7 @@ impl RuntimeLaunchMetadata {
             exact_program_hash: sealed.admitted_program_hash()?,
             sealed_invocation: serde_json::to_value(sealed)
                 .context("serialize sealed admitted invocation")?,
-            project_authority: self.admitted_project_authority.clone().ok_or_else(|| {
-                anyhow::anyhow!("sealed launch has no admitted project authority")
-            })?,
+            project_authority: admitted_project_authority.clone(),
             lifecycle_authority: resume.lifecycle_authority,
             launch_driver: self
                 .launch_driver
@@ -915,6 +1002,14 @@ impl RuntimeLaunchMetadata {
         self
     }
 
+    pub fn with_in_process_lifecycle_authority(
+        mut self,
+        authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    ) -> Self {
+        self.in_process_lifecycle_authority = Some(authority);
+        self
+    }
+
     pub fn with_admitted_artifact_identity(
         mut self,
         identity: ryeos_state::objects::AdmittedLaunchArtifactIdentity,
@@ -945,6 +1040,7 @@ impl RuntimeLaunchMetadata {
         Self {
             schema_version: self.schema_version,
             launch_driver: self.launch_driver,
+            in_process_lifecycle_authority: self.in_process_lifecycle_authority,
             cancellation_mode: self.cancellation_mode,
             native_resume: self.native_resume.clone(),
             checkpoint_dir: self.native_resume.as_ref().map(|_| checkpoint_dir),
@@ -976,6 +1072,7 @@ impl RuntimeLaunchMetadata {
     pub fn continuation_successor_seed(&self, resume_context: ResumeContext) -> Self {
         Self {
             launch_driver: self.launch_driver,
+            in_process_lifecycle_authority: self.in_process_lifecycle_authority,
             cancellation_mode: self.cancellation_mode,
             native_resume: self.native_resume.clone(),
             resume_context: Some(resume_context),
@@ -1021,6 +1118,88 @@ mod tests {
     use super::*;
     use ryeos_engine::contracts::{ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec};
     use std::collections::HashMap;
+
+    #[test]
+    fn in_process_handler_metadata_has_exact_lifecycle_and_no_launch_capsule() {
+        let metadata = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            .with_in_process_lifecycle_authority(
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+            );
+        metadata.validate().unwrap();
+        assert!(metadata.admitted_launch_capsule().unwrap().is_none());
+
+        let mut contradictory = metadata;
+        contradictory.admitted_project_authority =
+            Some(ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS);
+        let error = contradictory.validate().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("contains subprocess-only authority"));
+    }
+
+    #[test]
+    fn in_process_handler_metadata_rejects_missing_or_recoverable_lifecycle_authority() {
+        let missing = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
+        assert!(missing
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("has no lifecycle authority"));
+
+        let recoverable = RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
+            .with_in_process_lifecycle_authority(
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            );
+        let error = recoverable
+            .validate()
+            .expect_err("in-process handlers must never acquire replay authority");
+        let message = error.to_string();
+        assert!(message.contains("daemon-owned"));
+        assert!(message.contains("non-recoverable"));
+
+        let no_driver = RuntimeLaunchMetadata::default().with_in_process_lifecycle_authority(
+            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
+        );
+        assert!(no_driver
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("requires the in-process handler launch driver"));
+    }
+
+    #[test]
+    fn launch_metadata_rejects_predecessor_schema_epoch() {
+        let mut predecessor = RuntimeLaunchMetadata::default();
+        predecessor.schema_version = LAUNCH_METADATA_SCHEMA_VERSION - 1;
+        let error = predecessor.validate().unwrap_err();
+        assert!(error.to_string().contains(&format!(
+            "schema {} is not current schema {}",
+            LAUNCH_METADATA_SCHEMA_VERSION - 1,
+            LAUNCH_METADATA_SCHEMA_VERSION
+        )));
+    }
+
+    #[test]
+    fn launch_metadata_current_schema_requires_explicit_driver_and_in_process_authority_fields() {
+        for field in [
+            "launch_driver",
+            "in_process_lifecycle_authority",
+            "admitted_launch_capsule_schema",
+        ] {
+            let mut value = serde_json::to_value(RuntimeLaunchMetadata::default()).unwrap();
+            value
+                .as_object_mut()
+                .expect("launch metadata object")
+                .remove(field);
+            assert!(
+                serde_json::from_value::<RuntimeLaunchMetadata>(value).is_err(),
+                "current launch metadata accepted missing field {field}"
+            );
+        }
+    }
 
     fn empty_spec() -> PlanSubprocessSpec {
         PlanSubprocessSpec {
@@ -1152,6 +1331,7 @@ mod tests {
         let m = RuntimeLaunchMetadata {
             schema_version: LAUNCH_METADATA_SCHEMA_VERSION,
             launch_driver: None,
+            in_process_lifecycle_authority: None,
             cancellation_mode: Some(CancellationMode::Graceful { grace_secs: 7 }),
             native_resume: None,
             checkpoint_dir: Some(PathBuf::from("/tmp/ckpt")),
@@ -1532,7 +1712,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_project_identity_project_ref_requires_resolved_pin() {
+    fn authoritative_project_identity_rejects_project_ref_without_typed_resolution_evidence() {
         let mut context = resume_context(ProjectContext::ProjectRef {
             principal: "fp:test".to_string(),
             ref_name: "projects/demo".to_string(),
@@ -1550,9 +1730,6 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        assert_eq!(
-            context.authoritative_project_identity().unwrap(),
-            (None, Some("e".repeat(64)))
-        );
+        assert!(context.authoritative_project_identity().is_err());
     }
 }
