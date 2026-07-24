@@ -6,7 +6,7 @@
 //! `ryeos/ryeos/executor/primitive_executor.py` lines 1125-1229) and the
 //! driver wiring at lines 257-285:
 //!
-//!   * On the root chain element (chain[0] / current_index == 0):
+//!   * On the root chain element (`chain[0]` / `current_index == 0`):
 //!     write the fully resolved config under
 //!     `ctx.params["resolved_config"]` so the tool body receives it.
 //!   * On non-root chain elements (runtime / primitive hops):

@@ -24,7 +24,7 @@ use crate::resolution::ResolutionOutput;
 pub struct SubprocessSpec {
     /// Absolute path to the binary to spawn.
     pub cmd: PathBuf,
-    /// Argv excluding cmd[0]. Empty vec is allowed.
+    /// Argv excluding `cmd[0]`. Empty vec is allowed.
     pub args: Vec<String>,
     /// Working directory. Required, no default.
     pub cwd: PathBuf,

@@ -11,8 +11,8 @@
 //!   * `scope: "tool_file"` → no-op (entry point already verified
 //!     during chain walk).
 //!   * For active scopes, walk the configured base directory:
-//!       - `tool_siblings`: chain[0].source_path.parent(), non-recursive.
-//!       - `tool_dir`     : chain[0].source_path.parent(), respects
+//!       - `tool_siblings`: `chain[0].source_path.parent()`, non-recursive.
+//!       - `tool_dir`     : `chain[0].source_path.parent()`, respects
 //!         `recursive`. **Default scope.**
 //!         Prune `exclude_dirs`, filter by `extensions`, verify each file.
 //!   * Per-file verification: read content, parse signature header

@@ -5,7 +5,7 @@
 //! chain elements (the executor pipeline), but the user's tool
 //! item — which owns the public invocation contract — is upstream of
 //! the chain. Validating against any chain element's `config_schema`
-//! is wrong-by-design (chain[0] is always a wrapper/runtime, not the
+//! is wrong-by-design (`chain[0]` is always a wrapper/runtime, not the
 //! caller-facing tool).
 //!
 //! Instead, this module exposes a free function `validate_caller_params`
