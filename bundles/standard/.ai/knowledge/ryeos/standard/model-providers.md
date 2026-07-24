@@ -1,9 +1,9 @@
-<!-- ryeos:signed:2026-07-15T00:27:46Z:f2a831c06d0c26e05645c01de0aece7e9d60d9efc547fcae217121388f356692:zLzQCzQFd1jNVo4iJ2bza8UmyDviHSNoRTF1VxM6AT2SpHWG/JdNA8Cgf5pIIzSHhUTUwhFoEvqFo+LFzmaxCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-24T07:09:33Z:ec369c45295b4a6b57d884cb47402b2fa7a58c581b907f5a8954e5409c79ebce:05WdH1T+yyXM1UtXJLRJAUwiIPbRpR50RFDFNVM5PYtKO1aF2TwgQ5QmumwJBuXs64ENOoAvAcOyOupBY9pCCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/standard
 tags: [models, providers, routing, runtime, security]
-version: "1.0.0"
+version: "1.1.0"
 description: >
   Directive-owned model/provider launch preparation, routing tiers,
   provider configs, frozen runtime data, and adding new providers.
@@ -84,6 +84,9 @@ The standard bundle ships signed provider configs for:
 - `zen` — primary gateway and default route target.
 - `anthropic` — direct Anthropic Messages API.
 - `openai` — direct OpenAI Chat Completions API.
+- `openrouter` — multi-provider OpenAI-compatible gateway.
+- `zai` — direct Z.AI OpenAI-compatible Chat Completions API.
+- `local-openai` — local or offline OpenAI-compatible inference.
 
 Add provider configs only when a routing entry, directive, fixture, or
 test selects that provider.

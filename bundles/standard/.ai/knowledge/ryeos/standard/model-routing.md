@@ -1,11 +1,12 @@
-<!-- ryeos:signed:2026-06-21T03:35:57Z:f4c9a5aa1581d47610ab08e210ac5554bfbcf0d885cf759ee43b2aa183669762:jEWYn6SHwWakQ56hdgr2crWO48xy1SbCoMxQTDlFTs1Ofs/mmCEL69Uo/QDa/NIrqz/MLfTN7o7qbEen9it5Dw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-24T07:09:33Z:b774fad294cabbb4a95e4172c1b78c7fb035af7d05f66f63cd4f93c0b1cd7e03:aTPZ9D0lxztmQRMxzJOXbMjGIuuGL9hTcb/6bLOZMsJ/YSXq9bhcPeGRik8XtjQVnxV5i71bIhrs0kwNPlwCAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [models, providers, routing, tiers, llm]
-version: "1.2.0"
+version: "1.3.0"
 description: >
   How model routing works — the tier system, the routing table,
-  and the active provider configs (Anthropic, OpenAI, Zen, local-openai),
+  and the active provider configs (Anthropic, OpenAI, OpenRouter, Z.AI, Zen,
+  local-openai),
   including offline/local routing for internet-disabled eval.
 ---
 
@@ -72,6 +73,12 @@ Direct Anthropic Messages API access. Uses `x-api-key` auth,
 Direct OpenAI Chat Completions access. Uses `Bearer` token auth,
 standard `chat/completions` endpoint.
 
+### Z.AI (`config:ryeos-runtime/model-providers/zai`)
+Direct Z.AI Chat Completions access through the general API endpoint. Uses
+`ZAI_API_KEY` Bearer auth and native GLM model ids such as `glm-5.2`.
+The GLM Coding Plan endpoint is intentionally not used because Z.AI limits
+subscription quota to its documented supported tools.
+
 ### Local / offline (`config:ryeos-runtime/model-providers/local-openai`)
 An OpenAI-compatible server running on `localhost` (vLLM, llama.cpp,
 text-generation-webui, etc.), for environments where the internet is
@@ -128,5 +135,7 @@ Each provider reads its API key from an environment variable:
 | Zen         | `ZEN_API_KEY`         |
 | Anthropic   | `ANTHROPIC_API_KEY`   |
 | OpenAI      | `OPENAI_API_KEY`      |
+| OpenRouter  | `OPENROUTER_API_KEY`  |
+| Z.AI        | `ZAI_API_KEY`         |
 
 Set these in the daemon's environment or in `.ai/config/` secrets.
