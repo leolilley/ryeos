@@ -1213,14 +1213,14 @@ fn resolve_accounting_scope(
         // shifts from admission to the first reserve, burning a full
         // launch/relaunch cycle for the identical fail-closed outcome a
         // fresh launch gets right here.
-        if params.state.accounting.is_none() {
-            if let Some(financial_authority) = &prepared_launch.financial_authority {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "accounting ledger is unavailable; a recovered launch carrying financial \
-                     authority {} cannot be admitted",
-                    financial_authority.authority_digest
-                )));
-            }
+        if params.state.accounting.is_none()
+            && let Some(financial_authority) = &prepared_launch.financial_authority
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "accounting ledger is unavailable; a recovered launch carrying financial \
+                 authority {} cannot be admitted",
+                financial_authority.authority_digest
+            )));
         }
         return Ok((Some(existing), false));
     }

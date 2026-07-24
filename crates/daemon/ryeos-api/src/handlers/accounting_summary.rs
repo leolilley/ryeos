@@ -423,12 +423,12 @@ mod tests {
 
     #[test]
     fn cursor_round_trips_as_versioned_opaque_text() {
-        let cursor = encode_cursor(1234, "A-attempt");
+        let cursor = encode_cursor(1234, 5678, "A-attempt");
         assert!(!cursor.contains("A-attempt"));
-        assert_eq!(
-            decode_cursor(&cursor).unwrap(),
-            (1234, "A-attempt".to_string())
-        );
+        let decoded = decode_cursor(&cursor).unwrap();
+        assert_eq!(decoded.occurred_at_gte_ms, 1234);
+        assert_eq!(decoded.occurred_at_lt_ms, 5678);
+        assert_eq!(decoded.attempt_id, "A-attempt");
         assert!(decode_cursor("1234:A-attempt").is_err());
     }
 

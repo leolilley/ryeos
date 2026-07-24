@@ -2434,8 +2434,7 @@ pub fn summarize_provider_attempt_budget(
     .context("query summarize_provider_attempt_budget")
 }
 
-/// Bounded drill-down rows, stably ordered by `(occurred_at_ms, attempt_id)`.
-/// Drill-down page over the latest-transition projection.
+/// Bounded drill-down page over the latest-transition projection.
 ///
 /// Pagination keys on `attempt_id` ALONE — the only immutable column. The
 /// natural-feeling `(occurred_at_ms, attempt_id)` keyset is wrong here:

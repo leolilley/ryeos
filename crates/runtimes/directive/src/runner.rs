@@ -5525,7 +5525,11 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("unprovable"));
-        assert_eq!(mock.recorded("mark_issued").len(), LEDGER_RPC_RETRIES + 1);
+        assert_eq!(
+            mock.recorded("mark_issued").len(),
+            LEDGER_RPC_RETRIES + 2,
+            "a proven still-reserved attempt gets one final paced issue retry"
+        );
         assert_eq!(mock.recorded("get").len(), 1);
     }
 
