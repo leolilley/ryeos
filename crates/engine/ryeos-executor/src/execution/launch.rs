@@ -4503,7 +4503,7 @@ enum SuccessorMode {
 /// Claims the launch lease (so only one launcher acts, and a dead launcher's
 /// claim is reclaimable), reconstructs the execution from the captured identity
 /// — re-resolved as the successor's OWN kind, never assumed directive — and runs
-/// it through [`run_claimed_thread_row`] with `previous_thread_id` set so the
+/// it through `run_claimed_thread_row` with `previous_thread_id` set so the
 /// runtime folds the chain. A MACHINE continuation injects no new stimulus.
 ///
 /// Fire-and-forget from the daemon: the machine path `tokio::spawn`s this after
