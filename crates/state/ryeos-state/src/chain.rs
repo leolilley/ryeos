@@ -53,6 +53,29 @@ pub(crate) struct ContinuationReadIdentity<'a> {
     pub(crate) successor_thread_id: &'a str,
 }
 
+pub(crate) struct AuthoritativeRootThreadReadback {
+    pub(crate) snapshot: ThreadSnapshot,
+    pub(crate) events: Vec<(String, ThreadEvent)>,
+    pub(crate) is_chain_final_event: bool,
+}
+
+pub(crate) struct AuthoritativeRootGenesisReadback {
+    pub(crate) snapshot: Option<ThreadSnapshot>,
+    pub(crate) updated_at: String,
+    pub(crate) prev_chain_state_hash: Option<String>,
+    pub(crate) last_event_hash: Option<String>,
+    pub(crate) last_chain_seq: u64,
+    pub(crate) only_root_thread: bool,
+    pub(crate) root_last_event_hash: Option<String>,
+    pub(crate) root_last_thread_seq: Option<u64>,
+}
+
+pub(crate) struct AuthoritativeRootBirthReadback {
+    pub(crate) root: Option<AuthoritativeRootThreadReadback>,
+    pub(crate) only_root_thread: bool,
+    pub(crate) predecessor: Option<AuthoritativeRootGenesisReadback>,
+}
+
 /// Validate through an already-pinned CAS root so every object in the closure
 /// is read from the same authority inode.
 pub(crate) fn validate_authoritative_history_with_cas(
@@ -951,6 +974,109 @@ pub(crate) fn read_authoritative_continuation_pair_with_trust(
         successor,
         predecessor,
     })
+}
+
+/// Read the current root publication and its canonical predecessor from one
+/// trust-verified signed head while retaining the caller's chain lock.
+pub(crate) fn read_authoritative_root_birth_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<AuthoritativeRootBirthReadback>> {
+    validate_chain_root_id(chain_root_id)?;
+    chain_lock.ensure_protects(refs_root, chain_root_id)?;
+    if chain_lock.read_verified_head(trust_store)?.is_none() {
+        head_cache.invalidate(chain_root_id);
+        return Ok(None);
+    }
+    let chain_state = read_chain_head_for_mutation(
+        cas_root,
+        refs_root,
+        Some(chain_lock),
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?;
+    let only_root_thread =
+        chain_state.threads.len() == 1 && chain_state.threads.contains_key(chain_root_id);
+    let root = chain_state
+        .threads
+        .get(chain_root_id)
+        .map(|entry| {
+            let snapshot = read_current_snapshot_for_mutation(
+                cas_root,
+                Some(chain_lock),
+                &chain_state,
+                chain_root_id,
+            )?;
+            let events = read_entry_thread_event_chain(
+                cas_root,
+                chain_lock,
+                chain_root_id,
+                chain_root_id,
+                entry,
+            )?;
+            let is_chain_final_event = events.last().is_some_and(|(hash, event)| {
+                chain_state.last_event_hash.as_deref() == Some(hash.as_str())
+                    && chain_state.last_chain_seq == event.chain_seq
+            });
+            Ok::<_, anyhow::Error>(AuthoritativeRootThreadReadback {
+                snapshot,
+                events,
+                is_chain_final_event,
+            })
+        })
+        .transpose()?;
+    let predecessor = chain_state
+        .prev_chain_state_hash
+        .as_deref()
+        .map(|hash| {
+            let predecessor: ChainState =
+                read_cas_object(cas_root, Some(chain_lock), hash, "root birth predecessor")?;
+            predecessor.validate()?;
+            validation::validate_chain_positions(&predecessor)?;
+            if predecessor.chain_root_id != chain_root_id {
+                anyhow::bail!("root birth predecessor belongs to a different chain");
+            }
+            let canonical = lillux::canonical_json(&predecessor.to_value())
+                .context("failed to canonicalize root birth predecessor")?;
+            if lillux::sha256_hex(canonical.as_bytes()) != hash {
+                anyhow::bail!("root birth predecessor is not canonically encoded");
+            }
+            let root_entry = predecessor.threads.get(chain_root_id);
+            let snapshot = root_entry
+                .map(|_| {
+                    read_current_snapshot_for_mutation(
+                        cas_root,
+                        Some(chain_lock),
+                        &predecessor,
+                        chain_root_id,
+                    )
+                })
+                .transpose()?;
+            let only_root_thread = predecessor.threads.len() == 1 && root_entry.is_some();
+            let root_last_event_hash = root_entry.and_then(|entry| entry.last_event_hash.clone());
+            let root_last_thread_seq = root_entry.map(|entry| entry.last_thread_seq);
+            Ok::<_, anyhow::Error>(AuthoritativeRootGenesisReadback {
+                snapshot,
+                updated_at: predecessor.updated_at,
+                prev_chain_state_hash: predecessor.prev_chain_state_hash,
+                last_event_hash: predecessor.last_event_hash,
+                last_chain_seq: predecessor.last_chain_seq,
+                only_root_thread,
+                root_last_event_hash,
+                root_last_thread_seq,
+            })
+        })
+        .transpose()?;
+    Ok(Some(AuthoritativeRootBirthReadback {
+        root,
+        only_root_thread,
+        predecessor,
+    }))
 }
 
 /// Publish a chain head through the durable projection-recovery journal.

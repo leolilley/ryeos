@@ -1341,27 +1341,6 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
     }
 }
 
-fn same_root_birth_identity(left: &ThreadSnapshot, right: &ThreadSnapshot) -> bool {
-    left.schema == right.schema
-        && left.kind == right.kind
-        && left.thread_id == right.thread_id
-        && left.chain_root_id == right.chain_root_id
-        && left.kind_name == right.kind_name
-        && left.item_ref == right.item_ref
-        && left.executor_ref == right.executor_ref
-        && left.launch_mode == right.launch_mode
-        && left.current_site_id == right.current_site_id
-        && left.origin_site_id == right.origin_site_id
-        && left.upstream_thread_id == right.upstream_thread_id
-        && left.requested_by == right.requested_by
-        && left.project_root == right.project_root
-        && left.project_authority == right.project_authority
-        && left.admitted_launch_capsule_hash == right.admitted_launch_capsule_hash
-        && left.captured_history_policy == right.captured_history_policy
-        && left.base_project_snapshot_hash == right.base_project_snapshot_hash
-        && left.created_at == right.created_at
-}
-
 enum ContinuationCommitReadback {
     Exact(ThreadSnapshot),
     ProvenAbsent,
@@ -1392,6 +1371,10 @@ fn same_authored_event(
         && actual.payload == expected.payload
 }
 
+fn same_exact_snapshot(actual: &ThreadSnapshot, expected: &ThreadSnapshot) -> bool {
+    actual.to_value() == expected.to_value()
+}
+
 fn same_successor_event_batch(
     actual: &[(String, ryeos_state::objects::ThreadEvent)],
     expected: &[ryeos_state::objects::ThreadEvent],
@@ -1409,6 +1392,128 @@ fn same_successor_event_batch(
                     && expected_sequence == Some(expected.thread_seq)
                     && same_authored_event(actual, expected)
             })
+}
+
+enum RootCommitReadback {
+    Exact(ThreadSnapshot),
+    ProvenAbsent,
+    Ambiguous(&'static str),
+}
+
+struct ExpectedRootCommit<'a> {
+    birth_snapshot: &'a ThreadSnapshot,
+    event_successor_snapshot: Option<&'a ThreadSnapshot>,
+    events: &'a [ryeos_state::objects::ThreadEvent],
+}
+
+fn has_exact_root_event_positions(events: &[(String, ryeos_state::objects::ThreadEvent)]) -> bool {
+    if events.is_empty() {
+        return false;
+    }
+    let mut previous_hash = None;
+    for (index, (hash, event)) in events.iter().enumerate() {
+        let expected_sequence = u64::try_from(index)
+            .ok()
+            .and_then(|index| index.checked_add(1));
+        if Some(event.chain_seq) != expected_sequence
+            || Some(event.thread_seq) != expected_sequence
+            || event.prev_chain_event_hash.as_deref() != previous_hash
+            || event.prev_thread_event_hash.as_deref() != previous_hash
+        {
+            return false;
+        }
+        previous_hash = Some(hash.as_str());
+    }
+    true
+}
+
+fn read_exact_committed_root(
+    g: &StateStoreGuard<'_>,
+    chain_root_id: &str,
+    expected: ExpectedRootCommit<'_>,
+) -> Result<RootCommitReadback> {
+    let Some(readback) = g.state_db.read_authoritative_root_birth(chain_root_id)? else {
+        return Ok(RootCommitReadback::ProvenAbsent);
+    };
+    if !readback.only_root_thread {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root head contains a divergent thread set",
+        ));
+    }
+    let Some(predecessor) = readback.predecessor else {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root head has no predecessor genesis",
+        ));
+    };
+    if predecessor.prev_chain_state_hash.is_some()
+        || predecessor.last_event_hash.is_some()
+        || predecessor.last_chain_seq != 0
+        || !predecessor.only_root_thread
+        || predecessor.root_last_event_hash.is_some()
+        || predecessor.root_last_thread_seq != Some(0)
+    {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root predecessor is not the exact zero-event genesis",
+        ));
+    }
+    let Some(genesis_snapshot) = predecessor.snapshot else {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root predecessor has no root snapshot",
+        ));
+    };
+    let expected_birth = StateDb::normalize_expected_root_birth(expected.birth_snapshot.clone())?;
+    if !same_exact_snapshot(&genesis_snapshot, &expected_birth) {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root genesis snapshot diverges from the attempted birth",
+        ));
+    }
+    let Some(root) = readback.root else {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root head has no root thread",
+        ));
+    };
+    if !root.is_chain_final_event {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root event batch is not chain-final",
+        ));
+    }
+    let expected_events =
+        StateDb::normalize_expected_root_events(expected.events.to_vec(), &predecessor.updated_at)?;
+    if !same_successor_event_batch(&root.events, &expected_events) {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root event batch diverges from the authored batch",
+        ));
+    }
+    if !has_exact_root_event_positions(&root.events) {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root events do not occupy the exact genesis append",
+        ));
+    }
+    let expected_published_snapshot =
+        if let Some(event_successor_snapshot) = expected.event_successor_snapshot {
+            let Some((last_event_hash, last_event)) = root.events.last() else {
+                return Ok(RootCommitReadback::Ambiguous(
+                    "authoritative root event batch is empty",
+                ));
+            };
+            let event_count = u64::try_from(root.events.len())
+                .context("authoritative root event batch is too large")?;
+            StateDb::normalize_expected_root_event_successor(
+                &expected_birth,
+                event_successor_snapshot.clone(),
+                last_event_hash.clone(),
+                event_count,
+                &last_event.ts,
+            )?
+        } else {
+            expected_birth
+        };
+    if !same_exact_snapshot(&root.snapshot, &expected_published_snapshot) {
+        return Ok(RootCommitReadback::Ambiguous(
+            "authoritative root snapshot diverges from the exact published state",
+        ));
+    }
+    Ok(RootCommitReadback::Exact(root.snapshot))
 }
 
 fn has_exact_atomic_continuation_positions(
@@ -3371,6 +3476,8 @@ impl StateStore {
             None
         };
         let expected_birth_snapshot = birth_snapshot.clone();
+        let expected_event_successor_snapshot = event_successor_snapshot.clone();
+        let expected_thread_events = thread_events.clone();
         // Establish the auxiliary runtime row before the authoritative commit.
         // A proven pre-commit failure removes it. Ambiguous acknowledgement or
         // an observable committed root preserves it for exact settlement;
@@ -3416,21 +3523,18 @@ impl StateStore {
         let result = match committed {
             Ok(committed) => committed_value(committed),
             Err(error) => {
-                let authoritative = g
-                    .state_db
-                    .read_authoritative_thread_snapshot(&thread.chain_root_id, &thread.thread_id);
-                match authoritative {
-                    Ok(Some(snapshot))
-                        if same_root_birth_identity(&snapshot, &expected_birth_snapshot) =>
-                    {
+                match read_exact_committed_root(
+                    &g,
+                    &thread.chain_root_id,
+                    ExpectedRootCommit {
+                        birth_snapshot: &expected_birth_snapshot,
+                        event_successor_snapshot: expected_event_successor_snapshot.as_ref(),
+                        events: &expected_thread_events,
+                    },
+                ) {
+                    Ok(RootCommitReadback::Exact(snapshot)) => {
                         if let RootBirthOwner::InProcess(owner) = &birth_owner {
                             owner.mark_birth_committed();
-                            if snapshot.status != ThreadStatus::Running {
-                                return Err(anyhow!(
-                                    "in-process root birth returned an error after publishing contradictory authoritative status {}: {error:#}",
-                                    snapshot.status.as_str()
-                                ));
-                            }
                             if let Err(reservation_error) = g
                                 .runtime_db
                                 .mark_in_process_handler_birth_running(&thread.thread_id)
@@ -3487,7 +3591,14 @@ impl StateStore {
                             successor,
                         });
                     }
-                    Ok(Some(_)) => {}
+                    Ok(RootCommitReadback::Ambiguous(reason)) => {
+                        if let RootBirthOwner::InProcess(owner) = &birth_owner {
+                            owner.mark_birth_committed();
+                        }
+                        return Err(anyhow!(
+                            "root birth failed with ambiguous authoritative state; preserving runtime ownership for reconciliation ({reason}): {error:#}"
+                        ));
+                    }
                     Err(authority_error) => {
                         if let RootBirthOwner::InProcess(owner) = &birth_owner {
                             // The write acknowledgement and authoritative
@@ -3502,7 +3613,7 @@ impl StateStore {
                             "root birth failed and authoritative readback was unavailable; preserving runtime ownership for reconciliation: write error: {error:#}; readback error: {authority_error:#}"
                         ));
                     }
-                    Ok(None) => {}
+                    Ok(RootCommitReadback::ProvenAbsent) => {}
                 }
                 if let Err(settle_error) = g.runtime_db.fail_launch_planning(&thread.thread_id) {
                     tracing::error!(
@@ -9286,6 +9397,41 @@ mod tests {
             &predecessor,
             &successor_events,
             &source_after_injected_event,
+        ));
+    }
+
+    #[test]
+    fn exact_root_event_proof_rejects_extra_or_divergent_events() {
+        let first_hash = "e".repeat(64);
+        let second_hash = "f".repeat(64);
+        let third_hash = "1".repeat(64);
+        let first = positioned_test_event("T-root", 1, 1, None, None);
+        let second = positioned_test_event(
+            "T-root",
+            2,
+            2,
+            Some(first_hash.clone()),
+            Some(first_hash.clone()),
+        );
+        let expected = vec![first.clone(), second.clone()];
+        let mut with_extra = vec![(first_hash.clone(), first), (second_hash.clone(), second)];
+        with_extra.push((
+            third_hash,
+            positioned_test_event("T-root", 3, 3, Some(second_hash.clone()), Some(second_hash)),
+        ));
+        assert!(has_exact_root_event_positions(&with_extra));
+        assert!(!same_successor_event_batch(&with_extra, &expected));
+
+        let mut divergent = with_extra[..2].to_vec();
+        divergent[1].1.prev_thread_event_hash = Some("2".repeat(64));
+        assert!(!has_exact_root_event_positions(&divergent));
+
+        let expected_snapshot = build_snapshot(&thread_record("T-root", "T-root"));
+        let mut divergent_snapshot = expected_snapshot.clone();
+        divergent_snapshot.result = Some(json!({"unexpected": true}));
+        assert!(!same_exact_snapshot(
+            &divergent_snapshot,
+            &expected_snapshot,
         ));
     }
 
