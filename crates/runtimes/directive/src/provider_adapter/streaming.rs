@@ -4367,6 +4367,7 @@ owner = "ryeos-dev"
             ("openai", "gpt-4o-mini"),
             ("anthropic", "claude-sonnet-4-5-20250929"),
             ("openrouter", "anthropic/claude-sonnet-4.6"),
+            ("zai", "glm-5.2"),
             ("zen", "gpt-5.4-nano"),
             ("local-openai", "local-test-model"),
         ] {
@@ -4458,6 +4459,115 @@ owner = "ryeos-dev"
             .expect("routed OpenRouter model must have exact pricing");
         assert!(!pricing.input_per_million.is_zero());
         assert!(!pricing.output_per_million.is_zero());
+    }
+
+    #[test]
+    fn bundled_zai_uses_direct_api_and_native_stream_contract() {
+        let model = "glm-5.2";
+        let snapshot = resolve("zai", model);
+        let mut transcript = canonical_transcript_with_tool_call();
+        transcript[2].reasoning_content = Some("I should use the calculator.".to_string());
+        let body = build_golden_body(
+            &snapshot,
+            &transcript,
+            &canonical_tool_schemas(),
+            Some(32_768),
+        );
+
+        assert_eq!(snapshot.provider.base_url, "https://api.z.ai/api/paas/v4");
+        assert_eq!(
+            snapshot.provider.auth.env_var.as_deref(),
+            Some("ZAI_API_KEY")
+        );
+        assert_eq!(
+            snapshot.provider.auth.header_name.as_deref(),
+            Some("Authorization")
+        );
+        assert_eq!(snapshot.provider.auth.prefix.as_deref(), Some("Bearer "));
+        assert_eq!(body["model"], model);
+        assert_eq!(body["max_tokens"], 32_768);
+        assert_eq!(body["tool_stream"], true);
+        assert!(
+            body.get("stream_options").is_none(),
+            "Z.AI reports usage in its final SSE frame without stream_options"
+        );
+        assert_eq!(
+            body["messages"][2]["reasoning_content"], "I should use the calculator.",
+            "Z.AI retained reasoning must survive the provider message conversion"
+        );
+        assert_eq!(
+            body["messages"][2]["tool_calls"][0]["function"]["name"],
+            "calculator"
+        );
+
+        let setup = snapshot
+            .provider
+            .setup_projection("zai")
+            .expect("bundled Z.AI setup metadata must validate");
+        assert_eq!(
+            setup.credential.expect("Z.AI credential").secret_name,
+            "ZAI_API_KEY"
+        );
+        let default_model = setup
+            .models
+            .iter()
+            .find(|candidate| candidate.name == model)
+            .expect("GLM-5.2 setup model");
+        assert!(default_model.recommended);
+        assert_eq!(default_model.context_window, Some(1_000_000));
+        let provider_pricing = snapshot
+            .provider
+            .pricing
+            .as_ref()
+            .expect("bundled Z.AI pricing");
+        let zero_priced_models = provider_pricing
+            .models
+            .iter()
+            .filter(|(_, pricing)| {
+                pricing.input_per_million.is_zero() && pricing.output_per_million.is_zero()
+            })
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            zero_priced_models.len(),
+            1,
+            "the bundled Z.AI contract must identify exactly one zero-priced model"
+        );
+        let zero_priced_model_name = zero_priced_models[0].as_str().to_owned();
+        let zero_priced_model = setup
+            .models
+            .iter()
+            .find(|candidate| candidate.name == zero_priced_model_name)
+            .expect("zero-priced Z.AI model must be present in setup projection");
+        assert!(
+            zero_priced_model
+                .pricing
+                .as_ref()
+                .is_some_and(|pricing| pricing.input_per_million.is_zero()
+                    && pricing.output_per_million.is_zero()),
+            "the zero-priced Z.AI setup model must carry exact zero pricing"
+        );
+        let zero_priced_snapshot = resolve("zai", &zero_priced_model_name);
+        let zero_priced_body = build_golden_body(
+            &zero_priced_snapshot,
+            &transcript,
+            &canonical_tool_schemas(),
+            Some(1_024),
+        );
+        assert_eq!(
+            zero_priced_snapshot.matched_profile.as_deref(),
+            Some("free-fast-no-thinking")
+        );
+        assert_eq!(zero_priced_body["thinking"]["type"], "disabled");
+
+        let pricing = snapshot
+            .provider
+            .pricing
+            .as_ref()
+            .and_then(|pricing| pricing.models.get(model))
+            .expect("bundled Z.AI model must have exact pricing");
+        assert_eq!(pricing.input_per_million.as_nanos(), 1_400_000_000);
+        assert_eq!(pricing.output_per_million.as_nanos(), 4_400_000_000);
     }
 
     struct StreamingEventRecorder {
