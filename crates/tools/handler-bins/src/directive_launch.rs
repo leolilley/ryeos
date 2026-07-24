@@ -20,6 +20,7 @@ const ALLOWED_SECRET_NAMES: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
+    "ZAI_API_KEY",
     "ZEN_API_KEY",
 ];
 // A 64-byte lowercase SHA-256 hex string occupies 66 bytes as canonical JSON:
@@ -658,4 +659,67 @@ fn fact(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+
+    use super::ALLOWED_SECRET_NAMES;
+
+    fn repository_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+    }
+
+    #[test]
+    fn bundled_provider_credentials_are_allowed_by_directive_launch() {
+        let repository = repository_root();
+        let runtime: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(
+                repository.join("bundles/standard/.ai/runtimes/directive-runtime.yaml"),
+            )
+            .expect("read directive runtime descriptor"),
+        )
+        .expect("parse directive runtime descriptor");
+        let descriptor_allowed = runtime["launch_contract"]["secret_policy"]["allowed_names"]
+            .as_sequence()
+            .expect("directive runtime secret allow-list")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("secret allow-list entries must be strings")
+                    .to_owned()
+            })
+            .collect::<BTreeSet<_>>();
+        let handler_allowed = ALLOWED_SECRET_NAMES
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            descriptor_allowed, handler_allowed,
+            "signed runtime descriptor and launch preparer must agree"
+        );
+
+        let providers =
+            repository.join("bundles/standard/.ai/config/ryeos-runtime/model-providers");
+        for entry in std::fs::read_dir(providers).expect("read bundled provider configs") {
+            let path = entry.expect("provider config entry").path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("yaml") {
+                continue;
+            }
+            let provider: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(&path).expect("read bundled provider config"),
+            )
+            .unwrap_or_else(|error| panic!("parse {}: {error}", path.display()));
+            if let Some(env_var) = provider["auth"]["env_var"].as_str() {
+                assert!(
+                    handler_allowed.contains(env_var),
+                    "{} requests provider secret {env_var} outside the directive launch allow-list",
+                    path.display()
+                );
+            }
+        }
+    }
 }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-23T15:25:30Z:f935dac2a483161184a713ec932c7259c84f7f3dec80923b74c81dd85c8a7c9b:7wWzDMWOo/LpfM32WCz5q890BuCzfuVwJnKz7RcgjB28Wl91FJNgrEcUIoHAD8x4LPA81tHyRysVpzUl5caOBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-24T09:36:55Z:6fcd5bc752a5b9e4c26bbc6b8cea87289cb8a7103cc6c7d9b3f396e76f07da13:slukQ0oK3hIm0As2KJk9Ga3x026FBYqMZsOG4NSWJZnShB8ZRBfG6lQhy0NeOkp6USOT566CWzCpxoNIDxRrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -70,6 +70,7 @@ launch_contract:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
       - OPENROUTER_API_KEY
+      - ZAI_API_KEY
       - ZEN_API_KEY
   required_runtime_data:
     - provider_snapshot
