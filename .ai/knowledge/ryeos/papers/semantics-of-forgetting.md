@@ -1,13 +1,14 @@
-<!-- ryeos:signed:2026-07-23T10:04:44Z:fb2c304e77e638fe73306a539e5573bee9e026d46a6dc9900187d0901f168d6f:tOwkiabO0IAi1WJEsdONgRt/NkMDa8Kgq3rRV2xfzlh723bEkoALhHl/vzevaX8+mkX2i4cHnMHhTsFV1o6FAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
----
+## <!-- ryeos:signed:2026-07-23T10:04:44Z:fb2c304e77e638fe73306a539e5573bee9e026d46a6dc9900187d0901f168d6f:tOwkiabO0IAi1WJEsdONgRt/NkMDa8Kgq3rRV2xfzlh723bEkoALhHl/vzevaX8+mkX2i4cHnMHhTsFV1o6FAw==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+
 category: ryeos/papers
 tags: [papers, forgetting, compaction, privacy, permanence, open-theory]
 version: "0.1.0"
 description: >
-  Working notes for paper 4, "A Semantics of Forgetting": any system whose
-  truth is its history owes a theory of which parts of the past may be
-  deleted without changing what the surviving record means. The open-theory
-  paper that keeps the program honest.
+Working notes for paper 4, "A Semantics of Forgetting": any system whose
+truth is its history owes a theory of which parts of the past may be
+deleted without changing what the surviving record means. The open-theory
+paper that keeps the program honest.
+
 ---
 
 # Paper 4 — A Semantics of Forgetting
@@ -57,8 +58,8 @@ The entire program (paper 3 especially) depends on unretractability: an
 agent's standing is its inability to disown its record. So forgetting must
 never become a retraction channel. The saving observation is that CAS
 splits content from commitment: dropping a body while retaining its hash,
-signature, and position in the braid forgets *what was said* while
-preserving *that it was said, by whom, under what authority*. Forget the
+signature, and position in the braid forgets _what was said_ while
+preserving _that it was said, by whom, under what authority_. Forget the
 bytes, keep the commitment. Deletion of content is permissible; deletion of
 the fact of commitment never is.
 
@@ -122,7 +123,7 @@ projection-safe), so that even forgetting leaves testimony.
   reachability relation for a system whose truth is its history — that is
   a semantic thesis, not a memory-management one.
 - **"Regulation (right to erasure) will demand more than body-dropping."**
-  Possibly — and the paper's value is stating precisely what *cannot* be
+  Possibly — and the paper's value is stating precisely what _cannot_ be
   granted (deletion of commitment) without the system ceasing to be
   accountable, so the negotiation happens with the invariant on the table.
 - **"Why a whole paper?"** Because every other paper's strength
