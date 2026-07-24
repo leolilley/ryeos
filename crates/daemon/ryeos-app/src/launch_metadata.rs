@@ -61,7 +61,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // Exact durable launch metadata contract. Changes to any embedded authority
 // shape require a new epoch so startup rejects the old store before nested
 // deserialization can reinterpret (or partially decode) that authority.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 12;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 13;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -198,6 +198,13 @@ pub struct RuntimeLaunchMetadata {
     /// execution paths that never launch a subprocess.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub isolation: Option<ryeos_engine::isolation::IsolationLaunchProvenance>,
+
+    /// Immutable daemon-minted accounting scope sealed with the admitted
+    /// launch capsule. `None` only for launches whose runtime declares no
+    /// financial authority. Continuations and recovery copy this forward
+    /// exactly; it is never reconstructed from configured limits.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +220,10 @@ pub struct PersistedParentExecutionContext {
     pub parent_thread_id: String,
     pub hard_limits: serde_json::Value,
     pub depth: u32,
+    /// Parent accounting scope captured at admission for detached follow
+    /// children admitted after the live callback context is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 }
 
 impl Default for RuntimeLaunchMetadata {
@@ -234,6 +245,7 @@ impl Default for RuntimeLaunchMetadata {
             follow_parent_context: None,
             follow_launch_window: None,
             isolation: None,
+            accounting_scope: None,
         }
     }
 }
@@ -732,6 +744,11 @@ impl RuntimeLaunchMetadata {
                 &attempt.follow_launch_window,
             )?,
             isolation: attempt.isolation.clone().or_else(|| self.isolation.clone()),
+            accounting_scope: exact(
+                "accounting scope",
+                &self.accounting_scope,
+                &attempt.accounting_scope,
+            )?,
         };
         merged.validate()?;
         Ok(merged)
@@ -885,6 +902,7 @@ impl RuntimeLaunchMetadata {
             follow_parent_context: None,
             follow_launch_window: None,
             isolation: None,
+            accounting_scope: None,
         }
     }
 
@@ -908,6 +926,7 @@ impl RuntimeLaunchMetadata {
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
             && self.isolation.is_none()
+            && self.accounting_scope.is_none()
     }
 
     /// Build the immutable CAS launch closure at admission. The runtime ledger
@@ -965,12 +984,22 @@ impl RuntimeLaunchMetadata {
                 anyhow::anyhow!("sealed launch has no admitted artifact identity")
             })?,
             prepared_launch: self.admitted_prepared_launch.clone(),
+            accounting_scope: self.accounting_scope.clone(),
             effective_caps,
             runtime_ref: sealed.runtime_ref().to_string(),
             executor_ref: sealed.executor_ref().to_string(),
         };
         capsule.validate()?;
         Ok(Some(capsule))
+    }
+
+    /// Seal the daemon-minted accounting scope for this launch.
+    pub fn with_accounting_scope(
+        mut self,
+        scope: ryeos_state::objects::AdmittedAccountingScope,
+    ) -> Self {
+        self.accounting_scope = Some(scope);
+        self
     }
 
     /// Set the daemon-allocated checkpoint directory.
@@ -1057,6 +1086,10 @@ impl RuntimeLaunchMetadata {
             // bundle generation. The successor receives fresh provenance when
             // its own launch plan is compiled.
             isolation: None,
+            // A continuation is another segment of the same execution and
+            // retains the execution budget authority it was admitted under
+            // (no allowance reset).
+            accounting_scope: self.accounting_scope.clone(),
         }
     }
 
@@ -1080,6 +1113,12 @@ impl RuntimeLaunchMetadata {
             admitted_project_authority: self.admitted_project_authority.clone(),
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
+            // A continuation is another segment of the SAME execution and
+            // retains the execution budget authority it was admitted under.
+            // Dropping this would mint a fresh allowance per segment — the
+            // exact "hard cap resets at every continuation" failure the
+            // ledger exists to prevent (plan constraint 6, §10.3).
+            accounting_scope: self.accounting_scope.clone(),
             ..Self::default()
         }
     }
@@ -1345,6 +1384,7 @@ mod tests {
             follow_parent_context: None,
             follow_launch_window: None,
             isolation: None,
+            accounting_scope: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: RuntimeLaunchMetadata = serde_json::from_str(&json).unwrap();
@@ -1405,10 +1445,17 @@ mod tests {
                 parent_thread_id: "follow-parent".to_string(),
                 hard_limits: serde_json::json!({"max_depth": 2}),
                 depth: 1,
+                accounting_scope: None,
             }),
             follow_launch_window: Some(FollowLaunchWindow {
                 key: "follow:source".to_string(),
                 width: 2,
+            }),
+            accounting_scope: Some(ryeos_state::objects::AdmittedAccountingScope {
+                budget_authority_site_id: "S-test".to_string(),
+                ledger_epoch: 1,
+                execution_budget_id: "B-source".to_string(),
+                directive_budget_id: Some("D-source".to_string()),
             }),
             ..RuntimeLaunchMetadata::default()
         };
@@ -1426,6 +1473,13 @@ mod tests {
         assert!(successor.sealed_root_request.is_none());
         assert!(successor.follow_parent_context.is_none());
         assert!(successor.follow_launch_window.is_none());
+        // No allowance reset: the successor retains the exact execution
+        // budget authority it was admitted under.
+        assert_eq!(
+            successor.accounting_scope, source.accounting_scope,
+            "continuation must carry the accounting scope forward"
+        );
+        assert!(successor.accounting_scope.is_some());
     }
 
     #[test]

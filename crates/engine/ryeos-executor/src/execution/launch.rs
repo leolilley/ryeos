@@ -15,6 +15,7 @@ use super::launch_envelope::{
     EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots, HardLimits, LaunchEnvelope,
     LaunchEnvelopeBuilder, RuntimeResult,
 };
+
 use super::limits::{
     apply_caller_limit_overrides, apply_execution_policy_defaults,
     apply_execution_policy_item_overrides, compute_effective_limits,
@@ -2342,6 +2343,11 @@ struct PreparedManagedLaunchAuthority {
     launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     pending_project_snapshot: Option<super::CapturedProjectGeneration>,
     augmentation_audits: Vec<crate::augmentations::LaunchAugmentationAudit>,
+    /// True when this preparation minted the accounting scope (fresh
+    /// admission) rather than copying a frozen one forward. Only a freshly
+    /// minted scope may create ledger accounts — a missing account for a
+    /// recovered scope is fail-closed, never re-created from limits.
+    freshly_minted_accounting_scope: bool,
 }
 
 /// Whether the exact authority audit for this launch is already part of the
@@ -2394,6 +2400,111 @@ fn launch_audit_records(
         }
     }));
     Ok(records)
+}
+
+fn mint_budget_id(prefix: &str) -> String {
+    let random_bytes: [u8; 16] = rand::random();
+    let hex = lillux::sha256_hex(&random_bytes);
+    format!("{prefix}-{}", &hex[..16])
+}
+
+/// Resolve the immutable accounting scope for a launch whose runtime declares
+/// a financial authority.
+///
+/// - An already-admitted continuation or recovery carries its frozen scope
+///   forward exactly (no allowance reset).
+/// - A paid callback-dispatched descendant inherits the parent's execution
+///   budget authority and mints only its own narrower directive-item scope;
+///   a scope from another accounting authority site or ledger epoch is
+///   rejected before child admission.
+/// - A fresh top-level execution mints a new execution budget identity from
+///   the local accounting authority.
+///
+/// Runtimes without a financial authority get no scope; a paid launch with no
+/// available accounting ledger fails closed here.
+fn resolve_accounting_scope(
+    params: &BuildAndLaunchParams<'_>,
+    metadata_template: Option<&ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
+    prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+) -> Result<(Option<ryeos_state::objects::AdmittedAccountingScope>, bool), BuildAndLaunchError> {
+    if let Some(existing) = metadata_template.and_then(|template| template.accounting_scope.clone())
+    {
+        // A recovered/continuation scope still requires the ledger whenever
+        // the launch carries financial authority — otherwise the refusal
+        // shifts from admission to the first reserve, burning a full
+        // launch/relaunch cycle for the identical fail-closed outcome a
+        // fresh launch gets right here.
+        if let (None, Some(financial_authority)) = (
+            params.state.accounting.as_ref(),
+            prepared_launch.financial_authority.as_ref(),
+        ) {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "accounting ledger is unavailable; a recovered launch carrying financial \
+                 authority {} cannot be admitted",
+                financial_authority.authority_digest
+            )));
+        }
+        return Ok((Some(existing), false));
+    }
+    // EVERY managed execution owns an execution budget scope (plan §5.1) —
+    // not just paying runtimes. A graph parent performs no direct paid work
+    // yet its execution account is exactly what its paid descendants must
+    // share; without it two parallel children each observe the full parent
+    // maximum. The financial authority decides only whether a narrower
+    // directive-item scope exists and whether a missing ledger is fatal.
+    let accounting = match (
+        params.state.accounting.as_ref(),
+        &prepared_launch.financial_authority,
+    ) {
+        (Some(accounting), _) => accounting,
+        (None, Some(financial_authority)) => {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "accounting ledger is unavailable; a launch carrying financial authority {} \
+                 cannot be admitted",
+                financial_authority.authority_digest
+            )));
+        }
+        // No ledger and no direct paid work: run unscoped (a paid descendant
+        // would fail its own admission on this node anyway).
+        (None, None) => return Ok((None, false)),
+    };
+    let (site_id, ledger_epoch) = accounting.site_identity();
+    let execution_budget_id = match params
+        .parent_execution_context
+        .and_then(|context| context.accounting_scope.as_ref())
+    {
+        Some(parent) => {
+            if parent.budget_authority_site_id != site_id || parent.ledger_epoch != ledger_epoch {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "paid descendant is bound to accounting authority {}/{} but this node \
+                     serves {}/{}; cross-site or cross-epoch paid fan-out is rejected before \
+                     child admission",
+                    parent.budget_authority_site_id,
+                    parent.ledger_epoch,
+                    site_id,
+                    ledger_epoch
+                )));
+            }
+            parent.execution_budget_id.clone()
+        }
+        None => mint_budget_id("B"),
+    };
+    // Only a runtime that pays directly gets a narrower directive-item
+    // account; scope-owning non-paying runtimes (graph, knowledge) carry the
+    // execution identity alone.
+    let directive_budget_id = prepared_launch
+        .financial_authority
+        .as_ref()
+        .map(|_| mint_budget_id("D"));
+    Ok((
+        Some(ryeos_state::objects::AdmittedAccountingScope {
+            budget_authority_site_id: site_id,
+            ledger_epoch,
+            execution_budget_id,
+            directive_budget_id,
+        }),
+        true,
+    ))
 }
 
 async fn prepare_managed_launch_authority(
@@ -2735,6 +2846,9 @@ async fn prepare_managed_launch_authority(
             item_ref: params.resolved.item_ref.clone(),
             secrets: missing_secrets_from_requirements(&names, &secret_requirements),
         },
+        error @ VaultReadError::AuthorityViolation(_) => {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+        }
         VaultReadError::Internal(error) => {
             BuildAndLaunchError::Internal(anyhow::anyhow!("vault read failed: {error:#}"))
         }
@@ -2789,6 +2903,7 @@ async fn prepare_managed_launch_authority(
         }
     }
     let pending_project_snapshot: Option<super::CapturedProjectGeneration> = None;
+    let freshly_minted_accounting_scope;
     let launch_metadata = {
         let original_pushed_head_ref =
             ryeos_app::launch_metadata::OriginalPushedHeadRef::from_provenance(params.provenance);
@@ -2876,6 +2991,12 @@ async fn prepare_managed_launch_authority(
         if let Some(checkpoint_dir) = checkpoint_dir.clone() {
             metadata = metadata.with_checkpoint_dir(checkpoint_dir);
         }
+        let (scope, minted) =
+            resolve_accounting_scope(params, metadata_template, &prepared_launch)?;
+        if let Some(scope) = scope {
+            metadata = metadata.with_accounting_scope(scope);
+        }
+        freshly_minted_accounting_scope = minted;
         Some(metadata)
     };
     Ok(PreparedManagedLaunchAuthority {
@@ -2890,6 +3011,7 @@ async fn prepare_managed_launch_authority(
         launch_metadata,
         pending_project_snapshot,
         augmentation_audits,
+        freshly_minted_accounting_scope,
     })
 }
 
@@ -3259,10 +3381,14 @@ async fn run_claimed_thread_row_inner(
         materialized_executor: materialized_binary,
         checkpoint_dir,
         is_resume,
-        launch_metadata: _,
+        launch_metadata,
         pending_project_snapshot,
         augmentation_audits,
+        freshly_minted_accounting_scope,
     } = authority;
+    let accounting_scope = launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.accounting_scope.clone());
     let engine = provenance.request_engine();
     // Runtime-state root: the deliberate `state_root` override when one was
     // requested, otherwise the project path. Resolution stays anchored at
@@ -3592,6 +3718,223 @@ async fn run_claimed_thread_row_inner(
         );
     }
 
+    // 6a½. Financial admission. A finite hard spend limit is enforceable only
+    // with a proven spend bound: paid-with-certificate or explicitly free.
+    // An advisory-only route under a finite hard limit rejects before any
+    // provider contact; a settled post-attempt threshold is never described
+    // as hard.
+    if !hard_limits.spend_usd.is_zero() {
+        // A runtime that pays providers directly must hold a proven bound; a
+        // non-paying runtime (graph/knowledge) may carry a finite limit that
+        // its paid descendants enforce through the shared execution account —
+        // each descendant's own admission re-checks eligibility.
+        if let Some(authority) = prepared_launch.financial_authority.as_ref() {
+            if !authority.spend_bound.hard_spend_eligible() {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "hard spend limit {} requires a mechanically proven spend bound; this \
+                     route's sealed financial authority is `{}` and is ineligible for hard \
+                     spend",
+                    hard_limits.spend_usd.to_canonical_string(),
+                    authority.spend_bound.as_str()
+                )));
+            }
+        }
+        if accounting_scope.is_none() || state.accounting.is_none() {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "hard spend limit {} requires the accounting ledger and a sealed accounting \
+                 scope; refusing to launch",
+                hard_limits.spend_usd.to_canonical_string()
+            )));
+        }
+    }
+
+    // 6a¾. Journaled account birth and the launch accounting gate. Only a
+    // freshly minted scope may create accounts; a recovered or continued
+    // scope requires its accounts to already exist (reservation fails closed
+    // on a missing account — allowance is never re-minted from limits).
+    // The gate must be open before the runtime can spawn; reserve/issue
+    // callbacks require it and terminal fencing closes it atomically.
+    if let (Some(scope), Some(accounting)) = (accounting_scope.as_ref(), state.accounting.as_ref())
+    {
+        let account_limit = (!hard_limits.spend_usd.is_zero()).then_some(hard_limits.spend_usd);
+        // Journaled, crash-recoverable account birth. The scope is sealed in
+        // launch metadata at thread birth, so a crash can land between seal
+        // and birth; recovery may re-run birth ONLY while the identity has
+        // zero ledger history — an identity WITH history and a missing
+        // account is fail-closed (allowance is never re-minted from limits).
+        let execution_exists = accounting
+            .account_exists(
+                &scope.execution_budget_id,
+                "execution",
+                &scope.execution_budget_id,
+            )
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "execution budget account lookup failed: {error:#}"
+                ))
+            })?;
+        if !execution_exists {
+            let may_create = freshly_minted_accounting_scope
+                || !accounting
+                    .execution_budget_has_history(&scope.execution_budget_id)
+                    .map_err(|error| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "execution budget history lookup failed: {error:#}"
+                        ))
+                    })?;
+            if !may_create {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "execution budget account {} is absent but its identity has ledger \
+                     history; refusing to re-mint allowance",
+                    scope.execution_budget_id
+                )));
+            }
+            accounting
+                .create_execution_account_prepared(
+                    &scope.execution_budget_id,
+                    &chain_root_id,
+                    account_limit,
+                )
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "execution budget account birth failed: {error:#}"
+                    ))
+                })?;
+        }
+        accounting
+            .activate_account(
+                &scope.execution_budget_id,
+                "execution",
+                &scope.execution_budget_id,
+            )
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "execution budget account activation failed: {error:#}"
+                ))
+            })?;
+        if let Some(directive_budget_id) = scope.directive_budget_id.as_ref() {
+            let directive_exists = accounting
+                .account_exists(
+                    &scope.execution_budget_id,
+                    "directive_item",
+                    directive_budget_id,
+                )
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "directive budget account lookup failed: {error:#}"
+                    ))
+                })?;
+            if !directive_exists {
+                let may_create = freshly_minted_accounting_scope
+                    || !accounting
+                        .directive_budget_has_history(directive_budget_id)
+                        .map_err(|error| {
+                            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                                "directive budget history lookup failed: {error:#}"
+                            ))
+                        })?;
+                if !may_create {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "directive budget account {directive_budget_id} is absent but its \
+                         identity has ledger history; refusing to re-mint allowance"
+                    )));
+                }
+                accounting
+                    .create_directive_account_prepared(
+                        &scope.execution_budget_id,
+                        directive_budget_id,
+                        account_limit,
+                    )
+                    .map_err(|error| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "directive budget account birth failed: {error:#}"
+                        ))
+                    })?;
+            }
+            accounting
+                .activate_account(
+                    &scope.execution_budget_id,
+                    "directive_item",
+                    directive_budget_id,
+                )
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "directive budget account activation failed: {error:#}"
+                    ))
+                })?;
+        }
+        // Bind the open gate to the exact daemon-resolved credential values
+        // that will be handed to this paid runtime. The runtime never sees or
+        // supplies this digest. `mark_issued` re-resolves the same declared
+        // names and must reproduce it before the irreversible provider-contact
+        // boundary.
+        let credential_binding = prepared_launch
+            .financial_authority
+            .as_ref()
+            .map(|financial| {
+                let authority: ryeos_accounting::ProviderAccountingAuthority =
+                    serde_json::from_value(financial.authority.clone()).map_err(|error| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "decode sealed financial authority for credential binding: {error}"
+                        ))
+                    })?;
+                authority.validate().map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "validate sealed financial authority for credential binding: {error}"
+                    ))
+                })?;
+                let secrets = prepared_launch
+                    .required_secrets
+                    .iter()
+                    .map(|required| {
+                        effective_vault
+                            .get(&required.name)
+                            .cloned()
+                            .map(|value| (required.name.clone(), value))
+                            .ok_or_else(|| {
+                                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                                    "prepared financial launch secret `{}` disappeared before \
+                                     accounting admission",
+                                    required.name
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                ryeos_accounting::credential_binding_digest(
+                    accounting.credential_binding_key(),
+                    &authority,
+                    &secrets,
+                )
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "seal launch credential binding: {error}"
+                    ))
+                })
+            })
+            .transpose()?;
+        accounting
+            .open_launch_gate_with_credential_binding(
+                &thread_id,
+                launch_owner,
+                &scope.execution_budget_id,
+                &chain_root_id,
+                credential_binding.as_ref().map(|digest| digest.as_str()),
+            )
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "launch accounting gate could not be opened: {error:#}"
+                ))
+            })?;
+        if !state
+            .callback_tokens
+            .set_accounting_scope(&cap.token, scope.clone())
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "callback capability disappeared before accounting-scope binding"
+            )));
+        }
+    }
+
     // 6b. Build inventory the launching kind asked for. The engine
     //     enumerates + parses every inventoried item once here so the
     //     runtime is a pure consumer of `envelope.inventory`.
@@ -3669,6 +4012,20 @@ async fn run_claimed_thread_row_inner(
     )
     .runtime_data(prepared_launch.runtime_data.clone())
     .inventory(inventory)
+    .financial_authority(
+        prepared_launch
+            .financial_authority
+            .as_ref()
+            .map(|authority| authority.authority.clone()),
+    )
+    .accounting_scope(accounting_scope.as_ref().map(|scope| {
+        super::launch_envelope::EnvelopeAccountingScope {
+            budget_authority_site_id: scope.budget_authority_site_id.clone(),
+            ledger_epoch: scope.ledger_epoch,
+            execution_budget_id: scope.execution_budget_id.clone(),
+            directive_budget_id: scope.directive_budget_id.clone(),
+        }
+    }))
     .build();
 
     // 8. Write thread.json (status = created, pre-execution audit).
@@ -4561,7 +4918,27 @@ async fn prepare_successor_launch(
     )
     .await?;
     let launch_metadata = if let Some(persisted) = metadata_template {
-        persisted.clone()
+        // The seed template deliberately carries no prepared-launch payload
+        // (it is thread-owned state), but the successor's OWN freshly sealed
+        // authority was just computed above — a ManagedRuntime capsule
+        // without it fails validation at birth. Fill the seed's empty slots
+        // from the fresh authority; never overwrite copied-forward values.
+        let mut merged = persisted.clone();
+        if let Some(fresh) = authority.launch_metadata.as_ref() {
+            if merged.admitted_prepared_launch.is_none() {
+                merged.admitted_prepared_launch = fresh.admitted_prepared_launch.clone();
+            }
+            if merged.admitted_artifact_identity.is_none() {
+                merged.admitted_artifact_identity = fresh.admitted_artifact_identity.clone();
+            }
+            if merged.admitted_launch_capsule_schema.is_none() {
+                merged.admitted_launch_capsule_schema = fresh.admitted_launch_capsule_schema;
+            }
+            if merged.accounting_scope.is_none() {
+                merged.accounting_scope = fresh.accounting_scope.clone();
+            }
+        }
+        merged
     } else {
         authority
             .launch_metadata
@@ -5540,6 +5917,7 @@ async fn launch_claimed_follow_child(
                 parent_thread_id: p.parent_thread_id,
                 hard_limits: p.hard_limits,
                 depth: p.depth,
+                accounting_scope: p.accounting_scope,
             });
     let sealed_root_request = metadata.sealed_root_request.ok_or_else(|| {
         anyhow::anyhow!("follow child: {thread_id} has no sealed root execution request")
@@ -7722,7 +8100,7 @@ mod tests {
         let parent_hard_limits = HardLimits {
             turns: 6,
             tokens: 1_000,
-            spend_usd: 0.25,
+            spend_usd: ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap(),
             spawns: 2,
             depth: 3,
             duration_seconds: 45,
@@ -7731,6 +8109,7 @@ mod tests {
             parent_thread_id: "T-parent".to_string(),
             hard_limits: serde_json::to_value(&parent_hard_limits).unwrap(),
             depth: 4,
+            accounting_scope: None,
         };
 
         let parent_limits = parent_limits_from_context(Some(&ctx))
@@ -7739,7 +8118,7 @@ mod tests {
         let requested = LimitValues {
             turns: 20,
             tokens: 20_000,
-            spend_usd: 2.0,
+            spend_usd: ryeos_accounting::UsdNanos::parse_canonical("2").unwrap(),
             spawns: 10,
             depth: 8,
             duration_seconds: 300,
@@ -7753,7 +8132,10 @@ mod tests {
 
         assert_eq!(hard.turns, 6);
         assert_eq!(hard.tokens, 1_000);
-        assert_eq!(hard.spend_usd, 0.25);
+        assert_eq!(
+            hard.spend_usd,
+            ryeos_accounting::UsdNanos::parse_canonical("0.25").unwrap()
+        );
         assert_eq!(hard.spawns, 2);
         assert_eq!(hard.depth, 3);
         assert_eq!(hard.duration_seconds, 45);
@@ -7772,6 +8154,7 @@ mod tests {
             parent_thread_id: "T-parent".to_string(),
             hard_limits: json!({}),
             depth: 2,
+            accounting_scope: None,
         };
 
         assert!(parent_limits_from_context(Some(&ctx)).unwrap().is_none());
@@ -7784,6 +8167,7 @@ mod tests {
             parent_thread_id: "T-parent".to_string(),
             hard_limits: json!({"turns": "not-a-number"}),
             depth: 0,
+            accounting_scope: None,
         };
 
         let err = parent_limits_from_context(Some(&ctx)).unwrap_err();

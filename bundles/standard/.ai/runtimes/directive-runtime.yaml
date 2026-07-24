@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-16T09:08:17Z:147aa624bd479e3bb86b7bca4adad99b58307785427895bc95619c9ce5b8eed9:yxhTxdKllu69N5V+2p10HP8T7VMQEKRJWbiCZHIBDjvRb0lkgAb3ZhexkjwaCN7KfmKEDhQgQfdq3yeHcUSlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-23T15:25:30Z:f935dac2a483161184a713ec932c7259c84f7f3dec80923b74c81dd85c8a7c9b:7wWzDMWOo/LpfM32WCz5q890BuCzfuVwJnKz7RcgjB28Wl91FJNgrEcUIoHAD8x4LPA81tHyRysVpzUl5caOBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -51,6 +51,19 @@ launch_contract:
         - bundle
       allowed_trust:
         - trusted_bundle
+    execution:
+      kind: item
+      id: ryeos-runtime/execution
+      required: false
+      merge: deep_merge
+      allowed_spaces:
+        - bundle
+        - project
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+  financial_authority:
+    kind: provider_accounting_authority_v1
   secret_policy:
     max_requirements: 4
     allowed_names:
@@ -70,4 +83,6 @@ launch_contract:
     config_hash: {required: true, kind: string, max_bytes: 66}
     config_value_digest: {required: true, kind: string, max_bytes: 66}
     config_sources: {required: true, kind: json, max_bytes: 4096}
+    authority_digest: {required: true, kind: string, max_bytes: 66}
+    spend_bound: {required: true, kind: string, max_bytes: 32}
 description: "Interprets directive workflows by orchestrating LLM threads"

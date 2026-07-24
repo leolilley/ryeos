@@ -6,7 +6,7 @@ use super::{
     ExecutionProjectAuthority, ExecutionRecoveryAuthority,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 5;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 6;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -16,6 +16,46 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+/// Immutable daemon-minted accounting scope sealed with an admitted launch.
+/// A paid descendant reserves against exactly these identities; recovery
+/// rejects a ledger that cannot satisfy them and never remints allowance
+/// from configured limits alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedAccountingScope {
+    pub budget_authority_site_id: String,
+    pub ledger_epoch: u64,
+    pub execution_budget_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directive_budget_id: Option<String>,
+}
+
+impl AdmittedAccountingScope {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_trimmed_control_free(
+            "accounting scope site",
+            &self.budget_authority_site_id,
+            false,
+        )?;
+        validate_trimmed_control_free(
+            "accounting scope execution budget id",
+            &self.execution_budget_id,
+            false,
+        )?;
+        if let Some(directive_budget_id) = &self.directive_budget_id {
+            validate_trimmed_control_free(
+                "accounting scope directive budget id",
+                directive_budget_id,
+                false,
+            )?;
+        }
+        if self.ledger_epoch == 0 {
+            anyhow::bail!("accounting scope ledger epoch must be positive");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -298,6 +338,11 @@ pub struct AdmittedLaunchCapsule {
     /// binding resolution, augmentations, or launch-preparer handlers.
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub prepared_launch: Option<serde_json::Value>,
+    /// Sealed accounting scope for launches whose runtime declares a
+    /// financial authority. `None` states the launch performs no direct paid
+    /// provider work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_scope: Option<AdmittedAccountingScope>,
     pub effective_caps: Vec<String>,
     pub runtime_ref: String,
     pub executor_ref: String,
@@ -433,6 +478,9 @@ impl AdmittedLaunchCapsule {
                 "in-process handler launch drivers cannot carry admitted subprocess capsules"
             ),
         }
+        if let Some(scope) = &self.accounting_scope {
+            scope.validate()?;
+        }
         if self.artifact_identity.executor_ref() != self.executor_ref {
             anyhow::bail!("admitted launch artifact identity contradicts executor ref");
         }
@@ -482,6 +530,7 @@ impl AdmittedLaunchCapsule {
             && self.launch_driver == other.launch_driver
             && self.artifact_identity == other.artifact_identity
             && self.prepared_launch == other.prepared_launch
+            && self.accounting_scope == other.accounting_scope
             && self.effective_caps == other.effective_caps
             && self.runtime_ref == other.runtime_ref
             && self.executor_ref == other.executor_ref)
@@ -554,6 +603,7 @@ mod tests {
                 },
             },
             prepared_launch: None,
+            accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:direct".to_string(),
             executor_ref: "tool:test/executor".to_string(),
@@ -609,6 +659,7 @@ mod tests {
                 executor_bundle_signer_fingerprint: "fp:executor-bundle".to_string(),
             },
             prepared_launch,
+            accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:test/directive".to_string(),
             executor_ref: "executor:test/subprocess".to_string(),

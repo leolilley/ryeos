@@ -6879,6 +6879,61 @@ impl StateStore {
         queries::summarize_usage_by_subject(g.state_db.projection(), filter)
     }
 
+    pub fn get_provider_attempt_budget_latest(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<queries::ProviderAttemptBudgetRow>> {
+        let g = self.lock()?;
+        queries::get_provider_attempt_budget_latest(g.state_db.projection(), attempt_id)
+    }
+
+    pub fn get_provider_attempt_budget_transition_identity(
+        &self,
+        transition_id: &str,
+    ) -> Result<Option<queries::ProviderAttemptBudgetTransitionIdentity>> {
+        let g = self.lock()?;
+        queries::get_provider_attempt_budget_transition_identity(
+            g.state_db.projection(),
+            transition_id,
+        )
+    }
+
+    pub fn summarize_provider_attempt_budget(
+        &self,
+        filter: &queries::AccountingSummaryFilter<'_>,
+    ) -> Result<queries::AccountingSummaryTotals> {
+        let g = self.lock()?;
+        queries::summarize_provider_attempt_budget(g.state_db.projection(), filter)
+    }
+
+    pub fn provider_attempt_budget_projection_bounds(
+        &self,
+    ) -> Result<queries::AccountingProjectionBounds> {
+        let g = self.lock()?;
+        queries::provider_attempt_budget_projection_bounds(g.state_db.projection())
+    }
+
+    pub fn thread_projection_health(
+        &self,
+    ) -> crate::projection_health::ThreadProjectionHealthSnapshot {
+        self.projection_health.snapshot()
+    }
+
+    pub fn list_provider_attempt_budget(
+        &self,
+        filter: &queries::AccountingSummaryFilter<'_>,
+        limit: u32,
+        after_attempt_id: Option<&str>,
+    ) -> Result<Vec<queries::ProviderAttemptBudgetRow>> {
+        let g = self.lock()?;
+        queries::list_provider_attempt_budget(
+            g.state_db.projection(),
+            filter,
+            limit,
+            after_attempt_id,
+        )
+    }
+
     pub fn list_thread_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {
         let g = self.lock()?;
         let child_rows = queries::list_thread_children(g.state_db.projection(), thread_id)?;

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T00:27:46Z:807acdb359905d53430acb140a3e4115f848acece19318e73c581f1489cc19ba:lQKjPLmr9RP8VknP7pZM0GGIL0ODHRNmdn8y/UNSgQ0hjoMfZ92ntx+YqWZozgJz+ptFJKfYl17wHmYK46crDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-23T15:25:30Z:f4b3cea706b2d630b95aba1f580b8c45210239a6ce1e544a2cd3e734a7c1024d:HmM4BnyG8Imqqhpvttb8X+6e1X0TdJDr0fx7Q57fvjQLGKO6BTrKP7RlgZWlINTo2CQI2cuy6bFX9+x+dZYWCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: graph
 default: true
@@ -19,6 +19,8 @@ launch_contract:
   preparation:
     kind: none
   config_inputs: {}
+  financial_authority:
+    kind: none
   secret_policy:
     max_requirements: 0
     allowed_names: []

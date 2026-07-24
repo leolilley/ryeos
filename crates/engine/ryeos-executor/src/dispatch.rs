@@ -90,6 +90,9 @@ pub struct ParentExecutionContext {
     pub parent_thread_id: String,
     pub hard_limits: Value,
     pub depth: u32,
+    /// Parent's immutable accounting scope; paid descendants inherit this
+    /// execution budget authority (never a fresh allowance).
+    pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 }
 
 /// Single source of truth for the `runtime:` ref kind discriminator.
@@ -3640,6 +3643,15 @@ pub fn admit_launch_contract(
                 source_kind: "launch_preparation".to_owned(),
                 source_name: "symbolic_requirement".to_owned(),
                 remediation: crate::dispatch_error::required_secret_remediation(&name),
+            }
+        }
+        error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+            DispatchError::LaunchPreparationFailed {
+                code: "launch_secret_check_failed".to_owned(),
+                message: error.to_string(),
+                classification: "internal".to_owned(),
+                binding: None,
+                details: Box::new(BTreeMap::new()),
             }
         }
         ryeos_app::vault::VaultReadError::Internal(error) => {

@@ -67,9 +67,16 @@ pub struct TokenUsage {
     /// protocol exposes it. This remains accounting metadata and never drives
     /// local stream enforcement.
     pub reasoning_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
     /// Provider-reported charge for this request, when a signed streaming
     /// metadata schema declares its location.
     pub reported_cost_usd: Option<f64>,
+    /// Exact JSON number token for authoritative settlement. Unlike the
+    /// presentation-only `f64` above, this preserves decimal scale and digits
+    /// through the callback boundary.
+    #[serde(skip_serializing)]
+    pub reported_cost_usd_raw: Option<String>,
     pub cost_details: Option<Value>,
     pub is_byok: Option<bool>,
     pub source: ProviderUsageSource,
@@ -81,6 +88,11 @@ pub struct TokenUsage {
     /// Malformed optional billing/enrichment metadata. These do not invalidate
     /// otherwise complete token counts and are settled/persisted independently.
     pub metadata_anomalies: Vec<String>,
+    /// Provider-reported spend facts that cannot be trusted for settlement
+    /// (for example, a cumulative final charge that regressed). Kept separate
+    /// so malformed token accounting never invalidates an otherwise
+    /// trustworthy direct charge, and vice versa.
+    pub spend_anomalies: Vec<String>,
     /// Well-formed accounting that contradicts another declared protocol
     /// contract (for example, output usage above the effective requested
     /// provider-native limit). These facts do not make token counts malformed.

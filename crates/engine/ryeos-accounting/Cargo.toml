@@ -1,0 +1,16 @@
+[package]
+name = "ryeos-accounting"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+description = "Shared financial accounting authority: fixed-point USD, spend-bound certificates, reservation state machine, and callback DTOs"
+
+[lib]
+name = "ryeos_accounting"
+path = "src/lib.rs"
+
+[dependencies]
+lillux = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

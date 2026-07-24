@@ -95,7 +95,7 @@ pub const GRAPH_FOLLOW_SUSPENDED: &str = "graph_follow_suspended";
 pub const GRAPH_NODE_RETRY: &str = "graph_node_retry";
 
 pub const PROVIDER_RETRY: &str = "provider_retry";
-pub const PROVIDER_ATTEMPT_ACCOUNTING: &str = "provider_attempt_accounting";
+pub const PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1: &str = "provider_attempt_budget_transition_v1";
 pub const COST_UNTRACKED: &str = "cost_untracked";
 pub const THREAD_USAGE: &str = "thread_usage";
 

@@ -478,6 +478,7 @@ mod tests {
             root_content_digest: "0".repeat(64),
             hard_limits: serde_json::Value::Null,
             depth: 0,
+            accounting_scope: None,
         }
     }
 

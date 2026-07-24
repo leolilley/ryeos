@@ -333,6 +333,61 @@ enum ActiveReconcileMode {
     Live,
 }
 
+/// Accounting-ledger reconciliation. Runs after process-identity repair and
+/// before dead-thread finalization so a launch generation that restart
+/// recovery still owns is never prematurely released; the per-thread fence
+/// inside `finalize_dead`/`finalize_recovered_stop` handles owned deaths.
+///
+/// This pass repairs the two crash gaps the live paths can leave:
+/// a committed fence whose terminal thread publication never confirmed, and
+/// nonterminal reservations owned by an already-terminal thread.
+fn reconcile_accounting(state: &AppState) -> Result<()> {
+    let Some(ledger) = state.accounting.as_ref() else {
+        return Ok(());
+    };
+    let is_terminal = |thread_id: &str| -> Result<bool> {
+        Ok(state
+            .state_store
+            .get_thread(thread_id)?
+            .map(|thread| {
+                thread.status != ThreadStatus::Created.as_str()
+                    && thread.status != ThreadStatus::Running.as_str()
+            })
+            // A missing row with durable accounting state is an orphan; treat
+            // it as terminal so its holds cannot linger forever.
+            .unwrap_or(true))
+    };
+    for (thread_id, generation) in ledger.gates_with_publication_due()? {
+        if is_terminal(&thread_id)? {
+            if let Err(error) = ledger.confirm_terminal_publication(&thread_id, &generation) {
+                tracing::warn!(thread_id, %error, "terminal publication repair failed");
+            }
+        }
+    }
+    for (attempt_id, thread_id, generation, attempt_state) in ledger.nonterminal_reservations()? {
+        if is_terminal(&thread_id)? {
+            tracing::warn!(
+                thread_id,
+                attempt_id,
+                state = attempt_state.as_str(),
+                "terminal thread left a nonterminal provider attempt; fencing"
+            );
+            if let Err(error) = ledger.fence_launch_gate_and_close_attempts(
+                &thread_id,
+                &generation,
+                ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis() as i64)
+                    .unwrap_or(0),
+            ) {
+                tracing::error!(thread_id, attempt_id, %error, "accounting fence failed");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Finalize a dead thread as failed. Centralized so the `Finalize` /
 /// `FinalizeExhausted` / orphan branches share identical bookkeeping.
 fn finalize_dead(
@@ -367,6 +422,12 @@ fn finalize_dead(
     if let Some(extra) = error_extra {
         error_obj["details"] = extra;
     }
+    crate::accounting_terminal::fence_accounting_for_terminal(
+        state,
+        thread_id,
+        None,
+        ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
+    )?;
     state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: "failed".to_string(),
@@ -931,6 +992,23 @@ fn finalize_recovered_stop(
         ryeos_app::state_store::StopIntent::Cancel => "cancelled",
         ryeos_app::state_store::StopIntent::Kill => "killed",
     };
+    // Terminal admission requires the financial fence to have committed;
+    // proceeding to terminalization past a failed fence would leave held
+    // funds admissible behind a terminal thread. Skip this pass and let the
+    // next reconcile sweep retry both.
+    if let Err(error) = crate::accounting_terminal::fence_accounting_for_terminal(
+        state,
+        thread_id,
+        None,
+        ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
+    ) {
+        tracing::error!(
+            thread_id,
+            %error,
+            "accounting fence failed during stop recovery; deferring terminalization"
+        );
+        return;
+    }
     if let Err(error) = state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: terminal_status.to_string(),
@@ -1010,6 +1088,7 @@ async fn reconcile_active_threads_inner(
     mode: ActiveReconcileMode,
 ) -> Result<ActiveThreadReconcileReport> {
     repair_detached_spawn_links(state)?;
+    reconcile_accounting(state)?;
     let blocked_freezes = reconcile_execution_workspaces(state, mode)?;
     let mut reconciled = reconcile_in_process_handler_reservations(state, mode)?;
     // Orphan thread cleanup.

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:16Z:22e72c472f31f4e01ded3e2148d67f9aac09bd435d4c089938e7579a87333800:1BKZoHRdz2f2Go/m+xHu86O1WSJNASRcOJhL4o0VMrrHSsH+xxnbSuSN/rs99ySdeA8raGZAHk99Dx49+3zXCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-23T15:25:30Z:09b041ebec07bfb6ad3b4a8a9c6a1cbbf04cecfda31803769435b286de5f9318:WSkkHG/s4zM3aQd+/aquhmQElzlpbDyZXUqfQtEisoUUtmWlJaUMqdHGh/e2KZc3Vsb4L/qcJPC9C/oKTdWyCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 description: "Example long-running directive that self-continues at the context boundary and seeds the successor with a summary hook."
 version: "1.0.0"
@@ -7,7 +7,7 @@ model:
 limits:
   turns: 80
   tokens: 400000
-  spend_usd: 4.00
+  spend_usd: "4"
   depth: 5
 continuation:
   carry_turns: 8

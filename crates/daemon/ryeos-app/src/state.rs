@@ -124,6 +124,11 @@ pub struct AppState {
     /// `EmptyVault` or when the vault public key file doesn't exist.
     /// Populated at startup from `<system>/.ai/node/vault/public_key.pem`.
     pub vault_fingerprint: Option<String>,
+    /// Daemon-owned financial accounting ledger (`accounting.sqlite3` plus
+    /// its external monotonic anchor). `None` means the ledger failed to
+    /// open or verify — every hard-budget admission then fails closed while
+    /// unrelated non-hard work continues.
+    pub accounting: Option<Arc<crate::accounting_db::AccountingDb>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +161,19 @@ pub struct StatusResponse {
     pub active_threads: i64,
     pub thread_projection: ThreadProjectionHealthSnapshot,
     pub pending_head_transitions: crate::state_store::PendingHeadTransitionStatus,
+    /// Accounting-ledger health. The node can be ready while accounting is
+    /// degraded or unavailable; only hard-budget admission fails closed.
+    pub accounting: AccountingStatus,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AccountingStatus {
+    pub ledger_available: bool,
+    pub hard_admission_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbox_unpublished: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outbox_oldest_created_at_ms: Option<i64>,
 }
 
 impl AppState {
@@ -193,6 +211,26 @@ impl AppState {
             active_threads: self.state_store.active_thread_count().unwrap_or(0),
             thread_projection: self.state_store.projection_health_snapshot(),
             pending_head_transitions,
+            accounting: match &self.accounting {
+                Some(ledger) => {
+                    let (outbox_unpublished, outbox_oldest_created_at_ms) = ledger
+                        .unpublished_outbox_stats()
+                        .map(|(count, oldest)| (Some(count), oldest))
+                        .unwrap_or((None, None));
+                    AccountingStatus {
+                        ledger_available: true,
+                        hard_admission_enabled: ledger.hard_admission_enabled(),
+                        outbox_unpublished,
+                        outbox_oldest_created_at_ms,
+                    }
+                }
+                None => AccountingStatus {
+                    ledger_available: false,
+                    hard_admission_enabled: false,
+                    outbox_unpublished: None,
+                    outbox_oldest_created_at_ms: None,
+                },
+            },
         })
     }
 }

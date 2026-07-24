@@ -1,3 +1,4 @@
+use ryeos_accounting::UsdNanos;
 use ryeos_engine::execution_policy::{PolicySourceKind, ResolvedExecutionPolicy, Sourced};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,8 +32,9 @@ pub struct LimitValues {
     pub turns: u32,
     #[serde(default = "default_tokens")]
     pub tokens: u64,
+    /// Fixed-point USD as a canonical decimal string; `"0"` = unlimited.
     #[serde(default = "default_spend")]
-    pub spend_usd: f64,
+    pub spend_usd: UsdNanos,
     #[serde(default = "default_spawns")]
     pub spawns: u32,
     #[serde(default = "default_depth")]
@@ -55,8 +57,10 @@ impl Default for LimitValues {
 }
 
 impl LimitValues {
-    fn validate(&self, source: &str) -> anyhow::Result<()> {
-        validate_spend_usd(self.spend_usd, &format!("{source}.spend_usd"))
+    fn validate(&self, _source: &str) -> anyhow::Result<()> {
+        // `UsdNanos` is non-negative fixed point by construction; the old
+        // finite/non-negative float validation is enforced by the type.
+        Ok(())
     }
 }
 
@@ -65,28 +69,16 @@ impl LimitValues {
 pub struct LimitCaps {
     pub turns: Option<u32>,
     pub tokens: Option<u64>,
-    pub spend_usd: Option<f64>,
+    pub spend_usd: Option<UsdNanos>,
     pub spawns: Option<u32>,
     pub depth: Option<u32>,
     pub duration_seconds: Option<u64>,
 }
 
 impl LimitCaps {
-    fn validate(&self, source: &str) -> anyhow::Result<()> {
-        if let Some(spend_usd) = self.spend_usd {
-            validate_spend_usd(spend_usd, &format!("{source}.spend_usd"))?;
-        }
+    fn validate(&self, _source: &str) -> anyhow::Result<()> {
         Ok(())
     }
-}
-
-fn validate_spend_usd(value: f64, source: &str) -> anyhow::Result<()> {
-    if !value.is_finite() || value < 0.0 {
-        return Err(anyhow::anyhow!(
-            "{source} must be finite and non-negative, got {value}"
-        ));
-    }
-    Ok(())
 }
 
 fn default_turns() -> u32 {
@@ -95,8 +87,8 @@ fn default_turns() -> u32 {
 fn default_tokens() -> u64 {
     0
 }
-fn default_spend() -> f64 {
-    0.0
+fn default_spend() -> UsdNanos {
+    UsdNanos::ZERO
 }
 fn default_spawns() -> u32 {
     0
@@ -124,7 +116,10 @@ pub fn compute_effective_limits(
     let mut hard = HardLimits {
         turns: sentinel_clamp(requested.turns, caps.turns.unwrap_or(0)),
         tokens: sentinel_clamp(requested.tokens, caps.tokens.unwrap_or(0)),
-        spend_usd: sentinel_clamp(requested.spend_usd, caps.spend_usd.unwrap_or(0.0)),
+        spend_usd: sentinel_clamp(
+            requested.spend_usd,
+            caps.spend_usd.unwrap_or(UsdNanos::ZERO),
+        ),
         spawns: sentinel_clamp(requested.spawns, caps.spawns.unwrap_or(0)),
         depth: sentinel_clamp(requested.depth, caps.depth.unwrap_or(0)),
         duration_seconds: sentinel_clamp(
@@ -151,7 +146,6 @@ pub fn compute_effective_limits(
 /// => bound 0) and parent clamps alike. A plain `min` would let a zero bound
 /// erase a bounded value into unlimited, or let a zero (unlimited) value ignore
 /// a real bound.
-#[allow(clippy::float_cmp)] // 0.0 is an exact sentinel here, not an approximation
 fn sentinel_clamp<T: Copy + PartialOrd + Default>(value: T, bound: T) -> T {
     let unlimited = T::default();
     if bound == unlimited {
@@ -183,8 +177,6 @@ pub fn merge_header_limits(base: &LimitValues, header: &Value) -> anyhow::Result
         m.insert(k.clone(), v.clone());
     }
     let result: LimitValues = serde_json::from_value(merged)?;
-    // A non-finite or negative spend value silently disables enforcement (the
-    // harness only acts when `spend_usd > 0.0`), so reject it at the source.
     result.validate("limits")?;
     Ok(result)
 }
@@ -314,12 +306,17 @@ mod tests {
     #[test]
     fn merge_header_limits_rejects_negative_spend() {
         let base = LimitValues::default();
+        // Authoritative money never passes through JSON numbers at all.
         let err =
             merge_header_limits(&base, &serde_json::json!({ "spend_usd": -1.0 })).unwrap_err();
         assert!(
-            err.to_string().contains("must be finite and non-negative"),
+            err.to_string().contains("canonical decimal string"),
             "got {err}"
         );
+        // A signed decimal string is rejected by the canonical parser.
+        let err =
+            merge_header_limits(&base, &serde_json::json!({ "spend_usd": "-1" })).unwrap_err();
+        assert!(err.to_string().contains("not canonical"), "got {err}");
     }
 
     #[test]
@@ -328,19 +325,19 @@ mod tests {
         // their caps, not just turns/duration.
         let requested = LimitValues {
             tokens: 0,
-            spend_usd: 0.0,
+            spend_usd: UsdNanos::ZERO,
             spawns: 0,
             ..Default::default()
         };
         let caps = LimitCaps {
             tokens: Some(1000),
-            spend_usd: Some(1.5),
+            spend_usd: Some(UsdNanos::parse_canonical("1.5").unwrap()),
             spawns: Some(3),
             ..Default::default()
         };
         let hard = compute_effective_limits(Some(&requested), &LimitValues::default(), &caps, None);
         assert_eq!(hard.tokens, 1000);
-        assert_eq!(hard.spend_usd, 1.5);
+        assert_eq!(hard.spend_usd, UsdNanos::parse_canonical("1.5").unwrap());
         assert_eq!(hard.spawns, 3);
     }
 
@@ -508,7 +505,7 @@ mod tests {
         );
         let err = load_limits_config_from_loader(&loader).unwrap_err();
         assert!(
-            err.to_string().contains("must be finite and non-negative"),
+            err.to_string().contains("canonical decimal string"),
             "got {err}"
         );
     }
@@ -539,7 +536,7 @@ mod tests {
         let defaults = LimitValues {
             tokens: 123_456,
             spawns: 42,
-            spend_usd: 9.0,
+            spend_usd: UsdNanos::parse_canonical("9").unwrap(),
             ..Default::default()
         };
         let requested = apply_execution_policy_item_overrides(
@@ -556,7 +553,7 @@ mod tests {
         assert_eq!(requested.duration_seconds, 7200);
         assert_eq!(requested.tokens, 123_456);
         assert_eq!(requested.spawns, 42);
-        assert_eq!(requested.spend_usd, 9.0);
+        assert_eq!(requested.spend_usd, UsdNanos::parse_canonical("9").unwrap());
     }
 
     #[test]

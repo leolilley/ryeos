@@ -96,6 +96,8 @@ launch_contract:
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
+  financial_authority:
+    kind: none
 description: "synth runtime for runtime_e2e"
 "#
     );
@@ -495,15 +497,19 @@ async fn e2e_indirect_directive_audit_records_subject_not_runtime() {
                 let provider = r#"base_url: "http://127.0.0.1:9"
 family: chat_completions
 body_template:
-  model: "{{model}}"
-  messages: "{{messages}}"
-  tools: "{{tools}}"
-  stream: "{{stream}}"
+  model: "{model}"
+  messages: "{messages}"
+  tools: "{tools}"
+  stream: "{stream}"
 auth: {}
 headers: {}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {path: max_tokens, semantics: provider_native_output_tokens}
 pricing:
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0.0"
+  output_per_million: "0.0"
 "#;
                 std::fs::write(
                     provider_dir.join("audit-noauth.yaml"),

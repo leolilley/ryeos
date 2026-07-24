@@ -243,6 +243,66 @@ impl RuntimeCallbackAPI for UdsRuntimeClient {
             .map_err(Self::map_rpc_error)
     }
 
+    async fn provider_attempt_reserve(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_reserve", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_mark_issued(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_mark_issued", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_settle(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_settle", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_release_unissued(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_release_unissued", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
+    async fn provider_attempt_get(
+        &self,
+        _thread_id: &str,
+        mut params: Value,
+    ) -> Result<Value, CallbackError> {
+        self.inject_callback_token(&mut params);
+        self.rpc
+            .request("runtime.provider_attempt_get", params)
+            .await
+            .map_err(Self::map_rpc_error)
+    }
+
     async fn bundle_events_append(
         &self,
         thread_id: &str,

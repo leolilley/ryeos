@@ -52,6 +52,10 @@ pub struct CallbackCapability {
     pub hard_limits: Value,
     /// Parent thread's current spawn-tree depth. Children launch at `depth + 1`.
     pub depth: u32,
+    /// Immutable accounting scope of the minting thread. Paid callback-
+    /// dispatched descendants inherit this execution budget authority; it is
+    /// never accepted from runtime-supplied fields.
+    pub accounting_scope: Option<ryeos_state::objects::AdmittedAccountingScope>,
 }
 
 impl CallbackCapability {
@@ -153,10 +157,27 @@ impl CallbackCapabilityStore {
             root_content_digest,
             hard_limits,
             depth,
+            accounting_scope: None,
         };
 
         self.capabilities.lock().unwrap().insert(token, cap.clone());
         cap
+    }
+
+    /// Bind the minting thread's accounting scope to a freshly-minted cap.
+    /// Returns whether the token was found.
+    pub fn set_accounting_scope(
+        &self,
+        token: &str,
+        scope: ryeos_state::objects::AdmittedAccountingScope,
+    ) -> bool {
+        match self.capabilities.lock().unwrap().get_mut(token) {
+            Some(cap) => {
+                cap.accounting_scope = Some(scope);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Override the carried chain root for a freshly-minted cap. Returns whether
@@ -530,7 +551,7 @@ mod tests {
         let hard_limits = serde_json::json!({
             "turns": 6,
             "tokens": 1000,
-            "spend_usd": 0.25,
+            "spend_usd": "0.25",
             "spawns": 2,
             "depth": 3,
             "duration_seconds": 45,
@@ -770,6 +791,7 @@ mod tests {
             root_content_digest: "0".repeat(64),
             hard_limits: serde_json::Value::Null,
             depth: 0,
+            accounting_scope: None,
         };
 
         let cloned = cap.clone();

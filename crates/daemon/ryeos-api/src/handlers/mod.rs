@@ -12,6 +12,7 @@
 
 use crate::registry::ServiceDescriptor;
 
+pub mod accounting_summary;
 pub mod admission_attestations_for_subject;
 pub mod admission_claim;
 pub mod admission_status;
@@ -144,6 +145,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     seat::TOUCH_DESCRIPTOR,
     seat::CLOSE_DESCRIPTOR,
     threads_input::DESCRIPTOR,
+    accounting_summary::DESCRIPTOR,
     usage_summary::DESCRIPTOR,
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,

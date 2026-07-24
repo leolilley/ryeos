@@ -1975,6 +1975,9 @@ fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
     Ok(decoded)
 }
 
+// The Current variant carries the full launch metadata by design; the
+// incompatible arm is a rejection record, so the size skew is inherent.
+#[allow(clippy::large_enum_variant)]
 enum StoredLaunchMetadata {
     Current(Box<RuntimeLaunchMetadata>),
     Incompatible(IncompatibleLaunchMetadata),
