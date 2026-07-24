@@ -1730,6 +1730,32 @@ pub struct CommittedWrite<T> {
     pub projection: ProjectionStatus,
 }
 
+pub struct CreateChainWithEventSuccessorRequest<'a> {
+    pub chain_root_id: &'a str,
+    pub genesis_snapshot: ThreadSnapshot,
+    pub event_successor_snapshot: ThreadSnapshot,
+    pub events: Vec<ThreadEvent>,
+    pub signer: &'a dyn Signer,
+    pub runtime_liveness: &'a dyn RuntimeLivenessInspector,
+    pub cas_mutation_guard: &'a crate::recovery::CasMutationGuard,
+}
+
+struct CreateChainWithEventsRequest<'a> {
+    chain_root_id: &'a str,
+    snapshot: ThreadSnapshot,
+    event_successor_snapshot: Option<ThreadSnapshot>,
+    events: Vec<ThreadEvent>,
+    signer: &'a dyn Signer,
+    runtime_liveness: Option<&'a dyn RuntimeLivenessInspector>,
+    cas_mutation_guard: &'a crate::recovery::CasMutationGuard,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadSnapshotWithLastEventReadback {
+    pub snapshot: ThreadSnapshot,
+    pub last_event: Option<(String, ThreadEvent)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthoritativeThreadSnapshotReadback {
     pub snapshot: ThreadSnapshot,
@@ -3336,15 +3362,15 @@ impl StateDb {
         signer: &dyn Signer,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
         let guard = self.pinned_authority()?.acquire_shared_guard()?;
-        self.create_chain_with_events_inner(
+        self.create_chain_with_events_inner(CreateChainWithEventsRequest {
             chain_root_id,
             snapshot,
-            None,
+            event_successor_snapshot: None,
             events,
             signer,
-            None,
-            &guard,
-        )
+            runtime_liveness: None,
+            cas_mutation_guard: &guard,
+        })
     }
 
     pub fn create_chain_with_events_admitted(
@@ -3356,48 +3382,45 @@ impl StateDb {
         runtime_liveness: &dyn RuntimeLivenessInspector,
         cas_mutation_guard: &crate::recovery::CasMutationGuard,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
-        self.create_chain_with_events_inner(
+        self.create_chain_with_events_inner(CreateChainWithEventsRequest {
             chain_root_id,
             snapshot,
-            None,
+            event_successor_snapshot: None,
             events,
             signer,
-            Some(runtime_liveness),
+            runtime_liveness: Some(runtime_liveness),
             cas_mutation_guard,
-        )
+        })
     }
 
     pub fn create_chain_with_event_successor_admitted(
         &self,
-        chain_root_id: &str,
-        genesis_snapshot: ThreadSnapshot,
-        event_successor_snapshot: ThreadSnapshot,
-        events: Vec<ThreadEvent>,
-        signer: &dyn Signer,
-        runtime_liveness: &dyn RuntimeLivenessInspector,
-        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        request: CreateChainWithEventSuccessorRequest<'_>,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
-        self.create_chain_with_events_inner(
-            chain_root_id,
-            genesis_snapshot,
-            Some(event_successor_snapshot),
-            events,
-            signer,
-            Some(runtime_liveness),
-            cas_mutation_guard,
-        )
+        self.create_chain_with_events_inner(CreateChainWithEventsRequest {
+            chain_root_id: request.chain_root_id,
+            snapshot: request.genesis_snapshot,
+            event_successor_snapshot: Some(request.event_successor_snapshot),
+            events: request.events,
+            signer: request.signer,
+            runtime_liveness: Some(request.runtime_liveness),
+            cas_mutation_guard: request.cas_mutation_guard,
+        })
     }
 
     fn create_chain_with_events_inner(
         &self,
-        chain_root_id: &str,
-        snapshot: ThreadSnapshot,
-        event_successor_snapshot: Option<ThreadSnapshot>,
-        events: Vec<ThreadEvent>,
-        signer: &dyn Signer,
-        runtime_liveness: Option<&dyn RuntimeLivenessInspector>,
-        cas_mutation_guard: &crate::recovery::CasMutationGuard,
+        request: CreateChainWithEventsRequest<'_>,
     ) -> anyhow::Result<CommittedWrite<AddThreadWithEventsResult>> {
+        let CreateChainWithEventsRequest {
+            chain_root_id,
+            snapshot,
+            event_successor_snapshot,
+            events,
+            signer,
+            runtime_liveness,
+            cas_mutation_guard,
+        } = request;
         if events.iter().any(|event| !event.durability.is_cas_stored()) {
             anyhow::bail!("StateDb::create_chain_with_events cannot persist ephemeral events");
         }
@@ -4326,7 +4349,7 @@ impl StateDb {
         &self,
         chain_root_id: &str,
         thread_id: &str,
-    ) -> anyhow::Result<Option<(ThreadSnapshot, Option<(String, ThreadEvent)>)>> {
+    ) -> anyhow::Result<Option<AuthoritativeThreadSnapshotWithLastEventReadback>> {
         let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
             &self._refs_directory,
             &self._cas_directory,
@@ -4350,7 +4373,10 @@ impl StateDb {
         };
         let last_event =
             chain::read_snapshot_last_event_object(&self.cas_root, Some(&chain_lock), &snapshot)?;
-        Ok(Some((snapshot, last_event)))
+        Ok(Some(AuthoritativeThreadSnapshotWithLastEventReadback {
+            snapshot,
+            last_event,
+        }))
     }
 
     /// Read one root publication and its canonical predecessor genesis under

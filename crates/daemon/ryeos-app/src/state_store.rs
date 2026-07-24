@@ -15,6 +15,7 @@ use ryeos_state::objects::ThreadSnapshot;
 use ryeos_state::objects::ThreadUsage;
 use ryeos_state::queries;
 use ryeos_state::signer::Signer;
+use ryeos_state::CreateChainWithEventSuccessorRequest;
 use ryeos_state::StateDb;
 use ryeos_state::UsageSubject;
 
@@ -811,7 +812,7 @@ pub enum ContinuationOutcome {
     /// and detail derived directly from the exact committed snapshot.
     Created {
         persisted: Vec<PersistedEventRecord>,
-        successor: ThreadDetail,
+        successor: Box<ThreadDetail>,
     },
     /// The source already has a successor whose recorded fingerprint MATCHES this
     /// request — a duplicate submit. The caller returns this id WITHOUT
@@ -1342,7 +1343,7 @@ fn build_snapshot(thread: &NewThreadRecord) -> ThreadSnapshot {
 }
 
 enum ContinuationCommitReadback {
-    Exact(ThreadSnapshot),
+    Exact(Box<ThreadSnapshot>),
     ProvenAbsent,
     Ambiguous(&'static str),
 }
@@ -1395,7 +1396,7 @@ fn same_successor_event_batch(
 }
 
 enum RootCommitReadback {
-    Exact(ThreadSnapshot),
+    Exact(Box<ThreadSnapshot>),
     ProvenAbsent,
     Ambiguous(&'static str),
 }
@@ -1513,7 +1514,7 @@ fn read_exact_committed_root(
             "authoritative root snapshot diverges from the exact published state",
         ));
     }
-    Ok(RootCommitReadback::Exact(root.snapshot))
+    Ok(RootCommitReadback::Exact(Box::new(root.snapshot)))
 }
 
 fn has_exact_atomic_continuation_positions(
@@ -1672,7 +1673,9 @@ fn read_exact_committed_continuation(
             "authoritative source has divergent post-continuation state",
         ));
     }
-    Ok(ContinuationCommitReadback::Exact(successor_snapshot))
+    Ok(ContinuationCommitReadback::Exact(Box::new(
+        successor_snapshot,
+    )))
 }
 
 fn build_continuation_snapshot(
@@ -2850,12 +2853,14 @@ impl StateStore {
         thread_id: &str,
     ) -> Result<Option<(ThreadSnapshot, Option<PersistedEventRecord>)>> {
         let g = self.lock()?;
-        let Some((snapshot, last_event)) = g
+        let Some(readback) = g
             .state_db
             .read_authoritative_thread_snapshot_with_last_event(thread_id, thread_id)?
         else {
             return Ok(None);
         };
+        let snapshot = readback.snapshot;
+        let last_event = readback.last_event;
         let last_event = last_event
             .map(|(event_hash, event)| {
                 let chain_seq = i64::try_from(event.chain_seq)
@@ -3503,13 +3508,15 @@ impl StateStore {
         }
         let committed = match event_successor_snapshot {
             Some(successor) => g.state_db.create_chain_with_event_successor_admitted(
-                &thread.chain_root_id,
-                birth_snapshot,
-                successor,
-                thread_events,
-                g.signer.as_ref(),
-                &g.runtime_db,
-                permit.cas_guard(),
+                CreateChainWithEventSuccessorRequest {
+                    chain_root_id: &thread.chain_root_id,
+                    genesis_snapshot: birth_snapshot,
+                    event_successor_snapshot: successor,
+                    events: thread_events,
+                    signer: g.signer.as_ref(),
+                    runtime_liveness: &g.runtime_db,
+                    cas_mutation_guard: permit.cas_guard(),
+                },
             ),
             None => g.state_db.create_chain_with_events_admitted(
                 &thread.chain_root_id,
@@ -3585,7 +3592,7 @@ impl StateStore {
                             "root birth returned an error after publishing authoritative state; continuing from exact committed snapshot"
                         );
                         let successor =
-                            thread_detail_from_committed_snapshot(snapshot, thread_runtime);
+                            thread_detail_from_committed_snapshot(*snapshot, thread_runtime);
                         return Ok(CreatedThreadPublication {
                             persisted: Vec::new(),
                             successor,
@@ -4701,7 +4708,7 @@ impl StateStore {
                         return Ok(CreatedThreadPublication {
                             persisted: Vec::new(),
                             successor: thread_detail_from_committed_snapshot(
-                                snapshot,
+                                *snapshot,
                                 successor_runtime,
                             ),
                         });
@@ -5239,7 +5246,7 @@ impl StateStore {
                         return Ok(CreatedThreadPublication {
                             persisted: Vec::new(),
                             successor: thread_detail_from_committed_snapshot(
-                                snapshot,
+                                *snapshot,
                                 successor_runtime,
                             ),
                         });
@@ -5512,10 +5519,10 @@ impl StateStore {
                         );
                         return Ok(ContinuationOutcome::Created {
                             persisted: Vec::new(),
-                            successor: thread_detail_from_committed_snapshot(
-                                snapshot,
+                            successor: Box::new(thread_detail_from_committed_snapshot(
+                                *snapshot,
                                 successor_runtime,
-                            ),
+                            )),
                         });
                     }
                     Err(authority_error) => {
@@ -5561,10 +5568,10 @@ impl StateStore {
         };
         Ok(ContinuationOutcome::Created {
             persisted,
-            successor: thread_detail_from_committed_snapshot(
+            successor: Box::new(thread_detail_from_committed_snapshot(
                 successor_result.snapshot,
                 successor_runtime,
-            ),
+            )),
         })
     }
 

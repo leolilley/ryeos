@@ -364,16 +364,30 @@ async fn await_operator_handoff(
     }
 }
 
-fn admit_fresh_launch(
-    item_ref: &crate::routes::parsed_ref::ParsedItemRef,
-    ref_bindings: &BTreeMap<String, String>,
-    project: &ryeos_executor::execution::project_source::ResolvedProjectContext,
-    provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
-    parameters: &Value,
-    ctx: &HandlerContext,
-    state: &AppState,
+struct FreshLaunchAdmission<'a> {
+    item_ref: &'a crate::routes::parsed_ref::ParsedItemRef,
+    ref_bindings: &'a BTreeMap<String, String>,
+    project: &'a ryeos_executor::execution::project_source::ResolvedProjectContext,
+    provenance: &'a ryeos_app::execution_provenance::ExecutionProvenance,
+    parameters: &'a Value,
+    ctx: &'a HandlerContext,
+    state: &'a AppState,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+}
+
+fn admit_fresh_launch(
+    admission: FreshLaunchAdmission<'_>,
 ) -> Result<crate::routes::launch::DispatchLaunchOptions, HandlerError> {
+    let FreshLaunchAdmission {
+        item_ref,
+        ref_bindings,
+        project,
+        provenance,
+        parameters,
+        ctx,
+        state,
+        lifecycle_authority,
+    } = admission;
     let preflight = crate::routes::launch::preflight_dispatch_launch(
         state,
         item_ref,
@@ -488,16 +502,16 @@ pub async fn handle(
                     resolved_authority.project.clone(),
                 )
                 .map_err(|error| HandlerError::Internal(error.to_string()))?;
-            let launch_options = admit_fresh_launch(
-                &parsed_ref,
-                &ref_bindings,
-                &project_ctx,
-                &launch_provenance,
-                &parameters,
-                &ctx,
-                &state,
-                resolved_authority.lifecycle,
-            )?
+            let launch_options = admit_fresh_launch(FreshLaunchAdmission {
+                item_ref: &parsed_ref,
+                ref_bindings: &ref_bindings,
+                project: &project_ctx,
+                provenance: &launch_provenance,
+                parameters: &parameters,
+                ctx: &ctx,
+                state: &state,
+                lifecycle_authority: resolved_authority.lifecycle,
+            })?
             .retain_captured_generation(project_ctx.take_captured_generation());
             let (handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
                 &state,

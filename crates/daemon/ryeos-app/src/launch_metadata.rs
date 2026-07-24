@@ -1211,8 +1211,10 @@ mod tests {
 
     #[test]
     fn launch_metadata_rejects_predecessor_schema_epoch() {
-        let mut predecessor = RuntimeLaunchMetadata::default();
-        predecessor.schema_version = LAUNCH_METADATA_SCHEMA_VERSION - 1;
+        let predecessor = RuntimeLaunchMetadata {
+            schema_version: LAUNCH_METADATA_SCHEMA_VERSION - 1,
+            ..RuntimeLaunchMetadata::default()
+        };
         let error = predecessor.validate().unwrap_err();
         assert!(error.to_string().contains(&format!(
             "schema {} is not current schema {}",

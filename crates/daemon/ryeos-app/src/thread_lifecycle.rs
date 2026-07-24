@@ -3165,7 +3165,7 @@ impl ThreadLifecycleService {
                 successor,
             } => {
                 self.publish_records(&persisted);
-                Ok(OperatorContinuation::Created(successor))
+                Ok(OperatorContinuation::Created(*successor))
             }
             crate::state_store::ContinuationOutcome::Existing {
                 successor_thread_id,

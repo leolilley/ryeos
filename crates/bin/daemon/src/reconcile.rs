@@ -569,16 +569,14 @@ fn classify_in_process_reservation_race(
         (None, Some(status)) if status.is_terminal() => {
             InProcessReservationRaceState::TerminalWithoutReservation
         }
-        (Some(InProcessHandlerReservationPhase::Running), Some(status))
-            if status == ryeos_state::objects::ThreadStatus::Running =>
-        {
-            InProcessReservationRaceState::Running
-        }
-        (Some(InProcessHandlerReservationPhase::Pending), Some(status))
-            if status == ryeos_state::objects::ThreadStatus::Running =>
-        {
-            InProcessReservationRaceState::PendingBirthPublished
-        }
+        (
+            Some(InProcessHandlerReservationPhase::Running),
+            Some(ryeos_state::objects::ThreadStatus::Running),
+        ) => InProcessReservationRaceState::Running,
+        (
+            Some(InProcessHandlerReservationPhase::Pending),
+            Some(ryeos_state::objects::ThreadStatus::Running),
+        ) => InProcessReservationRaceState::PendingBirthPublished,
         (Some(_), Some(status)) if status.is_terminal() && active => {
             InProcessReservationRaceState::ActiveTerminal
         }

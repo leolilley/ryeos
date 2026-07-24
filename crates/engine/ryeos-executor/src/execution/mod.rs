@@ -308,47 +308,6 @@ pub(crate) fn derive_pinned_child_authority(
     .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
 }
 
-#[cfg(test)]
-mod pinned_child_authority_tests {
-    use super::*;
-    use ryeos_state::objects::{
-        ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
-        LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization,
-    };
-
-    #[test]
-    fn pin_at_spawn_preserves_the_sealed_parent_capability_ceiling() {
-        let root = tempfile::tempdir().unwrap();
-        let parent = ExecutionProjectAuthority::live(
-            root.path().canonicalize().unwrap(),
-            "project:test".to_string(),
-            LiveProjectAccess::ReadWrite,
-            LiveFilesystemConfinement::standard_descriptor_rooted(),
-            EnvironmentAuthority::None,
-            vec!["sealed.project.cap".to_string()],
-        )
-        .unwrap()
-        .with_child_policy(ChildProjectAuthorityPolicy::PinAtSpawn {
-            realization: PinnedChildProjectRealization::ReadOnly,
-        })
-        .unwrap();
-
-        let child = derive_pinned_child_authority(
-            &parent,
-            "a".repeat(64),
-            PinnedChildProjectRealization::ReadOnly,
-        )
-        .unwrap();
-        let ExecutionProjectAuthority::PinnedGeneration {
-            capability_ceiling, ..
-        } = child
-        else {
-            panic!("pin-at-spawn must produce pinned authority");
-        };
-        assert_eq!(capability_ceiling, vec!["sealed.project.cap".to_string()]);
-    }
-}
-
 /// Capture a live project tree under a durable recovery root. The
 /// shared guard is acquired from the same descriptor-pinned authority before
 /// the first blob write and remains held until the staged root is durable.
@@ -1074,4 +1033,45 @@ pub(crate) fn ensure_control_tree_unchanged(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pinned_child_authority_tests {
+    use super::*;
+    use ryeos_state::objects::{
+        ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization,
+    };
+
+    #[test]
+    fn pin_at_spawn_preserves_the_sealed_parent_capability_ceiling() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = ExecutionProjectAuthority::live(
+            root.path().canonicalize().unwrap(),
+            "project:test".to_string(),
+            LiveProjectAccess::ReadWrite,
+            LiveFilesystemConfinement::standard_descriptor_rooted(),
+            EnvironmentAuthority::None,
+            vec!["sealed.project.cap".to_string()],
+        )
+        .unwrap()
+        .with_child_policy(ChildProjectAuthorityPolicy::PinAtSpawn {
+            realization: PinnedChildProjectRealization::ReadOnly,
+        })
+        .unwrap();
+
+        let child = derive_pinned_child_authority(
+            &parent,
+            "a".repeat(64),
+            PinnedChildProjectRealization::ReadOnly,
+        )
+        .unwrap();
+        let ExecutionProjectAuthority::PinnedGeneration {
+            capability_ceiling, ..
+        } = child
+        else {
+            panic!("pin-at-spawn must produce pinned authority");
+        };
+        assert_eq!(capability_ceiling, vec!["sealed.project.cap".to_string()]);
+    }
 }
