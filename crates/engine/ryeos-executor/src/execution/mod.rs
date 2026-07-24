@@ -43,15 +43,95 @@ static PROJECT_CAPTURE_PERMITS: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_PROJECT_CAPTURE_WORK));
 
 pub async fn run_bounded_project_capture<T, E>(
-    operation: impl FnOnce() -> std::result::Result<T, E>,
-) -> std::result::Result<T, E> {
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    run_bounded_project_capture_observed(operation, None).await
+}
+
+pub async fn run_bounded_project_capture_observed<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let semaphore_timer = launch_timings.as_ref().map(|timings| {
+        timings.nested(
+            "project_context_resolution",
+            "project_capture_semaphore_wait",
+        )
+    });
     let permit = PROJECT_CAPTURE_PERMITS
         .acquire()
         .await
         .expect("static project-capture semaphore is never closed");
-    let result = tokio::task::block_in_place(operation);
+    drop(semaphore_timer);
+    let result = run_project_capture_off_thread(operation, launch_timings).await;
     drop(permit);
     result
+}
+
+/// Run lightweight live-project filesystem resolution off the async worker
+/// without consuming one of the scarce CAS capture/materialization permits.
+pub async fn run_unbounded_project_capture<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    run_unbounded_project_capture_observed(operation, None).await
+}
+
+pub async fn run_unbounded_project_capture_observed<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    run_project_capture_off_thread(operation, launch_timings).await
+}
+
+async fn run_project_capture_off_thread<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let queue_timer = launch_timings.as_ref().map(|timings| {
+        timings.nested(
+            "project_context_resolution",
+            "project_capture_blocking_queue_wait",
+        )
+    });
+    let result = tokio::task::spawn_blocking(move || {
+        drop(queue_timer);
+        let _work_timer = launch_timings.as_ref().map(|timings| {
+            timings.nested(
+                "project_context_resolution",
+                "project_capture_blocking_work",
+            )
+        });
+        operation()
+    });
+    match result.await {
+        Ok(result) => result,
+        Err(join_error) if join_error.is_panic() => {
+            std::panic::resume_unwind(join_error.into_panic())
+        }
+        Err(join_error) => {
+            panic!("project capture blocking task was cancelled: {join_error}")
+        }
+    }
 }
 
 /// A descriptor-pinned CAS publication whose immutable objects are protected

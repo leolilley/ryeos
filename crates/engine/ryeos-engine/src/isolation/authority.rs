@@ -54,6 +54,91 @@ pub struct IsolationVerifiedCode {
     pub content_hash: String,
 }
 
+/// Exact already-open executable authority carried through one isolation
+/// launch. The descriptor, rather than `identity.source_path`, is the process
+/// execution authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IsolationDescriptorFileIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: i64,
+    pub changed_seconds: i64,
+    pub changed_nanoseconds: i64,
+    pub mode: u32,
+    pub file_type: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct IsolationDescriptorBoundCommand {
+    identity: IsolationVerifiedCode,
+    executable: Arc<std::fs::File>,
+    file_identity: IsolationDescriptorFileIdentity,
+}
+
+impl IsolationDescriptorBoundCommand {
+    pub fn new(
+        identity: IsolationVerifiedCode,
+        executable: Arc<std::fs::File>,
+        file_identity: IsolationDescriptorFileIdentity,
+    ) -> Self {
+        Self {
+            identity,
+            executable,
+            file_identity,
+        }
+    }
+
+    pub fn identity(&self) -> &IsolationVerifiedCode {
+        &self.identity
+    }
+
+    pub fn executable(&self) -> &Arc<std::fs::File> {
+        &self.executable
+    }
+
+    pub fn file_identity(&self) -> IsolationDescriptorFileIdentity {
+        self.file_identity
+    }
+}
+
+/// Canonical command authority accepted by the isolation boundary.
+///
+/// Persisted/operator identities are revalidated and captured by isolation.
+/// Native executors use `DescriptorBound`; they never fall back to a pathname
+/// after their materialized inode has passed verification.
+#[derive(Debug, Clone, Copy)]
+pub enum IsolationCommandAuthorityRef<'a> {
+    Revalidate(&'a IsolationVerifiedCode),
+    DescriptorBound(&'a IsolationDescriptorBoundCommand),
+}
+
+impl<'a> IsolationCommandAuthorityRef<'a> {
+    pub fn identity(self) -> &'a IsolationVerifiedCode {
+        match self {
+            Self::Revalidate(identity) => identity,
+            Self::DescriptorBound(command) => command.identity(),
+        }
+    }
+}
+
+pub trait IsolationCommandAuthority: std::fmt::Debug + Send + Sync {
+    fn authority(&self) -> IsolationCommandAuthorityRef<'_>;
+}
+
+impl IsolationCommandAuthority for IsolationVerifiedCode {
+    fn authority(&self) -> IsolationCommandAuthorityRef<'_> {
+        IsolationCommandAuthorityRef::Revalidate(self)
+    }
+}
+
+impl IsolationCommandAuthority for IsolationDescriptorBoundCommand {
+    fn authority(&self) -> IsolationCommandAuthorityRef<'_> {
+        IsolationCommandAuthorityRef::DescriptorBound(self)
+    }
+}
+
 /// Per-launch facts used to resolve policy placeholders and record provenance.
 #[derive(Debug, Clone, Copy)]
 pub struct IsolationLaunchContext<'a> {
@@ -69,7 +154,7 @@ pub struct IsolationLaunchContext<'a> {
     /// The one verified-code entry that must supply the process executable.
     /// Other entries may be imported tool/runtime files and cannot silently
     /// substitute for a changed command.
-    pub verified_command: Option<&'a IsolationVerifiedCode>,
+    pub verified_command: Option<&'a dyn IsolationCommandAuthority>,
     pub item_ref: &'a str,
     pub thread_id: &'a str,
 }

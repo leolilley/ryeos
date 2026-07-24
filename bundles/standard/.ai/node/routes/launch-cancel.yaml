@@ -1,0 +1,15 @@
+# ryeos:signed:2026-07-23T12:05:42Z:1bd0e81eaff236c780bc321d496f73e52cd28c98131c87c38490b3a286cb9d48:fpgyou3coV6/TL0R8k3GtHkLU4lhhK1MBIaWUcy/3YNMTc+vnsOXQdw5Q4yoQDP4XcGVYOCNPl0JV8PToohfCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+id: launch/cancel
+path: /launches/{launch_id}/cancel
+methods:
+  - POST
+auth: ryeos_signed
+limits:
+  body_bytes_max: 0
+  timeout_ms: 30000
+  concurrent_max: 64
+response:
+  mode: json
+  source: service:launch/cancel
+  source_config:
+    launch_id: "${path.launch_id}"

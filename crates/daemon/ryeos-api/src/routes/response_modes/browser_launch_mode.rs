@@ -117,6 +117,7 @@ impl CompiledResponseMode for CompiledBrowserLaunchMode {
             input,
             principal: Some(ctx.principal),
             workspace_lifeline: None,
+            launch_timings: None,
             state: ctx.state,
             webhook_dedupe: ctx.webhook_dedupe,
         };

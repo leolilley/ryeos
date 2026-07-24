@@ -125,6 +125,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             false,
             None,
             None,
+            None,
         )
         .map_err(|error| {
             RouteDispatchError::BadRequest(format!("launch admission failed: {error}"))
@@ -266,6 +267,14 @@ fn launch_task_error(
         Ok(Err(crate::routes::launch::LaunchSpawnError::InvalidRef { ref_str, reason })) => {
             RouteDispatchError::BadRequest(format!("invalid item_ref '{ref_str}': {reason}"))
         }
+        Ok(Err(error)) => RouteDispatchError::Structured {
+            code: error.code().to_string(),
+            status: error.http_status().as_u16(),
+            body: serde_json::json!({
+                "code": error.code(),
+                "error": error.to_string(),
+            }),
+        },
         Ok(Ok(())) => RouteDispatchError::Internal(
             "launch completed without authoritative handoff".to_string(),
         ),

@@ -72,7 +72,11 @@ pub struct PrepareRuntimeLaunchRequest<'a> {
     pub ref_bindings: &'a BTreeMap<String, String>,
     pub roots: &'a ResolutionRoots,
     pub parsers: &'a ParserDispatcher,
+    /// Exact trust half of the same effective request snapshot as `parsers`.
+    pub trust_store: &'a ryeos_engine::trust::TrustStore,
     pub principal: &'a EffectivePrincipal,
+    pub ref_binding_resolution_timings:
+        Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
 }
 
 pub fn prepare_runtime_launch(
@@ -114,6 +118,9 @@ pub fn prepare_runtime_launch(
     let scopes = principal_scopes(request.principal);
     let mut binding_wires = BTreeMap::new();
     let mut binding_records = BTreeMap::new();
+    let ref_binding_resolution_timer = request
+        .ref_binding_resolution_timings
+        .map(|timings| timings.nested("background_dispatch", "ref_binding_resolution"));
     for (name, raw_ref) in request.ref_bindings {
         let declaration = &contract.ref_bindings[name];
         let canonical =
@@ -148,7 +155,7 @@ pub fn prepare_runtime_launch(
             &request.engine.kinds,
             request.parsers,
             request.roots,
-            &request.engine.trust_store,
+            request.trust_store,
             &request.engine.composers,
         )
         .map_err(|error| map_binding_resolution_error(name, error))?;
@@ -172,6 +179,7 @@ pub fn prepare_runtime_launch(
         );
         binding_wires.insert(name.clone(), prepared_item_wire(&resolution)?);
     }
+    drop(ref_binding_resolution_timer);
 
     let launch_config_roots = request.engine.launch_config_roots(request.roots);
     let config_inputs = ryeos_engine::launch_config::load_launch_config_snapshots(
@@ -179,7 +187,7 @@ pub fn prepare_runtime_launch(
         &launch_config_roots,
         request.parsers,
         &request.engine.kinds,
-        &request.engine.trust_store,
+        request.trust_store,
     )
     .map_err(map_launch_config_error)?;
 

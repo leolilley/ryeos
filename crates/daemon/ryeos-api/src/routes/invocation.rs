@@ -104,6 +104,9 @@ pub struct RouteInvocationContext {
     /// execution provenance so blocking runtime work can outlive cancellation
     /// of the request future without losing its workspace.
     pub workspace_lifeline: Option<Arc<ryeos_app::temp_dir_guard::TempDirGuard>>,
+    /// Process-local launch observability context. This is not execution
+    /// authority and is never serialized into a runtime envelope.
+    pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     /// Shared daemon state.
     pub state: AppState,
     /// Process-wide webhook delivery-id dedupe store. Read by HMAC

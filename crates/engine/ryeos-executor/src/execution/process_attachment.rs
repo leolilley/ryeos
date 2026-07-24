@@ -177,12 +177,21 @@ pub(crate) fn run_lillux_attached(
     request: ryeos_engine::isolation::IsolationRequestAwaitingAttachment,
     workspace_lifeline: Option<Arc<TempDirGuard>>,
 ) -> Result<lillux::SubprocessResult> {
-    let _workspace_lifeline = workspace_lifeline;
     let spawned = match request.spawn() {
         Ok(spawned) => spawned,
         Err(result) => return Ok(result),
     };
+    run_spawned_lillux_attached(state, thread_id, launch_owner, spawned, workspace_lifeline)
+}
 
+pub(crate) fn run_spawned_lillux_attached(
+    state: &AppState,
+    thread_id: &str,
+    launch_owner: &str,
+    spawned: lillux::ProcessAwaitingAttachment,
+    workspace_lifeline: Option<Arc<TempDirGuard>>,
+) -> Result<lillux::SubprocessResult> {
+    let _workspace_lifeline = workspace_lifeline;
     #[cfg(target_os = "linux")]
     let identity_result = ryeos_app::process::capture_execution_process_identity_from_pidfd(
         spawned.pid() as i64,

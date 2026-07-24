@@ -31,4 +31,5 @@ libc = { workspace = true }
 
 [dev-dependencies]
 ryeos-app = { workspace = true, features = ["test-support"] }
+ryeos-scheduler = { workspace = true }
 tempfile = { workspace = true }

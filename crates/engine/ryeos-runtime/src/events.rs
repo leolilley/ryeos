@@ -20,6 +20,13 @@ use serde::{Deserialize, Serialize};
 // reads), so the enum and the projection reference one source of truth.
 use ryeos_state::event_types as wire;
 
+/// Framing prefix for structured, non-payload child timing records written to
+/// captured stderr and re-emitted by the daemon after the child exits.
+///
+/// This is observability transport only. It is not a persisted runtime event
+/// type or launch-envelope field.
+pub const CAPTURED_CHILD_TIMING_PREFIX: &str = "RYEOS_CHILD_TIMING_JSON ";
+
 /// Storage strategy for a persisted event.
 ///
 /// Wire form is `snake_case` so daemon-side serialization stays
@@ -107,6 +114,9 @@ pub enum RuntimeEventType {
     AsLaunchedResolution,
     AsLaunchedRefBindings,
     RuntimeLaunchFacts,
+    /// A launch augmentation reused a process-local projection instead of
+    /// fabricating a child execution. Kept outside the composed launch input.
+    LaunchAugmentationCacheHit,
     /// A `(key, value)` metadata tag stamped on a thread post-launch (cohort
     /// identity, e.g. `fleet`/`game`). Event-backed so it survives a projection
     /// rebuild, unlike a bare facet-table write.
@@ -182,6 +192,7 @@ impl RuntimeEventType {
             Self::AsLaunchedResolution => wire::AS_LAUNCHED_RESOLUTION,
             Self::AsLaunchedRefBindings => wire::AS_LAUNCHED_REF_BINDINGS,
             Self::RuntimeLaunchFacts => wire::RUNTIME_LAUNCH_FACTS,
+            Self::LaunchAugmentationCacheHit => wire::LAUNCH_AUGMENTATION_CACHE_HIT,
             Self::ThreadFacetSet => wire::THREAD_FACET_SET,
             Self::ThreadReconciled => wire::THREAD_RECONCILED,
             Self::OrphanProcessKilled => wire::ORPHAN_PROCESS_KILLED,
@@ -234,6 +245,7 @@ impl RuntimeEventType {
             wire::AS_LAUNCHED_RESOLUTION => Ok(Self::AsLaunchedResolution),
             wire::AS_LAUNCHED_REF_BINDINGS => Ok(Self::AsLaunchedRefBindings),
             wire::RUNTIME_LAUNCH_FACTS => Ok(Self::RuntimeLaunchFacts),
+            wire::LAUNCH_AUGMENTATION_CACHE_HIT => Ok(Self::LaunchAugmentationCacheHit),
             wire::THREAD_FACET_SET => Ok(Self::ThreadFacetSet),
             wire::THREAD_RECONCILED => Ok(Self::ThreadReconciled),
             wire::ORPHAN_PROCESS_KILLED => Ok(Self::OrphanProcessKilled),
@@ -332,6 +344,7 @@ impl RuntimeEventType {
             | Self::AsLaunchedResolution
             | Self::AsLaunchedRefBindings
             | Self::RuntimeLaunchFacts
+            | Self::LaunchAugmentationCacheHit
             | Self::ThreadFacetSet
             | Self::ThreadReconciled
             | Self::OrphanProcessKilled
@@ -390,6 +403,7 @@ mod tests {
             RuntimeEventType::AsLaunchedResolution,
             RuntimeEventType::AsLaunchedRefBindings,
             RuntimeEventType::RuntimeLaunchFacts,
+            RuntimeEventType::LaunchAugmentationCacheHit,
             RuntimeEventType::ThreadFacetSet,
             RuntimeEventType::ThreadReconciled,
             RuntimeEventType::OrphanProcessKilled,

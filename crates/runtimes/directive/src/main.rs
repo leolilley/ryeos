@@ -14,9 +14,11 @@ mod expression_inventory_tests;
 mod harness;
 mod knowledge;
 mod provider_adapter;
+mod provider_transport_timing;
 mod result_guard;
 mod resume;
 mod runner;
+mod startup_timing;
 
 use ryeos_directive_core::{ResolvedProviderSnapshot, PROVIDER_SNAPSHOT_KEY};
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
@@ -131,9 +133,12 @@ fn render_stimulus_with_limits(
 }
 
 fn main() {
+    let main_started_at = std::time::Instant::now();
+    startup_timing::init(main_started_at);
     ryeos_tracing::init_subscriber(ryeos_tracing::SubscriberConfig::for_directive_runtime());
 
     let result = run_directive();
+    startup_timing::emit_process_exit_summary();
     let exit_code = match &result {
         Ok(_) => 0,
         Err(_) => 1,
@@ -188,6 +193,8 @@ fn run_directive() -> Result<RuntimeResult> {
             });
         }
     };
+    startup_timing::set_identity(&envelope.invocation_id, &envelope.thread_id);
+    startup_timing::mark_envelope_parsed();
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(run_with_envelope(envelope))
@@ -227,16 +234,20 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     // runtime from a crashed one; the running transition then opens the
     // mutation surface used by thread_continued and the opening stimulus.
     // Both lifecycle calls precede resume replay and are resume-critical.
+    startup_timing::mark_attach_process_started();
     callback.attach_current_process().await?;
+    startup_timing::mark_attach_process_done();
     // The directive bootstrap emits the opening cognition before Runner enters
     // its state machine. Cross the lifecycle boundary immediately after process
     // attachment so every subsequent durable callback is authored by a running
     // thread. Runner's Init mark remains an idempotent defense for alternate
     // harnesses and resume entry points.
+    startup_timing::mark_mark_running_started();
     callback
         .mark_running()
         .await
         .context("failed to mark directive runtime running after attach")?;
+    startup_timing::mark_mark_running_done();
 
     let mut runtime_data = std::mem::take(&mut envelope.runtime_data);
     let provider_snapshot: ResolvedProviderSnapshot =
@@ -265,6 +276,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
         &envelope.inventory,
         &provider_snapshot,
     )?;
+    startup_timing::mark_bootstrap_done();
 
     let provider = bootstrap_output.provider.clone();
     let provider_id = bootstrap_output.provider_id.clone();

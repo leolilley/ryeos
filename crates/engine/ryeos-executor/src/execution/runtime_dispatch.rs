@@ -522,6 +522,7 @@ async fn handle_execute(
         project_path: project_path.as_path(),
         provenance: child_provenance,
         lifecycle_authority,
+        launch_timings: None,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
         usage_subject: None,

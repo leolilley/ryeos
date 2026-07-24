@@ -164,6 +164,7 @@ impl SchedulerContext for AppSchedulerContext {
             None,
             &exec_ctx,
             &self.0,
+            None,
         )?;
         if !preflight.class.persists_pre_minted_root() {
             anyhow::bail!(
@@ -187,6 +188,7 @@ impl SchedulerContext for AppSchedulerContext {
             project_path: std::path::Path::new(project_path),
             provenance,
             lifecycle_authority: resolved_authority.lifecycle,
+            launch_timings: None,
             original_root_kind: &original_root_kind,
             pre_minted_thread_id: Some(thread_id.to_string()),
             usage_subject: None,

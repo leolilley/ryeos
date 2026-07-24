@@ -1876,6 +1876,11 @@ pub async fn run_and_wait(
         state_root = %runtime_state_root.display(),
         "execution roots resolved"
     );
+    if super::process_attachment::finalize_requested_stop_if_present(&state, &tid)? {
+        guard.mark_finalized();
+        guard.cleanup();
+        anyhow::bail!("terminal subprocess {tid} was stopped before credential mint");
+    }
     let ProtocolLaunchEnv {
         bindings: protocol_env_bindings,
         callback_token,
@@ -1929,6 +1934,11 @@ pub async fn run_and_wait(
     )?;
     let wait_isolation = state.isolation.clone();
     let wait_isolation_daemon_socket_path = isolation_daemon_socket_path;
+    if super::process_attachment::finalize_requested_stop_if_present(&state, &tid)? {
+        guard.mark_finalized();
+        guard.cleanup();
+        anyhow::bail!("terminal subprocess {tid} was stopped before isolation and process spawn");
+    }
     let spawn_workspace_lifeline = guard.temp_dir.clone();
     let spawn_handle = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
@@ -2514,6 +2524,14 @@ pub async fn run_detached(
         state_root = %runtime_state_root.display(),
         "execution roots resolved"
     );
+    if super::process_attachment::finalize_requested_stop_if_present(&state, &created.thread_id)? {
+        guard.mark_finalized();
+        guard.cleanup();
+        anyhow::bail!(
+            "detached terminal subprocess {} was stopped before credential mint",
+            created.thread_id
+        );
+    }
     let launch_timeout_secs = prepared_plan.timeout_secs;
     let ProtocolLaunchEnv {
         bindings: protocol_env_bindings,
@@ -2786,6 +2804,37 @@ async fn dispatch_detached_bg_task(
     let isolation_for_spawn = bg_state.isolation.clone();
     let isolation_daemon_socket_path_for_spawn = bg_isolation_daemon_socket_path;
     let spawn_workspace_lifeline = bg_temp_dir.clone();
+
+    match super::process_attachment::finalize_requested_stop_if_present(&bg_state, &bg_thread_id) {
+        Ok(true) => {
+            drop(bg_temp_dir.take());
+            return;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(
+                phase = log_phase,
+                thread_id = %bg_thread_id,
+                %error,
+                "durable stop fence failed before detached isolation and process spawn"
+            );
+            if let Err(cleanup_error) = fail_thread_static_owned(
+                &bg_state,
+                &bg_thread_id,
+                "stop_fence_failed",
+                &launch_owner,
+            ) {
+                tracing::error!(
+                    phase = log_phase,
+                    thread_id = %bg_thread_id,
+                    error = %cleanup_error,
+                    "detached stop-fence failure and terminal cleanup both failed"
+                );
+            }
+            drop(bg_temp_dir.take());
+            return;
+        }
+    }
 
     let spawn_result = task::spawn_blocking(move || {
         let _spawn_workspace_lifeline = spawn_workspace_lifeline;
@@ -4044,6 +4093,13 @@ async fn run_existing_recovered_thread(
         })?;
 
         params.vault_bindings = vault_bindings;
+    }
+    if super::process_attachment::finalize_requested_stop_if_present(&state, &thread_id)
+        .map_err(ResumeError::Other)?
+    {
+        guard.mark_finalized();
+        guard.cleanup();
+        return Ok(RecoveryLaunchOutcome::Skipped("stop_requested"));
     }
     let ProtocolLaunchEnv {
         bindings: protocol_env_bindings,

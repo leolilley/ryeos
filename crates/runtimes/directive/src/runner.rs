@@ -328,7 +328,7 @@ fn retry_backoff(
         // The stream died mid-read (chunk timeout/reset). The request is
         // idempotent; the durable `provider_retry` event records the count of
         // live/ephemeral deltas emitted before the cut.
-        Some(ProviderStreamError::MidStream { .. }) => execution.retry_mid_stream,
+        Some(ProviderStreamError::MidStream(_)) => execution.retry_mid_stream,
         None => false,
     };
     if !retryable {
@@ -428,8 +428,21 @@ impl Runner {
             return_nudge_sent: false,
             continuation_config: continuation,
             sampling,
+            // Retain the existing per-process client and pool size; no
+            // protocol or keepalive tuning is added without measurement. The
+            // custom resolver preserves reqwest's default getaddrinfo behavior
+            // while exposing DNS timing. The connector layer records only the
+            // honest aggregate connection-establishment boundary, which can
+            // include DNS, TCP, proxy negotiation, and TLS. Response versions
+            // are observed after negotiation rather than forced here.
             http_client: reqwest::Client::builder()
                 .pool_max_idle_per_host(8)
+                .dns_resolver(std::sync::Arc::new(
+                    crate::provider_transport_timing::InstrumentedDnsResolver,
+                ))
+                .connector_layer(
+                    crate::provider_transport_timing::ConnectionEstablishmentTimingLayer,
+                )
                 .timeout(std::time::Duration::from_secs(600))
                 .build()
                 .expect("reqwest client builder"),
@@ -712,6 +725,7 @@ impl Runner {
                                 tools: &visible_tools_owned,
                                 callback: &self.callback,
                                 turn,
+                                attempt: attempt_number,
                                 sampling: self.sampling.as_ref(),
                                 cancel_flag: Some(cancel_flag.clone()),
                                 interrupt_flag: Some(interrupt_flag.clone()),
@@ -755,23 +769,16 @@ impl Runner {
                                     let mid_stream_attempt = e
                                         .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
                                         .and_then(|error| match error {
-                                            crate::provider_adapter::ProviderStreamError::MidStream {
-                                                accepted_bytes,
-                                                accepted_output_events,
-                                                live_output_events_emitted,
-                                                usage,
-                                                generation_header_id,
-                                                response_id,
-                                                requested_output_tokens,
-                                                ..
-                                            } => Some((
-                                                *accepted_bytes,
-                                                *accepted_output_events,
-                                                *live_output_events_emitted,
-                                                usage.clone(),
-                                                generation_header_id.clone(),
-                                                response_id.clone(),
-                                                *requested_output_tokens,
+                                            crate::provider_adapter::ProviderStreamError::MidStream(
+                                                mid_stream,
+                                            ) => Some((
+                                                mid_stream.accepted_bytes,
+                                                mid_stream.accepted_output_events,
+                                                mid_stream.live_output_events_emitted,
+                                                mid_stream.usage.clone(),
+                                                mid_stream.generation_header_id.clone(),
+                                                mid_stream.response_id.clone(),
+                                                mid_stream.requested_output_tokens,
                                             )),
                                             _ => None,
                                         });
@@ -873,10 +880,9 @@ impl Runner {
                                         .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
                                         )
                                         .and_then(|pe| match pe {
-                                            crate::provider_adapter::ProviderStreamError::MidStream {
-                                                live_output_events_emitted,
-                                                ..
-                                            } => Some(*live_output_events_emitted),
+                                            crate::provider_adapter::ProviderStreamError::MidStream(
+                                                mid_stream,
+                                            ) => Some(mid_stream.live_output_events_emitted),
                                             _ => None,
                                         });
                                     tracing::warn!(
@@ -1753,24 +1759,17 @@ impl Runner {
                             } else if let Some(mid_stream) = e.downcast_ref::<
                                 crate::provider_adapter::ProviderStreamError,
                             >().and_then(|error| match error {
-                                crate::provider_adapter::ProviderStreamError::MidStream {
-                                    accepted_bytes,
-                                    accepted_output_events,
-                                    live_output_events_emitted,
-                                    usage,
-                                    generation_header_id,
-                                    response_id,
-                                    requested_output_tokens,
-                                    detail,
-                                } => Some((
-                                    *accepted_bytes,
-                                    *accepted_output_events,
-                                    *live_output_events_emitted,
-                                    usage.clone(),
-                                    generation_header_id.clone(),
-                                    response_id.clone(),
-                                    *requested_output_tokens,
-                                    detail.clone(),
+                                crate::provider_adapter::ProviderStreamError::MidStream(
+                                    mid_stream,
+                                ) => Some((
+                                    mid_stream.accepted_bytes,
+                                    mid_stream.accepted_output_events,
+                                    mid_stream.live_output_events_emitted,
+                                    mid_stream.usage.clone(),
+                                    mid_stream.generation_header_id.clone(),
+                                    mid_stream.response_id.clone(),
+                                    mid_stream.requested_output_tokens,
+                                    mid_stream.detail.clone(),
                                 )),
                                 _ => None,
                             }) {
@@ -1884,7 +1883,7 @@ impl Runner {
                                 .or_else(|| {
                                     e.downcast_ref::<crate::provider_adapter::ProviderStreamError>()
                                         .and_then(|error| match error {
-                                            crate::provider_adapter::ProviderStreamError::MidStream { usage, .. } => usage.as_ref(),
+                                            crate::provider_adapter::ProviderStreamError::MidStream(mid_stream) => mid_stream.usage.as_ref(),
                                             _ => None,
                                         })
                                 });
@@ -4177,16 +4176,18 @@ mod tests {
         // A stream cut mid-read (chunk timeout/reset) is transient: retried by
         // default under the shared budget, and disabled by the knob.
         let mid_stream = || {
-            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream {
-                live_output_events_emitted: 42,
-                accepted_bytes: 128,
-                accepted_output_events: 3,
-                usage: None,
-                generation_header_id: None,
-                response_id: None,
-                requested_output_tokens: Some(32_768),
-                detail: "stream chunk error: operation timed out".into(),
-            })
+            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
+                Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
+                    live_output_events_emitted: 42,
+                    accepted_bytes: 128,
+                    accepted_output_events: 3,
+                    usage: None,
+                    generation_header_id: None,
+                    response_id: None,
+                    requested_output_tokens: Some(32_768),
+                    detail: "stream chunk error: operation timed out".into(),
+                }),
+            ))
         };
         let mut cfg = retry_cfg();
         assert_eq!(

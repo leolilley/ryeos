@@ -178,6 +178,7 @@ mod tests {
             input: serde_json::Value::Null,
             principal: None,
             workspace_lifeline: None,
+            launch_timings: None,
             state,
             webhook_dedupe: Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new()),
         };

@@ -246,6 +246,28 @@ impl ParserRegistry {
         self.descriptors.len()
     }
 
+    pub(crate) fn estimated_size_bytes(&self) -> usize {
+        self.fingerprint.len()
+            + self
+                .descriptors
+                .iter()
+                .map(|(canonical_ref, descriptor)| {
+                    canonical_ref.len()
+                        + serde_json::to_vec(descriptor)
+                            .map(|serialized| serialized.len())
+                            .unwrap_or(0)
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn project_overlay_root(
+        project_root: &Path,
+        kinds: &KindRegistry,
+    ) -> Result<PathBuf, EngineError> {
+        let bootstrap = ParserBootstrap::derive(kinds)?;
+        Ok(project_root.join(AI_DIR).join(bootstrap.directory))
+    }
+
     pub fn is_empty(&self) -> bool {
         self.descriptors.is_empty()
     }

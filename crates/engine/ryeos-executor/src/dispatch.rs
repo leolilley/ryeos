@@ -270,6 +270,9 @@ pub struct DispatchRequest<'a> {
     /// Response timing is intentionally absent: it does not alter execution
     /// ownership after admission.
     pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    /// Optional process-local launch observability. This is not persisted,
+    /// delegated, or interpreted as execution authority.
+    pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     /// **B1**: kind parsed from the user-supplied root `item_ref`.
     /// `dispatch_native_runtime` gates `runtime.execute` enforcement
     /// on this being `"runtime"` so indirect alias chains are not
@@ -971,9 +974,9 @@ fn project_corpus(
     let engine_roots = ctx
         .engine
         .resolution_roots(Some(request.project_path.to_path_buf()));
-    let effective_parsers = ctx
+    let request_snapshot = ctx
         .engine
-        .effective_parser_dispatcher(Some(request.project_path))
+        .effective_request_snapshot(Some(request.project_path))
         .map_err(|e| DispatchError::Internal(anyhow::anyhow!("corpus parser dispatcher: {e}")))?;
 
     let refs = ryeos_engine::item_resolution::enumerate_kind_refs(&engine_roots, kind_schema, kind);
@@ -989,9 +992,9 @@ fn project_corpus(
         let projection = ryeos_engine::resolution::resolve_item_for_corpus(
             cref,
             &ctx.engine.kinds,
-            &effective_parsers,
+            &request_snapshot.parser_dispatcher,
             &engine_roots,
-            &ctx.engine.trust_store,
+            &request_snapshot.trust_store,
         )
         .map_err(|e| {
             DispatchError::InvalidRef(cref.to_string(), format!("corpus projection failed: {e}"))
@@ -1071,9 +1074,9 @@ fn project_method_payload(
                 }
                 std::borrow::Cow::Borrowed(admission.resolution_output())
             } else {
-                let effective_parsers = ctx
+                let request_snapshot = ctx
                     .engine
-                    .effective_parser_dispatcher(Some(request.project_path))
+                    .effective_request_snapshot(Some(request.project_path))
                     .map_err(|e| {
                         DispatchError::InvalidRef(
                             canonical_ref.to_string(),
@@ -1084,9 +1087,9 @@ fn project_method_payload(
                     ryeos_engine::resolution::run_resolution_pipeline(
                         canonical_ref,
                         &ctx.engine.kinds,
-                        &effective_parsers,
+                        &request_snapshot.parser_dispatcher,
                         engine_roots,
-                        &ctx.engine.trust_store,
+                        &request_snapshot.trust_store,
                         &ctx.engine.composers,
                     )
                     .map_err(|e| {
@@ -1148,10 +1151,13 @@ pub(crate) fn method_runtime_config_snapshot(
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
     state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<BTreeMap<String, Value>, DispatchError> {
     if requirements.is_empty() {
         return Ok(BTreeMap::new());
     }
+    let _runtime_config_timer = launch_timings
+        .map(|timings| timings.nested("background_dispatch", "method_runtime_config_snapshot"));
 
     let loader = verified_loader_for_method_runtime(
         engine_roots,
@@ -1328,7 +1334,13 @@ pub(crate) async fn dispatch_method(
             request,
             request.root_admission.as_ref(),
         )?;
-        method_runtime_config_snapshot(kind, &method_decl.runtime_config, &engine_roots, state)?;
+        method_runtime_config_snapshot(
+            kind,
+            &method_decl.runtime_config,
+            &engine_roots,
+            state,
+            request.launch_timings.as_ref(),
+        )?;
         return Ok(json!({
             "validated": true,
             "item_ref": canonical_ref.to_string(),
@@ -1489,7 +1501,7 @@ pub(crate) async fn dispatch_method(
             request.provenance.project_authority().clone(),
         )
     };
-    created.map_err(|e| DispatchError::Internal(anyhow::anyhow!("thread creation failed: {e}")))?;
+    created.map_err(map_root_thread_creation_error)?;
     let mut lifecycle_owner =
         crate::execution::process_attachment::LifecycleOwnerGuard::new(state, &thread_id);
 
@@ -1558,6 +1570,17 @@ pub(crate) async fn dispatch_method(
     // projection, executor materialization, or process scheduling.
     if let Some(handoff) = launch_handoff {
         handoff.publish(thread_id.clone());
+    }
+
+    // A bound launch can be stopped as soon as its durable row is visible.
+    // Fence that request before minting either borrowed-child credential.
+    if crate::execution::process_attachment::finalize_requested_stop_if_present(state, &thread_id)
+        .map_err(DispatchError::Internal)?
+    {
+        lifecycle_owner.disarm();
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "method thread {thread_id} was stopped before credential mint"
+        )));
     }
 
     // Generate callback token. The method child borrows the dispatch
@@ -1650,6 +1673,7 @@ pub(crate) async fn dispatch_method(
             &method_decl.runtime_config,
             &engine_roots,
             state,
+            request.launch_timings.as_ref(),
         )?;
 
         let envelope = ryeos_engine::method_wire::MethodCallEnvelope {
@@ -1695,16 +1719,46 @@ pub(crate) async fn dispatch_method(
             .app_root
             .join(ryeos_engine::AI_DIR)
             .join("state");
-        let executor = crate::execution::launch::materialize_native_executor(
-            &bundle_roots,
-            &executor_ref,
-            &cache_root,
-            &ctx.engine.node_trust_store,
-            ryeos_engine::resolution::TrustClass::TrustedBundle,
-        )
-        .map_err(|e| DispatchError::RuntimeMaterializationFailed {
+        let materialization_engine = (*ctx.engine).clone();
+        let materialization_bundle_roots = bundle_roots.clone();
+        let materialization_executor_ref = executor_ref.clone();
+        let materialization_timings = request.launch_timings.clone();
+        let materialization_queue_timer = materialization_timings
+            .as_ref()
+            .map(|timings| {
+                timings.nested(
+                    "background_dispatch",
+                    "executor_materialization_blocking_queue_wait",
+                )
+            });
+        let executor = tokio::task::spawn_blocking(move || {
+            drop(materialization_queue_timer);
+            let _materialization_work_timer = materialization_timings
+                .as_ref()
+                .map(|timings| {
+                    timings.nested(
+                        "background_dispatch",
+                        "executor_materialization_blocking_work",
+                    )
+                });
+            crate::execution::launch::materialize_native_executor_for_engine(
+                &materialization_engine,
+                &materialization_bundle_roots,
+                &materialization_executor_ref,
+                &cache_root,
+                ryeos_engine::resolution::TrustClass::TrustedBundle,
+                materialization_timings.as_ref(),
+            )
+        })
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "method executor materialization worker failed: {error}"
+            ))
+        })?
+        .map_err(|error| DispatchError::RuntimeMaterializationFailed {
             executor_ref: executor_ref.clone(),
-            detail: e.to_string(),
+            detail: error.to_string(),
         })?;
 
         let executor_path = executor.path.clone();
@@ -1719,10 +1773,7 @@ pub(crate) async fn dispatch_method(
         let project_path_str = request.project_path.to_str().ok_or_else(|| {
             DispatchError::Internal(anyhow::anyhow!("dispatch project path is not valid UTF-8"))
         })?;
-        let isolation_verified_code = [ryeos_engine::isolation::IsolationVerifiedCode {
-            source_path: executor.path,
-            content_hash: executor.content_hash,
-        }];
+        let isolation_verified_command = executor.verified_command.clone();
         let roots = ryeos_app::env_contract::DaemonRootEnv::from_resolution_roots(
             &engine_roots,
             &state.config.app_root,
@@ -1829,6 +1880,16 @@ pub(crate) async fn dispatch_method(
             .provenance
             .isolation_live_access_authority()
             .map_err(DispatchError::Internal)?;
+        if crate::execution::process_attachment::finalize_requested_stop_if_present(
+            state,
+            &thread_id,
+        )
+        .map_err(DispatchError::Internal)?
+        {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "method thread {thread_id} was stopped before isolation"
+            )));
+        }
         let applied = state
             .isolation
             .apply_awaiting_attachment_with_provenance(
@@ -1843,8 +1904,8 @@ pub(crate) async fn dispatch_method(
                         .then_some(envelope.callback.socket_path.as_path()),
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&node_trusted_keys_dir),
-                    verified_code: &isolation_verified_code,
-                    verified_command: Some(&isolation_verified_code[0]),
+                    verified_code: &[],
+                    verified_command: Some(&isolation_verified_command),
                     item_ref: &runtime_item_ref_string,
                     thread_id: &thread_id,
                 },
@@ -1855,6 +1916,16 @@ pub(crate) async fn dispatch_method(
             .seed_isolation_provenance(&thread_id, applied.provenance)
             .map_err(DispatchError::Internal)?;
         let subprocess_request = applied.request;
+        if crate::execution::process_attachment::finalize_requested_stop_if_present(
+            state,
+            &thread_id,
+        )
+        .map_err(DispatchError::Internal)?
+        {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "method thread {thread_id} was stopped before process spawn"
+            )));
+        }
         let workspace_lifeline = request.provenance.workspace_lifeline();
         let process_state = state.clone();
         let process_thread_id = thread_id.clone();
@@ -2020,6 +2091,19 @@ pub(crate) async fn dispatch_method(
     }
 
     outcome
+}
+
+fn map_root_thread_creation_error(error: anyhow::Error) -> DispatchError {
+    if error
+        .chain()
+        .any(|cause| cause.is::<ryeos_app::state_store::LaunchPlanningInactive>())
+    {
+        DispatchError::LaunchCancelled {
+            stage: "authoritative thread publication",
+        }
+    } else {
+        DispatchError::Internal(error.context("thread creation failed"))
+    }
 }
 
 /// Conditionally finalize a daemon-owned subprocess thread. Method runtimes
@@ -2526,6 +2610,7 @@ async fn dispatch_via_method_executor(
         project_path: request.project_path,
         provenance: request.provenance.clone(),
         lifecycle_authority: request.lifecycle_authority,
+        launch_timings: request.launch_timings.clone(),
         original_root_kind: target_canonical.kind.as_str(),
         pre_minted_thread_id: request.pre_minted_thread_id.clone(),
         usage_subject: request.usage_subject.clone(),
@@ -3029,6 +3114,7 @@ pub fn dispatch_daemon_owned(
     let project_path = request.project_path.to_path_buf();
     let provenance = request.provenance.clone();
     let lifecycle_authority = request.lifecycle_authority;
+    let launch_timings = request.launch_timings.clone();
     let original_root_kind = request.original_root_kind.to_owned();
     let pre_minted_thread_id = request.pre_minted_thread_id.clone();
     let usage_subject = request.usage_subject.clone();
@@ -3056,6 +3142,7 @@ pub fn dispatch_daemon_owned(
             project_path: &project_path,
             provenance,
             lifecycle_authority,
+            launch_timings,
             original_root_kind: &original_root_kind,
             pre_minted_thread_id,
             usage_subject,
@@ -3172,6 +3259,10 @@ async fn dispatch_inner(
     // Secondary execution identities are independently authorized before any
     // binding resolution or launch preparation. Their slot declarations are
     // selected later from the actual managed-envelope runtime contract.
+    let ref_binding_timer = request
+        .launch_timings
+        .as_ref()
+        .map(|timings| timings.nested("background_dispatch", "ref_binding_authorization"));
     crate::execution::launch_preparation::validate_ref_bindings(&request.ref_bindings)?;
     for (binding_name, raw_ref) in &request.ref_bindings {
         let canonical = CanonicalRef::parse(raw_ref)
@@ -3203,6 +3294,7 @@ async fn dispatch_inner(
             });
         }
     }
+    drop(ref_binding_timer);
 
     // Reject a method call (`call.method`/`call.args`) aimed at a kind that
     // does not declare method dispatch. The method selector is control
@@ -3571,9 +3663,9 @@ pub fn prepare_launch_contract(
     let roots = ctx
         .engine
         .resolution_roots(Some(project_path.to_path_buf()));
-    let parsers = ctx
+    let request_snapshot = ctx
         .engine
-        .effective_parser_dispatcher(Some(project_path))
+        .effective_request_snapshot(Some(project_path))
         .map_err(|error| DispatchError::LaunchPreparationFailed {
             code: "launch_parser_registry_failed".to_owned(),
             message: error.to_string(),
@@ -3584,9 +3676,9 @@ pub fn prepare_launch_contract(
     let resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &primary.canonical_ref,
         &ctx.engine.kinds,
-        &parsers,
+        &request_snapshot.parser_dispatcher,
         &roots,
-        &ctx.engine.trust_store,
+        &request_snapshot.trust_store,
         &ctx.engine.composers,
     )
     .map_err(|error| DispatchError::LaunchPreparationFailed {
@@ -3603,8 +3695,10 @@ pub fn prepare_launch_contract(
             primary: &resolution,
             ref_bindings,
             roots: &roots,
-            parsers: &parsers,
+            parsers: &request_snapshot.parser_dispatcher,
+            trust_store: &request_snapshot.trust_store,
             principal: &ctx.plan_ctx.requested_by,
+            ref_binding_resolution_timings: None,
         },
     )
     .map(Some)
@@ -3658,8 +3752,9 @@ fn finish_root_dispatch_preflight(
     usage_subject_asserted_by: Option<&str>,
     ctx: &ExecutionContext,
     state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<RootDispatchPreflight, DispatchError> {
-    let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
+    let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution_with_timings(
         &ctx.engine,
         &ctx.plan_ctx,
         root_subject,
@@ -3668,6 +3763,7 @@ fn finish_root_dispatch_preflight(
         ref_bindings.clone(),
         usage_subject.cloned(),
         usage_subject_asserted_by.map(str::to_string),
+        launch_timings,
     )
     .map_err(DispatchError::Internal)?;
     Ok(RootDispatchPreflight {
@@ -3708,6 +3804,7 @@ pub fn preflight_root_dispatch(
     usage_subject_asserted_by: Option<&str>,
     ctx: &ExecutionContext,
     state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<RootDispatchPreflight, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited: HashSet<CanonicalRef> = HashSet::new();
@@ -3805,7 +3902,11 @@ pub fn preflight_root_dispatch(
             });
         }
 
-        let hop = resolve_dispatch_hop(&current_ref, ctx)?;
+        let hop_timer = launch_timings
+            .map(|timings| timings.nested("preflight_admission", "hop_resolve_and_verify"));
+        let hop = resolve_dispatch_hop(&current_ref, ctx);
+        drop(hop_timer);
+        let hop = hop?;
         let VerifiedHop {
             canonical_ref: hop_ref,
             verified,
@@ -3952,6 +4053,7 @@ pub fn preflight_root_dispatch(
                                             usage_subject_asserted_by,
                                             &inner_ctx,
                                             state,
+                                            launch_timings,
                                         )?;
                                         target.requested_subject =
                                             admitted_requested_subject.clone();
@@ -3974,6 +4076,7 @@ pub fn preflight_root_dispatch(
                                 usage_subject_asserted_by,
                                 ctx,
                                 state,
+                                launch_timings,
                             );
                         }
                         LifecycleMode::Managed => {
@@ -4030,6 +4133,7 @@ pub fn preflight_root_dispatch(
                                 usage_subject_asserted_by,
                                 ctx,
                                 state,
+                                launch_timings,
                             );
                         }
                     }
@@ -4086,6 +4190,7 @@ pub fn preflight_root_dispatch(
                     usage_subject_asserted_by,
                     ctx,
                     state,
+                    launch_timings,
                 );
             }
         }
@@ -4183,6 +4288,15 @@ mod tests {
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
     use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+
+    #[test]
+    fn cancelled_method_root_publication_preserves_launch_cancelled_contract() {
+        let error =
+            map_root_thread_creation_error(ryeos_app::state_store::LaunchPlanningInactive.into());
+        assert_eq!(error.code(), "launch_cancelled");
+        assert_eq!(error.http_status(), axum::http::StatusCode::CONFLICT);
+        assert!(!error.to_string().contains("T-"));
+    }
 
     #[test]
     fn finalize_params_routes_failure_cause_to_error_not_result() {

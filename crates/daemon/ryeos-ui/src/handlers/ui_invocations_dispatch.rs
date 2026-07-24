@@ -347,6 +347,7 @@ async fn execute_prepared_item_ref(
         project_path: &prepared.project.effective_path,
         provenance,
         lifecycle_authority: resolved_authority.lifecycle,
+        launch_timings: None,
         original_root_kind: root_canonical.kind.as_str(),
         pre_minted_thread_id: None,
         usage_subject: None,

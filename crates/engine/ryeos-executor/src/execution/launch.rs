@@ -1,6 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::OsStr;
+use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use rand::Rng;
@@ -40,7 +43,7 @@ use terminal::{
 
 /// Typed error for native executor materialization failures.
 ///
-/// Raised by [`materialize_native_executor`] when the bundle CAS
+/// Raised by [`materialize_native_executor_for_engine`] when the bundle CAS
 /// cannot supply the requested binary. The daemon's `dispatch.rs`
 /// maps this to `DispatchError::RuntimeMaterializationFailed` with
 /// a 502 status — no string-classifier anywhere.
@@ -88,6 +91,10 @@ pub struct MaterializedExecutor {
     pub content_hash: String,
     pub bundle_manifest_hash: String,
     pub bundle_signer_fingerprint: String,
+    /// Exact no-follow descriptor whose identity passed materialization
+    /// verification. Native launch paths must carry this handle through the
+    /// isolation boundary instead of reopening `path`.
+    pub verified_command: ryeos_engine::isolation::IsolationDescriptorBoundCommand,
 }
 
 #[derive(Debug, Clone)]
@@ -206,8 +213,9 @@ pub(crate) fn required_secret_missing_payload(
     .to_value()
 }
 
-/// Typed error returned by [`build_and_launch`]. Materialization
-/// failures carry a stable variant; everything else is `Internal`.
+/// Typed error returned by [`build_and_launch`]. Materialization,
+/// cancellation, admission, and launch-preparation failures retain stable
+/// variants; unexpected infrastructure failures use `Internal`.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildAndLaunchError {
     #[error("materialization failed: {0}")]
@@ -223,6 +231,12 @@ pub enum BuildAndLaunchError {
     CapabilityRejected { reason: String },
     #[error("{0}")]
     LaunchPreparation(#[source] Box<DispatchError>),
+    #[error("launch `{thread_id}` was cancelled before {stage}: {detail}")]
+    LaunchCancelled {
+        thread_id: String,
+        stage: &'static str,
+        detail: String,
+    },
     #[error("{0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -252,7 +266,8 @@ impl BuildAndLaunchError {
             }),
             Self::Materialization(_)
             | Self::MissingSecrets { .. }
-            | Self::CapabilityRejected { .. } => false,
+            | Self::CapabilityRejected { .. }
+            | Self::LaunchCancelled { .. } => false,
             Self::LaunchPreparation(error) => error.retryable(),
         }
     }
@@ -267,6 +282,12 @@ impl From<serde_json::Error> for BuildAndLaunchError {
 impl From<std::io::Error> for BuildAndLaunchError {
     fn from(e: std::io::Error) -> Self {
         Self::Internal(anyhow::anyhow!(e))
+    }
+}
+
+impl From<ryeos_engine::error::EngineError> for MaterializationError {
+    fn from(error: ryeos_engine::error::EngineError) -> Self {
+        Self::Internal(error.to_string())
     }
 }
 
@@ -289,164 +310,284 @@ fn host_triple() -> String {
 }
 
 const BUNDLE_MANIFEST_REF: &str = "refs/bundles/manifest";
+const EXECUTOR_VERIFICATION_CACHE_MAX_ENTRIES: usize = 64;
+const EXECUTOR_VERIFICATION_CACHE_MAX_IN_FLIGHT: usize = 64;
+const EXECUTOR_VERIFICATION_CACHE_MAX_METADATA_BYTES: usize = 1024 * 1024;
 
-/// Content-addressed cache target for a native executor binary.
-///
-/// Returns `<cache_root>/cache/executors/<blob_hash>/<bare>`.
-fn executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> PathBuf {
-    cache_root
-        .join("cache")
-        .join("executors")
-        .join(blob_hash)
-        .join(bare)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ManifestRefProbe {
+    bundle_root: PathBuf,
+    cas_ready: bool,
+    signed_ref_digest: Option<String>,
 }
 
-fn verify_materialized_executor_artifact(
-    target_path: &Path,
-    expected_hash: &str,
-    expected_mode: u32,
-    executor_ref: &str,
-) -> Result<(), MaterializationError> {
-    let metadata = std::fs::symlink_metadata(target_path).map_err(|error| {
-        MaterializationError::MaterializationFailed {
-            executor_ref: executor_ref.to_string(),
-            detail: format!(
-                "failed to stat materialized executor {}: {error}",
-                target_path.display()
-            ),
-        }
-    })?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-        return Err(MaterializationError::MaterializationFailed {
-            executor_ref: executor_ref.to_string(),
-            detail: format!(
-                "materialized executor {} must be a regular, non-symlink file",
-                target_path.display()
-            ),
-        });
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let actual_mode = metadata.permissions().mode() & 0o7777;
-        if actual_mode & !0o777 != 0 {
-            return Err(MaterializationError::MaterializationFailed {
-                executor_ref: executor_ref.to_string(),
-                detail: format!(
-                    "materialized executor {} has forbidden special permission bits ({actual_mode:#o})",
-                    target_path.display()
-                ),
-            });
-        }
-        if actual_mode != expected_mode {
-            return Err(MaterializationError::MaterializationFailed {
-                executor_ref: executor_ref.to_string(),
-                detail: format!(
-                    "materialized executor {} has Unix mode {actual_mode:#o}, expected signed mode {expected_mode:#o}",
-                    target_path.display()
-                ),
-            });
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = expected_mode;
-        return Err(MaterializationError::MaterializationFailed {
-            executor_ref: executor_ref.to_string(),
-            detail: "native executor Unix mode validation is unavailable on this platform"
-                .to_string(),
-        });
-    }
-
-    let actual_hash = std::fs::read(target_path)
-        .map(|bytes| lillux::cas::sha256_hex(&bytes))
-        .map_err(|error| MaterializationError::MaterializationFailed {
-            executor_ref: executor_ref.to_string(),
-            detail: format!(
-                "failed to verify materialized executor {}: {error}",
-                target_path.display()
-            ),
-        })?;
-    if actual_hash != expected_hash {
-        return Err(MaterializationError::MaterializationFailed {
-            executor_ref: executor_ref.to_string(),
-            detail: format!(
-                "materialized executor {} failed its content-address check",
-                target_path.display()
-            ),
-        });
-    }
-    Ok(())
-}
-
-/// Resolve a native executor from the system bundle's CAS.
-///
-/// Looks up the system bundle manifest via `refs/bundles/manifest`,
-/// verifies the trusted signature over that exact manifest hash, resolves
-/// `bin/<host_triple>/<bare>` through hash-checked manifest and ItemSource
-/// objects, verifies the blob bytes, checks architecture,
-/// and materializes the binary to a content-addressed cache under
-/// `cache_root/cache/executors/<blob_hash>/<bare>`.
-///
-/// Content-addressed: a given blob hash always lands at the same path.
-/// Extract once per (binary version, host), re-exec from cache forever
-/// after. Cache lives under daemon-owned app-root state, not under the
-/// project tree — read-only project mounts work.
-///
-/// Returns the materialized path and the verified raw-byte SHA-256 that every
-/// enforced launch must carry into the isolation boundary.
-pub fn materialize_native_executor(
-    bundle_roots: &[PathBuf],
-    executor_ref: &str,
-    cache_root: &Path,
-    trust_store: &ryeos_engine::trust::TrustStore,
+/// Cheap lookup identity read before deciding whether the expensive signed CAS
+/// chain may be reused. Every registered bundle root participates, including
+/// roots that do not publish the requested executor, preserving the mandatory
+/// all-roots ambiguity check.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExecutorVerificationProbe {
+    bundle_generation_fingerprint: String,
+    node_trust_fingerprint: String,
     root_trust_class: ryeos_engine::resolution::TrustClass,
-) -> Result<MaterializedExecutor, MaterializationError> {
-    let bare = executor_ref.strip_prefix("native:").ok_or_else(|| {
-        MaterializationError::ExecutorUnavailable {
-            executor_ref: executor_ref.to_string(),
-            detail: "executor_ref is not a native executor".into(),
-        }
-    })?;
-    let mut components = Path::new(bare).components();
-    if bare.is_empty()
-        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
-        || components.next().is_some()
-    {
-        return Err(MaterializationError::ExecutorUnavailable {
-            executor_ref: executor_ref.to_string(),
-            detail: "native executor id must be one normal filename component".to_string(),
-        });
+    host_triple: String,
+    executor_ref: String,
+    manifest_refs: Vec<ManifestRefProbe>,
+}
+
+/// Full verified-chain identity retained by the cache. The probe is the lookup
+/// index; this key additionally binds every authenticated object/content edge
+/// that selected the executable.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VerifiedExecutorChainKey {
+    probe: ExecutorVerificationProbe,
+    bundle_root: PathBuf,
+    signed_manifest_ref_digest: String,
+    manifest_object_hash: String,
+    item_source_object_hash: String,
+    blob_hash: String,
+    blob_len: u64,
+    mode: u32,
+    signer_fingerprint: String,
+}
+
+#[derive(Debug)]
+struct VerifiedNativeExecutorChain {
+    key: VerifiedExecutorChainKey,
+}
+
+struct ExecutorVerificationCacheEntry {
+    verified: Arc<VerifiedNativeExecutorChain>,
+    last_used: u64,
+    metadata_bytes: usize,
+}
+
+#[derive(Default)]
+struct ExecutorVerificationCacheState {
+    by_probe: HashMap<ExecutorVerificationProbe, VerifiedExecutorChainKey>,
+    entries: HashMap<VerifiedExecutorChainKey, ExecutorVerificationCacheEntry>,
+    in_flight: HashSet<ExecutorVerificationProbe>,
+    tick: u64,
+    metadata_bytes: usize,
+}
+
+struct ExecutorVerificationCache {
+    state: Mutex<ExecutorVerificationCacheState>,
+    ready: Condvar,
+}
+
+static EXECUTOR_VERIFICATION_CACHE: OnceLock<ExecutorVerificationCache> = OnceLock::new();
+
+fn executor_verification_cache() -> &'static ExecutorVerificationCache {
+    EXECUTOR_VERIFICATION_CACHE.get_or_init(|| ExecutorVerificationCache {
+        state: Mutex::new(ExecutorVerificationCacheState::default()),
+        ready: Condvar::new(),
+    })
+}
+
+fn verified_chain_metadata_bytes(key: &VerifiedExecutorChainKey) -> usize {
+    let mut total = key.probe.bundle_generation_fingerprint.len()
+        + key.probe.node_trust_fingerprint.len()
+        + key.probe.host_triple.len()
+        + key.probe.executor_ref.len()
+        + key.bundle_root.as_os_str().as_encoded_bytes().len()
+        + key.signed_manifest_ref_digest.len()
+        + key.manifest_object_hash.len()
+        + key.item_source_object_hash.len()
+        + key.blob_hash.len()
+        + key.signer_fingerprint.len()
+        + std::mem::size_of::<VerifiedExecutorChainKey>();
+    for manifest_ref in &key.probe.manifest_refs {
+        total += manifest_ref
+            .bundle_root
+            .as_os_str()
+            .as_encoded_bytes()
+            .len()
+            + manifest_ref
+                .signed_ref_digest
+                .as_ref()
+                .map_or(0, String::len)
+            + std::mem::size_of::<ManifestRefProbe>();
     }
+    total
+}
 
-    let triple = host_triple();
-
-    // Iterate every bundle root that ships a manifest. A requested native
-    // executor must resolve from exactly one root: even if admission was
-    // bypassed, root ordering must never decide which executable runs.
-    let mut tried_roots: Vec<PathBuf> = Vec::new();
-    let mut last_resolution_error: Option<String> = None;
-    let mut resolved_with: Option<(
-        PathBuf,
-        lillux::cas::CasStore,
-        ryeos_engine::executor_resolution::ResolvedExecutor,
-        ryeos_engine::executor_resolution::VerifiedExecutorManifestRef,
-    )> = None;
-
-    for system_root in bundle_roots {
-        let ai_dir = system_root.join(ryeos_engine::AI_DIR);
-        let objects_dir = ai_dir.join("objects");
-
-        if !objects_dir.join("blobs").is_dir() || !objects_dir.join("objects").is_dir() {
-            continue;
+fn remove_cached_probe(
+    state: &mut ExecutorVerificationCacheState,
+    probe: &ExecutorVerificationProbe,
+) {
+    if let Some(key) = state.by_probe.remove(probe) {
+        if let Some(entry) = state.entries.remove(&key) {
+            state.metadata_bytes = state.metadata_bytes.saturating_sub(entry.metadata_bytes);
         }
+    }
+}
 
+fn retire_other_executor_generations(
+    state: &mut ExecutorVerificationCacheState,
+    current_generation: &str,
+) {
+    let stale = state
+        .entries
+        .keys()
+        .filter(|key| key.probe.bundle_generation_fingerprint.as_str() != current_generation)
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in stale {
+        if let Some(entry) = state.entries.remove(&key) {
+            state.metadata_bytes = state.metadata_bytes.saturating_sub(entry.metadata_bytes);
+        }
+        state.by_probe.retain(|_, indexed| indexed != &key);
+    }
+}
+
+enum ExecutorVerificationCacheLookup {
+    Hit(Arc<VerifiedNativeExecutorChain>),
+    Owner(ExecutorVerificationFlight),
+    Bypass,
+}
+
+struct ExecutorVerificationFlight {
+    probe: ExecutorVerificationProbe,
+    complete: bool,
+}
+
+impl ExecutorVerificationFlight {
+    fn publish(
+        mut self,
+        verified: VerifiedNativeExecutorChain,
+    ) -> Arc<VerifiedNativeExecutorChain> {
+        let cache = executor_verification_cache();
+        let mut state = cache
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        remove_cached_probe(&mut state, &self.probe);
+        retire_other_executor_generations(&mut state, &self.probe.bundle_generation_fingerprint);
+        state.tick = state.tick.wrapping_add(1);
+        let last_used = state.tick;
+        let key = verified.key.clone();
+        let metadata_bytes = verified_chain_metadata_bytes(&key);
+        if metadata_bytes > EXECUTOR_VERIFICATION_CACHE_MAX_METADATA_BYTES {
+            let verified = Arc::new(verified);
+            state.in_flight.remove(&self.probe);
+            self.complete = true;
+            cache.ready.notify_all();
+            return verified;
+        }
+        while !state.entries.is_empty()
+            && (state.entries.len() >= EXECUTOR_VERIFICATION_CACHE_MAX_ENTRIES
+                || state.metadata_bytes.saturating_add(metadata_bytes)
+                    > EXECUTOR_VERIFICATION_CACHE_MAX_METADATA_BYTES)
+        {
+            let Some(oldest) = state
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            if let Some(entry) = state.entries.remove(&oldest) {
+                state.metadata_bytes = state.metadata_bytes.saturating_sub(entry.metadata_bytes);
+            }
+            state.by_probe.retain(|_, indexed| indexed != &oldest);
+        }
+        let verified = Arc::new(verified);
+        state.metadata_bytes = state.metadata_bytes.saturating_add(metadata_bytes);
+        state.entries.insert(
+            key.clone(),
+            ExecutorVerificationCacheEntry {
+                verified: verified.clone(),
+                last_used,
+                metadata_bytes,
+            },
+        );
+        state.by_probe.insert(self.probe.clone(), key);
+        state.in_flight.remove(&self.probe);
+        self.complete = true;
+        cache.ready.notify_all();
+        verified
+    }
+}
+
+impl Drop for ExecutorVerificationFlight {
+    fn drop(&mut self) {
+        if self.complete {
+            return;
+        }
+        let cache = executor_verification_cache();
+        let mut state = cache
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.in_flight.remove(&self.probe);
+        cache.ready.notify_all();
+    }
+}
+
+fn lookup_or_claim_executor_verification(
+    probe: &ExecutorVerificationProbe,
+    force_reverify: bool,
+) -> ExecutorVerificationCacheLookup {
+    let cache = executor_verification_cache();
+    let mut state = cache
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    loop {
+        retire_other_executor_generations(&mut state, &probe.bundle_generation_fingerprint);
+        if force_reverify {
+            // A repair needs the authenticated blob bytes, which ordinary
+            // metadata-cache hits deliberately do not retain. Re-apply the
+            // invalidation after every single-flight wake so a concurrent
+            // verifier cannot publish a metadata-only hit into this forced
+            // path.
+            remove_cached_probe(&mut state, probe);
+        } else if let Some(key) = state.by_probe.get(probe).cloned() {
+            state.tick = state.tick.wrapping_add(1);
+            let last_used = state.tick;
+            if let Some(entry) = state.entries.get_mut(&key) {
+                entry.last_used = last_used;
+                return ExecutorVerificationCacheLookup::Hit(entry.verified.clone());
+            }
+            state.by_probe.remove(probe);
+        }
+        if !state.in_flight.contains(probe)
+            && state.in_flight.len() >= EXECUTOR_VERIFICATION_CACHE_MAX_IN_FLIGHT
+        {
+            return ExecutorVerificationCacheLookup::Bypass;
+        }
+        if state.in_flight.insert(probe.clone()) {
+            return ExecutorVerificationCacheLookup::Owner(ExecutorVerificationFlight {
+                probe: probe.clone(),
+                complete: false,
+            });
+        }
+        state = cache
+            .ready
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+}
+
+fn manifest_ref_probe(
+    bundle_roots: &[PathBuf],
+    bundle_generation_fingerprint: &str,
+    node_trust_fingerprint: &str,
+    executor_ref: &str,
+    triple: &str,
+    root_trust_class: ryeos_engine::resolution::TrustClass,
+) -> Result<ExecutorVerificationProbe, MaterializationError> {
+    let mut manifest_refs = Vec::with_capacity(bundle_roots.len());
+    for bundle_root in bundle_roots {
+        let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
+        let objects = ai_dir.join("objects");
+        let cas_ready = objects.join("blobs").is_dir() && objects.join("objects").is_dir();
         let ref_path = ai_dir.join(BUNDLE_MANIFEST_REF);
-        let signed_ref = match std::fs::read_to_string(&ref_path) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+        let signed_ref_digest = match std::fs::read(&ref_path) {
+            Ok(bytes) => Some(lillux::cas::sha256_hex(&bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(MaterializationError::ManifestError(format!(
                     "failed to read signed bundle executor manifest ref {}: {error}",
@@ -454,7 +595,68 @@ pub fn materialize_native_executor(
                 )))
             }
         };
+        manifest_refs.push(ManifestRefProbe {
+            bundle_root: bundle_root.clone(),
+            cas_ready,
+            signed_ref_digest,
+        });
+    }
+    Ok(ExecutorVerificationProbe {
+        bundle_generation_fingerprint: bundle_generation_fingerprint.to_owned(),
+        node_trust_fingerprint: node_trust_fingerprint.to_owned(),
+        root_trust_class,
+        host_triple: triple.to_owned(),
+        executor_ref: executor_ref.to_owned(),
+        manifest_refs,
+    })
+}
 
+fn verify_native_executor_chain(
+    probe: &ExecutorVerificationProbe,
+    bare: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<(VerifiedNativeExecutorChain, Vec<u8>), MaterializationError> {
+    let manifest_verification_timer = launch_timings.map(|timings| {
+        timings.nested(
+            "background_dispatch",
+            "executor_manifest_chain_verification",
+        )
+    });
+    let mut tried_roots: Vec<PathBuf> = Vec::new();
+    let mut last_resolution_error: Option<String> = None;
+    let mut resolved_with: Option<(
+        PathBuf,
+        String,
+        lillux::cas::CasStore,
+        ryeos_engine::executor_resolution::ResolvedExecutor,
+        ryeos_engine::executor_resolution::VerifiedExecutorManifestRef,
+    )> = None;
+
+    for manifest_probe in &probe.manifest_refs {
+        if !manifest_probe.cas_ready {
+            continue;
+        }
+        let Some(expected_ref_digest) = manifest_probe.signed_ref_digest.as_ref() else {
+            continue;
+        };
+        let system_root = &manifest_probe.bundle_root;
+        let ai_dir = system_root.join(ryeos_engine::AI_DIR);
+        let objects_dir = ai_dir.join("objects");
+        let ref_path = ai_dir.join(BUNDLE_MANIFEST_REF);
+        let signed_ref = std::fs::read_to_string(&ref_path).map_err(|error| {
+            MaterializationError::ManifestError(format!(
+                "failed to re-read signed bundle executor manifest ref {}: {error}",
+                ref_path.display()
+            ))
+        })?;
+        let live_ref_digest = lillux::cas::sha256_hex(signed_ref.as_bytes());
+        if &live_ref_digest != expected_ref_digest {
+            return Err(MaterializationError::ManifestError(format!(
+                "signed bundle executor manifest ref {} changed during generation-checked verification",
+                ref_path.display()
+            )));
+        }
         tried_roots.push(system_root.clone());
 
         let verified_ref =
@@ -465,7 +667,7 @@ pub fn materialize_native_executor(
                         .get(fingerprint)
                         .map(|signer| signer.verifying_key)
                 },
-                root_trust_class,
+                probe.root_trust_class,
             ) {
                 Ok(verified) => verified,
                 Err(
@@ -486,8 +688,7 @@ pub fn materialize_native_executor(
                     )))
                 }
             };
-        let mhash = verified_ref.manifest_hash.clone();
-
+        let manifest_hash = verified_ref.manifest_hash.clone();
         if !matches!(
             verified_ref.trust_class,
             ryeos_engine::resolution::TrustClass::TrustedBundle
@@ -501,34 +702,32 @@ pub fn materialize_native_executor(
         }
 
         let cas = lillux::cas::CasStore::new(objects_dir);
-
         let manifest_value = cas
-            .get_object(&mhash)
-            .map_err(|e| {
+            .get_object(&manifest_hash)
+            .map_err(|error| {
                 MaterializationError::ManifestError(format!(
-                    "failed to read bundle manifest object {mhash}: {e}"
+                    "failed to read bundle manifest object {manifest_hash}: {error}"
                 ))
             })?
             .ok_or_else(|| {
                 MaterializationError::ManifestError(format!(
-                    "bundle manifest object {mhash} not found in system CAS"
+                    "bundle manifest object {manifest_hash} not found in system CAS"
                 ))
             })?;
-
         let manifest_item_source_hashes =
             ryeos_engine::executor_resolution::verify_executor_manifest_object(
                 &manifest_value,
-                &mhash,
+                &manifest_hash,
             )
             .map_err(|error| {
                 MaterializationError::ManifestError(format!(
-                    "bundle executor manifest {mhash} failed verification: {error}"
+                    "bundle executor manifest {manifest_hash} failed verification: {error}"
                 ))
             })?;
 
         tracing::debug!(
-            executor_ref,
-            host_triple = %triple,
+            executor_ref = %probe.executor_ref,
+            host_triple = %probe.host_triple,
             bundle_root = %system_root.display(),
             manifest_entries = manifest_item_source_hashes.len(),
             "scanning bundle manifest for native executor"
@@ -536,22 +735,38 @@ pub fn materialize_native_executor(
 
         match ryeos_engine::executor_resolution::resolve_native_executor(
             &manifest_item_source_hashes,
-            executor_ref,
-            &triple,
-            |h| cas.get_object(h).map_err(|e| e.to_string()),
+            &probe.executor_ref,
+            &probe.host_triple,
+            |hash| cas.get_object(hash).map_err(|error| error.to_string()),
         ) {
             Ok(resolved) => {
+                if resolved.mode & 0o022 != 0 {
+                    return Err(MaterializationError::ResolutionFailed {
+                        executor_ref: bare.to_string(),
+                        detail: format!(
+                            "signed executor mode {:#o} is group/other writable",
+                            resolved.mode
+                        ),
+                    });
+                }
                 if let Some((first_root, ..)) = &resolved_with {
                     return Err(MaterializationError::ResolutionFailed {
                         executor_ref: bare.to_string(),
                         detail: format!(
-                            "native executor identity `bin/{triple}/{bare}` is published by both {} and {}; bundle root order cannot select an executor",
+                            "native executor identity `bin/{}/{bare}` is published by both {} and {}; bundle root order cannot select an executor",
+                            probe.host_triple,
                             first_root.display(),
                             system_root.display(),
                         ),
                     });
                 }
-                resolved_with = Some((system_root.clone(), cas, resolved, verified_ref));
+                resolved_with = Some((
+                    system_root.clone(),
+                    live_ref_digest,
+                    cas,
+                    resolved,
+                    verified_ref,
+                ));
             }
             Err(
                 error @ ryeos_engine::executor_resolution::ExecutorResolutionError::NotInManifest {
@@ -559,7 +774,6 @@ pub fn materialize_native_executor(
                 },
             ) => {
                 last_resolution_error = Some(error.to_string());
-                continue;
             }
             Err(error) => {
                 return Err(MaterializationError::ResolutionFailed {
@@ -575,38 +789,36 @@ pub fn materialize_native_executor(
             executor_ref: bare.to_string(),
             detail: format!(
                 "no system bundle manifest found ({BUNDLE_MANIFEST_REF}). \
-                 The bundle pipeline must ship binaries for host triple '{triple}'."
+                 The bundle pipeline must ship binaries for host triple '{}'.",
+                probe.host_triple
             ),
         });
     }
 
-    let (_bundle_root, cas, resolved, verified_ref) =
+    let (bundle_root, signed_ref_digest, cas, resolved, verified_ref) =
         resolved_with.ok_or_else(|| MaterializationError::ResolutionFailed {
             executor_ref: bare.to_string(),
             detail: last_resolution_error.unwrap_or_else(|| {
                 format!(
-                    "no manifest among {} system bundle root(s) lists '{executor_ref}' for triple '{triple}'",
-                    tried_roots.len()
+                    "no manifest among {} system bundle root(s) lists '{}' for triple '{}'",
+                    tried_roots.len(),
+                    probe.executor_ref,
+                    probe.host_triple
                 )
             }),
         })?;
+    drop(manifest_verification_timer);
 
-    tracing::info!(
-        executor_ref,
-        host_triple = %triple,
-        manifest_hash = %verified_ref.manifest_hash,
-        item_source_hash = %resolved.item_source_hash,
-        blob_hash = %resolved.blob_hash,
-        signer_fp = %verified_ref.signer_fingerprint,
-        trust_class = ?verified_ref.trust_class,
-        "native executor CAS chain cryptographically verified"
-    );
-
-    // 5. Fetch the binary blob from CAS
+    let blob_fetch_timer = launch_timings.map(|timings| {
+        timings.nested(
+            "background_dispatch",
+            "executor_blob_fetch_hash_and_arch_check",
+        )
+    });
     let blob_bytes = cas
         .get_blob(&resolved.blob_hash)
-        .map_err(|e| MaterializationError::BlobNotFound {
-            hash: format!("{} (read error: {e})", resolved.blob_hash),
+        .map_err(|error| MaterializationError::BlobNotFound {
+            hash: format!("{} (read error: {error})", resolved.blob_hash),
         })?
         .ok_or_else(|| MaterializationError::BlobNotFound {
             hash: resolved.blob_hash.clone(),
@@ -621,130 +833,1126 @@ pub fn materialize_native_executor(
             ),
         });
     }
-
-    // 6. Architecture check
-    arch_check::check_arch(&blob_bytes, std::env::consts::ARCH).map_err(|e| {
+    arch_check::check_arch(&blob_bytes, std::env::consts::ARCH).map_err(|error| {
         MaterializationError::ArchCheckFailed {
             executor_ref: bare.to_string(),
-            detail: e.to_string(),
+            detail: error.to_string(),
         }
     })?;
+    drop(blob_fetch_timer);
 
-    // 7. Materialize to content-addressed cache under daemon state.
-    //    Path: <cache_root>/cache/executors/<blob_hash>/<bare>
-    //    Content-addressed → extract once, re-exec forever.
-    let target_path = executor_cache_target(cache_root, &resolved.blob_hash, bare);
+    tracing::info!(
+        executor_ref = %probe.executor_ref,
+        host_triple = %probe.host_triple,
+        manifest_hash = %verified_ref.manifest_hash,
+        item_source_hash = %resolved.item_source_hash,
+        blob_hash = %resolved.blob_hash,
+        signer_fp = %verified_ref.signer_fingerprint,
+        trust_class = ?verified_ref.trust_class,
+        "native executor CAS chain cryptographically verified"
+    );
 
-    match std::fs::symlink_metadata(&target_path) {
-        Ok(_) => {
-            verify_materialized_executor_artifact(
-                &target_path,
-                &blob_content_hash,
-                resolved.mode,
-                bare,
-            )?;
-            tracing::debug!(
-                executor_ref,
-                target = %target_path.display(),
-                "native executor cache hit"
-            );
-            return Ok(MaterializedExecutor {
-                path: target_path,
-                content_hash: blob_content_hash,
-                bundle_manifest_hash: verified_ref.manifest_hash,
-                bundle_signer_fingerprint: verified_ref.signer_fingerprint,
-            });
+    let blob_len = u64::try_from(blob_bytes.len()).map_err(|_| {
+        MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: "native executor blob length does not fit u64".to_string(),
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(MaterializationError::MaterializationFailed {
-                executor_ref: bare.to_string(),
+    })?;
+    Ok((
+        VerifiedNativeExecutorChain {
+            key: VerifiedExecutorChainKey {
+                probe: probe.clone(),
+                bundle_root,
+                signed_manifest_ref_digest: signed_ref_digest,
+                manifest_object_hash: verified_ref.manifest_hash,
+                item_source_object_hash: resolved.item_source_hash,
+                blob_hash: resolved.blob_hash,
+                blob_len,
+                mode: resolved.mode,
+                signer_fingerprint: verified_ref.signer_fingerprint,
+            },
+        },
+        blob_bytes,
+    ))
+}
+
+fn cached_or_verified_executor_chain(
+    probe: &ExecutorVerificationProbe,
+    bare: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    force_reverify: bool,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<(Arc<VerifiedNativeExecutorChain>, Option<Vec<u8>>), MaterializationError> {
+    match lookup_or_claim_executor_verification(probe, force_reverify) {
+        ExecutorVerificationCacheLookup::Hit(verified) => {
+            if executor_cache_verify_hits_enabled() {
+                let (cold, cold_blob) =
+                    verify_native_executor_chain(probe, bare, trust_store, launch_timings)?;
+                let cold_blob_hash = lillux::cas::sha256_hex(&cold_blob);
+                let cold_blob_len = u64::try_from(cold_blob.len()).ok();
+                if cold.key != verified.key
+                    || cold_blob_hash != verified.key.blob_hash
+                    || cold_blob_len != Some(verified.key.blob_len)
+                {
+                    return Err(MaterializationError::MaterializationFailed {
+                        executor_ref: probe.executor_ref.clone(),
+                        detail: format!(
+                            "verified-chain cache diagnostic diverged from cold verification (hot={:?}, cold={:?}, cold_blob_hash={cold_blob_hash}, cold_blob_len={cold_blob_len:?})",
+                            verified.key, cold.key,
+                        ),
+                    });
+                }
+            }
+            tracing::debug!(
+                executor_ref = %probe.executor_ref,
+                bundle_generation = %probe.bundle_generation_fingerprint,
+                "native executor verified-chain cache hit"
+            );
+            Ok((verified, None))
+        }
+        ExecutorVerificationCacheLookup::Owner(flight) => {
+            let (verified, blob_bytes) =
+                verify_native_executor_chain(probe, bare, trust_store, launch_timings)?;
+            Ok((flight.publish(verified), Some(blob_bytes)))
+        }
+        ExecutorVerificationCacheLookup::Bypass => {
+            let (verified, blob_bytes) =
+                verify_native_executor_chain(probe, bare, trust_store, launch_timings)?;
+            Ok((Arc::new(verified), Some(blob_bytes)))
+        }
+    }
+}
+
+const EXECUTOR_CACHE_VERIFY_HITS_ENV: &str = "RYEOS_EXECUTOR_CACHE_VERIFY_HITS";
+const EXECUTOR_STAT_PIN_ENV: &str = "RYEOS_EXECUTOR_STAT_PIN";
+
+fn exact_env_opt_in(value: Option<&OsStr>) -> bool {
+    value == Some(OsStr::new("1"))
+}
+
+fn executor_cache_verify_hits_enabled() -> bool {
+    exact_env_opt_in(std::env::var_os(EXECUTOR_CACHE_VERIFY_HITS_ENV).as_deref())
+}
+
+fn executor_stat_pin_fast_path_enabled_for(
+    stat_pin: Option<&OsStr>,
+    verify_hits: Option<&OsStr>,
+) -> bool {
+    exact_env_opt_in(stat_pin) && !exact_env_opt_in(verify_hits)
+}
+
+fn executor_stat_pin_fast_path_enabled() -> bool {
+    let stat_pin = std::env::var_os(EXECUTOR_STAT_PIN_ENV);
+    let verify_hits = std::env::var_os(EXECUTOR_CACHE_VERIFY_HITS_ENV);
+    executor_stat_pin_fast_path_enabled_for(stat_pin.as_deref(), verify_hits.as_deref())
+}
+
+/// Content-addressed cache target for a native executor binary.
+///
+/// Returns `<cache_root>/cache/executors/<blob_hash>/<bare>`.
+fn executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> PathBuf {
+    cache_root
+        .join("cache")
+        .join("executors")
+        .join(blob_hash)
+        .join(bare)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExecutorPinKey {
+    cache_root: PathBuf,
+    blob_hash: String,
+    bare: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecutorFileIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+    changed_seconds: i64,
+    changed_nanoseconds: i64,
+    mode: u32,
+    file_type: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecutorStatPin {
+    identity: ExecutorFileIdentity,
+    capture_granule_seconds: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutorStatPinState {
+    Unpinned,
+    Pinned(ExecutorStatPin),
+    PermanentlyDisabled,
+}
+
+const EXECUTOR_STAT_PIN_MAX_ENTRIES: usize = 256;
+
+#[derive(Default)]
+struct ExecutorStatPinRegistryState {
+    entries: HashMap<ExecutorPinKey, Arc<Mutex<ExecutorStatPinState>>>,
+    /// Saturation is sticky. Once the bounded registry reaches its cap, every
+    /// entry remains on the full-hash path for the daemon lifetime instead of
+    /// evicting a permanent-disable decision.
+    saturated: bool,
+}
+
+struct ExecutorStatPinRegistry {
+    state: Mutex<ExecutorStatPinRegistryState>,
+}
+
+static EXECUTOR_STAT_PIN_REGISTRY: OnceLock<ExecutorStatPinRegistry> = OnceLock::new();
+
+fn executor_stat_pin_registry() -> &'static ExecutorStatPinRegistry {
+    EXECUTOR_STAT_PIN_REGISTRY.get_or_init(|| ExecutorStatPinRegistry {
+        state: Mutex::new(ExecutorStatPinRegistryState::default()),
+    })
+}
+
+impl ExecutorStatPinRegistry {
+    fn entry(&self, key: ExecutorPinKey) -> Option<Arc<Mutex<ExecutorStatPinState>>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.saturated {
+            return None;
+        }
+        if let Some(entry) = state.entries.get(&key) {
+            return Some(Arc::clone(entry));
+        }
+        if state.entries.len() >= EXECUTOR_STAT_PIN_MAX_ENTRIES {
+            state.saturated = true;
+            let entries = state.entries.values().cloned().collect::<Vec<_>>();
+            drop(state);
+            for entry in entries {
+                *entry
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    ExecutorStatPinState::PermanentlyDisabled;
+            }
+            return None;
+        }
+        let entry = Arc::new(Mutex::new(ExecutorStatPinState::Unpinned));
+        state.entries.insert(key, Arc::clone(&entry));
+        Some(entry)
+    }
+}
+
+struct ExecutorCacheLayout {
+    cache_root: PathBuf,
+    state_root: lillux::secure_fs::PinnedDirectory,
+    cache: lillux::secure_fs::PinnedDirectory,
+    executors: lillux::secure_fs::PinnedDirectory,
+}
+
+struct VerifiedOpenedExecutor {
+    handle: Arc<std::fs::File>,
+    identity: ExecutorFileIdentity,
+}
+
+fn validate_secure_cache_directory(
+    directory: &lillux::secure_fs::PinnedDirectory,
+    executor_ref: &str,
+) -> Result<(), MaterializationError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = directory;
+        return Err(MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: "descriptor-pinned native executor cache validation requires Linux".to_string(),
+        });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = std::fs::metadata(directory.descriptor_path().map_err(|error| {
+            MaterializationError::MaterializationFailed {
+                executor_ref: executor_ref.to_string(),
                 detail: format!(
-                    "failed to inspect executor cache target {}: {error}",
-                    target_path.display()
+                    "failed to address pinned executor cache directory {}: {error}",
+                    directory.path().display()
+                ),
+            }
+        })?)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!(
+                "failed to inspect pinned executor cache directory {}: {error}",
+                directory.path().display()
+            ),
+        })?;
+        let daemon_uid = unsafe { libc::geteuid() };
+        let mode = metadata.mode() & 0o7777;
+        if metadata.uid() != daemon_uid || mode & 0o022 != 0 {
+            return Err(MaterializationError::MaterializationFailed {
+                executor_ref: executor_ref.to_string(),
+                detail: format!(
+                    "executor cache directory {} must be owned by daemon uid {} and not group/other writable (uid={}, mode={mode:#o})",
+                    directory.path().display(),
+                    daemon_uid,
+                    metadata.uid(),
                 ),
             });
         }
+        Ok(())
     }
+}
 
-    // Stage atomically — first writer wins.
-    let staging_dir = target_path.parent().unwrap().with_file_name(format!(
-        "{}.staging.{}.{}",
-        resolved.blob_hash,
-        std::process::id(),
-        rand::thread_rng().gen::<u32>()
-    ));
-    std::fs::create_dir_all(&staging_dir).map_err(|e| {
-        MaterializationError::MaterializationFailed {
-            executor_ref: bare.to_string(),
-            detail: format!("failed to create staging dir: {e}"),
-        }
-    })?;
-    let staged_bin = staging_dir.join(bare);
-    lillux::cas::materialize_executable(&staged_bin, &blob_bytes, resolved.mode).map_err(|e| {
-        let _ = std::fs::remove_dir_all(&staging_dir);
-        MaterializationError::MaterializationFailed {
-            executor_ref: bare.to_string(),
-            detail: format!("failed to materialize executable: {e}"),
-        }
-    })?;
+#[cfg(unix)]
+fn executor_file_identity(metadata: &std::fs::Metadata) -> ExecutorFileIdentity {
+    use std::os::unix::fs::MetadataExt as _;
 
-    // Atomic publish — first writer wins.
-    //
-    // We rename the staging directory to its final content-addressed
-    // location. If `rename` fails, we MUST verify the target exists
-    // before returning Ok — otherwise a permissions error / dirty
-    // cache dir / FS corruption would silently produce a path that
-    // has no binary in it and the caller's exec would later fail
-    // with a confusing ENOENT.
-    let target_parent = target_path.parent().unwrap();
-    if let Some(grandparent) = target_parent.parent() {
-        std::fs::create_dir_all(grandparent).map_err(|e| {
+    ExecutorFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+        mode: metadata.mode(),
+        file_type: metadata.mode() & libc::S_IFMT,
+    }
+}
+
+fn reusable_executor_stat_pin(
+    identity: ExecutorFileIdentity,
+    capture_time: SystemTime,
+) -> Option<ExecutorStatPin> {
+    let capture_granule_seconds = capture_time
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())?;
+    // Git-style racy-clean protection: a timestamp in the capture clock
+    // second may not advance for a subsequent same-granule mutation.
+    if identity.modified_seconds >= capture_granule_seconds
+        || identity.changed_seconds >= capture_granule_seconds
+    {
+        return None;
+    }
+    Some(ExecutorStatPin {
+        identity,
+        capture_granule_seconds,
+    })
+}
+
+fn remember_executor_stat_pin(
+    state: Option<&Arc<Mutex<ExecutorStatPinState>>>,
+    pin: Option<ExecutorStatPin>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    let mut state = state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *state != ExecutorStatPinState::PermanentlyDisabled {
+        *state = pin.map_or(ExecutorStatPinState::Unpinned, ExecutorStatPinState::Pinned);
+    }
+}
+
+fn executor_pin_state(
+    layout: &ExecutorCacheLayout,
+    verified: &VerifiedNativeExecutorChain,
+    bare: &str,
+) -> Option<Arc<Mutex<ExecutorStatPinState>>> {
+    executor_stat_pin_registry().entry(ExecutorPinKey {
+        cache_root: layout.cache_root.clone(),
+        blob_hash: verified.key.blob_hash.clone(),
+        bare: bare.to_string(),
+    })
+}
+
+fn validate_executor_cache_ancestors(
+    layout: &ExecutorCacheLayout,
+    blob_dir: &lillux::secure_fs::PinnedDirectory,
+    executor_ref: &str,
+) -> Result<(), MaterializationError> {
+    validate_secure_cache_directory(&layout.state_root, executor_ref)?;
+    validate_secure_cache_directory(&layout.cache, executor_ref)?;
+    validate_secure_cache_directory(&layout.executors, executor_ref)?;
+    validate_secure_cache_directory(blob_dir, executor_ref)
+}
+
+fn open_executor_cache_layout(
+    cache_root: &Path,
+    executor_ref: &str,
+) -> Result<ExecutorCacheLayout, MaterializationError> {
+    let state_root =
+        lillux::secure_fs::PinnedDirectory::open_or_create(cache_root).map_err(|error| {
             MaterializationError::MaterializationFailed {
-                executor_ref: bare.to_string(),
-                detail: format!("failed to create cache root dir: {e}"),
+                executor_ref: executor_ref.to_string(),
+                detail: format!(
+                    "failed to securely open executor cache root {}: {error}",
+                    cache_root.display()
+                ),
             }
         })?;
-    }
-    match std::fs::rename(&staging_dir, target_parent) {
-        Ok(_) => {
-            tracing::info!(
-                executor_ref,
-                target = %target_path.display(),
-                "native executor published to cache"
-            );
+    let cache = state_root
+        .open_or_create_child(OsStr::new("cache"), 0o700)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to securely open executor cache directory: {error}"),
+        })?;
+    let executors = cache
+        .open_or_create_child(OsStr::new("executors"), 0o700)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to securely open native executor cache: {error}"),
+        })?;
+    // Security eligibility is checked only after the complete descriptor
+    // hierarchy and per-entry pin key exist. That ordering lets any ancestor
+    // anomaly permanently disable this logical entry instead of returning
+    // before the daemon-lifetime disable decision can be recorded.
+    Ok(ExecutorCacheLayout {
+        cache_root: cache_root.to_path_buf(),
+        state_root,
+        cache,
+        executors,
+    })
+}
+
+enum MaterializedArtifactInspection {
+    Valid(VerifiedOpenedExecutor),
+    Missing,
+    Invalid(String),
+}
+
+fn verify_opened_executor_file(
+    mut file: std::fs::File,
+    expected_hash: &str,
+    expected_len: u64,
+    expected_mode: u32,
+    executor_ref: &str,
+) -> Result<(VerifiedOpenedExecutor, Option<ExecutorStatPin>), String> {
+    #[cfg(unix)]
+    let before_identity = {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = file
+            .metadata()
+            .map_err(|error| format!("failed to inspect opened executor: {error}"))?;
+        if !metadata.file_type().is_file() {
+            return Err("opened executor is not a regular file".to_string());
         }
-        Err(rename_err) => {
-            let _ = std::fs::remove_dir_all(&staging_dir);
-            if let Err(winner_error) = verify_materialized_executor_artifact(
-                &target_path,
-                &blob_content_hash,
-                resolved.mode,
-                bare,
-            ) {
-                return Err(MaterializationError::MaterializationFailed {
-                    executor_ref: bare.to_string(),
-                    detail: format!(
-                        "failed to publish executor to cache at {} \
-                         (rename error: {rename_err}; winner validation failed: {winner_error})",
-                        target_path.display(),
-                    ),
-                });
+        let daemon_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != daemon_uid {
+            return Err(format!(
+                "opened executor is owned by uid {}, expected daemon uid {daemon_uid}",
+                metadata.uid()
+            ));
+        }
+        let actual_mode = metadata.mode() & 0o7777;
+        if actual_mode & !0o777 != 0 {
+            return Err(format!(
+                "opened executor has forbidden special permission bits ({actual_mode:#o})"
+            ));
+        }
+        if actual_mode != expected_mode {
+            return Err(format!(
+                "opened executor has Unix mode {actual_mode:#o}, expected signed mode {expected_mode:#o}"
+            ));
+        }
+        if actual_mode & 0o022 != 0 {
+            return Err(format!(
+                "opened executor has group/other writable mode {actual_mode:#o}"
+            ));
+        }
+        if metadata.len() != expected_len {
+            return Err(format!(
+                "opened executor has length {}, expected signed blob length {expected_len}",
+                metadata.len()
+            ));
+        }
+        executor_file_identity(&metadata)
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            file,
+            expected_hash,
+            expected_len,
+            expected_mode,
+            executor_ref,
+        );
+        return Err("native executor Unix validation is unavailable on this platform".to_string());
+    }
+
+    let mut bytes = Vec::with_capacity(usize::try_from(expected_len).unwrap_or(0));
+    file.read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read opened executor: {error}"))?;
+    let actual_hash = lillux::cas::sha256_hex(&bytes);
+    if actual_hash != expected_hash {
+        return Err(format!(
+            "opened executor failed its content-address check for {executor_ref}"
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let after_metadata = file
+            .metadata()
+            .map_err(|error| format!("failed to re-inspect opened executor: {error}"))?;
+        let daemon_uid = unsafe { libc::geteuid() };
+        if !after_metadata.file_type().is_file()
+            || after_metadata.uid() != daemon_uid
+            || after_metadata.mode() & 0o7777 != expected_mode
+            || after_metadata.mode() & 0o022 != 0
+            || after_metadata.len() != expected_len
+        {
+            return Err("opened executor security metadata changed while hashing".to_string());
+        }
+        let after_identity = executor_file_identity(&after_metadata);
+        if before_identity != after_identity {
+            return Err("opened executor identity changed while hashing".to_string());
+        }
+        let pin = reusable_executor_stat_pin(after_identity, SystemTime::now());
+        Ok((
+            VerifiedOpenedExecutor {
+                handle: Arc::new(file),
+                identity: after_identity,
+            },
+            pin,
+        ))
+    }
+}
+
+fn inspect_materialized_executor(
+    layout: &ExecutorCacheLayout,
+    verified: &VerifiedNativeExecutorChain,
+    bare: &str,
+) -> MaterializedArtifactInspection {
+    inspect_materialized_executor_with_pin_policy(
+        layout,
+        verified,
+        bare,
+        executor_stat_pin_fast_path_enabled(),
+    )
+}
+
+fn inspect_materialized_executor_with_pin_policy(
+    layout: &ExecutorCacheLayout,
+    verified: &VerifiedNativeExecutorChain,
+    bare: &str,
+    stat_pin_fast_path_enabled: bool,
+) -> MaterializedArtifactInspection {
+    let pin_state = executor_pin_state(layout, verified, bare);
+    let mut pin_state_guard = pin_state.as_ref().map(|state| {
+        state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    });
+    let blob_dir = match layout
+        .executors
+        .open_child_directory(OsStr::new(&verified.key.blob_hash))
+    {
+        Ok(Some(directory)) => directory,
+        Ok(None) => {
+            return match layout
+                .executors
+                .open_entry(OsStr::new(&verified.key.blob_hash), false)
+            {
+                Ok(None) => MaterializedArtifactInspection::Missing,
+                Ok(Some(_)) => {
+                    if let Some(state) = pin_state_guard.as_deref_mut() {
+                        *state = ExecutorStatPinState::PermanentlyDisabled;
+                    }
+                    MaterializedArtifactInspection::Invalid(
+                        "content-addressed executor entry is not a directory".to_string(),
+                    )
+                }
+                Err(error) => {
+                    if let Some(state) = pin_state_guard.as_deref_mut() {
+                        *state = ExecutorStatPinState::PermanentlyDisabled;
+                    }
+                    MaterializedArtifactInspection::Invalid(format!(
+                        "content-addressed executor entry is malformed: {error}"
+                    ))
+                }
             }
+        }
+        Err(error) => {
+            if let Some(state) = pin_state_guard.as_deref_mut() {
+                *state = ExecutorStatPinState::PermanentlyDisabled;
+            }
+            return MaterializedArtifactInspection::Invalid(format!(
+                "failed to securely open content-addressed executor directory: {error}"
+            ));
+        }
+    };
+    if let Err(error) = validate_executor_cache_ancestors(layout, &blob_dir, bare) {
+        if let Some(state) = pin_state_guard.as_deref_mut() {
+            *state = ExecutorStatPinState::PermanentlyDisabled;
+        }
+        return MaterializedArtifactInspection::Invalid(error.to_string());
+    }
+    let file = match blob_dir.open_regular(OsStr::new(bare), false) {
+        Ok(Some(file)) => file,
+        Ok(None) => {
+            return MaterializedArtifactInspection::Invalid(
+                "materialized executor file is missing".to_string(),
+            )
+        }
+        Err(error) => {
+            if let Some(state) = pin_state_guard.as_deref_mut() {
+                *state = ExecutorStatPinState::PermanentlyDisabled;
+            }
+            return MaterializedArtifactInspection::Invalid(format!(
+                "materialized executor is not a regular non-symlink file: {error}"
+            ));
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = match file.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return MaterializedArtifactInspection::Invalid(format!(
+                    "failed to stat materialized executor descriptor: {error}"
+                ))
+            }
+        };
+        let daemon_uid = unsafe { libc::geteuid() };
+        let actual_mode = metadata.mode() & 0o7777;
+        if !metadata.file_type().is_file()
+            || metadata.uid() != daemon_uid
+            || actual_mode & 0o022 != 0
+        {
+            if let Some(state) = pin_state_guard.as_deref_mut() {
+                *state = ExecutorStatPinState::PermanentlyDisabled;
+            }
+            return MaterializedArtifactInspection::Invalid(format!(
+                "materialized executor descriptor is not a daemon-owned, non-group/other-writable regular file (uid={}, mode={actual_mode:#o})",
+                metadata.uid()
+            ));
+        }
+        let observed = executor_file_identity(&metadata);
+        if stat_pin_fast_path_enabled
+            && pin_state_guard.as_deref().is_some_and(
+                |state| matches!(state, ExecutorStatPinState::Pinned(pin) if pin.identity == observed),
+            )
+        {
+            tracing::debug!(
+                executor_ref = bare,
+                device = observed.device,
+                inode = observed.inode,
+                "native executor materialized-file stat-pin hit"
+            );
+            return MaterializedArtifactInspection::Valid(VerifiedOpenedExecutor {
+                handle: Arc::new(file),
+                identity: observed,
+            });
+        }
+    }
+    match verify_opened_executor_file(
+        file,
+        &verified.key.blob_hash,
+        verified.key.blob_len,
+        verified.key.mode,
+        bare,
+    ) {
+        Ok((opened, pin)) => {
+            if let Some(state) = pin_state_guard.as_deref_mut() {
+                if *state != ExecutorStatPinState::PermanentlyDisabled {
+                    *state =
+                        pin.map_or(ExecutorStatPinState::Unpinned, ExecutorStatPinState::Pinned);
+                }
+            }
+            MaterializedArtifactInspection::Valid(opened)
+        }
+        Err(detail) => MaterializedArtifactInspection::Invalid(detail),
+    }
+}
+
+enum QuarantinedExecutorEntry {
+    Directory {
+        name: String,
+        directory: lillux::secure_fs::PinnedDirectory,
+    },
+    Other {
+        name: String,
+    },
+}
+
+impl QuarantinedExecutorEntry {
+    fn remove(
+        self,
+        executors: &lillux::secure_fs::PinnedDirectory,
+        executor_ref: &str,
+    ) -> Result<(), MaterializationError> {
+        match self {
+            Self::Directory { name, directory } => {
+                directory.remove_contents_recursive().map_err(|error| {
+                    MaterializationError::MaterializationFailed {
+                        executor_ref: executor_ref.to_string(),
+                        detail: format!("failed to empty executor quarantine {name}: {error}"),
+                    }
+                })?;
+                if !executors
+                    .remove_empty_child_if_same(OsStr::new(&name), &directory)
+                    .map_err(|error| MaterializationError::MaterializationFailed {
+                        executor_ref: executor_ref.to_string(),
+                        detail: format!("failed to remove executor quarantine {name}: {error}"),
+                    })?
+                {
+                    return Err(MaterializationError::MaterializationFailed {
+                        executor_ref: executor_ref.to_string(),
+                        detail: format!("executor quarantine {name} remained non-empty"),
+                    });
+                }
+            }
+            Self::Other { name } => {
+                let quarantine_path =
+                    executors
+                        .descriptor_child_path(OsStr::new(&name))
+                        .map_err(|error| MaterializationError::MaterializationFailed {
+                            executor_ref: executor_ref.to_string(),
+                            detail: format!(
+                                "failed to address executor quarantine {name}: {error}"
+                            ),
+                        })?;
+                std::fs::remove_file(&quarantine_path).map_err(|error| {
+                    MaterializationError::MaterializationFailed {
+                        executor_ref: executor_ref.to_string(),
+                        detail: format!("failed to remove executor quarantine {name}: {error}"),
+                    }
+                })?;
+                executors.sync_tree().map_err(|error| {
+                    MaterializationError::MaterializationFailed {
+                        executor_ref: executor_ref.to_string(),
+                        detail: format!(
+                            "failed to durably remove executor quarantine {name}: {error}"
+                        ),
+                    }
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn quarantine_materialized_executor(
+    layout: &ExecutorCacheLayout,
+    blob_hash: &str,
+    executor_ref: &str,
+) -> Result<Option<QuarantinedExecutorEntry>, MaterializationError> {
+    let source = layout
+        .executors
+        .descriptor_child_path(OsStr::new(blob_hash))
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to address corrupt executor cache entry: {error}"),
+        })?;
+    match std::fs::symlink_metadata(&source) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(MaterializationError::MaterializationFailed {
+                executor_ref: executor_ref.to_string(),
+                detail: format!("failed to inspect corrupt executor cache entry: {error}"),
+            })
+        }
+    }
+    let quarantine_name = format!(
+        ".quarantine.{blob_hash}.{}.{}",
+        std::process::id(),
+        rand::thread_rng().gen::<u64>()
+    );
+    let destination = layout
+        .executors
+        .descriptor_child_path(OsStr::new(&quarantine_name))
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to address executor quarantine: {error}"),
+        })?;
+    match lillux::rename_path_noreplace_durable(&source, &destination) {
+        Ok(()) => {}
+        Err(error) if error.namespace_committed() => {}
+        Err(error) => {
+            return Err(MaterializationError::MaterializationFailed {
+                executor_ref: executor_ref.to_string(),
+                detail: format!("failed to quarantine corrupt executor cache entry: {error}"),
+            })
+        }
+    }
+    let quarantined = match layout
+        .executors
+        .open_child_directory(OsStr::new(&quarantine_name))
+    {
+        Ok(Some(directory)) => QuarantinedExecutorEntry::Directory {
+            name: quarantine_name,
+            directory,
+        },
+        Ok(None) | Err(_) => QuarantinedExecutorEntry::Other {
+            name: quarantine_name,
+        },
+    };
+    Ok(Some(quarantined))
+}
+
+fn remove_staging_directory(
+    executors: &lillux::secure_fs::PinnedDirectory,
+    staging_name: &str,
+    staging: &lillux::secure_fs::PinnedDirectory,
+) -> anyhow::Result<()> {
+    staging.remove_contents_recursive()?;
+    if !executors.remove_empty_child_if_same(OsStr::new(staging_name), staging)? {
+        anyhow::bail!("executor staging directory remained non-empty");
+    }
+    Ok(())
+}
+
+fn publish_verified_executor_blob(
+    layout: &ExecutorCacheLayout,
+    verified: &VerifiedNativeExecutorChain,
+    bare: &str,
+    blob_bytes: &[u8],
+) -> Result<VerifiedOpenedExecutor, MaterializationError> {
+    if lillux::cas::sha256_hex(blob_bytes) != verified.key.blob_hash
+        || u64::try_from(blob_bytes.len()).ok() != Some(verified.key.blob_len)
+    {
+        return Err(MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: "verified executor bytes changed before cache publication".to_string(),
+        });
+    }
+    let staging_name = format!(
+        ".staging.{}.{}.{}",
+        verified.key.blob_hash,
+        std::process::id(),
+        rand::thread_rng().gen::<u64>()
+    );
+    let staging = layout
+        .executors
+        .create_child(OsStr::new(&staging_name), 0o700)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to create executor staging directory: {error}"),
+        })?;
+    validate_secure_cache_directory(&staging, bare)?;
+    let mut staged_file = staging
+        .open_regular_create(OsStr::new(bare), true, true, verified.key.mode)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to create staged executor: {error}"),
+        })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        staged_file
+            .set_permissions(std::fs::Permissions::from_mode(verified.key.mode))
+            .map_err(|error| MaterializationError::MaterializationFailed {
+                executor_ref: bare.to_string(),
+                detail: format!("failed to apply signed executor mode: {error}"),
+            })?;
+    }
+    staged_file
+        .write_all(blob_bytes)
+        .and_then(|()| staged_file.sync_all())
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to write staged executor: {error}"),
+        })?;
+    drop(staged_file);
+    let staged_file = staging
+        .open_regular(OsStr::new(bare), false)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to reopen staged executor: {error}"),
+        })?
+        .ok_or_else(|| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: "staged executor disappeared before verification".to_string(),
+        })?;
+    let (verified_staged_file, pin) = verify_opened_executor_file(
+        staged_file,
+        &verified.key.blob_hash,
+        verified.key.blob_len,
+        verified.key.mode,
+        bare,
+    )
+    .map_err(|detail| MaterializationError::MaterializationFailed {
+        executor_ref: bare.to_string(),
+        detail: format!("staged executor verification failed: {detail}"),
+    })?;
+    if let Err(error) = validate_executor_cache_ancestors(layout, &staging, bare) {
+        let pin_state = executor_pin_state(layout, verified, bare);
+        if let Some(pin_state) = pin_state {
+            *pin_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                ExecutorStatPinState::PermanentlyDisabled;
+        }
+        return Err(error);
+    }
+    staging
+        .sync_tree()
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to sync staged executor tree: {error}"),
+        })?;
+
+    match layout.executors.rename_child_directory_noreplace(
+        OsStr::new(&staging_name),
+        OsStr::new(&verified.key.blob_hash),
+        &staging,
+    ) {
+        // The staged file was fully hashed through its open descriptor, and
+        // this primitive proves the same pinned staging-directory inode was
+        // moved without replacement. No second target-path read is needed on
+        // the won branch.
+        Ok(()) => {
+            let pin_state = executor_pin_state(layout, verified, bare);
+            remember_executor_stat_pin(pin_state.as_ref(), pin);
+            Ok(verified_staged_file)
+        }
+        Err(error) => {
+            if !error.namespace_committed() {
+                let _ = remove_staging_directory(&layout.executors, &staging_name, &staging);
+            }
+            match inspect_materialized_executor(layout, verified, bare) {
+                MaterializedArtifactInspection::Valid(opened) => {
+                    tracing::debug!(
+                        executor_ref = bare,
+                        "native executor publish lost benign race; verified winner"
+                    );
+                    Ok(opened)
+                }
+                MaterializedArtifactInspection::Missing => {
+                    Err(MaterializationError::MaterializationFailed {
+                        executor_ref: bare.to_string(),
+                        detail: format!(
+                            "executor publication failed and no race winner exists: {error}"
+                        ),
+                    })
+                }
+                MaterializedArtifactInspection::Invalid(winner_error) => {
+                    Err(MaterializationError::MaterializationFailed {
+                        executor_ref: bare.to_string(),
+                        detail: format!(
+                            "executor publication failed and race winner was invalid: {error}; {winner_error}"
+                        ),
+                    })
+                }
+            }
+        }
+    }
+}
+
+fn repair_materialized_executor(
+    layout: &ExecutorCacheLayout,
+    mut verified: Arc<VerifiedNativeExecutorChain>,
+    bare: &str,
+    mut blob_bytes: Option<Vec<u8>>,
+    probe: &ExecutorVerificationProbe,
+    trust_store: &ryeos_engine::trust::TrustStore,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<(Arc<VerifiedNativeExecutorChain>, VerifiedOpenedExecutor), MaterializationError> {
+    let namespace_lock = layout.executors.lock_exclusive().map_err(|error| {
+        MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("failed to lock executor cache namespace: {error}"),
+        }
+    })?;
+    namespace_lock
+        .ensure_protects(&layout.executors)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: bare.to_string(),
+            detail: format!("executor cache lock identity mismatch: {error}"),
+        })?;
+    if let MaterializedArtifactInspection::Valid(opened) =
+        inspect_materialized_executor(layout, &verified, bare)
+    {
+        return Ok((verified, opened));
+    }
+    // Remove the suspect namespace entry before any expensive fallback work.
+    // If chain verification or publication fails, the bad target remains
+    // quarantined and therefore cannot be selected by a later launch.
+    let quarantine = quarantine_materialized_executor(layout, &verified.key.blob_hash, bare)?;
+    if blob_bytes.is_none() {
+        // The namespace lock serializes repairs before the cache is invalidated,
+        // so exactly one repairer performs this mandatory full-chain fallback.
+        let refreshed =
+            cached_or_verified_executor_chain(probe, bare, trust_store, true, launch_timings)?;
+        verified = refreshed.0;
+        blob_bytes = refreshed.1;
+    }
+    let blob_bytes =
+        blob_bytes
+            .as_deref()
+            .ok_or_else(|| MaterializationError::MaterializationFailed {
+                executor_ref: bare.to_string(),
+                detail:
+                    "single-flight full executor re-verification produced no trusted blob bytes"
+                        .to_string(),
+            })?;
+    let opened = publish_verified_executor_blob(layout, &verified, bare, blob_bytes)?;
+    if let Some(quarantine) = quarantine {
+        quarantine.remove(&layout.executors, bare)?;
+    }
+    tracing::info!(
+        executor_ref = bare,
+        blob_hash = %verified.key.blob_hash,
+        "native executor cache entry repaired from fully verified CAS chain"
+    );
+    Ok((verified, opened))
+}
+
+struct NativeExecutorMaterializationContext<'a> {
+    bundle_roots: &'a [PathBuf],
+    cache_root: &'a Path,
+    trust_store: &'a ryeos_engine::trust::TrustStore,
+    root_trust_class: ryeos_engine::resolution::TrustClass,
+    bundle_generation_fingerprint: &'a str,
+    node_trust_fingerprint: &'a str,
+    launch_timings: Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
+}
+
+fn materialize_native_executor_in_generation(
+    executor_ref: &str,
+    context: NativeExecutorMaterializationContext<'_>,
+) -> Result<MaterializedExecutor, MaterializationError> {
+    let NativeExecutorMaterializationContext {
+        bundle_roots,
+        cache_root,
+        trust_store,
+        root_trust_class,
+        bundle_generation_fingerprint,
+        node_trust_fingerprint,
+        launch_timings,
+    } = context;
+    let bare = executor_ref.strip_prefix("native:").ok_or_else(|| {
+        MaterializationError::ExecutorUnavailable {
+            executor_ref: executor_ref.to_string(),
+            detail: "executor_ref is not a native executor".into(),
+        }
+    })?;
+    let mut components = Path::new(bare).components();
+    if bare.is_empty()
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(MaterializationError::ExecutorUnavailable {
+            executor_ref: executor_ref.to_string(),
+            detail: "native executor id must be one normal filename component".to_string(),
+        });
+    }
+
+    let triple = host_triple();
+    let manifest_probe_timer = launch_timings
+        .map(|timings| timings.nested("background_dispatch", "executor_manifest_ref_probe"));
+    let probe = manifest_ref_probe(
+        bundle_roots,
+        bundle_generation_fingerprint,
+        node_trust_fingerprint,
+        executor_ref,
+        &triple,
+        root_trust_class,
+    )?;
+    drop(manifest_probe_timer);
+    let (mut verified, verified_blob_bytes) =
+        cached_or_verified_executor_chain(&probe, bare, trust_store, false, launch_timings)?;
+    let materialized_file_timer = launch_timings.map(|timings| {
+        timings.nested(
+            "background_dispatch",
+            "executor_materialized_file_verify_or_repair",
+        )
+    });
+    let layout = open_executor_cache_layout(cache_root, bare)?;
+    let target_path = executor_cache_target(cache_root, &verified.key.blob_hash, bare);
+    let opened = match inspect_materialized_executor(&layout, &verified, bare) {
+        MaterializedArtifactInspection::Valid(opened) => {
             tracing::debug!(
                 executor_ref,
                 target = %target_path.display(),
-                "native executor publish lost benign race; using winner's binary"
+                "native executor materialized-file identity verified"
             );
+            opened
         }
-    }
+        MaterializedArtifactInspection::Missing | MaterializedArtifactInspection::Invalid(_) => {
+            let repaired = repair_materialized_executor(
+                &layout,
+                verified,
+                bare,
+                verified_blob_bytes,
+                &probe,
+                trust_store,
+                launch_timings,
+            )?;
+            verified = repaired.0;
+            repaired.1
+        }
+    };
+    drop(materialized_file_timer);
 
-    verify_materialized_executor_artifact(&target_path, &blob_content_hash, resolved.mode, bare)?;
     Ok(MaterializedExecutor {
-        path: target_path,
-        content_hash: blob_content_hash,
-        bundle_manifest_hash: verified_ref.manifest_hash,
-        bundle_signer_fingerprint: verified_ref.signer_fingerprint,
+        path: executor_cache_target(cache_root, &verified.key.blob_hash, bare),
+        content_hash: verified.key.blob_hash.clone(),
+        bundle_manifest_hash: verified.key.manifest_object_hash.clone(),
+        bundle_signer_fingerprint: verified.key.signer_fingerprint.clone(),
+        verified_command: ryeos_engine::isolation::IsolationDescriptorBoundCommand::new(
+            ryeos_engine::isolation::IsolationVerifiedCode {
+                source_path: executor_cache_target(cache_root, &verified.key.blob_hash, bare),
+                content_hash: verified.key.blob_hash.clone(),
+            },
+            opened.handle,
+            ryeos_engine::isolation::IsolationDescriptorFileIdentity {
+                device: opened.identity.device,
+                inode: opened.identity.inode,
+                size: opened.identity.size,
+                modified_seconds: opened.identity.modified_seconds,
+                modified_nanoseconds: opened.identity.modified_nanoseconds,
+                changed_seconds: opened.identity.changed_seconds,
+                changed_nanoseconds: opened.identity.changed_nanoseconds,
+                mode: opened.identity.mode,
+                file_type: opened.identity.file_type,
+            },
+        ),
+    })
+}
+
+/// Resolve and materialize an executor while holding the exact installed
+/// bundle-generation guard owned by `engine`.
+pub fn materialize_native_executor_for_engine(
+    engine: &ryeos_engine::engine::Engine,
+    bundle_roots: &[PathBuf],
+    executor_ref: &str,
+    cache_root: &Path,
+    root_trust_class: ryeos_engine::resolution::TrustClass,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<MaterializedExecutor, MaterializationError> {
+    engine.debug_assert_executor_cache_generation_identity();
+    engine.with_checked_bundle_generation(|_| {
+        if bundle_roots != engine.bundle_roots.as_slice() {
+            return Err(MaterializationError::Internal(
+                "executor verification requires the complete registered bundle-root generation"
+                    .to_string(),
+            ));
+        }
+        let bundle_generation_fingerprint = engine.registered_bundle_generation_fingerprint();
+        let node_trust_fingerprint = engine.node_trust_store.fingerprint();
+        materialize_native_executor_in_generation(
+            executor_ref,
+            NativeExecutorMaterializationContext {
+                bundle_roots,
+                cache_root,
+                trust_store: &engine.node_trust_store,
+                root_trust_class,
+                bundle_generation_fingerprint: &bundle_generation_fingerprint,
+                node_trust_fingerprint: &node_trust_fingerprint,
+                launch_timings,
+            },
+        )
     })
 }
 
@@ -990,6 +2198,9 @@ fn apply_follow_child_hybrid(
 pub struct BuildAndLaunchParams<'a> {
     pub state: &'a AppState,
     pub lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
+    /// Optional request-local daemon timing trace. Observability only: this is
+    /// neither persisted nor part of launch authority.
+    pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     /// The serving runtime's canonical ref (`runtime:<name>`) for a managed
     /// runtime-registry launch (directive / graph); `None` for direct subprocess
     /// launches. Persisted into the `ResumeContext` so a continuation successor
@@ -1130,6 +2341,7 @@ struct PreparedManagedLaunchAuthority {
     is_resume: bool,
     launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     pending_project_snapshot: Option<super::CapturedProjectGeneration>,
+    augmentation_audits: Vec<crate::augmentations::LaunchAugmentationAudit>,
 }
 
 /// Whether the exact authority audit for this launch is already part of the
@@ -1146,8 +2358,9 @@ fn launch_audit_records(
     resolved: &ResolvedExecutionRequest,
     resolution: &ryeos_engine::resolution::ResolutionOutput,
     prepared_launch: &super::launch_preparation::PreparedRuntimeLaunch,
+    augmentation_audits: &[crate::augmentations::LaunchAugmentationAudit],
 ) -> Result<Vec<ryeos_app::state_store::NewEventRecord>, BuildAndLaunchError> {
-    Ok([
+    let mut records = [
         (
             RuntimeEventType::AsLaunchedResolution,
             serde_json::to_value(resolution.as_launched_digest())?,
@@ -1172,7 +2385,15 @@ fn launch_audit_records(
             payload,
         },
     )
-    .collect())
+    .collect::<Vec<_>>();
+    records.extend(augmentation_audits.iter().map(|audit| {
+        ryeos_app::state_store::NewEventRecord {
+            event_type: audit.event_type.as_str().to_owned(),
+            storage_class: audit.event_type.storage_class().as_str().to_owned(),
+            payload: audit.payload.clone(),
+        }
+    }));
+    Ok(records)
 }
 
 async fn prepare_managed_launch_authority(
@@ -1198,11 +2419,11 @@ async fn prepare_managed_launch_authority(
         .state_store
         .admitted_launch_capsule(thread_id)
         .map_err(BuildAndLaunchError::Internal)?;
-    let effective_parsers = if admitted_capsule.is_none() {
+    let effective_request_snapshot = if admitted_capsule.is_none() {
         Some(
             engine
-                .effective_parser_dispatcher(Some(params.project_path))
-                .map_err(|error| anyhow::anyhow!("effective parser dispatcher: {error}"))?,
+                .effective_request_snapshot(Some(params.project_path))
+                .map_err(|error| anyhow::anyhow!("effective request snapshot: {error}"))?,
         )
     } else {
         None
@@ -1238,42 +2459,6 @@ async fn prepare_managed_launch_authority(
         &params.resolved.resolved_item.kind,
     )?;
 
-    // Augmentation is part of the authoritative resolution, not a mutation of
-    // already-audited launch state. Its internal worker is an independent,
-    // lifecycle-guarded root, so the prospective managed thread need not exist.
-    if admitted_capsule.is_none() {
-        let launching_kind_schema = engine
-            .kinds
-            .get(&params.resolved.resolved_item.kind)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "build_and_launch: launching kind `{}` is not registered",
-                    params.resolved.resolved_item.kind
-                )
-            })?;
-        if let Some(exec) = launching_kind_schema.execution() {
-            if !exec.launch_augmentations.is_empty() {
-                crate::augmentations::run_augmentations(
-                    exec,
-                    &mut resolution,
-                    thread_id,
-                    params.project_path,
-                    engine,
-                    params.provenance,
-                    &params.resolved.plan_context,
-                    params.acting_principal,
-                    params.state,
-                )
-                .await
-                .map_err(|error| {
-                    BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "launch augmentation failed: {error}"
-                    ))
-                })?;
-            }
-        }
-    }
-
     let selected_runtime = engine
         .runtimes
         .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
@@ -1287,6 +2472,128 @@ async fn prepare_managed_launch_authority(
             })
         })?
         .clone();
+    let runtime_binary =
+        crate::dispatch::strip_binary_ref_prefix(&selected_runtime.yaml.binary_ref)
+            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
+    let executor_ref = format!("native:{runtime_binary}");
+    let verified_protocol =
+        crate::dispatch::require_callback_runtime_protocol(engine, &selected_runtime, "managed")
+            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
+    if selected_runtime.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
+        || verified_protocol.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed runtime and protocol artifact identity requires installed TrustedBundle provenance"
+        )));
+    }
+
+    // Parent executor verification/materialization does not consume the
+    // augmentation projection. Start it on the blocking pool before polling
+    // augmentation, then join both legs. Runtime preparation below reads
+    // `resolution.composed.derived`, so it remains strictly post-join.
+    let materialization_engine = (*engine).clone();
+    let materialization_bundle_roots = bundle_roots.clone();
+    let materialization_executor_ref = executor_ref.clone();
+    let materialization_cache_root = params
+        .state
+        .config
+        .app_root
+        .join(ryeos_engine::AI_DIR)
+        .join("state");
+    let materialization_timings = params.launch_timings.clone();
+    let materialization_queue_timer = materialization_timings.as_ref().map(|timings| {
+        timings.nested(
+            "background_dispatch",
+            "executor_materialization_blocking_queue_wait",
+        )
+    });
+    let materialization_handle = tokio::task::spawn_blocking(move || {
+        drop(materialization_queue_timer);
+        let _materialization_work_timer = materialization_timings.as_ref().map(|timings| {
+            timings.nested(
+                "background_dispatch",
+                "executor_materialization_blocking_work",
+            )
+        });
+        materialize_native_executor_for_engine(
+            &materialization_engine,
+            &materialization_bundle_roots,
+            &materialization_executor_ref,
+            &materialization_cache_root,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+            materialization_timings.as_ref(),
+        )
+    });
+
+    let augmentation = async {
+        // Augmentation is part of the authoritative resolution, not a mutation
+        // of already-audited launch state. Its internal worker is an
+        // independent, lifecycle-guarded root, so the prospective managed
+        // thread need not exist.
+        if admitted_capsule.is_none() {
+            let launching_kind_schema = engine
+                .kinds
+                .get(&params.resolved.resolved_item.kind)
+                .ok_or_else(|| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "build_and_launch: launching kind `{}` is not registered",
+                        params.resolved.resolved_item.kind
+                    ))
+                })?;
+            if let Some(exec) = launching_kind_schema.execution() {
+                if !exec.launch_augmentations.is_empty() {
+                    let augmentation_timer = params.launch_timings.as_ref().map(|timings| {
+                        timings.nested("background_dispatch", "launch_augmentation")
+                    });
+                    let audits = crate::augmentations::run_augmentations(
+                        exec,
+                        &mut resolution,
+                        thread_id,
+                        params.project_path,
+                        engine,
+                        params.provenance,
+                        &params.resolved.plan_context,
+                        params.acting_principal,
+                        params.state,
+                        params.launch_timings.as_ref(),
+                    )
+                    .await
+                    .map_err(|error| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "launch augmentation failed: {error}"
+                        ))
+                    })?;
+                    drop(augmentation_timer);
+                    return Ok(audits);
+                }
+            }
+        }
+        Ok::<Vec<crate::augmentations::LaunchAugmentationAudit>, BuildAndLaunchError>(Vec::new())
+    };
+    let materialization = async {
+        let materialized = materialization_handle
+            .await
+            .map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "executor materialization blocking worker failed: {error}"
+                ))
+            })?
+            .map_err(BuildAndLaunchError::from)?;
+        Ok::<MaterializedExecutor, BuildAndLaunchError>(materialized)
+    };
+    let (augmentation_result, materialization_result) = tokio::join!(augmentation, materialization);
+    let concurrent_prerequisites_succeeded =
+        augmentation_result.is_ok() && materialization_result.is_ok();
+    let augmentation_audits = augmentation_result?;
+    let materialized_executor = materialization_result?;
+    debug_assert!(
+        concurrent_prerequisites_succeeded,
+        "runtime preparation must remain strictly after augmentation and executor materialization join"
+    );
+
+    if let Some(timings) = params.launch_timings.as_ref() {
+        timings.mark("runtime_prep_started");
+    }
     let prepared_launch = if let Some(capsule) = admitted_capsule.as_ref() {
         if capsule.launch_driver != ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -1306,22 +2613,40 @@ async fn prepare_managed_launch_authority(
             ))
         })?
     } else {
-        super::launch_preparation::prepare_runtime_launch(
+        let runtime_preparation_timer = params
+            .launch_timings
+            .as_ref()
+            .map(|timings| timings.nested("background_dispatch", "runtime_preparation"));
+        let prepared = super::launch_preparation::prepare_runtime_launch(
             super::launch_preparation::PrepareRuntimeLaunchRequest {
                 engine,
                 runtime: &selected_runtime,
                 primary: &resolution,
                 ref_bindings: &params.resolved.ref_bindings,
                 roots: &engine_roots,
-                parsers: effective_parsers.as_ref().ok_or_else(|| {
-                    BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "fresh managed launch has no parser authority"
-                    ))
-                })?,
+                parsers: &effective_request_snapshot
+                    .as_ref()
+                    .ok_or_else(|| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "fresh managed launch has no parser authority"
+                        ))
+                    })?
+                    .parser_dispatcher,
+                trust_store: &effective_request_snapshot
+                    .as_ref()
+                    .ok_or_else(|| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "fresh managed launch has no trust authority"
+                        ))
+                    })?
+                    .trust_store,
                 principal: &params.resolved.plan_context.requested_by,
+                ref_binding_resolution_timings: params.launch_timings.as_ref(),
             },
         )
-        .map_err(BuildAndLaunchError::from)?
+        .map_err(BuildAndLaunchError::from);
+        drop(runtime_preparation_timer);
+        prepared?
     };
     let composed_effective_caps = derive_effective_caps(&resolution.composed);
     ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&composed_effective_caps)
@@ -1354,33 +2679,6 @@ async fn prepare_managed_launch_authority(
             capsule.effective_caps.iter().map(String::as_str).collect();
         effective_caps.retain(|capability| admitted_ceiling.contains(capability.as_str()));
     }
-    let runtime_binary =
-        crate::dispatch::strip_binary_ref_prefix(&selected_runtime.yaml.binary_ref)
-            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
-    let executor_ref = format!("native:{runtime_binary}");
-    let verified_protocol =
-        crate::dispatch::require_callback_runtime_protocol(engine, &selected_runtime, "managed")
-            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
-    if selected_runtime.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
-        || verified_protocol.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
-    {
-        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-            "managed runtime and protocol artifact identity requires installed TrustedBundle provenance"
-        )));
-    }
-    let executor_cache_root = params
-        .state
-        .config
-        .app_root
-        .join(ryeos_engine::AI_DIR)
-        .join("state");
-    let materialized_executor = materialize_native_executor(
-        &bundle_roots,
-        &executor_ref,
-        &executor_cache_root,
-        &engine.node_trust_store,
-        ryeos_engine::resolution::TrustClass::TrustedBundle,
-    )?;
     let admitted_artifact_identity =
         ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
             runtime_ref: selected_runtime.canonical_ref.to_string(),
@@ -1601,6 +2899,7 @@ async fn prepare_managed_launch_authority(
         is_resume,
         launch_metadata,
         pending_project_snapshot,
+        augmentation_audits,
     })
 }
 
@@ -1686,7 +2985,29 @@ pub async fn build_and_launch(
         .pre_minted_thread_id
         .map(str::to_owned)
         .unwrap_or_else(ryeos_app::thread_lifecycle::new_thread_id);
+    if let Some(timings) = params.launch_timings.as_ref() {
+        timings.bind_thread_id(&thread_id);
+        timings.set_launch_dimensions(&params.resolved.resolved_item.kind, "managed_runtime");
+    }
+    if params.pre_minted_thread_id.is_some() {
+        params
+            .state
+            .state_store
+            .ensure_launch_planning_active(&thread_id)
+            .map_err(|error| {
+                map_launch_planning_check_error(error, &thread_id, "authoritative planning")
+            })?;
+    }
     let mut authority = prepare_managed_launch_authority(&params, &thread_id, None).await?;
+    if params.pre_minted_thread_id.is_some() {
+        params
+            .state
+            .state_store
+            .ensure_launch_planning_active(&thread_id)
+            .map_err(|error| {
+                map_launch_planning_check_error(error, &thread_id, "irreversible thread handoff")
+            })?;
+    }
     let sealed_request =
         ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_with_resolution(
             params.resolved,
@@ -1702,10 +3023,15 @@ pub async fn build_and_launch(
         params.resolved,
         &authority.resolution,
         &authority.prepared_launch,
+        &authority.augmentation_audits,
     )?;
     // Reserve the pre-minted ID before publishing the row. The reservation is
     // moved through the whole launch and drops automatically if creation or
     // preparation fails.
+    let row_publication_timer = params
+        .launch_timings
+        .as_ref()
+        .map(|timings| timings.nested("background_dispatch", "thread_row_publication"));
     let _launch_claim = ThreadLaunchClaim::acquire_fresh(params.state, &thread_id)
         .map_err(BuildAndLaunchError::Internal)?;
     let thread = match params.previous_thread_id {
@@ -1719,7 +3045,14 @@ pub async fn build_and_launch(
                 Some("chained_resume"),
                 initial_events,
                 authority.launch_metadata.as_ref(),
-            )?,
+            )
+            .map_err(|error| {
+                map_launch_planning_check_error(
+                    error,
+                    &thread_id,
+                    "authoritative thread publication",
+                )
+            })?,
         None => params
             .state
             .threads
@@ -1738,8 +3071,25 @@ pub async fn build_and_launch(
                     })?,
                 initial_events,
                 authority.launch_metadata.as_ref(),
-            )?,
+            )
+            .map_err(|error| {
+                map_launch_planning_check_error(
+                    error,
+                    &thread_id,
+                    "authoritative thread publication",
+                )
+            })?,
     };
+    drop(row_publication_timer);
+    if let Some(timings) = params.launch_timings.as_ref() {
+        timings.record_nested_from_milestone(
+            "background_dispatch",
+            "runtime_prep_to_row_publication",
+            "runtime_prep_started",
+        );
+        timings
+            .record_top_level_from_milestone("background_dispatch", "background_dispatch_entered");
+    }
     drop(authority.pending_project_snapshot.take());
     run_claimed_thread_row_with_authority(
         params,
@@ -1748,6 +3098,27 @@ pub async fn build_and_launch(
         LaunchAuditDisposition::CommittedAtBirth,
     )
     .await
+}
+
+fn map_launch_planning_check_error(
+    error: anyhow::Error,
+    thread_id: &str,
+    stage: &'static str,
+) -> BuildAndLaunchError {
+    if error
+        .chain()
+        .any(|cause| cause.is::<ryeos_app::state_store::LaunchPlanningInactive>())
+    {
+        BuildAndLaunchError::LaunchCancelled {
+            thread_id: thread_id.to_string(),
+            stage,
+            detail: error.to_string(),
+        }
+    } else {
+        BuildAndLaunchError::Internal(
+            error.context(format!("read launch planning state during {stage}")),
+        )
+    }
 }
 
 /// Run an already-created `created` thread row to completion: resolve, spawn its
@@ -1874,6 +3245,7 @@ async fn run_claimed_thread_row_inner(
     let BuildAndLaunchParams {
         state,
         lifecycle_authority: _,
+        launch_timings,
         runtime_ref: _,
         acting_principal,
         resolved,
@@ -1900,6 +3272,7 @@ async fn run_claimed_thread_row_inner(
         is_resume,
         launch_metadata: _,
         pending_project_snapshot,
+        augmentation_audits,
     } = authority;
     let engine = provenance.request_engine();
     // Runtime-state root: the deliberate `state_root` override when one was
@@ -1970,9 +3343,9 @@ async fn run_claimed_thread_row_inner(
     }
 
     let engine_roots = engine.resolution_roots(Some(project_path.to_path_buf()));
-    let effective_parsers = engine
-        .effective_parser_dispatcher(Some(project_path))
-        .map_err(|e| anyhow::anyhow!("effective parser dispatcher: {e}"))?;
+    let effective_request_snapshot = engine
+        .effective_request_snapshot(Some(project_path))
+        .map_err(|e| anyhow::anyhow!("effective request snapshot: {e}"))?;
 
     // 2. Compute limits (root execution: depth = 0)
     let root_item_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(&resolved.item_ref)
@@ -1980,9 +3353,9 @@ async fn run_claimed_thread_row_inner(
     let execution_policy = ryeos_engine::execution_policy::ExecutionPolicyResolver::new(
         ryeos_engine::config_loading::ConfigLoadContext {
             roots: &engine_roots,
-            parsers: &effective_parsers,
+            parsers: &effective_request_snapshot.parser_dispatcher,
             kinds: &engine.kinds,
-            trust_store: &engine.trust_store,
+            trust_store: &effective_request_snapshot.trust_store,
         },
     )
     .resolve_for_item(&root_item_ref)
@@ -2177,6 +3550,13 @@ async fn run_claimed_thread_row_inner(
     // was the only entity gating its own callback dispatches.
     // Run-scoped token: must outlive the run's hard timeout + finalization, so
     // a `duration > 3600s` run does not lose callback authority mid-run.
+    if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
+        return Err(BuildAndLaunchError::LaunchCancelled {
+            thread_id: thread_id.clone(),
+            stage: "callback capability mint",
+            detail: "durable stop intent won after authoritative thread creation".to_string(),
+        });
+    }
     let ttl = launch_token_ttl(Some(hard_limits.duration_seconds));
     let child_provenance = provenance.clone_for_borrowed_child();
     // The token's project identity is the run's state/callback anchor: the
@@ -2230,7 +3610,7 @@ async fn run_claimed_thread_row_inner(
         launching_kind_schema,
         &engine.kinds,
         &engine_roots,
-        &effective_parsers,
+        &effective_request_snapshot.parser_dispatcher,
     )
     .map_err(|e| anyhow::anyhow!("inventory build failed: {e}"))?;
 
@@ -2244,7 +3624,12 @@ async fn run_claimed_thread_row_inner(
     match launch_audit {
         LaunchAuditDisposition::CommittedAtBirth => {}
         LaunchAuditDisposition::AppendForAttempt => {
-            let launch_audit = launch_audit_records(resolved, &resolution, &prepared_launch)?;
+            let launch_audit = launch_audit_records(
+                resolved,
+                &resolution,
+                &prepared_launch,
+                &augmentation_audits,
+            )?;
             state
                 .threads
                 .append_launch_attempt_audit(&chain_root_id, &thread_id, &launch_audit)
@@ -2328,15 +3713,15 @@ async fn run_claimed_thread_row_inner(
     // blocking process and pipe operations. Keep their owner on Tokio's
     // blocking pool so async workers remain free to service runtime UDS
     // callbacks.
+    let isolation_verified_command = materialized_binary.verified_command;
     let materialized_binary_path = materialized_binary.path;
     let binary_path = materialized_binary_path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("materialized runtime path is not valid UTF-8"))?
         .to_owned();
-    let isolation_verified_command = ryeos_engine::isolation::IsolationVerifiedCode {
-        source_path: materialized_binary_path,
-        content_hash: materialized_binary.content_hash,
-    };
+    // The ambient cache pathname is argv/provenance only. The exact no-follow
+    // descriptor and its verified stat identity cross the isolation boundary
+    // in `isolation_verified_command`.
     let project_owned = project_path.to_path_buf();
     let acting_principal_owned = acting_principal.to_string();
     let callback_owned = envelope.callback.clone();
@@ -2354,6 +3739,13 @@ async fn run_claimed_thread_row_inner(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
+        return Err(BuildAndLaunchError::LaunchCancelled {
+            thread_id: thread_id.clone(),
+            stage: "thread credential mint",
+            detail: "durable stop intent won after authoritative thread creation".to_string(),
+        });
+    }
     let thread_auth = descriptor_clone
         .env_injections
         .iter()
@@ -2410,7 +3802,29 @@ async fn run_claimed_thread_row_inner(
     let state_for_spawn = (*state).clone();
     let launch_owner_owned = launch_owner.to_string();
 
+    if super::process_attachment::finalize_requested_stop_if_present(state, &thread_id)? {
+        return Err(BuildAndLaunchError::LaunchCancelled {
+            thread_id: thread_id.clone(),
+            stage: "isolation and runtime spawn",
+            detail: "durable stop intent won after authoritative thread creation".to_string(),
+        });
+    }
+    let spawn_handoff_timer = launch_timings
+        .as_ref()
+        .map(|timings| timings.top_level("spawn_scheduled_to_handoff"));
+    let spawn_worker_total_timer = launch_timings
+        .as_ref()
+        .map(|timings| timings.top_level("runtime_spawn_worker"));
+    let spawn_queue_timer = launch_timings
+        .as_ref()
+        .map(|timings| timings.nested("runtime_spawn_worker", "spawn_blocking_queue_wait"));
+    let spawn_work_timings = launch_timings.clone();
     let spawn_handle = tokio::task::spawn_blocking(move || {
+        let spawn_worker_total_timer = spawn_worker_total_timer;
+        drop(spawn_queue_timer);
+        let spawn_work_timer = spawn_work_timings
+            .as_ref()
+            .map(|timings| timings.nested("runtime_spawn_worker", "spawn_blocking_work"));
         if let Err(e) = super::thread_meta::write_thread_meta(
             &state_root_for_spawn,
             &thread_id_owned,
@@ -2423,7 +3837,7 @@ async fn run_claimed_thread_row_inner(
                 "failed to update thread.json audit record to running"
             );
         }
-        spawn_runtime(SpawnRuntimeParams {
+        let result = spawn_runtime(SpawnRuntimeParams {
             state: &state_for_spawn,
             descriptor: &descriptor_clone,
             item_ref: &runtime_item_ref,
@@ -2450,7 +3864,13 @@ async fn run_claimed_thread_row_inner(
             // predecessor's copied-forward checkpoint; a fresh launch writes a
             // cold one.
             is_resume,
-        })
+        });
+        drop(spawn_work_timer);
+        drop(spawn_worker_total_timer);
+        if let Some(timings) = spawn_work_timings.as_ref() {
+            timings.emit("runtime_spawn_completed");
+        }
+        result
     });
 
     // The row and complete launch audit are durable, and the exact in-memory
@@ -2459,6 +3879,11 @@ async fn run_claimed_thread_row_inner(
     // actual child start may race with network delivery by design.
     if let Some(handoff) = launch_handoff {
         handoff.publish(thread_id.clone());
+    }
+    drop(spawn_handoff_timer);
+    if let Some(timings) = launch_timings.as_ref() {
+        timings.mark("runtime_handoff_published");
+        timings.emit("runtime_handoff_published");
     }
 
     let spawned_runtime = spawn_handle
@@ -2793,6 +4218,7 @@ impl PreparedOperatorSuccessorLaunch {
             &self.prepared.execution.resolved,
             &self.prepared.authority.resolution,
             &self.prepared.authority.prepared_launch,
+            &self.prepared.authority.augmentation_audits,
         )
     }
 
@@ -2849,6 +4275,7 @@ impl PreparedFollowChildLaunch {
             &self.execution.resolved,
             &self.authority.resolution,
             &self.authority.prepared_launch,
+            &self.authority.augmentation_audits,
         )
     }
 
@@ -2990,6 +4417,7 @@ async fn prepare_follow_child_launch_inner(
         &BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
+            launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &execution.acting_principal,
             resolved: &execution.resolved,
@@ -3057,6 +4485,7 @@ impl PreparedMachineSuccessorLaunch {
             &self.prepared.execution.resolved,
             &self.prepared.authority.resolution,
             &self.prepared.authority.prepared_launch,
+            &self.prepared.authority.augmentation_audits,
         )
     }
 
@@ -3105,6 +4534,7 @@ async fn prepare_successor_launch(
         &BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
+            launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &execution.acting_principal,
             resolved: &execution.resolved,
@@ -3652,6 +5082,7 @@ async fn launch_claimed_successor(
     let launch_params = BuildAndLaunchParams {
         state,
         lifecycle_authority: resume.lifecycle_authority,
+        launch_timings: None,
         // Propagate the predecessor's runtime identity so this successor
         // re-seeds the same runtime for the NEXT continuation turn.
         runtime_ref: resume.runtime_ref.as_deref(),
@@ -3724,6 +5155,7 @@ async fn launch_claimed_native_resume(
         BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
+            launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &params.acting_principal,
             resolved: &params.resolved,
@@ -3947,6 +5379,7 @@ async fn launch_admitted_root_with_claim(
         BuildAndLaunchParams {
             state: &state,
             lifecycle_authority: resume.lifecycle_authority,
+            launch_timings: None,
             runtime_ref: resume.runtime_ref.as_deref(),
             acting_principal: &execution.acting_principal,
             resolved: &execution.resolved,
@@ -4163,6 +5596,7 @@ async fn launch_claimed_follow_child(
     let launch_params = BuildAndLaunchParams {
         state,
         lifecycle_authority: identity.lifecycle_authority,
+        launch_timings: None,
         runtime_ref: identity.runtime_ref.as_deref(),
         acting_principal: &params.acting_principal,
         resolved: &params.resolved,
@@ -5447,8 +6881,8 @@ mod tests {
         let item_ref = format!("bin/{}/{bare_name}", host_triple());
         let item_source = serde_json::json!({
             "kind": "item_source",
-            "item_ref": item_ref,
-            "content_blob_hash": blob_hash,
+            "item_ref": item_ref.clone(),
+            "content_blob_hash": blob_hash.clone(),
             "integrity": format!("sha256:{blob_hash}"),
             "mode": 0o755,
             "signature_info": null,
@@ -5477,6 +6911,105 @@ mod tests {
         lillux::signature::compute_fingerprint(&signing_key.verifying_key())
     }
 
+    struct ExecutableMaterializerFixture {
+        fingerprint: String,
+        blob_hash: String,
+        blob_path: PathBuf,
+        bytes: Vec<u8>,
+    }
+
+    fn write_executable_materializer_fixture(
+        bundle_root: &Path,
+        bare_name: &str,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> ExecutableMaterializerFixture {
+        let bytes = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let ai_dir = bundle_root.join(ryeos_engine::AI_DIR);
+        let objects_root = ai_dir.join("objects");
+        let cas = lillux::cas::CasStore::new(objects_root.clone());
+        let blob_hash = cas.store_blob(&bytes).unwrap();
+        let item_ref = format!("bin/{}/{bare_name}", host_triple());
+        let item_source = serde_json::json!({
+            "kind": "item_source",
+            "item_ref": item_ref.clone(),
+            "content_blob_hash": blob_hash.clone(),
+            "integrity": format!("sha256:{blob_hash}"),
+            "mode": 0o755,
+            "signature_info": null,
+        });
+        let item_source_hash = cas.store_object(&item_source).unwrap();
+        let manifest = serde_json::json!({
+            "kind": "source_manifest",
+            "item_source_hashes": {
+                item_ref: item_source_hash,
+            },
+        });
+        let manifest_hash = cas.store_object(&manifest).unwrap();
+        let ref_path = ai_dir.join(BUNDLE_MANIFEST_REF);
+        std::fs::create_dir_all(ref_path.parent().unwrap()).unwrap();
+        let signed_ref = lillux::signature::sign_content(
+            &format!(
+                "{}\n{manifest_hash}\n",
+                ryeos_engine::executor_resolution::EXECUTOR_MANIFEST_REF_DOMAIN,
+            ),
+            signing_key,
+            "#",
+            None,
+        );
+        std::fs::write(ref_path, signed_ref).unwrap();
+        ExecutableMaterializerFixture {
+            fingerprint: lillux::signature::compute_fingerprint(&signing_key.verifying_key()),
+            blob_path: lillux::cas::shard_path(&objects_root, "blobs", &blob_hash, ""),
+            blob_hash,
+            bytes,
+        }
+    }
+
+    fn materializer_trust_store(
+        fixture: &ExecutableMaterializerFixture,
+        signing_key: &lillux::crypto::SigningKey,
+    ) -> ryeos_engine::trust::TrustStore {
+        ryeos_engine::trust::TrustStore::from_signers(vec![ryeos_engine::trust::TrustedSigner {
+            fingerprint: fixture.fingerprint.clone(),
+            verifying_key: signing_key.verifying_key(),
+            label: None,
+        }])
+    }
+
+    fn focused_test_generation_fingerprint(bundle_roots: &[PathBuf]) -> String {
+        let mut generation_identity = Vec::new();
+        for root in bundle_roots {
+            generation_identity.extend_from_slice(root.as_os_str().as_encoded_bytes());
+            generation_identity.push(0);
+        }
+        format!(
+            "focused-test-generation:{}",
+            lillux::cas::sha256_hex(&generation_identity)
+        )
+    }
+
+    fn materialize_test_executor(
+        bundle_roots: &[PathBuf],
+        executor_ref: &str,
+        cache_root: &Path,
+        trust_store: &ryeos_engine::trust::TrustStore,
+    ) -> Result<MaterializedExecutor, MaterializationError> {
+        let bundle_generation_fingerprint = focused_test_generation_fingerprint(bundle_roots);
+        let node_trust_fingerprint = trust_store.fingerprint();
+        materialize_native_executor_in_generation(
+            executor_ref,
+            NativeExecutorMaterializationContext {
+                bundle_roots,
+                cache_root,
+                trust_store,
+                root_trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+                bundle_generation_fingerprint: &bundle_generation_fingerprint,
+                node_trust_fingerprint: &node_trust_fingerprint,
+                launch_timings: None,
+            },
+        )
+    }
+
     #[test]
     fn materializer_rejects_duplicate_native_executor_instead_of_first_root_wins() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5493,18 +7026,466 @@ mod tests {
             },
         ]);
 
-        let error = materialize_native_executor(
+        let error = materialize_test_executor(
             &[first.clone(), second.clone()],
             "native:shared-executor",
             tmp.path(),
             &trust_store,
-            ryeos_engine::resolution::TrustClass::TrustedBundle,
         )
         .expect_err("root order must not select between duplicate executor identities");
         let message = error.to_string();
         assert!(message.contains("published by both"));
         assert!(message.contains(&first.display().to_string()));
         assert!(message.contains(&second.display().to_string()));
+    }
+
+    #[test]
+    fn materializer_repairs_corrupt_target_from_a_fully_verified_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[72u8; 32]);
+        let fixture = write_executable_materializer_fixture(&bundle, "repair-executor", &key);
+        let trust_store = materializer_trust_store(&fixture, &key);
+        let materialized = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:repair-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        std::fs::write(&materialized.path, b"corrupt materialized target").unwrap();
+
+        let repaired = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:repair-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+
+        assert_eq!(repaired.content_hash, fixture.blob_hash);
+        assert_eq!(std::fs::read(&repaired.path).unwrap(), fixture.bytes);
+        let executor_cache = cache_root.join("cache").join("executors");
+        assert!(!std::fs::read_dir(executor_cache).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".quarantine.")
+        }));
+    }
+
+    #[test]
+    fn verified_chain_cache_hit_skips_redundant_cas_blob_read_and_reuses_pinned_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[74u8; 32]);
+        let fixture = write_executable_materializer_fixture(&bundle, "cached-executor", &key);
+        let trust_store = materializer_trust_store(&fixture, &key);
+        let first = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:cached-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        std::fs::remove_file(&fixture.blob_path).unwrap();
+
+        let second = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:cached-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .expect("exact generation/trust/manifest identity may reuse the verified chain");
+
+        assert_eq!(first.path, second.path);
+        assert_eq!(std::fs::read(&second.path).unwrap(), fixture.bytes);
+    }
+
+    #[test]
+    fn same_granule_executor_identity_is_never_pinned() {
+        let capture_seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let capture_seconds = i64::try_from(capture_seconds).unwrap();
+        let identity = ExecutorFileIdentity {
+            device: 1,
+            inode: 2,
+            size: 3,
+            modified_seconds: capture_seconds,
+            modified_nanoseconds: 0,
+            changed_seconds: capture_seconds,
+            changed_nanoseconds: 0,
+            mode: libc::S_IFREG | 0o755,
+            file_type: libc::S_IFREG,
+        };
+        assert!(reusable_executor_stat_pin(identity, SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn stat_pin_fast_path_requires_current_opt_in_and_verify_hits_forces_full_verification() {
+        let enabled = OsStr::new("1");
+        let disabled = OsStr::new("0");
+        let noncanonical = OsStr::new("true");
+
+        assert!(!executor_stat_pin_fast_path_enabled_for(None, None));
+        assert!(!executor_stat_pin_fast_path_enabled_for(
+            Some(disabled),
+            None
+        ));
+        assert!(!executor_stat_pin_fast_path_enabled_for(
+            Some(noncanonical),
+            None
+        ));
+        assert!(executor_stat_pin_fast_path_enabled_for(Some(enabled), None));
+        assert!(!executor_stat_pin_fast_path_enabled_for(
+            Some(enabled),
+            Some(enabled)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enabled_stat_pin_skips_unchanged_hash_and_mismatch_falls_back_to_tamper_rejection() {
+        use std::io::Seek as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let cache_root = tmp.path().join("state");
+        let bare = "pin-branch-executor";
+        let key = lillux::crypto::SigningKey::from_bytes(&[78u8; 32]);
+        let fixture = write_executable_materializer_fixture(&bundle, bare, &key);
+        let trust_store = materializer_trust_store(&fixture, &key);
+        let materialized = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            &format!("native:{bare}"),
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+
+        let bundle_roots = std::slice::from_ref(&bundle);
+        let generation = focused_test_generation_fingerprint(bundle_roots);
+        let trust_fingerprint = trust_store.fingerprint();
+        let probe = manifest_ref_probe(
+            bundle_roots,
+            &generation,
+            &trust_fingerprint,
+            &format!("native:{bare}"),
+            &host_triple(),
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+        )
+        .unwrap();
+        let (verified, _) = verify_native_executor_chain(&probe, bare, &trust_store, None).unwrap();
+        let layout = open_executor_cache_layout(&cache_root, bare).unwrap();
+        let original_identity =
+            executor_file_identity(&std::fs::metadata(&materialized.path).unwrap());
+        let pin_state = executor_pin_state(&layout, &verified, bare).unwrap();
+        let seed_original_pin = || {
+            *pin_state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                ExecutorStatPinState::Pinned(ExecutorStatPin {
+                    identity: original_identity,
+                    capture_granule_seconds: original_identity.changed_seconds.saturating_add(1),
+                });
+        };
+
+        seed_original_pin();
+        let pinned =
+            match inspect_materialized_executor_with_pin_policy(&layout, &verified, bare, true) {
+                MaterializedArtifactInspection::Valid(opened) => opened,
+                MaterializedArtifactInspection::Missing => {
+                    panic!("materialized executor disappeared before pin inspection")
+                }
+                MaterializedArtifactInspection::Invalid(detail) => {
+                    panic!("unchanged pinned executor was rejected: {detail}")
+                }
+            };
+        let mut pinned_handle = pinned.handle.try_clone().unwrap();
+        assert_eq!(
+            pinned_handle.stream_position().unwrap(),
+            0,
+            "stat-pin hit must return before the full-file read"
+        );
+        drop(pinned_handle);
+        drop(pinned);
+
+        seed_original_pin();
+        let fully_verified =
+            match inspect_materialized_executor_with_pin_policy(&layout, &verified, bare, false) {
+                MaterializedArtifactInspection::Valid(opened) => opened,
+                MaterializedArtifactInspection::Missing => {
+                    panic!("materialized executor disappeared before full verification")
+                }
+                MaterializedArtifactInspection::Invalid(detail) => {
+                    panic!("valid executor failed full verification: {detail}")
+                }
+            };
+        let mut fully_verified_handle = fully_verified.handle.try_clone().unwrap();
+        assert_eq!(
+            fully_verified_handle.stream_position().unwrap(),
+            u64::try_from(fixture.bytes.len()).unwrap(),
+            "disabled pin policy must consume the complete file hash"
+        );
+        drop(fully_verified_handle);
+        drop(fully_verified);
+
+        seed_original_pin();
+        let mut corrupt = fixture.bytes.clone();
+        corrupt[0] ^= 0xff;
+        let replacement = materialized.path.with_extension("tampered");
+        std::fs::write(&replacement, &corrupt).unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&replacement, &materialized.path).unwrap();
+        let replacement_identity =
+            executor_file_identity(&std::fs::metadata(&materialized.path).unwrap());
+        assert_ne!(replacement_identity, original_identity);
+
+        match inspect_materialized_executor_with_pin_policy(&layout, &verified, bare, true) {
+            MaterializedArtifactInspection::Invalid(detail) => {
+                assert!(detail.contains("content-addressed check"));
+            }
+            MaterializedArtifactInspection::Missing => {
+                panic!("tampered replacement disappeared before inspection")
+            }
+            MaterializedArtifactInspection::Valid(_) => {
+                panic!("pin identity mismatch must fall back to hash and reject tampered bytes")
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_pin_registry_saturation_permanently_disables_all_fast_paths() {
+        let registry = ExecutorStatPinRegistry {
+            state: Mutex::new(ExecutorStatPinRegistryState::default()),
+        };
+        let key = |index: usize| ExecutorPinKey {
+            cache_root: PathBuf::from("/test/executor-cache"),
+            blob_hash: format!("{index:064x}"),
+            bare: format!("executor-{index}"),
+        };
+        let first = registry.entry(key(0)).unwrap();
+        for index in 1..EXECUTOR_STAT_PIN_MAX_ENTRIES {
+            assert!(registry.entry(key(index)).is_some());
+        }
+        assert!(registry.entry(key(EXECUTOR_STAT_PIN_MAX_ENTRIES)).is_none());
+        assert_eq!(
+            *first.lock().unwrap(),
+            ExecutorStatPinState::PermanentlyDisabled
+        );
+        assert!(registry.entry(key(0)).is_none());
+        assert!(registry
+            .entry(key(EXECUTOR_STAT_PIN_MAX_ENTRIES + 1))
+            .is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn weak_cache_directory_permissions_permanently_disable_entry_pin() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[77u8; 32]);
+        let fixture = write_executable_materializer_fixture(&bundle, "weak-cache-executor", &key);
+        let trust_store = materializer_trust_store(&fixture, &key);
+        let materialized = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:weak-cache-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        let blob_dir = materialized.path.parent().unwrap();
+        std::fs::set_permissions(blob_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        let repaired = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:weak-cache-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&repaired.path).unwrap(), fixture.bytes);
+        let layout = open_executor_cache_layout(&cache_root, "weak-cache-executor").unwrap();
+        let state = executor_stat_pin_registry()
+            .entry(ExecutorPinKey {
+                cache_root: layout.cache_root.clone(),
+                blob_hash: fixture.blob_hash,
+                bare: "weak-cache-executor".to_string(),
+            })
+            .unwrap();
+        assert_eq!(
+            *state.lock().unwrap(),
+            ExecutorStatPinState::PermanentlyDisabled
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn full_hash_detects_same_size_rewrite_with_restored_mtime() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::MetadataExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[75u8; 32]);
+        let fixture = write_executable_materializer_fixture(&bundle, "ctime-executor", &key);
+        let trust_store = materializer_trust_store(&fixture, &key);
+        let first = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:ctime-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let pinned = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:ctime-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        let before = std::fs::metadata(&pinned.path).unwrap();
+        let mut corrupt = fixture.bytes.clone();
+        corrupt[0] ^= 0xff;
+        std::fs::write(&pinned.path, &corrupt).unwrap();
+        let path = std::ffi::CString::new(pinned.path.as_os_str().as_bytes()).unwrap();
+        let times = [
+            libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT,
+            },
+            libc::timespec {
+                tv_sec: before.mtime(),
+                tv_nsec: before.mtime_nsec(),
+            },
+        ];
+        assert_eq!(
+            unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), 0) },
+            0
+        );
+        let tampered = std::fs::metadata(&pinned.path).unwrap();
+        assert_eq!(tampered.len(), before.len());
+        assert_eq!(tampered.mtime(), before.mtime());
+        assert_eq!(tampered.mtime_nsec(), before.mtime_nsec());
+        assert_ne!(
+            (tampered.ctime(), tampered.ctime_nsec()),
+            (before.ctime(), before.ctime_nsec())
+        );
+
+        let repaired = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:ctime-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&repaired.path).unwrap(), fixture.bytes);
+        assert_eq!(
+            first.verified_command.identity().content_hash,
+            repaired.verified_command.identity().content_hash
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn materialized_descriptor_survives_path_substitution_without_inode_rebinding() {
+        use std::io::{Read as _, Seek as _};
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[76u8; 32]);
+        let fixture = write_executable_materializer_fixture(&bundle, "descriptor-executor", &key);
+        let trust_store = materializer_trust_store(&fixture, &key);
+        let materialized = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:descriptor-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        let held_inode = materialized
+            .verified_command
+            .executable()
+            .metadata()
+            .unwrap()
+            .ino();
+        let displaced = materialized.path.with_extension("displaced");
+        std::fs::rename(&materialized.path, &displaced).unwrap();
+        std::fs::write(&materialized.path, vec![0u8; fixture.bytes.len()]).unwrap();
+        std::fs::set_permissions(&materialized.path, std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        assert_ne!(
+            std::fs::metadata(&materialized.path).unwrap().ino(),
+            held_inode
+        );
+
+        let mut exact = materialized
+            .verified_command
+            .executable()
+            .try_clone()
+            .unwrap();
+        exact.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut bytes = Vec::new();
+        exact.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, fixture.bytes);
+        assert_eq!(exact.metadata().unwrap().ino(), held_inode);
+    }
+
+    #[test]
+    fn materializer_quarantines_bad_target_when_full_chain_repair_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[73u8; 32]);
+        let fixture =
+            write_executable_materializer_fixture(&bundle, "failed-repair-executor", &key);
+        let trust_store = materializer_trust_store(&fixture, &key);
+        let materialized = materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:failed-repair-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .unwrap();
+        std::fs::write(&materialized.path, b"corrupt materialized target").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&fixture.blob_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        std::fs::write(&fixture.blob_path, b"corrupt CAS blob").unwrap();
+
+        materialize_test_executor(
+            std::slice::from_ref(&bundle),
+            "native:failed-repair-executor",
+            &cache_root,
+            &trust_store,
+        )
+        .expect_err("corrupt CAS bytes must prevent repair");
+
+        assert!(!materialized.path.exists());
+        let executor_cache = cache_root.join("cache").join("executors");
+        assert!(std::fs::read_dir(executor_cache).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".quarantine.")
+        }));
     }
 
     #[test]
@@ -5691,6 +7672,27 @@ mod tests {
                 expected_substr,
             );
         }
+    }
+
+    #[test]
+    fn planning_check_only_maps_the_typed_inactive_marker_to_cancellation() {
+        let cancelled = map_launch_planning_check_error(
+            ryeos_app::state_store::LaunchPlanningInactive.into(),
+            "T-internal",
+            "authoritative thread publication",
+        );
+        assert!(matches!(cancelled, BuildAndLaunchError::LaunchCancelled {
+            thread_id,
+            stage: "authoritative thread publication",
+            ..
+        } if thread_id == "T-internal"));
+
+        let internal = map_launch_planning_check_error(
+            anyhow::anyhow!("runtime database unavailable"),
+            "T-internal",
+            "authoritative thread publication",
+        );
+        assert!(matches!(internal, BuildAndLaunchError::Internal(_)));
     }
 
     #[test]

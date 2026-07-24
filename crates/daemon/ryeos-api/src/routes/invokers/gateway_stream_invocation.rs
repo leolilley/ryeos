@@ -14,7 +14,7 @@ use crate::routes::invocation::{
 };
 use crate::routes::response_modes::execute_mode::{
     preauthorize_execution_policy, resolve_execution_contract, resolve_project_context_off_thread,
-    ProjectRootNormalization,
+    ProjectRootNormalization, ResolveProjectContextRequest,
 };
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
@@ -71,43 +71,15 @@ pub(crate) struct LaunchRequest {
     pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
 }
 
-fn pre_spawn_stream_error(
-    keep_alive_secs: u64,
-    code: String,
-    message: String,
-) -> RouteInvocationResult {
-    let stream = async_stream::stream! {
-        yield Ok(error_envelope(&code, &message));
-    };
-
-    RouteInvocationResult::Stream(RouteEventStream {
-        events: Box::pin(stream),
-        keep_alive_secs,
-    })
-}
-
-fn pre_spawn_handoff_error(
-    keep_alive_secs: u64,
+fn handoff_error_envelope(
     failure: ryeos_executor::execution::launch::LaunchHandoffFailure,
-) -> RouteInvocationResult {
-    let stream = async_stream::stream! {
-        yield Ok(error_envelope_with(
-            &failure.code,
-            &failure.message,
-            Some(failure.body),
-        ));
-    };
-
-    RouteInvocationResult::Stream(RouteEventStream {
-        events: Box::pin(stream),
-        keep_alive_secs,
-    })
+) -> RouteStreamEnvelope {
+    error_envelope_with(&failure.code, &failure.message, Some(failure.body))
 }
 
-fn pre_spawn_dispatch_error(
-    keep_alive_secs: u64,
+fn dispatch_error_envelope(
     error: ryeos_executor::dispatch_error::DispatchError,
-) -> RouteInvocationResult {
+) -> RouteStreamEnvelope {
     let mut payload =
         ryeos_executor::structured_error::StructuredErrorPayload::from(&error).to_value();
     if let Some(map) = payload.as_object_mut() {
@@ -116,14 +88,93 @@ fn pre_spawn_dispatch_error(
     }
     let code = error.code().to_owned();
     let message = error.to_string();
+    error_envelope_with(&code, &message, Some(payload))
+}
+
+fn pre_spawn_dispatch_error(
+    keep_alive_secs: u64,
+    error: ryeos_executor::dispatch_error::DispatchError,
+) -> RouteInvocationResult {
+    let envelope = dispatch_error_envelope(error);
     let stream = async_stream::stream! {
-        yield Ok(error_envelope_with(&code, &message, Some(payload)));
+        yield Ok(envelope);
     };
     RouteInvocationResult::Stream(RouteEventStream {
         events: Box::pin(stream),
         keep_alive_secs,
     })
 }
+
+fn completed_launch_error_envelope(
+    result: Result<Result<(), crate::routes::launch::LaunchSpawnError>, tokio::task::JoinError>,
+) -> RouteStreamEnvelope {
+    match result {
+        Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {
+            dispatch_error_envelope(error)
+        }
+        Ok(Err(error)) => error_envelope(error.code(), &error.to_string()),
+        Ok(Ok(())) => error_envelope(
+            "launch_handoff_missing",
+            "launch completed without authoritative handoff",
+        ),
+        Err(error) => error_envelope("launch_task_failed", &error.to_string()),
+    }
+}
+
+fn execution_planning_envelope(launch_id: &str) -> RouteStreamEnvelope {
+    RouteStreamEnvelope::new(
+        "execution_planning",
+        serde_json::json!({"launch_id": launch_id}),
+    )
+}
+
+fn map_launch_planning_reservation_error(
+    error: ryeos_app::state_store::LaunchPlanningReservationError,
+) -> RouteDispatchError {
+    match error {
+        ryeos_app::state_store::LaunchPlanningReservationError::CapacityExceeded(_) => {
+            RouteDispatchError::ServiceUnavailable {
+                code: "launch_planning_capacity_exceeded".to_string(),
+                message: "launch planning capacity is temporarily unavailable".to_string(),
+            }
+        }
+        ryeos_app::state_store::LaunchPlanningReservationError::Internal(error) => {
+            RouteDispatchError::Internal(format!(
+                "persist stream launch planning admission: {error:#}"
+            ))
+        }
+    }
+}
+
+fn launch_handoff_identity_error(
+    expected_thread_id: &str,
+    handed_off_thread_id: &str,
+) -> Option<RouteStreamEnvelope> {
+    (expected_thread_id != handed_off_thread_id).then(|| {
+        error_envelope(
+            "launch_handoff_identity_mismatch",
+            "authoritative handoff returned a different thread identity",
+        )
+    })
+}
+
+async fn await_launch_handoff(
+    launch_handle: &mut tokio::task::JoinHandle<
+        Result<(), crate::routes::launch::LaunchSpawnError>,
+    >,
+    ready: tokio::sync::oneshot::Receiver<ryeos_executor::execution::launch::LaunchHandoffResult>,
+) -> Result<String, RouteStreamEnvelope> {
+    tokio::select! {
+        biased;
+        readiness = ready => match readiness {
+            Ok(Ok(ready_thread_id)) => Ok(ready_thread_id),
+            Ok(Err(failure)) => Err(handoff_error_envelope(failure)),
+            Err(_) => Err(completed_launch_error_envelope((&mut *launch_handle).await)),
+        },
+        result = &mut *launch_handle => Err(completed_launch_error_envelope(result)),
+    }
+}
+
 static GATEWAY_CONTRACT: RouteInvocationContract = RouteInvocationContract {
     output: RouteInvocationOutput::Stream,
     principal: PrincipalPolicy::Optional,
@@ -168,9 +219,14 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                 "/execute/stream requires explicit live_direct project policy".to_string(),
             ));
         }
-        if let Err(error) =
-            ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings)
-        {
+        let ref_binding_validation_timer = ctx
+            .launch_timings
+            .as_ref()
+            .map(|timings| timings.top_level("route_ref_binding_validation"));
+        let ref_binding_validation =
+            ryeos_executor::execution::launch_preparation::validate_ref_bindings(&req.ref_bindings);
+        drop(ref_binding_validation_timer);
+        if let Err(error) = ref_binding_validation {
             return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
         }
         if req.validate_only {
@@ -214,6 +270,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                         required_cap
                     ))
                 })?;
+            let ref_binding_authorization_timer = ctx
+                .launch_timings
+                .as_ref()
+                .map(|timings| timings.top_level("route_ref_binding_authorization"));
             for (name, bound_ref) in &req.ref_bindings {
                 let canonical = ryeos_engine::canonical_ref::CanonicalRef::parse(bound_ref)
                     .map_err(|error| {
@@ -236,6 +296,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                         ))
                     })?;
             }
+            drop(ref_binding_authorization_timer);
         }
 
         let usage_subject = req.usage_subject.clone();
@@ -324,18 +385,33 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
 
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
+        if let Some(timings) = ctx.launch_timings.as_ref() {
+            timings.set_launch_dimensions(item_ref.kind(), "gateway_stream");
+            timings.bind_thread_id(&thread_id);
+        }
         let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
-        let mut project_ctx = resolve_project_context_off_thread(
-            ctx.state.clone(),
-            project_source.clone(),
-            project_path.as_path().to_path_buf(),
-            principal_id.clone(),
-            format!("stream-{thread_id}"),
-            ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
-            ProjectRootNormalization::CanonicalizeLive,
-        )
-        .await
-        .map_err(|error| {
+        let project_context_timer = ctx
+            .launch_timings
+            .as_ref()
+            .map(|timings| timings.top_level("project_context_resolution"));
+        let project_context_result =
+            resolve_project_context_off_thread(ResolveProjectContextRequest {
+                state: ctx.state.clone(),
+                source: project_source.clone(),
+                project_path: project_path.as_path().to_path_buf(),
+                principal_id: principal_id.clone(),
+                checkout_id: format!("stream-{thread_id}"),
+                pinned_realization:
+                    ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+                normalization: ProjectRootNormalization::CanonicalizeLive,
+                launch_timings: ctx.launch_timings.clone(),
+            })
+            .await;
+        drop(project_context_timer);
+        let mut project_ctx = project_context_result.map_err(|error| {
+            if let Some(timings) = ctx.launch_timings.as_ref() {
+                timings.emit("gateway_project_context_failed");
+            }
             RouteDispatchError::BadRequest(format!("resolve stream project: {error}"))
         })?;
         let resolved_contract = resolve_execution_contract(
@@ -349,27 +425,43 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             &ctx.state,
         )
         .map_err(|error| {
+            if let Some(timings) = ctx.launch_timings.as_ref() {
+                timings.emit("gateway_execution_contract_failed");
+            }
             RouteDispatchError::BadRequest(format!("resolve stream execution authority: {error}"))
         })?;
 
         // Resolve the actual persisted root (including wrapper targets), verify
         // it, and capture its policy before exposing an id to the stream.
-        let preflight = crate::routes::launch::preflight_dispatch_launch(
-            &ctx.state,
-            &item_ref,
-            &project_ctx,
-            &req.parameters,
-            &req.ref_bindings,
-            &principal_id,
-            &principal_scopes,
-            &execution_origin_site_id,
-            req.call.clone(),
-            &req.launch_mode,
-            req.validate_only,
-            usage_subject.as_ref(),
-            usage_subject_asserted_by.as_deref(),
+        let preflight_timer = ctx
+            .launch_timings
+            .as_ref()
+            .map(|timings| timings.top_level("preflight_admission"));
+        let preflight_result = crate::routes::launch::preflight_dispatch_launch_off_thread(
+            crate::routes::launch::OwnedDispatchPreflight {
+                state: ctx.state.clone(),
+                item_ref: item_ref.clone(),
+                project_path: project_ctx.effective_path.clone(),
+                request_engine: project_ctx.request_engine.clone(),
+                parameters: req.parameters.clone(),
+                ref_bindings: req.ref_bindings.clone(),
+                principal_id: principal_id.clone(),
+                principal_scopes: principal_scopes.clone(),
+                origin_site_id: execution_origin_site_id.clone(),
+                call: req.call.clone(),
+                launch_mode: req.launch_mode.clone(),
+                validate_only: req.validate_only,
+                usage_subject: usage_subject.clone(),
+                usage_subject_asserted_by: usage_subject_asserted_by.clone(),
+                launch_timings: ctx.launch_timings.clone(),
+            },
         )
-        .map_err(|error| {
+        .await;
+        drop(preflight_timer);
+        let preflight = preflight_result.map_err(|error| {
+            if let Some(timings) = ctx.launch_timings.as_ref() {
+                timings.emit("gateway_preflight_failed");
+            }
             RouteDispatchError::BadRequest(format!("stream root launch admission failed: {error}"))
         })?;
         if !preflight.class.persists_pre_minted_root() {
@@ -400,6 +492,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         options.usage_subject = usage_subject;
         options.usage_subject_asserted_by = usage_subject_asserted_by;
         options.call = req.call;
+        options.launch_timings = ctx.launch_timings.clone();
         let request_scoped = resolved_contract.lifecycle_authority.ownership
             == ryeos_state::objects::ExecutionOwnershipAuthority::RequestScoped;
         options = options.retain_captured_generation(project_ctx.take_captured_generation());
@@ -418,6 +511,28 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         // (moved into the stream below) reclaims the sender at stream end.
         let sub = ryeos_app::event_stream::HubSubscription::new(hub, &thread_id);
 
+        // Commit the owner-bound cancellation handle only once every fallible
+        // launch-assembly step has succeeded, and immediately before task
+        // spawn. From this point, the task-exit guard settles every pre-bind
+        // failure/abort/unwind path.
+        let planning_commit_timer = ctx
+            .launch_timings
+            .as_ref()
+            .map(|timings| timings.top_level("launch_planning_commit"));
+        let launch_id = ctx
+            .state
+            .state_store
+            .reserve_launch_planning(&thread_id, &principal_id)
+            .map_err(|error| {
+                if let Some(timings) = ctx.launch_timings.as_ref() {
+                    timings.emit("gateway_planning_commit_failed");
+                }
+                map_launch_planning_reservation_error(error)
+            })?;
+        drop(planning_commit_timer);
+        if let Some(timings) = ctx.launch_timings.as_ref() {
+            timings.mark("launch_planning_committed");
+        }
         let launch_provenance = resolved_contract.provenance;
         let (mut launch_handle, ready) = crate::routes::launch::spawn_dispatch_launch_with_handoff(
             &ctx.state,
@@ -434,86 +549,67 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         } else {
             None
         });
-        let ready_thread_id = tokio::select! {
-            biased;
-            readiness = ready => match readiness {
-                Ok(Ok(ready_thread_id)) => ready_thread_id,
-                Ok(Err(failure)) => {
-                    return Ok(pre_spawn_handoff_error(self.keep_alive_secs, failure));
-                }
-                Err(_) => match launch_handle.await {
-                    Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {
-                        return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
-                    }
-                    Ok(Err(error)) => {
-                        return Ok(pre_spawn_stream_error(
-                            self.keep_alive_secs,
-                            error.code().to_string(),
-                            error.to_string(),
-                        ));
-                    }
-                    Ok(Ok(())) => {
-                        return Ok(pre_spawn_stream_error(
-                            self.keep_alive_secs,
-                            "launch_handoff_missing".to_string(),
-                            "launch completed without authoritative handoff".to_string(),
-                        ));
-                    }
-                    Err(error) => {
-                        return Ok(pre_spawn_stream_error(
-                            self.keep_alive_secs,
-                            "launch_task_failed".to_string(),
-                            error.to_string(),
-                        ));
-                    }
-                },
-            },
-            result = &mut launch_handle => match result {
-                Ok(Err(crate::routes::launch::LaunchSpawnError::Dispatch(error))) => {
-                    return Ok(pre_spawn_dispatch_error(self.keep_alive_secs, error));
-                }
-                Ok(Err(error)) => {
-                    return Ok(pre_spawn_stream_error(
-                        self.keep_alive_secs,
-                        error.code().to_string(),
-                        error.to_string(),
-                    ));
-                }
-                Ok(Ok(())) => {
-                    return Ok(pre_spawn_stream_error(
-                        self.keep_alive_secs,
-                        "launch_handoff_missing".to_string(),
-                        "launch completed without authoritative handoff".to_string(),
-                    ));
-                }
-                Err(error) => {
-                    return Ok(pre_spawn_stream_error(
-                        self.keep_alive_secs,
-                        "launch_task_failed".to_string(),
-                        error.to_string(),
-                    ));
-                }
-            },
-        };
-        if ready_thread_id != thread_id {
-            return Ok(pre_spawn_stream_error(
-                self.keep_alive_secs,
-                "launch_handoff_identity_mismatch".to_string(),
-                "authoritative handoff returned a different thread identity".to_string(),
-            ));
-        }
 
         let events_svc = ctx.state.events.clone();
         let state_store_clone = ctx.state.state_store.clone();
         let thread_id_for_stream = thread_id.clone();
         let keep_alive_secs = self.keep_alive_secs;
+        let launch_timings = ctx.launch_timings.clone();
 
         let stream = async_stream::stream! {
-            let _guard = span.enter();
+            // Keep the span alive for the stream lifetime without entering it
+            // across awaits. An entered tracing guard is thread-local and can
+            // otherwise attribute unrelated task work while this stream waits.
+            let _span_lifetime = span;
             let _launch_scope = launch_scope;
             // Move the subscription guard (which owns the receiver) into the
             // stream so the sender is reclaimed when the stream ends.
             let mut sub = sub;
+
+            if let Some(timings) = launch_timings.as_ref() {
+                timings.mark("execution_planning_yielded");
+                timings.record_top_level_from_milestone(
+                    "planning_commit_to_execution_planning_yield",
+                    "launch_planning_committed",
+                );
+                timings.emit("execution_planning_yielded");
+            }
+            yield Ok(execution_planning_envelope(&launch_id));
+
+            let ready_thread_id = match await_launch_handoff(&mut launch_handle, ready).await {
+                Ok(ready_thread_id) => {
+                    if let Some(timings) = launch_timings.as_ref() {
+                        timings.mark("launch_handoff_observed");
+                    }
+                    ready_thread_id
+                }
+                Err(envelope) => {
+                    if let Some(timings) = launch_timings.as_ref() {
+                        timings.emit("gateway_stream_launch_failed");
+                    }
+                    yield Ok(envelope);
+                    return;
+                }
+            };
+            if let Some(envelope) =
+                launch_handoff_identity_error(&thread_id, &ready_thread_id)
+            {
+                if let Some(timings) = launch_timings.as_ref() {
+                    timings.mark("launch_handoff_identity_mismatch");
+                    timings.emit("gateway_stream_launch_failed");
+                }
+                yield Ok(envelope);
+                return;
+            }
+
+            if let Some(timings) = launch_timings.as_ref() {
+                timings.mark("stream_started_yielded");
+                timings.record_top_level_from_milestone(
+                    "handoff_to_stream_started_yield",
+                    "launch_handoff_observed",
+                );
+                timings.emit("gateway_stream_started");
+            }
             yield Ok(
                 RouteStreamEnvelope::new(
                     "stream_started",
@@ -806,5 +902,226 @@ mod tests {
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);
         assert!(req.call.is_none());
+    }
+
+    #[test]
+    fn planning_envelope_exposes_only_the_opaque_launch_id() {
+        let envelope = execution_planning_envelope("L-opaque");
+        assert_eq!(envelope.event_type, "execution_planning");
+        assert_eq!(
+            envelope.payload,
+            serde_json::json!({"launch_id": "L-opaque"})
+        );
+        assert!(envelope.payload.get("thread_id").is_none());
+        assert!(envelope.payload.get("request_trace_id").is_none());
+    }
+
+    #[test]
+    fn planning_capacity_maps_to_typed_503_without_launch_or_owner_details() {
+        let error = map_launch_planning_reservation_error(
+            ryeos_app::state_store::LaunchPlanningReservationError::CapacityExceeded(
+                ryeos_app::state_store::LaunchPlanningCapacityExceeded,
+            ),
+        );
+        let RouteDispatchError::ServiceUnavailable { code, message } = error else {
+            panic!("planning capacity must remain a typed unavailable response");
+        };
+        assert_eq!(code, "launch_planning_capacity_exceeded");
+        assert_eq!(
+            message,
+            "launch planning capacity is temporarily unavailable"
+        );
+        assert!(!message.contains("L-"));
+        assert!(!message.contains("T-"));
+        assert!(!message.contains("fp:"));
+    }
+
+    #[test]
+    fn planning_reservation_storage_failure_remains_internal() {
+        let error = map_launch_planning_reservation_error(
+            ryeos_app::state_store::LaunchPlanningReservationError::Internal(anyhow::anyhow!(
+                "runtime database unavailable"
+            )),
+        );
+        assert!(matches!(error, RouteDispatchError::Internal(message)
+            if message.contains("runtime database unavailable")));
+    }
+
+    #[tokio::test]
+    async fn completed_launch_with_buffered_handoff_survives_delayed_first_poll() {
+        let (sender, ready) = tokio::sync::oneshot::channel();
+        sender.send(Ok("T-ready".to_string())).unwrap();
+        let mut launch_handle = tokio::spawn(async { Ok(()) });
+        while !launch_handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let result = await_launch_handoff(&mut launch_handle, ready).await;
+        assert!(matches!(result, Ok(thread_id) if thread_id == "T-ready"));
+    }
+
+    #[tokio::test]
+    async fn structured_handoff_failure_is_the_first_error_envelope() {
+        let (sender, ready) = tokio::sync::oneshot::channel();
+        sender
+            .send(Err(
+                ryeos_executor::execution::launch::LaunchHandoffFailure {
+                    code: "launch_preparation_failed".to_string(),
+                    message: "preparation failed".to_string(),
+                    status: 502,
+                    body: serde_json::json!({
+                        "code": "ignored_duplicate",
+                        "error": "ignored duplicate",
+                        "retryable": true,
+                        "classification": "environment",
+                    }),
+                },
+            ))
+            .unwrap();
+        let mut launch_handle = tokio::spawn(std::future::pending::<
+            Result<(), crate::routes::launch::LaunchSpawnError>,
+        >());
+
+        let result = await_launch_handoff(&mut launch_handle, ready).await;
+        let Err(envelope) = result else {
+            panic!("structured handoff failure must be reported");
+        };
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload["code"], "launch_preparation_failed");
+        assert_eq!(envelope.payload["error"], "preparation failed");
+        assert_eq!(envelope.payload["retryable"], true);
+        assert_eq!(envelope.payload["classification"], "environment");
+        launch_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn launch_task_panic_before_handoff_is_a_launch_task_error() {
+        let (sender, ready) = tokio::sync::oneshot::channel();
+        let mut launch_handle = tokio::spawn(async move {
+            let _sender = sender;
+            panic!("synthetic launch panic");
+            #[allow(unreachable_code)]
+            Ok::<(), crate::routes::launch::LaunchSpawnError>(())
+        });
+
+        let result = await_launch_handoff(&mut launch_handle, ready).await;
+        let Err(envelope) = result else {
+            panic!("launch task panic must be reported");
+        };
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload["code"], "launch_task_failed");
+        assert!(envelope.payload["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("synthetic launch panic")));
+    }
+
+    #[test]
+    fn handoff_identity_mismatch_has_a_stable_error_envelope() {
+        assert!(launch_handoff_identity_error("T-expected", "T-expected").is_none());
+        let envelope = launch_handoff_identity_error("T-expected", "T-other")
+            .expect("mismatched handoff must fail");
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload["code"], "launch_handoff_identity_mismatch");
+        assert_eq!(
+            envelope.payload["error"],
+            "authoritative handoff returned a different thread identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_handoff_reports_completed_launch_failure_as_first_error() {
+        let (sender, ready) = tokio::sync::oneshot::channel();
+        drop(sender);
+        let mut launch_handle = tokio::spawn(async {
+            Err(crate::routes::launch::LaunchSpawnError::InvalidRef {
+                ref_str: "bad ref".to_string(),
+                reason: "invalid".to_string(),
+            })
+        });
+
+        let result = await_launch_handoff(&mut launch_handle, ready).await;
+        let Err(envelope) = result else {
+            panic!("closed handoff must report launch failure");
+        };
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload["code"], "invalid_ref");
+        assert_eq!(
+            envelope.payload["error"],
+            "invalid item_ref 'bad ref': invalid"
+        );
+    }
+
+    #[test]
+    fn abort_registry_capacity_has_a_stable_stream_error_envelope() {
+        let envelope = completed_launch_error_envelope(Ok(Err(
+            crate::routes::launch::LaunchSpawnError::AbortRegistryCapacityExceeded,
+        )));
+
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(
+            envelope.payload["code"],
+            "launch_abort_registry_capacity_exceeded"
+        );
+        assert_eq!(
+            envelope.payload["error"],
+            "active launch task signal registry reached its bounded capacity"
+        );
+    }
+
+    #[test]
+    fn completed_dispatch_error_retains_its_structured_envelope() {
+        let envelope = completed_launch_error_envelope(Ok(Err(
+            crate::routes::launch::LaunchSpawnError::Dispatch(
+                ryeos_executor::dispatch_error::DispatchError::LaunchCancelled {
+                    stage: "authoritative thread publication",
+                },
+            ),
+        )));
+
+        assert_eq!(envelope.event_type, "stream_error");
+        assert_eq!(envelope.payload["code"], "launch_cancelled");
+        assert_eq!(
+            envelope.payload["error"],
+            "launch was cancelled before authoritative thread publication"
+        );
+        assert_eq!(envelope.payload["retryable"], false);
+        assert!(envelope.payload.get("thread_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn request_scoped_guard_aborts_but_daemon_owned_guard_does_not() {
+        let request_task = tokio::spawn(std::future::pending::<()>());
+        let request_guard = RequestScopedLaunchGuard(Some(request_task.abort_handle()));
+        drop(request_guard);
+        assert!(request_task.await.unwrap_err().is_cancelled());
+
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let daemon_task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            sender.send(42).unwrap();
+        });
+        let daemon_guard = RequestScopedLaunchGuard(None);
+        drop(daemon_guard);
+        drop(daemon_task);
+        assert_eq!(receiver.await.unwrap(), 42);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_unpolled_stream_drops_captured_request_launch_guard() {
+        let request_task = tokio::spawn(std::future::pending::<()>());
+        let launch_scope = RequestScopedLaunchGuard(Some(request_task.abort_handle()));
+        let stream = async_stream::stream! {
+            let _launch_scope = launch_scope;
+            yield 1u8;
+        };
+
+        // On a current-thread runtime the task and stream are both unpolled.
+        // Dropping the returned stream must still drop its captured ownership
+        // guard and abort request-scoped launch work before handoff.
+        drop(stream);
+        assert!(request_task
+            .await
+            .expect_err("stream drop must abort request-scoped launch")
+            .is_cancelled());
     }
 }

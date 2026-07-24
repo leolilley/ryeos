@@ -188,11 +188,14 @@ pub async fn spawn_detached_child(
                     {
                         snapshot_hash.to_string()
                     } else {
-                        let generation = crate::execution::run_bounded_project_capture(|| {
+                        let capture_state = state.clone();
+                        let capture_path = cap.provenance.original_project_path().to_path_buf();
+                        let capture_origin_site_id = parent.origin_site_id.clone();
+                        let generation = crate::execution::run_bounded_project_capture(move || {
                             crate::execution::capture_live_project_snapshot(
-                                state,
-                                cap.provenance.original_project_path(),
-                                &parent.origin_site_id,
+                                &capture_state,
+                                &capture_path,
+                                &capture_origin_site_id,
                                 "detached-pin-at-spawn",
                             )
                         })
@@ -227,12 +230,16 @@ pub async fn spawn_detached_child(
             }
         ) {
         if let Some(base) = launch_snapshot_hash.as_deref() {
-            let frozen = crate::execution::run_bounded_project_capture(|| {
+            let capture_state = state.clone();
+            let capture_parent_thread_id = parent_thread_id.clone();
+            let capture_path = cap.provenance.effective_path().to_path_buf();
+            let capture_base = base.to_owned();
+            let frozen = crate::execution::run_bounded_project_capture(move || {
                 crate::execution::seal_callback_workspace_generation(
-                    state,
-                    &parent_thread_id,
-                    cap.provenance.effective_path(),
-                    base,
+                    &capture_state,
+                    &capture_parent_thread_id,
+                    &capture_path,
+                    &capture_base,
                 )
             })
             .await?;
@@ -285,12 +292,16 @@ pub async fn spawn_detached_child(
     if let Some(snapshot_hash) = inherited_snapshot_hash.as_deref() {
         let realization =
             crate::execution::project_source::pinned_context_realization(&child_project_authority)?;
-        let child_context = crate::execution::run_bounded_project_capture(|| {
+        let capture_state = state.clone();
+        let capture_snapshot_hash = snapshot_hash.to_owned();
+        let capture_original_path = cap.provenance.original_project_path().to_path_buf();
+        let capture_child_thread_id = child_thread_id.clone();
+        let child_context = crate::execution::run_bounded_project_capture(move || {
             crate::execution::project_source::resolve_pinned_snapshot_context(
-                state,
-                snapshot_hash,
-                cap.provenance.original_project_path().to_path_buf(),
-                &child_thread_id,
+                &capture_state,
+                &capture_snapshot_hash,
+                capture_original_path,
+                &capture_child_thread_id,
                 realization,
             )
         })

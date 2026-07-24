@@ -450,7 +450,10 @@ fn isolation_plan_request(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
-            verified_command: spec.verified_command.as_ref().map(|command| command.code()),
+            verified_command: spec
+                .verified_command
+                .as_ref()
+                .map(|command| command.code() as &dyn crate::isolation::IsolationCommandAuthority),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -475,7 +478,10 @@ fn isolation_plan_request_awaiting_attachment(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
-            verified_command: spec.verified_command.as_ref().map(|command| command.code()),
+            verified_command: spec
+                .verified_command
+                .as_ref()
+                .map(|command| command.code() as &dyn crate::isolation::IsolationCommandAuthority),
             item_ref,
             thread_id: &ctx.thread_id,
         },

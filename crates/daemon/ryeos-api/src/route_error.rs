@@ -80,6 +80,11 @@ pub enum RouteDispatchError {
     /// override but is entitled to be told about. Maps to 409.
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A bounded daemon resource refused new work. The stable public code and
+    /// generic message deliberately disclose neither resource occupancy nor
+    /// whether any caller-selected identifier exists.
+    #[error("service unavailable: {message}")]
+    ServiceUnavailable { code: String, message: String },
     #[error("internal: {0}")]
     Internal(String),
     /// Structured error with a pre-built JSON body.
@@ -132,6 +137,14 @@ impl axum::response::IntoResponse for RouteDispatchError {
             Self::Conflict(msg) => (
                 StatusCode::CONFLICT,
                 axum::Json(serde_json::json!({ "error": msg })),
+            )
+                .into_response(),
+            Self::ServiceUnavailable { code, message } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({
+                    "error": message,
+                    "error_code": code,
+                })),
             )
                 .into_response(),
             Self::Internal(msg) => (
@@ -191,5 +204,27 @@ mod tests {
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(actual, json!({ "error": msg }));
+    }
+
+    #[tokio::test]
+    async fn typed_service_unavailable_maps_to_503_without_resource_details() {
+        let response = RouteDispatchError::ServiceUnavailable {
+            code: "launch_planning_capacity_exceeded".to_string(),
+            message: "launch planning capacity is temporarily unavailable".to_string(),
+        }
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let actual: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            actual,
+            json!({
+                "error": "launch planning capacity is temporarily unavailable",
+                "error_code": "launch_planning_capacity_exceeded",
+            })
+        );
+        assert!(actual.get("launch_id").is_none());
+        assert!(actual.get("requested_by").is_none());
+        assert!(actual.get("pending_rows").is_none());
     }
 }

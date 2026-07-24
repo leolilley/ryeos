@@ -205,6 +205,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             project_path: &project_ctx.effective_path,
             provenance,
             lifecycle_authority: resolved_authority.lifecycle,
+            launch_timings: None,
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: None,
             usage_subject: None,

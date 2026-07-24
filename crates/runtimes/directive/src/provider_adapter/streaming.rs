@@ -135,16 +135,19 @@ pub enum ProviderStreamError {
     /// protocol error after content started arriving.
     /// `live_output_events_emitted` counts acknowledged live/ephemeral
     /// `cognition_out` publications for this attempt.
-    MidStream {
-        live_output_events_emitted: usize,
-        accepted_bytes: u64,
-        accepted_output_events: usize,
-        usage: Option<TokenUsage>,
-        generation_header_id: Option<String>,
-        response_id: Option<String>,
-        requested_output_tokens: Option<u64>,
-        detail: String,
-    },
+    MidStream(Box<ProviderMidStreamError>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderMidStreamError {
+    pub live_output_events_emitted: usize,
+    pub accepted_bytes: u64,
+    pub accepted_output_events: usize,
+    pub usage: Option<TokenUsage>,
+    pub generation_header_id: Option<String>,
+    pub response_id: Option<String>,
+    pub requested_output_tokens: Option<u64>,
+    pub detail: String,
 }
 
 impl std::fmt::Display for ProviderStreamError {
@@ -152,8 +155,8 @@ impl std::fmt::Display for ProviderStreamError {
         match self {
             ProviderStreamError::Status { detail, .. }
             | ProviderStreamError::Timeout { detail }
-            | ProviderStreamError::Send { detail, .. }
-            | ProviderStreamError::MidStream { detail, .. } => f.write_str(detail),
+            | ProviderStreamError::Send { detail, .. } => f.write_str(detail),
+            ProviderStreamError::MidStream(error) => f.write_str(&error.detail),
         }
     }
 }
@@ -398,6 +401,9 @@ pub fn parse_sse_events_with_state(
     tool_call_state: &mut HashMap<String, String>,
 ) -> Vec<StreamEvent> {
     let raw_events = split_sse_events(data);
+    if !raw_events.is_empty() {
+        crate::startup_timing::mark_first_provider_event();
+    }
     let mut events = Vec::new();
 
     for (event_type, payload) in raw_events {
@@ -471,16 +477,28 @@ fn split_sse_events(data: &str) -> Vec<(String, String)> {
     events
 }
 
-fn provider_reported_error(
-    block: &str,
-    config: Option<&crate::directive::StreamErrorConfig>,
+struct ProviderReportedErrorContext<'a> {
     usage: Option<TokenUsage>,
     generation_header_id: Option<String>,
     response_id: Option<String>,
-    output_meter: &StreamOutputMeter,
+    output_meter: &'a StreamOutputMeter,
     live_output_events_emitted: usize,
     requested_output_tokens: Option<u64>,
+}
+
+fn provider_reported_error(
+    block: &str,
+    config: Option<&crate::directive::StreamErrorConfig>,
+    context: ProviderReportedErrorContext<'_>,
 ) -> Result<Option<ProviderReportedStreamError>> {
+    let ProviderReportedErrorContext {
+        usage,
+        generation_header_id,
+        response_id,
+        output_meter,
+        live_output_events_emitted,
+        requested_output_tokens,
+    } = context;
     let Some(config) = config else {
         return Ok(None);
     };
@@ -1142,6 +1160,8 @@ pub struct StreamingCallInput<'a> {
     pub tools: &'a [ToolSchema],
     pub callback: &'a CallbackClient,
     pub turn: u32,
+    /// One-based attempt number within this turn.
+    pub attempt: u32,
     pub sampling: Option<&'a SamplingConfig>,
     /// Optional cancellation flag (SIGTERM). When set mid-stream, the loop
     /// breaks and the call returns [`StreamOutcome::Cancelled`].
@@ -1155,9 +1175,30 @@ pub struct StreamingCallInput<'a> {
 #[tracing::instrument(
     name = "provider:request_streaming",
     skip(input),
-    fields(adapter_type = "stream", model = %input.model, turn = input.turn)
+    fields(
+        adapter_type = "stream",
+        model = %input.model,
+        turn = input.turn,
+        attempt = input.attempt,
+    )
 )]
 pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
+    let call_id =
+        crate::startup_timing::begin_provider_call(input.provider_id, input.turn, input.attempt);
+    let result =
+        crate::startup_timing::scope_provider_call(call_id, call_provider_streaming_inner(input))
+            .await;
+    let completion = match &result {
+        Ok(StreamOutcome::Completed { .. }) => "completed",
+        Ok(StreamOutcome::Interrupted { .. }) => "interrupted",
+        Ok(StreamOutcome::Cancelled { .. }) => "cancelled",
+        Err(_) => "error",
+    };
+    crate::startup_timing::finish_provider_call(call_id, completion);
+    result
+}
+
+async fn call_provider_streaming_inner(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
     let StreamingCallInput {
         client,
         provider,
@@ -1170,6 +1211,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         tools,
         callback,
         turn,
+        attempt: _,
         sampling,
         cancel_flag: _,    // checked inside the stream loop
         interrupt_flag: _, // checked inside the stream loop
@@ -1282,10 +1324,18 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         });
     }
 
-    let send = req
-        .json(&body)
-        .timeout(Duration::from_secs(execution.timeout_seconds))
-        .send();
+    let send = async {
+        // Mark inside the future so a ready, biased cancellation branch cannot
+        // claim a request was submitted when reqwest was never polled. Build
+        // the request first so JSON serialization is not mislabeled as
+        // provider service time.
+        let response = req
+            .json(&body)
+            .timeout(Duration::from_secs(execution.timeout_seconds))
+            .send();
+        crate::startup_timing::mark_provider_request_submitted();
+        response.await
+    };
     tokio::pin!(send);
     let send_result = tokio::select! {
         biased;
@@ -1331,6 +1381,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             })
         }
     })?;
+    crate::startup_timing::mark_provider_response_headers(&format!("{:?}", resp.version()));
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
@@ -1481,16 +1532,18 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         // failing the whole directive thread over one dropped HTTP stream.
         let chunk: Bytes = chunk_res.map_err(|e| {
             let chain = format!("{:#}", anyhow::Error::new(e));
-            anyhow::Error::new(ProviderStreamError::MidStream {
-                live_output_events_emitted,
-                accepted_bytes: u64::try_from(output_meter.total_bytes()).unwrap_or(u64::MAX),
-                accepted_output_events: output_meter.accepted_output_events,
-                usage: last_usage.clone(),
-                generation_header_id: generation_header_id.clone(),
-                response_id: last_response_id.clone(),
-                requested_output_tokens,
-                detail: format!("stream chunk error: {chain}"),
-            })
+            anyhow::Error::new(ProviderStreamError::MidStream(Box::new(
+                ProviderMidStreamError {
+                    live_output_events_emitted,
+                    accepted_bytes: u64::try_from(output_meter.total_bytes()).unwrap_or(u64::MAX),
+                    accepted_output_events: output_meter.accepted_output_events,
+                    usage: last_usage.clone(),
+                    generation_header_id: generation_header_id.clone(),
+                    response_id: last_response_id.clone(),
+                    requested_output_tokens,
+                    detail: format!("stream chunk error: {chain}"),
+                },
+            )))
         })?;
         // Prepend any partial UTF-8 sequence carried from the previous
         // chunk and decode the longest complete-UTF-8 prefix. The
@@ -1532,14 +1585,11 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         buffer.push_str(&decoded);
 
         // Drain complete SSE event blocks (separated by blank line).
-        loop {
-            // A stream may legally switch line endings between logical events.
-            // Pick the earliest delimiter of either form; `Option::or_else`
-            // would incorrectly prefer a later LF delimiter whenever one
-            // existed, merging an earlier CRLF-framed event into it.
-            let Some((idx, sep_len)) = next_sse_delimiter(&buffer) else {
-                break;
-            };
+        // A stream may legally switch line endings between logical events.
+        // Pick the earliest delimiter of either form; `Option::or_else`
+        // would incorrectly prefer a later LF delimiter whenever one
+        // existed, merging an earlier CRLF-framed event into it.
+        while let Some((idx, sep_len)) = next_sse_delimiter(&buffer) {
             if stream_frame_exceeds(execution.max_provider_stream_frame_bytes, idx) {
                 return Err(anyhow::Error::new(ProviderProtocolStreamError {
                     detail: format!(
@@ -1574,12 +1624,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                 streaming_config
                     .and_then(|streaming| streaming.metadata.as_ref())
                     .and_then(|metadata| metadata.error.as_ref()),
-                last_usage.clone(),
-                generation_header_id.clone(),
-                last_response_id.clone(),
-                &output_meter,
-                live_output_events_emitted,
-                requested_output_tokens,
+                ProviderReportedErrorContext {
+                    usage: last_usage.clone(),
+                    generation_header_id: generation_header_id.clone(),
+                    response_id: last_response_id.clone(),
+                    output_meter: &output_meter,
+                    live_output_events_emitted,
+                    requested_output_tokens,
+                },
             )? {
                 return Err(anyhow::Error::new(error));
             }
@@ -1656,6 +1708,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                                 )
                             })?;
                         live_output_events_emitted += 1;
+                        crate::startup_timing::mark_first_non_whitespace_text_published(text);
                     }
                     StreamEvent::ToolUse {
                         id,
@@ -1805,12 +1858,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             streaming_config
                 .and_then(|streaming| streaming.metadata.as_ref())
                 .and_then(|metadata| metadata.error.as_ref()),
-            last_usage.clone(),
-            generation_header_id.clone(),
-            last_response_id.clone(),
-            &output_meter,
-            live_output_events_emitted,
-            requested_output_tokens,
+            ProviderReportedErrorContext {
+                usage: last_usage.clone(),
+                generation_header_id: generation_header_id.clone(),
+                response_id: last_response_id.clone(),
+                output_meter: &output_meter,
+                live_output_events_emitted,
+                requested_output_tokens,
+            },
         )? {
             return Err(anyhow::Error::new(error));
         }
@@ -1873,6 +1928,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                             )
                         })?;
                     live_output_events_emitted += 1;
+                    crate::startup_timing::mark_first_non_whitespace_text_published(text);
                 }
                 StreamEvent::ToolUse {
                     id,
@@ -2815,12 +2871,14 @@ mod tests {
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.error.as_ref()),
-                usage.clone(),
-                None,
-                response_id.clone(),
-                &meter,
-                0,
-                Some(32_768),
+                ProviderReportedErrorContext {
+                    usage: usage.clone(),
+                    generation_header_id: None,
+                    response_id: response_id.clone(),
+                    output_meter: &meter,
+                    live_output_events_emitted: 0,
+                    requested_output_tokens: Some(32_768),
+                },
             )
             .unwrap()
             .is_none());
@@ -2863,12 +2921,14 @@ mod tests {
         assert!(provider_reported_error(
             block,
             Some(&config),
-            None,
-            None,
-            None,
-            &StreamOutputMeter::default(),
-            0,
-            None,
+            ProviderReportedErrorContext {
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                output_meter: &StreamOutputMeter::default(),
+                live_output_events_emitted: 0,
+                requested_output_tokens: None,
+            },
         )
         .unwrap()
         .is_none());
@@ -2959,16 +3019,18 @@ mod tests {
         let error = provider_reported_error(
             block,
             Some(&config),
-            Some(TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(2),
-                ..TokenUsage::default()
-            }),
-            Some("gen-header-1".to_string()),
-            Some("gen-body-1".to_string()),
-            &meter,
-            1,
-            Some(32_768),
+            ProviderReportedErrorContext {
+                usage: Some(TokenUsage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(2),
+                    ..TokenUsage::default()
+                }),
+                generation_header_id: Some("gen-header-1".to_string()),
+                response_id: Some("gen-body-1".to_string()),
+                output_meter: &meter,
+                live_output_events_emitted: 1,
+                requested_output_tokens: Some(32_768),
+            },
         )
         .unwrap()
         .expect("top-level provider error must be recognized");
@@ -4633,6 +4695,7 @@ owner = "ryeos-dev"
             tools: &[],
             callback: &callback,
             turn: 15,
+            attempt: 1,
             sampling: None,
             cancel_flag: None,
             interrupt_flag: None,

@@ -39,20 +39,100 @@ use ryeos_executor::dispatch_error::DispatchError;
 pub enum LaunchSpawnError {
     #[error("invalid item_ref '{ref_str}': {reason}")]
     InvalidRef { ref_str: String, reason: String },
+    #[error("launch planning admission is no longer active: {0}")]
+    PlanningCancelled(String),
+    #[error("failed to read launch planning state: {0}")]
+    PlanningStateCheckFailed(String),
+    #[error("active launch task signal registry reached its bounded capacity")]
+    AbortRegistryCapacityExceeded,
+    #[error("failed to register launch task cancellation signal: {0}")]
+    AbortRegistrationFailed(String),
     #[error("dispatch failed: {0}")]
     Dispatch(#[from] DispatchError),
 }
 
 impl LaunchSpawnError {
     /// Stable machine-readable error code matching the `DispatchError`
-    /// code for the `Dispatch` variant, with one launch-specific code
-    /// for `InvalidRef`.
+    /// code for the `Dispatch` variant and using launch-owned codes for
+    /// failures before dispatch authority transfers.
     pub fn code(&self) -> &str {
         match self {
             Self::InvalidRef { .. } => "invalid_ref",
+            Self::PlanningCancelled(_) => "launch_cancelled",
+            Self::PlanningStateCheckFailed(_) => "launch_planning_state_check_failed",
+            Self::AbortRegistryCapacityExceeded => "launch_abort_registry_capacity_exceeded",
+            Self::AbortRegistrationFailed(_) => "launch_abort_registration_failed",
             Self::Dispatch(e) => e.code(),
         }
     }
+
+    pub fn http_status(&self) -> axum::http::StatusCode {
+        match self {
+            Self::InvalidRef { .. } => axum::http::StatusCode::BAD_REQUEST,
+            Self::PlanningCancelled(_) => axum::http::StatusCode::CONFLICT,
+            Self::PlanningStateCheckFailed(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Self::AbortRegistryCapacityExceeded => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Self::AbortRegistrationFailed(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Dispatch(error) => error.http_status(),
+        }
+    }
+}
+
+fn map_launch_planning_check_error(error: anyhow::Error) -> LaunchSpawnError {
+    if error
+        .chain()
+        .any(|cause| cause.is::<ryeos_app::state_store::LaunchPlanningInactive>())
+    {
+        LaunchSpawnError::PlanningCancelled(error.to_string())
+    } else {
+        LaunchSpawnError::PlanningStateCheckFailed(error.to_string())
+    }
+}
+
+struct LaunchPlanningTaskGuard {
+    state: AppState,
+    reserved_thread_id: String,
+}
+
+impl Drop for LaunchPlanningTaskGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self
+            .state
+            .state_store
+            .unregister_launch_task_abort(&self.reserved_thread_id)
+        {
+            tracing::error!(
+                thread_id = %self.reserved_thread_id,
+                error = %error,
+                "failed to unregister durable launch task cancellation signal"
+            );
+        }
+        if let Err(error) = self
+            .state
+            .state_store
+            .settle_launch_planning_task_exit(&self.reserved_thread_id)
+        {
+            tracing::error!(
+                thread_id = %self.reserved_thread_id,
+                error = %error,
+                "failed to settle durable launch planning task exit"
+            );
+        }
+    }
+}
+
+fn abort_launch_task_with_typed_error(
+    task: tokio::task::JoinHandle<Result<(), LaunchSpawnError>>,
+    error: LaunchSpawnError,
+) -> tokio::task::JoinHandle<Result<(), LaunchSpawnError>> {
+    task.abort();
+    tokio::spawn(async move {
+        // Awaiting the aborted task ensures its captured planning guard has
+        // settled the durable admission before callers observe the typed
+        // launch error. The Tokio cancellation itself is never exposed.
+        let _ = task.await;
+        Err(error)
+    })
 }
 
 /// Options controlling the dispatch-launch beyond the core
@@ -72,6 +152,8 @@ pub(crate) struct DispatchLaunchOptions {
     /// Chained-resume turn: daemon-internal callers only (the
     /// thread-input service); never populated from raw HTTP bodies.
     pub previous_thread_id: Option<String>,
+    /// Optional request-local observability, never execution authority.
+    pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     /// Exact verified subject and captured policy returned by synchronous
     /// dispatch preflight. This may name a terminal target behind the
@@ -124,6 +206,7 @@ impl DispatchLaunchOptions {
             usage_subject_asserted_by: None,
             call: None,
             previous_thread_id: None,
+            launch_timings: None,
             lifecycle_authority,
             root_admission,
             project_path,
@@ -141,9 +224,10 @@ impl DispatchLaunchOptions {
 }
 
 /// Run the same schema-driven dispatch walk used by the background task and
-/// return the exact terminal/root contract before an id is minted. This is the
-/// public-route admission boundary shared by launch, stream, and thread-input
-/// callers; it deliberately understands no kind or service name.
+/// return the exact terminal/root contract before an internally reserved id is
+/// exposed or authoritatively published. This is the public-route admission
+/// boundary shared by launch, stream, and thread-input callers; it deliberately
+/// understands no kind or service name.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn preflight_dispatch_launch(
     state: &AppState,
@@ -159,48 +243,149 @@ pub(crate) fn preflight_dispatch_launch(
     validate_only: bool,
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<ryeos_executor::dispatch::RootDispatchPreflight, DispatchError> {
+    preflight_dispatch_launch_core(BorrowedDispatchPreflight {
+        state,
+        item_ref,
+        project_path: &project.effective_path,
+        request_engine: &project.request_engine,
+        parameters,
+        ref_bindings,
+        principal_id,
+        principal_scopes,
+        origin_site_id,
+        call: call.as_ref(),
+        launch_mode,
+        validate_only,
+        usage_subject,
+        usage_subject_asserted_by,
+        launch_timings,
+    })
+}
+
+struct BorrowedDispatchPreflight<'a> {
+    state: &'a AppState,
+    item_ref: &'a crate::routes::parsed_ref::ParsedItemRef,
+    project_path: &'a std::path::Path,
+    request_engine: &'a std::sync::Arc<ryeos_engine::engine::Engine>,
+    parameters: &'a Value,
+    ref_bindings: &'a BTreeMap<String, String>,
+    principal_id: &'a str,
+    principal_scopes: &'a [String],
+    origin_site_id: &'a str,
+    call: Option<&'a ryeos_engine::method_call::MethodCall>,
+    launch_mode: &'a str,
+    validate_only: bool,
+    usage_subject: Option<&'a ryeos_state::UsageSubject>,
+    usage_subject_asserted_by: Option<&'a str>,
+    launch_timings: Option<&'a ryeos_app::launch_stage_timings::LaunchStageTimings>,
+}
+
+fn preflight_dispatch_launch_core(
+    request: BorrowedDispatchPreflight<'_>,
 ) -> Result<ryeos_executor::dispatch::RootDispatchPreflight, DispatchError> {
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 
-    if ryeos_engine::contracts::LaunchMode::from_wire(launch_mode).is_none() {
+    if ryeos_engine::contracts::LaunchMode::from_wire(request.launch_mode).is_none() {
         return Err(DispatchError::InvalidLaunchMode {
-            other: launch_mode.to_string(),
+            other: request.launch_mode.to_string(),
         });
     }
-    let project_path = project.effective_path.canonicalize().map_err(|error| {
+    let project_path = request.project_path.canonicalize().map_err(|error| {
         DispatchError::ProjectSource(format!(
             "canonicalize launch project {}: {error}",
-            project.effective_path.display()
+            request.project_path.display()
         ))
     })?;
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
-            fingerprint: principal_id.to_string(),
-            scopes: principal_scopes.to_vec(),
+            fingerprint: request.principal_id.to_string(),
+            scopes: request.principal_scopes.to_vec(),
         }),
         project_context: ProjectContext::LocalPath { path: project_path },
-        current_site_id: state.threads.site_id().to_string(),
-        origin_site_id: origin_site_id.to_string(),
+        current_site_id: request.state.threads.site_id().to_string(),
+        origin_site_id: request.origin_site_id.to_string(),
         execution_hints: Default::default(),
-        validate_only,
+        validate_only: request.validate_only,
     };
     let exec_ctx = ryeos_executor::executor::ExecutionContext {
-        principal_fingerprint: principal_id.to_string(),
-        caller_scopes: principal_scopes.to_vec(),
-        engine: project.request_engine.clone(),
+        principal_fingerprint: request.principal_id.to_string(),
+        caller_scopes: request.principal_scopes.to_vec(),
+        engine: std::sync::Arc::clone(request.request_engine),
         plan_ctx,
-        requested_call: call,
+        requested_call: request.call.cloned(),
     };
     ryeos_executor::dispatch::preflight_root_dispatch(
-        item_ref.as_str(),
-        item_ref.kind(),
-        parameters,
-        ref_bindings,
-        usage_subject,
-        usage_subject_asserted_by,
+        request.item_ref.as_str(),
+        request.item_ref.kind(),
+        request.parameters,
+        request.ref_bindings,
+        request.usage_subject,
+        request.usage_subject_asserted_by,
         &exec_ctx,
-        state,
+        request.state,
+        request.launch_timings,
     )
+}
+
+pub(crate) struct OwnedDispatchPreflight {
+    pub state: AppState,
+    pub item_ref: crate::routes::parsed_ref::ParsedItemRef,
+    pub project_path: std::path::PathBuf,
+    pub request_engine: std::sync::Arc<ryeos_engine::engine::Engine>,
+    pub parameters: Value,
+    pub ref_bindings: BTreeMap<String, String>,
+    pub principal_id: String,
+    pub principal_scopes: Vec<String>,
+    pub origin_site_id: String,
+    pub call: Option<ryeos_engine::method_call::MethodCall>,
+    pub launch_mode: String,
+    pub validate_only: bool,
+    pub usage_subject: Option<ryeos_state::UsageSubject>,
+    pub usage_subject_asserted_by: Option<String>,
+    pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+}
+
+/// Keep verified resolution/composition off the async HTTP executor. Every
+/// input is owned so the blocking worker never borrows request state.
+pub(crate) async fn preflight_dispatch_launch_off_thread(
+    request: OwnedDispatchPreflight,
+) -> Result<ryeos_executor::dispatch::RootDispatchPreflight, DispatchError> {
+    let queue_timer = request
+        .launch_timings
+        .as_ref()
+        .map(|timings| timings.nested("preflight_admission", "preflight_blocking_queue_wait"));
+    tokio::task::spawn_blocking(move || {
+        drop(queue_timer);
+        let _work_timer = request
+            .launch_timings
+            .as_ref()
+            .map(|timings| timings.nested("preflight_admission", "preflight_blocking_work"));
+        preflight_dispatch_launch_core(BorrowedDispatchPreflight {
+            state: &request.state,
+            item_ref: &request.item_ref,
+            project_path: &request.project_path,
+            request_engine: &request.request_engine,
+            parameters: &request.parameters,
+            ref_bindings: &request.ref_bindings,
+            principal_id: &request.principal_id,
+            principal_scopes: &request.principal_scopes,
+            origin_site_id: &request.origin_site_id,
+            call: request.call.as_ref(),
+            launch_mode: &request.launch_mode,
+            validate_only: request.validate_only,
+            usage_subject: request.usage_subject.as_ref(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.as_deref(),
+            launch_timings: request.launch_timings.as_ref(),
+        })
+    })
+    .await
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "preflight admission blocking worker failed: {error}"
+        ))
+    })?
 }
 /// Spawn the kind-agnostic dispatch-launch task on the global tokio runtime.
 ///
@@ -284,12 +469,36 @@ fn spawn_dispatch_launch_inner(
     let usage_subject_asserted_by = options.usage_subject_asserted_by;
     let call = options.call;
     let previous_thread_id = options.previous_thread_id;
+    let launch_timings = options.launch_timings;
     let lifecycle_authority = options.lifecycle_authority;
     let root_admission = options.root_admission;
     let ref_bindings = options.ref_bindings;
     let captured_generation = options.captured_generation;
+    let first_poll_timer = launch_timings.as_ref().map(|timings| {
+        timings.mark("background_task_scheduled");
+        timings.nested("background_dispatch", "background_task_spawn_to_first_poll")
+    });
 
-    tokio::spawn(async move {
+    let registration_state = state_clone.clone();
+    let registration_thread_id = pre_minted_thread_id.clone();
+    // Construct the settlement guard before spawning and move it into the
+    // future. It is therefore captured state even if Tokio aborts the task
+    // before its first poll (including abort-registry capacity refusal), so a
+    // durable planning row cannot be stranded by an unpolled task.
+    let planning_task_guard = LaunchPlanningTaskGuard {
+        state: state_clone.clone(),
+        reserved_thread_id: pre_minted_thread_id.clone(),
+    };
+    let task = tokio::spawn(async move {
+        let _planning_task_guard = planning_task_guard;
+        drop(first_poll_timer);
+        if let Some(timings) = launch_timings.as_ref() {
+            timings.mark("background_dispatch_entered");
+        }
+        state_clone
+            .state_store
+            .ensure_launch_planning_active(&pre_minted_thread_id)
+            .map_err(map_launch_planning_check_error)?;
         // Keep the live capture's durable recovery roots pinned across request
         // cancellation and the complete background dispatch. The authoritative
         // birth/result rows become the long-lived roots before this drops.
@@ -319,6 +528,7 @@ fn spawn_dispatch_launch_inner(
             project_path: project_path_buf.as_path(),
             provenance,
             lifecycle_authority,
+            launch_timings: launch_timings.clone(),
             original_root_kind: item_ref.kind(),
             pre_minted_thread_id: Some(pre_minted_thread_id.clone()),
             usage_subject,
@@ -349,6 +559,15 @@ fn spawn_dispatch_launch_inner(
                 .await
             }
         };
+        if dispatched.is_err() {
+            if let Some(timings) = launch_timings.as_ref() {
+                timings.record_top_level_from_milestone(
+                    "background_dispatch",
+                    "background_dispatch_entered",
+                );
+                timings.emit("background_dispatch_failed");
+            }
+        }
         match dispatched {
             Ok(_value) => Ok(()),
             Err(e) => {
@@ -471,12 +690,43 @@ fn spawn_dispatch_launch_inner(
                 Err(LaunchSpawnError::Dispatch(e))
             }
         }
-    })
+    });
+    match registration_state
+        .state_store
+        .register_launch_task_abort(&registration_thread_id, task.abort_handle())
+    {
+        Ok(()) => task,
+        Err(ryeos_app::state_store::LaunchTaskAbortRegistrationError::CapacityExceeded) => {
+            tracing::warn!(
+                thread_id = %registration_thread_id,
+                "active launch task signal registry reached its bounded capacity"
+            );
+            abort_launch_task_with_typed_error(
+                task,
+                LaunchSpawnError::AbortRegistryCapacityExceeded,
+            )
+        }
+        Err(ryeos_app::state_store::LaunchTaskAbortRegistrationError::Internal(error)) => {
+            tracing::error!(
+                thread_id = %registration_thread_id,
+                error = %error,
+                "failed to register durable launch task cancellation signal"
+            );
+            abort_launch_task_with_typed_error(
+                task,
+                LaunchSpawnError::AbortRegistrationFailed(error.to_string()),
+            )
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     #[test]
     fn launch_spawn_error_code_invalid_ref() {
@@ -488,6 +738,45 @@ mod tests {
     }
 
     #[test]
+    fn launch_spawn_error_code_for_cancelled_planning_is_stable() {
+        let error = LaunchSpawnError::PlanningCancelled("cancelled".to_string());
+        assert_eq!(error.code(), "launch_cancelled");
+        assert_eq!(error.http_status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn planning_check_only_maps_the_typed_inactive_marker_to_cancellation() {
+        let cancelled =
+            map_launch_planning_check_error(ryeos_app::state_store::LaunchPlanningInactive.into());
+        assert!(matches!(cancelled, LaunchSpawnError::PlanningCancelled(_)));
+
+        let internal =
+            map_launch_planning_check_error(anyhow::anyhow!("runtime database unavailable"));
+        assert!(matches!(
+            internal,
+            LaunchSpawnError::PlanningStateCheckFailed(_)
+        ));
+        assert_eq!(
+            internal.http_status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    #[test]
+    fn launch_spawn_error_for_abort_registry_capacity_is_stable() {
+        let error = LaunchSpawnError::AbortRegistryCapacityExceeded;
+        assert_eq!(error.code(), "launch_abort_registry_capacity_exceeded");
+        assert_eq!(
+            error.http_status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            error.to_string(),
+            "active launch task signal registry reached its bounded capacity"
+        );
+    }
+
+    #[test]
     fn launch_spawn_error_code_dispatch_delegates() {
         let de = DispatchError::NotRootExecutable {
             kind: "k".into(),
@@ -495,5 +784,66 @@ mod tests {
         };
         let e = LaunchSpawnError::Dispatch(de);
         assert_eq!(e.code(), "not_root_executable");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guard_captured_before_spawn_is_dropped_on_pre_poll_abort() {
+        struct DropProbe(Arc<AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropProbe(dropped.clone());
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+
+        // A current-thread runtime cannot poll the spawned task until this
+        // test yields, so this exercises the same unpolled-abort boundary as
+        // abort-registry refusal in `spawn_dispatch_launch_inner`.
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("task must be aborted before first poll")
+            .is_cancelled());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn capacity_error_waits_for_aborted_guard_settlement() {
+        struct DropProbe(Arc<AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = DropProbe(dropped.clone());
+        let original = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<Result<(), LaunchSpawnError>>().await
+        });
+        let replacement = abort_launch_task_with_typed_error(
+            original,
+            LaunchSpawnError::AbortRegistryCapacityExceeded,
+        );
+        let error = replacement
+            .await
+            .expect("typed replacement task must not panic")
+            .expect_err("capacity refusal must remain a launch error");
+
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(matches!(
+            error,
+            LaunchSpawnError::AbortRegistryCapacityExceeded
+        ));
+        assert_eq!(error.code(), "launch_abort_registry_capacity_exceeded");
     }
 }

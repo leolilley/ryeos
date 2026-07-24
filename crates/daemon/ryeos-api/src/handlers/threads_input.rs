@@ -182,6 +182,14 @@ fn launch_spawn_error(error: crate::routes::launch::LaunchSpawnError) -> Handler
         crate::routes::launch::LaunchSpawnError::InvalidRef { ref_str, reason } => {
             HandlerError::BadRequest(format!("invalid item_ref '{ref_str}': {reason}"))
         }
+        error => HandlerError::Structured {
+            code: error.code().to_string(),
+            status: error.http_status().as_u16(),
+            body: json!({
+                "code": error.code(),
+                "error": error.to_string(),
+            }),
+        },
     }
 }
 
@@ -213,6 +221,9 @@ fn build_and_launch_error(
             ryeos_executor::dispatch_error::DispatchError::CapabilityRejected { reason },
         ),
         BuildAndLaunchError::LaunchPreparation(error) => dispatch_error(*error),
+        BuildAndLaunchError::LaunchCancelled { stage, .. } => {
+            dispatch_error(ryeos_executor::dispatch_error::DispatchError::LaunchCancelled { stage })
+        }
         BuildAndLaunchError::Materialization(error) => {
             HandlerError::Internal(format!("launch materialization failed: {error}"))
         }
@@ -312,6 +323,7 @@ fn admit_fresh_launch(
         None,
         "wait",
         false,
+        None,
         None,
         None,
     )

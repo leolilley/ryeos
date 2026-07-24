@@ -9,6 +9,7 @@
 //! Every augmentation failure aborts the parent launch with a typed
 //! `LaunchAugmentationError`. No silent fallback.
 
+mod compose_cache;
 pub mod compose_context_positions;
 pub mod projection;
 
@@ -16,6 +17,12 @@ use ryeos_engine::kind_registry::{ExecutionSchema, LaunchAugmentationDecl};
 use ryeos_engine::resolution::ResolutionOutput;
 
 use crate::dispatch_error::DispatchError;
+
+#[derive(Debug, Clone)]
+pub struct LaunchAugmentationAudit {
+    pub event_type: ryeos_runtime::events::RuntimeEventType,
+    pub payload: serde_json::Value,
+}
 
 /// Run all launch augmentations declared on the kind's schema.
 ///
@@ -36,26 +43,31 @@ pub async fn run_augmentations(
     plan_ctx: &ryeos_engine::contracts::PlanContext,
     principal_fingerprint: &str,
     state: &ryeos_app::state::AppState,
-) -> Result<(), LaunchAugmentationError> {
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<Vec<LaunchAugmentationAudit>, LaunchAugmentationError> {
+    let mut audits = Vec::new();
     for decl in &exec.launch_augmentations {
         match decl {
             LaunchAugmentationDecl::ComposeContextPositions { .. } => {
-                compose_context_positions::run(
-                    decl,
-                    resolution,
-                    parent_thread_id,
-                    project_path,
-                    engine,
-                    provenance,
-                    plan_ctx,
-                    principal_fingerprint,
-                    state,
-                )
-                .await?;
+                audits.extend(
+                    compose_context_positions::run(
+                        decl,
+                        resolution,
+                        parent_thread_id,
+                        project_path,
+                        engine,
+                        provenance,
+                        plan_ctx,
+                        principal_fingerprint,
+                        state,
+                        launch_timings,
+                    )
+                    .await?,
+                );
             }
         }
     }
-    Ok(())
+    Ok(audits)
 }
 
 /// Convert a `LaunchAugmentationError` into a `DispatchError` for

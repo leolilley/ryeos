@@ -347,6 +347,7 @@ impl CompiledResponseMode for CompiledHandlerMode {
             input,
             principal: Some(ctx.principal),
             workspace_lifeline: Some(workspace_guard),
+            launch_timings: None,
             state: ctx.state,
             webhook_dedupe: ctx.webhook_dedupe,
         };

@@ -29,6 +29,7 @@ pub mod ignore;
 pub mod io;
 pub mod kind_profiles;
 pub mod launch_metadata;
+pub mod launch_stage_timings;
 pub mod live_input_queue;
 pub mod node_config;
 pub mod offline_gc;

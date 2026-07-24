@@ -22,6 +22,21 @@ pub enum StopIntent {
     Kill,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchPlanningRecord {
+    pub launch_id: String,
+    pub reserved_thread_id: String,
+    pub requested_by: String,
+    pub daemon_generation_id: String,
+    pub state: String,
+    pub bound_thread_id: Option<String>,
+    pub outcome_code: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("pending launch planning admission reached its bounded capacity")]
+pub struct LaunchPlanningCapacityExceeded;
+
 /// Result of recording one operational parent/child lineage edge.
 ///
 /// Exact replays are expected when a durable launch is re-driven. A child is
@@ -109,6 +124,7 @@ pub struct RuntimeThreadHistoryDiscardReport {
     pub thread_child_links: usize,
     pub launch_windows: usize,
     pub seat_leases: usize,
+    pub launch_planning: usize,
 }
 
 impl RuntimeThreadHistoryDiscardReport {
@@ -126,6 +142,7 @@ impl RuntimeThreadHistoryDiscardReport {
             + self.thread_child_links
             + self.launch_windows
             + self.seat_leases
+            + self.launch_planning
     }
 }
 
@@ -875,6 +892,32 @@ CREATE TABLE IF NOT EXISTS seat_lease (
 
 CREATE INDEX IF NOT EXISTS idx_seat_lease_last_seen
     ON seat_lease(last_seen_at_ms);
+
+CREATE TABLE IF NOT EXISTS launch_planning (
+    launch_id TEXT PRIMARY KEY,
+    reserved_thread_id TEXT NOT NULL UNIQUE,
+    requested_by TEXT NOT NULL,
+    daemon_generation_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('planning', 'bound', 'cancelled', 'failed', 'expired')),
+    bound_thread_id TEXT,
+    outcome_code TEXT,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    finished_at_ms INTEGER,
+    CHECK (
+        (state = 'planning' AND bound_thread_id IS NULL AND outcome_code IS NULL AND finished_at_ms IS NULL)
+        OR
+        (state = 'bound' AND bound_thread_id IS NOT NULL AND bound_thread_id = reserved_thread_id AND outcome_code IS NOT NULL AND finished_at_ms IS NOT NULL)
+        OR
+        (state IN ('cancelled', 'failed', 'expired') AND bound_thread_id IS NULL AND outcome_code IS NOT NULL AND finished_at_ms IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_launch_planning_state_updated
+    ON launch_planning(state, updated_at_ms);
+
+CREATE INDEX IF NOT EXISTS idx_launch_planning_generation_state
+    ON launch_planning(daemon_generation_id, state);
 "#;
 
 use ryeos_state::sqlite_schema;
@@ -1608,6 +1651,71 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                     },
                 ],
             },
+            sqlite_schema::TableSpec {
+                name: "launch_planning",
+                columns: &[
+                    sqlite_schema::ColumnSpec {
+                        name: "launch_id",
+                        col_type: "TEXT",
+                        pk: true,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "reserved_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "requested_by",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "daemon_generation_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "state",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "bound_thread_id",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "outcome_code",
+                        col_type: "TEXT",
+                        pk: false,
+                        not_null: false,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "created_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "updated_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: true,
+                    },
+                    sqlite_schema::ColumnSpec {
+                        name: "finished_at_ms",
+                        col_type: "INTEGER",
+                        pk: false,
+                        not_null: false,
+                    },
+                ],
+            },
         ],
         indexes: &[
             sqlite_schema::IndexSpec {
@@ -1662,6 +1770,18 @@ fn runtime_schema_spec() -> sqlite_schema::SchemaSpec {
                 name: "idx_seat_lease_last_seen",
                 table: "seat_lease",
                 columns: &["last_seen_at_ms"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_launch_planning_state_updated",
+                table: "launch_planning",
+                columns: &["state", "updated_at_ms"],
+                unique: false,
+            },
+            sqlite_schema::IndexSpec {
+                name: "idx_launch_planning_generation_state",
+                table: "launch_planning",
+                columns: &["daemon_generation_id", "state"],
                 unique: false,
             },
         ],
@@ -1781,14 +1901,14 @@ fn decode_current_launch_metadata(raw: &str) -> Result<RuntimeLaunchMetadata> {
 }
 
 enum StoredLaunchMetadata {
-    Current(RuntimeLaunchMetadata),
+    Current(Box<RuntimeLaunchMetadata>),
     Incompatible(IncompatibleLaunchMetadata),
 }
 
 impl StoredLaunchMetadata {
     fn current(self) -> Option<RuntimeLaunchMetadata> {
         match self {
-            Self::Current(metadata) => Some(metadata),
+            Self::Current(metadata) => Some(*metadata),
             Self::Incompatible(_) => None,
         }
     }
@@ -1832,7 +1952,9 @@ fn decode_stored_launch_metadata(raw: &str) -> Result<StoredLaunchMetadata> {
             },
         ));
     }
-    decode_current_launch_metadata(raw).map(StoredLaunchMetadata::Current)
+    decode_current_launch_metadata(raw)
+        .map(Box::new)
+        .map(StoredLaunchMetadata::Current)
 }
 
 fn decode_stored_launch_metadata_column(
@@ -2273,6 +2395,47 @@ fn decode_completed_hook_response(
     Ok(response)
 }
 
+fn read_launch_planning(
+    conn: &Connection,
+    sql: &str,
+    key: &str,
+) -> Result<Option<LaunchPlanningRecord>> {
+    conn.query_row(sql, params![key], |row| {
+        Ok(LaunchPlanningRecord {
+            launch_id: row.get(0)?,
+            reserved_thread_id: row.get(1)?,
+            requested_by: row.get(2)?,
+            daemon_generation_id: row.get(3)?,
+            state: row.get(4)?,
+            bound_thread_id: row.get(5)?,
+            outcome_code: row.get(6)?,
+        })
+    })
+    .optional()
+    .map_err(Into::into)
+}
+
+fn prune_launch_planning(conn: &Connection, now_ms: i64) -> Result<()> {
+    const TERMINAL_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
+    const MAX_TERMINAL_ROWS: i64 = 4_096;
+    conn.execute(
+        "DELETE FROM launch_planning
+          WHERE state <> 'planning' AND finished_at_ms < ?1",
+        params![now_ms.saturating_sub(TERMINAL_RETENTION_MS)],
+    )?;
+    conn.execute(
+        "DELETE FROM launch_planning
+          WHERE launch_id IN (
+              SELECT launch_id FROM launch_planning
+               WHERE state <> 'planning'
+               ORDER BY finished_at_ms DESC, launch_id DESC
+               LIMIT -1 OFFSET ?1
+          )",
+        params![MAX_TERMINAL_ROWS],
+    )?;
+    Ok(())
+}
+
 impl RuntimeDb {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory runtime db")?;
@@ -2288,6 +2451,165 @@ impl RuntimeDb {
             _wal_file: None,
             _shm_file: None,
         })
+    }
+
+    pub fn reserve_launch_planning(
+        &self,
+        launch_id: &str,
+        reserved_thread_id: &str,
+        requested_by: &str,
+    ) -> Result<()> {
+        const MAX_PENDING_ROWS: i64 = 4_096;
+        self.reserve_launch_planning_bounded(
+            launch_id,
+            reserved_thread_id,
+            requested_by,
+            MAX_PENDING_ROWS,
+        )
+    }
+
+    fn reserve_launch_planning_bounded(
+        &self,
+        launch_id: &str,
+        reserved_thread_id: &str,
+        requested_by: &str,
+        max_pending_rows: i64,
+    ) -> Result<()> {
+        if max_pending_rows < 1 {
+            bail!("launch planning pending-row capacity must be positive");
+        }
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let pending_rows: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM launch_planning WHERE state = 'planning'",
+            [],
+            |row| row.get(0),
+        )?;
+        if pending_rows >= max_pending_rows {
+            return Err(LaunchPlanningCapacityExceeded.into());
+        }
+        tx.execute(
+            "INSERT INTO launch_planning (
+                launch_id, reserved_thread_id, requested_by, daemon_generation_id,
+                state, created_at_ms, updated_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, 'planning', ?5, ?5)",
+            params![
+                launch_id,
+                reserved_thread_id,
+                requested_by,
+                daemon_generation_id(),
+                now
+            ],
+        )?;
+        prune_launch_planning(&tx, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn launch_planning_by_id(&self, launch_id: &str) -> Result<Option<LaunchPlanningRecord>> {
+        read_launch_planning(
+            &self.conn,
+            "SELECT launch_id, reserved_thread_id, requested_by, daemon_generation_id,
+                    state, bound_thread_id, outcome_code
+               FROM launch_planning WHERE launch_id = ?1",
+            launch_id,
+        )
+    }
+
+    pub fn launch_planning_by_thread(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<LaunchPlanningRecord>> {
+        read_launch_planning(
+            &self.conn,
+            "SELECT launch_id, reserved_thread_id, requested_by, daemon_generation_id,
+                    state, bound_thread_id, outcome_code
+               FROM launch_planning WHERE reserved_thread_id = ?1",
+            thread_id,
+        )
+    }
+
+    pub fn pending_launch_planning(&self) -> Result<Vec<LaunchPlanningRecord>> {
+        let mut statement = self.conn.prepare(
+            "SELECT launch_id, reserved_thread_id, requested_by, daemon_generation_id,
+                    state, bound_thread_id, outcome_code
+               FROM launch_planning WHERE state = 'planning'
+               ORDER BY created_at_ms, launch_id",
+        )?;
+        let records = statement
+            .query_map([], |row| {
+                Ok(LaunchPlanningRecord {
+                    launch_id: row.get(0)?,
+                    reserved_thread_id: row.get(1)?,
+                    requested_by: row.get(2)?,
+                    daemon_generation_id: row.get(3)?,
+                    state: row.get(4)?,
+                    bound_thread_id: row.get(5)?,
+                    outcome_code: row.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(records)
+    }
+
+    pub fn cancel_unbound_launch_planning(&self, launch_id: &str) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE launch_planning
+                SET state = 'cancelled', outcome_code = 'cancelled_by_requester',
+                    updated_at_ms = ?2, finished_at_ms = ?2
+              WHERE launch_id = ?1 AND state = 'planning'",
+            params![launch_id, now],
+        )? == 1;
+        prune_launch_planning(&tx, now)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn bind_launch_planning(&self, reserved_thread_id: &str) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE launch_planning
+                SET state = 'bound', bound_thread_id = reserved_thread_id,
+                    outcome_code = 'thread_bound', updated_at_ms = ?2, finished_at_ms = ?2
+              WHERE reserved_thread_id = ?1 AND state = 'planning'",
+            params![reserved_thread_id, now],
+        )? == 1;
+        prune_launch_planning(&tx, now)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn fail_launch_planning(&self, reserved_thread_id: &str) -> Result<bool> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE launch_planning
+                SET state = 'failed', outcome_code = 'thread_creation_failed',
+                    updated_at_ms = ?2, finished_at_ms = ?2
+              WHERE reserved_thread_id = ?1 AND state = 'planning'",
+            params![reserved_thread_id, now],
+        )? == 1;
+        prune_launch_planning(&tx, now)?;
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    pub fn expire_stale_launch_planning(&self) -> Result<usize> {
+        let now = lillux::time::timestamp_millis() as i64;
+        let tx = self.conn.unchecked_transaction()?;
+        let changed = tx.execute(
+            "UPDATE launch_planning
+                SET state = 'expired', outcome_code = 'daemon_restarted_before_thread_bind',
+                    updated_at_ms = ?2, finished_at_ms = ?2
+              WHERE state = 'planning' AND daemon_generation_id <> ?1",
+            params![daemon_generation_id(), now],
+        )?;
+        prune_launch_planning(&tx, now)?;
+        tx.commit()?;
+        Ok(changed)
     }
 
     /// Clear the complete daemon-owned execution runtime store for an
@@ -2321,6 +2643,7 @@ impl RuntimeDb {
                 thread_child_links: count(&self.conn, "thread_child_link")?,
                 launch_windows: count(&self.conn, "launch_window")?,
                 seat_leases: count(&self.conn, "seat_lease")?,
+                launch_planning: count(&self.conn, "launch_planning")?,
             });
         }
 
@@ -2335,6 +2658,7 @@ impl RuntimeDb {
             thread_child_links: conn.execute("DELETE FROM thread_child_link", [])?,
             launch_windows: conn.execute("DELETE FROM launch_window", [])?,
             seat_leases: conn.execute("DELETE FROM seat_lease", [])?,
+            launch_planning: conn.execute("DELETE FROM launch_planning", [])?,
             hook_dispatch_ledger: conn.execute("DELETE FROM hook_dispatch_ledger", [])?,
             detached_spawn_intents: conn.execute("DELETE FROM detached_spawn_intent", [])?,
             recovery_waits: conn.execute("DELETE FROM thread_recovery_wait", [])?,
@@ -3951,7 +4275,7 @@ impl RuntimeDb {
                 )
             })?;
         let (launch_metadata, incompatible_launch_metadata) = match stored_launch_metadata {
-            Some(StoredLaunchMetadata::Current(metadata)) => (Some(metadata), None),
+            Some(StoredLaunchMetadata::Current(metadata)) => (Some(*metadata), None),
             Some(StoredLaunchMetadata::Incompatible(metadata)) => (None, Some(metadata)),
             None => (None, None),
         };
@@ -8482,5 +8806,76 @@ mod tests {
         assert_eq!(w.children[0].terminal_envelope, Some(env_a));
         assert_eq!(w.children[0].terminal_thread_id.as_deref(), Some("c-tail"));
         assert_eq!(w.children[0].terminal_status.as_deref(), Some("completed"));
+    }
+
+    #[test]
+    fn launch_planning_cancel_wins_only_while_unbound() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning("L-one", "T-one", "fp:owner")
+            .unwrap();
+        assert!(db.cancel_unbound_launch_planning("L-one").unwrap());
+        assert!(!db.bind_launch_planning("T-one").unwrap());
+        let record = db.launch_planning_by_id("L-one").unwrap().unwrap();
+        assert_eq!(record.state, "cancelled");
+        assert_eq!(record.requested_by, "fp:owner");
+        assert!(record.bound_thread_id.is_none());
+    }
+
+    #[test]
+    fn launch_planning_bind_fences_late_cancel() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning("L-two", "T-two", "fp:owner")
+            .unwrap();
+        assert!(db.bind_launch_planning("T-two").unwrap());
+        assert!(!db.cancel_unbound_launch_planning("L-two").unwrap());
+        let record = db.launch_planning_by_id("L-two").unwrap().unwrap();
+        assert_eq!(record.state, "bound");
+        assert_eq!(record.bound_thread_id.as_deref(), Some("T-two"));
+    }
+
+    #[test]
+    fn restart_generation_expires_only_unbound_predecessor_planning() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning("L-stale", "T-stale", "fp:owner")
+            .unwrap();
+        db.reserve_launch_planning("L-current", "T-current", "fp:owner")
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE launch_planning
+                    SET daemon_generation_id = 'previous-daemon-generation'
+                  WHERE launch_id = 'L-stale'",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(db.expire_stale_launch_planning().unwrap(), 1);
+        let stale = db.launch_planning_by_id("L-stale").unwrap().unwrap();
+        assert_eq!(stale.state, "expired");
+        assert_eq!(
+            stale.outcome_code.as_deref(),
+            Some("daemon_restarted_before_thread_bind")
+        );
+        let current = db.launch_planning_by_id("L-current").unwrap().unwrap();
+        assert_eq!(current.state, "planning");
+        assert!(current.outcome_code.is_none());
+    }
+
+    #[test]
+    fn launch_planning_pending_admission_is_bounded_and_terminal_rows_release_capacity() {
+        let (_tmp, db) = fresh_db();
+        db.reserve_launch_planning_bounded("L-one", "T-one", "fp:owner", 2)
+            .unwrap();
+        db.reserve_launch_planning_bounded("L-two", "T-two", "fp:owner", 2)
+            .unwrap();
+        let capacity = db
+            .reserve_launch_planning_bounded("L-three", "T-three", "fp:owner", 2)
+            .expect_err("third pending launch must reach bounded capacity");
+        assert!(capacity.is::<LaunchPlanningCapacityExceeded>());
+
+        assert!(db.cancel_unbound_launch_planning("L-one").unwrap());
+        db.reserve_launch_planning_bounded("L-three", "T-three", "fp:owner", 2)
+            .unwrap();
+        assert_eq!(db.pending_launch_planning().unwrap().len(), 2);
     }
 }

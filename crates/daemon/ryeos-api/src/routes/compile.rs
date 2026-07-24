@@ -54,6 +54,12 @@ pub trait CompiledResponseMode: Send + Sync {
     fn is_streaming(&self) -> bool {
         false
     }
+    /// Whether this compiled route is the canonical body-driven launch stream.
+    /// Request timing allocation keys off compiled behavior, not mutable raw
+    /// route fields or path names.
+    fn is_dispatch_launch(&self) -> bool {
+        false
+    }
     fn as_any(&self) -> &dyn std::any::Any;
     async fn handle(
         &self,

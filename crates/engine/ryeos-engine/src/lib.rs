@@ -22,6 +22,7 @@ pub mod launch_preparers;
 pub mod lifecycle;
 pub mod method_call;
 pub mod method_wire;
+mod parser_overlay_cache;
 pub mod parsers;
 pub mod plan_builder;
 pub mod protocol_vocabulary;

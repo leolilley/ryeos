@@ -351,6 +351,12 @@ fn unix_mode(path: &Path) -> Result<u32> {
             path.display()
         );
     }
+    if mode & 0o022 != 0 {
+        bail!(
+            "bundle executable {} is group/other-writable ({mode:#o})",
+            path.display()
+        );
+    }
     if mode & 0o111 == 0 {
         bail!(
             "bundle executable {} is not executable ({mode:#o})",
@@ -391,6 +397,12 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("special permission bits"));
+
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(unix_mode(&binary)
+            .unwrap_err()
+            .to_string()
+            .contains("group/other-writable"));
 
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(unix_mode(&binary).unwrap(), 0o755);

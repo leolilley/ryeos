@@ -43,6 +43,14 @@ impl ParserDispatcher {
         }
     }
 
+    pub(crate) fn handler_cache_identity(&self) -> String {
+        format!(
+            "{}:{:p}",
+            self.handlers.fingerprint(),
+            Arc::as_ptr(&self.handlers)
+        )
+    }
+
     pub fn dispatch(
         &self,
         parser_ref: &str,

@@ -2201,18 +2201,56 @@ impl ThreadLifecycleService {
             format!("HOSTNAME `{hostname}` cannot form this node's canonical site identity")
         })?;
 
-        Ok(Self {
+        Ok(Self::new_with_site_id(
             state_store,
             engine,
             kind_profiles,
             _events,
             event_hub,
             current_site_id,
+        ))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test_with_site_id(
+        state_store: Arc<StateStore>,
+        engine: Arc<Engine>,
+        kind_profiles: Arc<KindProfileRegistry>,
+        events: Arc<EventStoreService>,
+        event_hub: Arc<ThreadEventHub>,
+        current_site_id: &str,
+    ) -> anyhow::Result<Self> {
+        crate::identity::validate_canonical_site_id(current_site_id)?;
+        Ok(Self::new_with_site_id(
+            state_store,
+            engine,
+            kind_profiles,
+            events,
+            event_hub,
+            current_site_id.to_string(),
+        ))
+    }
+
+    fn new_with_site_id(
+        state_store: Arc<StateStore>,
+        engine: Arc<Engine>,
+        kind_profiles: Arc<KindProfileRegistry>,
+        events: Arc<EventStoreService>,
+        event_hub: Arc<ThreadEventHub>,
+        current_site_id: String,
+    ) -> Self {
+        Self {
+            state_store,
+            engine,
+            kind_profiles,
+            _events: events,
+            event_hub,
+            current_site_id,
             scheduler_db: std::sync::RwLock::new(None),
             scheduler_runtime_gate: std::sync::RwLock::new(None),
             app_root: std::sync::RwLock::new(None),
             live_input: std::sync::RwLock::new(None),
-        })
+        }
     }
 
     /// Wire the shared operator live-input queue. Called once after
@@ -2324,13 +2362,11 @@ impl ThreadLifecycleService {
             captured_history_policy: Some(admission.captured_history_policy.clone()),
         };
 
-        let persisted = self
+        let publication = self
             .state_store
             .create_admitted_root_thread(&thread_record)?;
-        self.publish_records(&persisted);
-
-        self.get_thread(thread_id)?
-            .ok_or_else(|| anyhow!("created thread missing from database: {thread_id}"))
+        self.publish_records(&publication.persisted);
+        Ok(publication.successor)
     }
 
     /// Managed-launch root creation with an authoritative initial event set.
@@ -2390,18 +2426,15 @@ impl ThreadLifecycleService {
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             captured_history_policy: Some(admission.captured_history_policy.clone()),
         };
-        let persisted = self
+        let publication = self
             .state_store
             .create_root_thread_with_events_and_launch_metadata(
                 &thread_record,
                 initial_events,
                 launch_metadata,
             )?;
-        let detail = self
-            .get_thread(thread_id)?
-            .ok_or_else(|| anyhow!("created root thread missing from database: {thread_id}"))?;
-        self.publish_records(&persisted);
-        Ok(detail)
+        self.publish_records(&publication.persisted);
+        Ok(publication.successor)
     }
 
     /// Create a chain successor for `source_thread_id` with a pre-minted id and
@@ -2494,7 +2527,7 @@ impl ThreadLifecycleService {
             captured_history_policy: None,
         };
 
-        let persisted = self.state_store.create_continuation_admitted(
+        let publication = self.state_store.create_continuation_admitted(
             &successor_record,
             &source.thread_id,
             &source.chain_root_id,
@@ -2502,11 +2535,8 @@ impl ThreadLifecycleService {
             initial_events,
             launch_metadata,
         )?;
-        self.publish_records(&persisted);
-
-        self.get_thread(successor_thread_id)?.ok_or_else(|| {
-            anyhow!("created continuation successor missing from database: {successor_thread_id}")
-        })
+        self.publish_records(&publication.persisted);
+        Ok(publication.successor)
     }
 
     /// Operator follow-up continuation, idempotent by request fingerprint.
@@ -2654,13 +2684,17 @@ impl ThreadLifecycleService {
             },
         };
 
-        let persisted = if params.thread_id == params.chain_root_id {
-            self.state_store
-                .create_admitted_root_thread(&thread_record)?
-        } else {
-            self.state_store
-                .create_child_thread_admitted(&thread_record)?
-        };
+        if params.thread_id == params.chain_root_id {
+            let publication = self
+                .state_store
+                .create_admitted_root_thread(&thread_record)?;
+            self.publish_records(&publication.persisted);
+            return Ok(publication.successor);
+        }
+
+        let persisted = self
+            .state_store
+            .create_child_thread_admitted(&thread_record)?;
         self.publish_records(&persisted);
 
         self.get_thread(&params.thread_id)?
@@ -4657,15 +4691,15 @@ pub fn resolve_thread_history_policy(
         ProjectContext::None => None,
     };
     let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
-    let parsers = engine
-        .effective_parser_dispatcher(project_root)
+    let request_snapshot = engine
+        .effective_request_snapshot(project_root)
         .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
     let resolution = ryeos_engine::resolution::run_effective_item_pipeline(
         &resolved_item.canonical_ref,
         &engine.kinds,
-        &parsers,
+        &request_snapshot.parser_dispatcher,
         &roots,
-        &engine.trust_store,
+        &request_snapshot.trust_store,
         &engine.composers,
     )
     .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
@@ -4698,6 +4732,59 @@ pub fn admit_verified_root_execution(
     usage_subject: Option<UsageSubject>,
     usage_subject_asserted_by: Option<String>,
 ) -> Result<RootExecutionAdmission> {
+    admit_verified_root_execution_inner(
+        engine,
+        plan_context,
+        verified_subject,
+        node_history_policy,
+        thread_profile,
+        ref_bindings,
+        usage_subject,
+        usage_subject_asserted_by,
+        None,
+    )
+}
+
+/// Root admission with request-local timing boundaries. Authority and output
+/// are identical to [`admit_verified_root_execution`]; the optional collector
+/// only observes the deliberate re-verification and composition intervals.
+#[allow(clippy::too_many_arguments)]
+pub fn admit_verified_root_execution_with_timings(
+    engine: &Engine,
+    plan_context: &PlanContext,
+    verified_subject: VerifiedItem,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+    thread_profile: String,
+    ref_bindings: BTreeMap<String, String>,
+    usage_subject: Option<UsageSubject>,
+    usage_subject_asserted_by: Option<String>,
+    launch_timings: Option<&crate::launch_stage_timings::LaunchStageTimings>,
+) -> Result<RootExecutionAdmission> {
+    admit_verified_root_execution_inner(
+        engine,
+        plan_context,
+        verified_subject,
+        node_history_policy,
+        thread_profile,
+        ref_bindings,
+        usage_subject,
+        usage_subject_asserted_by,
+        launch_timings,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn admit_verified_root_execution_inner(
+    engine: &Engine,
+    plan_context: &PlanContext,
+    verified_subject: VerifiedItem,
+    node_history_policy: &ResolvedNodeThreadHistoryPolicy,
+    thread_profile: String,
+    ref_bindings: BTreeMap<String, String>,
+    usage_subject: Option<UsageSubject>,
+    usage_subject_asserted_by: Option<String>,
+    launch_timings: Option<&crate::launch_stage_timings::LaunchStageTimings>,
+) -> Result<RootExecutionAdmission> {
     validate_principal_identifier(
         "root admission planning principal",
         plan_principal_identifier(plan_context),
@@ -4705,9 +4792,12 @@ pub fn admit_verified_root_execution(
     // A public `VerifiedItem` is evidence, not an admission capability. Run the
     // verifier again here and carry only the verifier's result into the sealed
     // token so fabricated provenance can never cross this boundary.
+    let reverify_timer = launch_timings
+        .map(|timings| timings.nested("preflight_admission", "root_admission_reverify"));
     let verified_subject = engine
         .verify(plan_context, verified_subject.resolved)
         .map_err(|error| anyhow!("root admission item verification failed: {error}"))?;
+    drop(reverify_timer);
     let project_root = match &plan_context.project_context {
         ProjectContext::LocalPath { path } => Some(path.as_path()),
         ProjectContext::SnapshotHash { .. } | ProjectContext::ProjectRef { .. } => verified_subject
@@ -4717,18 +4807,21 @@ pub fn admit_verified_root_execution(
         ProjectContext::None => None,
     };
     let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
-    let parsers = engine
-        .effective_parser_dispatcher(project_root)
+    let compose_timer = launch_timings
+        .map(|timings| timings.nested("preflight_admission", "root_admission_resolution_compose"));
+    let request_snapshot = engine
+        .effective_request_snapshot(project_root)
         .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
     let resolution = ryeos_engine::resolution::run_resolution_pipeline(
         &verified_subject.resolved.canonical_ref,
         &engine.kinds,
-        &parsers,
+        &request_snapshot.parser_dispatcher,
         &roots,
-        &engine.trust_store,
+        &request_snapshot.trust_store,
         &engine.composers,
     )
     .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
+    drop(compose_timer);
     let history = ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
         &verified_subject,
         &resolution,

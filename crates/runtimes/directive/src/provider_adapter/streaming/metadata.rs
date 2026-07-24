@@ -264,9 +264,7 @@ fn merge_cumulative_counter(
 
 fn read_optional_u64(root: &Value, path: Option<&str>, anomalies: &mut Vec<String>) -> Option<u64> {
     let path = path?;
-    let Some(value) = ryeos_runtime::template::resolve_path(root, path) else {
-        return None;
-    };
+    let value = ryeos_runtime::template::resolve_path(root, path)?;
     match value.as_u64() {
         Some(value) => Some(value),
         None => {

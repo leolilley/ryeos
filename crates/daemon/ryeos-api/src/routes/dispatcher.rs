@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
@@ -13,6 +13,19 @@ use crate::routes::invocation::{
 use crate::routes::limits::RouteLimiter;
 
 pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Request) -> Response {
+    route_dispatcher_from_ingress(State(api_state), request, Instant::now()).await
+}
+
+/// Dispatch with the outer server's allocation-free monotonic ingress origin.
+///
+/// Keeping the `Instant` as an ordinary argument avoids `http::Extensions`,
+/// whose type-erased insertion boxes even a Copy marker. Full launch timing
+/// state remains lazy until the compiled route contract is known.
+pub async fn route_dispatcher_from_ingress(
+    State(api_state): State<ApiState>,
+    mut request: Request,
+    ingress_started_at: Instant,
+) -> Response {
     let table = api_state.route_table.load_full();
     let app_state = (*api_state.app).clone();
     let webhook_dedupe = api_state.webhook_dedupe.clone();
@@ -67,6 +80,23 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
                 .into_response();
         }
     };
+    // Launch timing allocation is intentionally scoped to the one route
+    // contract that consumes it. Health checks and unrelated API traffic must
+    // not pay for a UUID plus shared timing state on every request.
+    let launch_timings = route.response_mode.is_dispatch_launch().then(|| {
+        request
+            .extensions()
+            .get::<ryeos_app::launch_stage_timings::LaunchStageTimings>()
+            .cloned()
+            .unwrap_or_else(|| {
+                let timings = ryeos_app::launch_stage_timings::LaunchStageTimings::new(
+                    uuid::Uuid::new_v4().simple().to_string(),
+                    ingress_started_at,
+                );
+                request.extensions_mut().insert(timings.clone());
+                timings
+            })
+    });
 
     let _permit = match route.semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -111,6 +141,7 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
         input: serde_json::Value::Null,
         principal: None,
         workspace_lifeline: None,
+        launch_timings: launch_timings.clone(),
         state: app_state.clone(),
         webhook_dedupe: webhook_dedupe.clone(),
     };
@@ -126,7 +157,13 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
     .await
     {
         Ok(r) => r,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            if let Some(timings) = launch_timings.as_ref() {
+                timings.record_top_level_since_start("http_request_to_auth_failure");
+                timings.emit("auth_failed");
+            }
+            return e.into_response();
+        }
     };
 
     let principal = match auth_result {
@@ -135,6 +172,10 @@ pub async fn route_dispatcher(State(api_state): State<ApiState>, request: Reques
         // caught as an Internal error by the enforcement layer.
         _ => unreachable!("invoke_checked enforces Principal for auth"),
     };
+    if let Some(timings) = launch_timings.as_ref() {
+        timings.record_top_level_since_start("http_request_to_principal");
+        timings.mark("principal_resolved");
+    }
 
     let route_dispatch_ctx = RouteDispatchContext {
         captures,

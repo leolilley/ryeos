@@ -150,7 +150,9 @@ pub fn import_dry_run(
     }
     let isolation_context = IsolationLaunchContext {
         verified_code: &verified_code,
-        verified_command: spec.verified_command.as_ref().map(|command| command.code()),
+        verified_command: spec.verified_command.as_ref().map(|command| {
+            command.code() as &dyn ryeos_engine::isolation::IsolationCommandAuthority
+        }),
         ..isolation_context
     };
 

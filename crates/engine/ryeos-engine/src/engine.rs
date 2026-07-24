@@ -71,6 +71,21 @@ pub struct EffectiveItem {
     pub diagnostics: Vec<EffectiveItemDiagnostic>,
 }
 
+/// Trust, parser dispatch, and the downstream cache fingerprint captured for
+/// one request under one checked installed-bundle generation.
+#[derive(Debug, Clone)]
+pub struct EffectiveRequestSnapshot {
+    pub trust_store: TrustStore,
+    pub parser_dispatcher: ParserDispatcher,
+    pub registry_fingerprint: String,
+    /// Effective item-trust identity, including the caller-overlay identity
+    /// even when that overlay adds no new signer.
+    pub effective_trust_identity: String,
+    /// Process-local identity of the immutable admitted engine/bundle
+    /// generation backing this snapshot.
+    pub request_engine_generation_identity: String,
+}
+
 /// Concrete native engine.
 ///
 /// Holds the kind registry and metadata parser registry. Exposes the
@@ -130,6 +145,19 @@ pub struct Engine {
     /// Generation guard shared with launch preparation. It is inert for
     /// directly-constructed test engines and active for node engines.
     isolation_generation: std::sync::Arc<crate::isolation::IsolationRuntime>,
+
+    /// Base item trust for a project-scoped engine, excluding the project's
+    /// mutable trust directory. This lets every request re-read project trust
+    /// and observe both additions and removals.
+    request_trust_base: Option<TrustStore>,
+
+    /// Distinguishes caller-supplied trust authority even when every supplied
+    /// signer was already present in the persistent trust base.
+    request_trust_overlay_identity: Option<String>,
+
+    /// Shared only by clones of this admitted engine generation. Cache keys
+    /// also include the effective generation/trust identities.
+    parser_overlay_cache: std::sync::Arc<crate::parser_overlay_cache::ParserOverlayCache>,
 }
 
 /// Read-only engine view bound to one verified installed-bundle generation.
@@ -249,6 +277,11 @@ impl Engine {
             registered_bundle_roots: Vec::new(),
             operator_ai_root: None,
             isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
+            request_trust_base: None,
+            request_trust_overlay_identity: None,
+            parser_overlay_cache: std::sync::Arc::new(
+                crate::parser_overlay_cache::ParserOverlayCache::default(),
+            ),
         }
     }
 
@@ -273,6 +306,36 @@ impl Engine {
             .iter()
             .find(|bundle| bundle.canonical_root == root)
             .map(|bundle| bundle.name.as_str())
+    }
+
+    /// Stable identity for this engine's complete admitted installed-bundle
+    /// generation. Executor verification caches bind to the whole generation,
+    /// rather than only the root that happened to publish a matching binary,
+    /// so an all-roots ambiguity check can never be bypassed by a cache hit.
+    pub fn registered_bundle_generation_fingerprint(&self) -> String {
+        match self.isolation_generation.registered_generation_identity() {
+            Some(identity) => lillux::cas::sha256_hex(
+                format!("ryeos:admitted-process-generation:v1:{identity}").as_bytes(),
+            ),
+            // Directly-constructed fixture engines have no retained daemon
+            // generation. Their cache namespace remains isolated by their
+            // registry/handler/root identity and all signed manifest refs.
+            None => self.request_engine_generation_identity(),
+        }
+    }
+
+    /// Assert the daemon-only executor-cache binding invariant without
+    /// widening normal engine authority APIs. Fixture/standalone engines have
+    /// no registry-owned root identities and use the per-ref probe namespace.
+    pub fn debug_assert_executor_cache_generation_identity(&self) {
+        debug_assert!(
+            self.registered_bundle_roots.is_empty()
+                || self
+                    .isolation_generation
+                    .registered_generation_identity()
+                    .is_some(),
+            "registry-owned daemon bundle roots must carry their retained generation identity"
+        );
     }
 
     pub fn with_operator_ai_root(mut self, operator_ai_root: PathBuf) -> Self {
@@ -314,6 +377,8 @@ impl Engine {
 
     pub fn with_trust_store(mut self, trust_store: TrustStore) -> Self {
         self.trust_store = trust_store;
+        self.request_trust_base = None;
+        self.request_trust_overlay_identity = None;
         self
     }
 
@@ -336,15 +401,17 @@ impl Engine {
         project_root: &Path,
         trust_overlay: Option<&TrustStore>,
     ) -> Result<Self, EngineError> {
-        let mut trust_store = self
-            .node_trust_store
+        let mut request_trust_base = self.node_trust_store.clone();
+        if let Some(overlay) = trust_overlay {
+            request_trust_base.extend_from(overlay);
+        }
+        let trust_store = request_trust_base
             .with_project_keys(project_root)?
             .into_owned();
-        if let Some(overlay) = trust_overlay {
-            trust_store.extend_from(overlay);
-        }
         let mut engine = self.clone();
         engine.trust_store = trust_store;
+        engine.request_trust_base = Some(request_trust_base);
+        engine.request_trust_overlay_identity = trust_overlay.map(TrustStore::fingerprint);
         Ok(engine)
     }
 
@@ -353,9 +420,66 @@ impl Engine {
         project_root: Option<&Path>,
     ) -> Result<Cow<'_, TrustStore>, EngineError> {
         match project_root {
-            Some(root) => Ok(self.trust_store.with_project_keys(root)?),
+            Some(root) => {
+                let base = self
+                    .request_trust_base
+                    .as_ref()
+                    .unwrap_or(&self.trust_store);
+                Ok(base.with_project_keys(root)?)
+            }
             None => Ok(Cow::Borrowed(&self.trust_store)),
         }
+    }
+
+    /// Capture the trust store, parser dispatcher, and downstream registry
+    /// fingerprint from one coherent request snapshot.
+    ///
+    /// Project trust is always re-read before the parser overlay cache is
+    /// consulted. The entire operation runs inside the installed-bundle
+    /// generation guard.
+    pub fn effective_request_snapshot(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Result<EffectiveRequestSnapshot, EngineError> {
+        self.checked_bundle_generation(|| self.effective_request_snapshot_current(project_root))
+    }
+
+    fn effective_request_snapshot_current(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Result<EffectiveRequestSnapshot, EngineError> {
+        let trust_store = self.effective_trust_store(project_root)?.into_owned();
+        let parser_dispatcher =
+            self.effective_parser_dispatcher_with_trust(project_root, &trust_store)?;
+        let registry_fingerprint =
+            self.fingerprint_for(parser_dispatcher.parser_tools.fingerprint());
+        let effective_trust_identity = self.effective_trust_identity(&trust_store);
+        let request_engine_generation_identity = self.request_engine_generation_identity();
+        Ok(EffectiveRequestSnapshot {
+            trust_store,
+            parser_dispatcher,
+            registry_fingerprint,
+            effective_trust_identity,
+            request_engine_generation_identity,
+        })
+    }
+
+    fn effective_trust_identity(&self, effective: &TrustStore) -> String {
+        let base = self
+            .request_trust_base
+            .as_ref()
+            .unwrap_or(&self.trust_store);
+        let mut identity = Vec::new();
+        append_identity_field(&mut identity, effective.fingerprint().as_bytes());
+        append_identity_field(&mut identity, base.fingerprint().as_bytes());
+        match &self.request_trust_overlay_identity {
+            Some(overlay) => {
+                identity.push(1);
+                append_identity_field(&mut identity, overlay.as_bytes());
+            }
+            None => identity.push(0),
+        }
+        lillux::cas::sha256_hex(&identity)
     }
 
     /// Install the catalog of `kind: runtime` items, normally built
@@ -471,8 +595,8 @@ impl Engine {
         // — the boot dispatcher overlaid by this project's
         // `.ai/parsers/` if any. Then apply extraction rules from
         // the schema.
-        let effective = self.effective_parser_dispatcher(project_root.as_deref())?;
-        let parsed = effective.dispatch(
+        let request_snapshot = self.effective_request_snapshot_current(project_root.as_deref())?;
+        let parsed = request_snapshot.parser_dispatcher.dispatch(
             &source_format.parser,
             &content,
             Some(&result.winner_path),
@@ -583,14 +707,13 @@ impl Engine {
 
         let roots = self.resolution_roots(request.project_root.clone());
         let project_root = request.project_root.as_deref();
-        let trust_store = self.effective_trust_store(project_root)?;
-        let effective_parsers = self.effective_parser_dispatcher(project_root)?;
+        let request_snapshot = self.effective_request_snapshot_current(project_root)?;
         let output = crate::resolution::run_effective_item_pipeline(
             &request.item_ref,
             &self.kinds,
-            &effective_parsers,
+            &request_snapshot.parser_dispatcher,
             &roots,
-            &trust_store,
+            &request_snapshot.trust_store,
             &self.composers,
         )
         .map_err(|e| {
@@ -724,32 +847,18 @@ impl Engine {
             _ => None,
         };
         let roots = self.resolution_roots(project_root.clone());
-        let trust_store = self.effective_trust_store(project_root.as_deref())?;
+        let request_snapshot = self.effective_request_snapshot_current(project_root.as_deref())?;
 
-        // Per-request: parser tools may be overlaid by the project's
-        // `.ai/parsers/`; the cache fingerprint must reflect that.
-        //
-        // **Single-snapshot guarantee**: the dispatcher and the
-        // fingerprint MUST be derived from the same overlay read.
-        // Calling `effective_parser_dispatcher(..)` and
-        // `effective_registry_fingerprint(..)` separately would walk
-        // `.ai/parsers/` twice, opening a window where a concurrent
-        // write to the overlay produces a plan whose runtime
-        // behaviour (snapshot A) and cache key (snapshot B) disagree.
-        let effective_parsers = self.effective_parser_dispatcher(project_root.as_deref())?;
-        let effective_fp = self.fingerprint_for(effective_parsers.parser_tools.fingerprint());
-
-        // Kind schemas and trust are system-only — no overlays
         crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
             item,
             parameters,
             hints,
             ctx,
             kinds: &self.kinds,
-            parsers: &effective_parsers,
+            parsers: &request_snapshot.parser_dispatcher,
             roots: &roots,
-            registry_fingerprint: &effective_fp,
-            trust_store: &trust_store,
+            registry_fingerprint: &request_snapshot.registry_fingerprint,
+            trust_store: &request_snapshot.trust_store,
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
         })
@@ -787,16 +896,15 @@ impl Engine {
         project_root: Option<PathBuf>,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         let roots = self.resolution_roots(project_root.clone());
-        let trust_store = self.effective_trust_store(project_root.as_deref())?;
-        let effective_parsers = self.effective_parser_dispatcher(project_root.as_deref())?;
+        let request_snapshot = self.effective_request_snapshot_current(project_root.as_deref())?;
         crate::plan_builder::resolve_terminal_executor(
             root_executor_id,
             root_source_path,
             root_kind,
             &self.kinds,
-            &effective_parsers,
+            &request_snapshot.parser_dispatcher,
             &roots,
-            &trust_store,
+            &request_snapshot.trust_store,
         )
     }
 
@@ -877,19 +985,13 @@ impl Engine {
     /// project's `.ai/parsers/`. Plan caches must key on this so a
     /// project-local parser change invalidates downstream entries.
     ///
-    /// NOTE: this performs an independent overlay read. Callers that
-    /// already hold an effective `ParserDispatcher` MUST instead call
-    /// `fingerprint_for(dispatcher.parser_tools.fingerprint())` to
-    /// guarantee dispatcher and fingerprint are derived from the
-    /// same snapshot of `.ai/parsers/`. See `build_plan` for the
-    /// canonical pattern. This entry point exists for callers that
-    /// don't already have a dispatcher in hand (tests, diagnostics).
     pub fn effective_registry_fingerprint(
         &self,
         project_root: Option<&Path>,
     ) -> Result<String, EngineError> {
-        let dispatcher = self.effective_parser_dispatcher(project_root)?;
-        Ok(self.fingerprint_for(dispatcher.parser_tools.fingerprint()))
+        Ok(self
+            .effective_request_snapshot(project_root)?
+            .registry_fingerprint)
     }
 
     /// Compose the engine's composite fingerprint over the kind
@@ -926,6 +1028,16 @@ impl Engine {
         &self,
         project_root: Option<&Path>,
     ) -> Result<ParserDispatcher, EngineError> {
+        Ok(self
+            .effective_request_snapshot(project_root)?
+            .parser_dispatcher)
+    }
+
+    fn effective_parser_dispatcher_with_trust(
+        &self,
+        project_root: Option<&Path>,
+        trust_store: &TrustStore,
+    ) -> Result<ParserDispatcher, EngineError> {
         match project_root {
             None => Ok(self.parser_dispatcher.clone()),
             Some(path) => {
@@ -950,16 +1062,72 @@ impl Engine {
                             .into(),
                     });
                 }
-                let trust_store = self.effective_trust_store(Some(path))?;
-                let overlaid = self.parser_dispatcher.parser_tools.with_project_overlay(
-                    path,
-                    &trust_store,
-                    &self.kinds,
-                )?;
-                Ok(self.parser_dispatcher.with_parser_tools(overlaid))
+                let overlay_root =
+                    crate::parsers::ParserRegistry::project_overlay_root(path, &self.kinds)?;
+                if !overlay_root.exists() {
+                    tracing::debug!(
+                        project_root = %path.display(),
+                        rebuild_reason = "no_overlay",
+                        "using base parser dispatcher"
+                    );
+                    return Ok(self.parser_dispatcher.clone());
+                }
+
+                let metadata =
+                    crate::parser_overlay_cache::fingerprint_parser_overlay(&overlay_root)?;
+                let base_trust = self
+                    .request_trust_base
+                    .as_ref()
+                    .unwrap_or(&self.trust_store);
+                let key = crate::parser_overlay_cache::ParserOverlayCacheKey {
+                    project_root: path.to_path_buf(),
+                    overlay_fingerprint: metadata.fingerprint,
+                    effective_trust_fingerprint: trust_store.fingerprint(),
+                    base_trust_fingerprint: base_trust.fingerprint(),
+                    caller_overlay_identity: self.request_trust_overlay_identity.clone(),
+                    generation_fingerprint: self.request_engine_generation_identity(),
+                };
+                self.parser_overlay_cache.get_or_build(
+                    key,
+                    metadata.cacheable,
+                    metadata.total_file_bytes,
+                    || {
+                        let overlaid = self.parser_dispatcher.parser_tools.with_project_overlay(
+                            path,
+                            trust_store,
+                            &self.kinds,
+                        )?;
+                        Ok(self.parser_dispatcher.with_parser_tools(overlaid))
+                    },
+                )
             }
         }
     }
+
+    fn request_engine_generation_identity(&self) -> String {
+        let mut generation = Vec::new();
+        if let Some(identity) = self.isolation_generation.registered_generation_identity() {
+            append_identity_field(&mut generation, &identity.to_le_bytes());
+        }
+        append_identity_field(&mut generation, self.registry_fingerprint().as_bytes());
+        append_identity_field(
+            &mut generation,
+            self.parser_dispatcher.handler_cache_identity().as_bytes(),
+        );
+        for registered in &self.registered_bundle_roots {
+            append_identity_field(&mut generation, registered.name.as_bytes());
+            append_identity_field(
+                &mut generation,
+                registered.canonical_root.as_os_str().as_encoded_bytes(),
+            );
+        }
+        lillux::cas::sha256_hex(&generation)
+    }
+}
+
+fn append_identity_field(bytes: &mut Vec<u8>, field: &[u8]) {
+    bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(field);
 }
 
 #[cfg(test)]
@@ -969,6 +1137,7 @@ mod tests {
         EffectivePrincipal, ExecutionHints, ItemSpace, Principal, ProjectContext, TrustClass,
     };
     use crate::trust::{TrustStore, TrustedSigner};
+    use base64::Engine as _;
     use lillux::crypto::SigningKey;
     use std::fs;
     use std::path::Path;
@@ -1155,6 +1324,35 @@ formats:
     }
 
     #[test]
+    fn retained_generation_identity_does_not_alias_same_registered_paths() {
+        let roots = vec![crate::item_resolution::RegisteredBundleRoot {
+            name: "same-name".to_string(),
+            canonical_root: PathBuf::from("/same/canonical/root"),
+        }];
+        let first = crate::isolation::IsolationRuntime::default().retain_registered_generation(
+            std::sync::Arc::new(CountingGenerationLifeline::default()),
+            TrustStore::empty(),
+            roots.clone(),
+        );
+        let second = crate::isolation::IsolationRuntime::default().retain_registered_generation(
+            std::sync::Arc::new(CountingGenerationLifeline::default()),
+            TrustStore::empty(),
+            roots.clone(),
+        );
+        let first = test_engine()
+            .with_registered_bundle_roots(roots.clone())
+            .with_isolation_generation(std::sync::Arc::new(first));
+        let second = test_engine()
+            .with_registered_bundle_roots(roots)
+            .with_isolation_generation(std::sync::Arc::new(second));
+
+        assert_ne!(
+            first.registered_bundle_generation_fingerprint(),
+            second.registered_bundle_generation_fingerprint(),
+        );
+    }
+
+    #[test]
     fn resolve_rejects_unknown_kind() {
         let engine = test_engine();
         let ctx = test_plan_context();
@@ -1295,8 +1493,6 @@ formats:
         let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
         format!("# ryeos:signed:2026-04-10T00:00:00Z:{hash}:{sig_b64}:{fingerprint}\n{body}")
     }
-
-    use base64::Engine as _;
 
     #[test]
     fn resolve_then_verify_trusted() {
@@ -1585,6 +1781,30 @@ formats:
         );
     }
 
+    #[test]
+    fn project_scoped_engine_does_not_retain_deleted_project_trust() {
+        let project_dir = tempdir();
+        let trusted_dir = project_dir.join(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
+        fs::create_dir_all(&trusted_dir).unwrap();
+
+        let signing_key = SigningKey::from_bytes(&[77u8; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let fingerprint = crate::trust::compute_fingerprint(&verifying_key);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(verifying_key.as_bytes());
+        let key_path = trusted_dir.join("project.pub");
+        fs::write(&key_path, encoded).unwrap();
+
+        let scoped = test_engine().for_project_root(&project_dir, None).unwrap();
+        assert!(scoped.trust_store.is_trusted(&fingerprint));
+
+        fs::remove_file(key_path).unwrap();
+        let current = scoped.effective_trust_store(Some(&project_dir)).unwrap();
+        assert!(
+            !current.is_trusted(&fingerprint),
+            "project trust removals must be visible to the next request"
+        );
+    }
+
     const PARSER_KIND_SCHEMA: &str = "\
 location:
   directory: parsers
@@ -1786,25 +2006,12 @@ formats:
         assert_eq!(resolved.source_format.extension, ".pyx");
     }
 
-    /// Single-snapshot guarantee for `build_plan`: the parser
-    /// dispatcher and the cache fingerprint MUST come from the same
-    /// overlay read of `.ai/parsers/`. We can't easily race the file
-    /// system in a unit test, so assert the structural identity that
-    /// makes the guarantee hold by construction:
-    ///
-    ///   `effective_registry_fingerprint(p)`
-    ///     ≡ `fingerprint_for(effective_parser_dispatcher(p)
-    ///                            .parser_tools.fingerprint())`
-    ///
-    /// `build_plan` derives its fingerprint via the right-hand side,
-    /// reusing the dispatcher it just loaded. The left-hand side is
-    /// kept available for callers that don't already hold a
-    /// dispatcher. As long as both spellings agree, no caller can
-    /// open a TOCTOU window by accidentally calling them separately.
-    /// If a future refactor splits the snapshot again, this assert
-    /// catches the divergence in CI.
+    /// The request snapshot must carry a cache fingerprint derived from the
+    /// exact dispatcher it carries. `build_plan` consumes this same object, so
+    /// parser behaviour, parser identity, and trust cannot come from separate
+    /// overlay reads.
     #[test]
-    fn effective_fingerprint_matches_dispatcher_derived_fingerprint() {
+    fn effective_snapshot_fingerprint_matches_its_dispatcher() {
         let project_dir = tempdir();
         let kinds_dir = tempdir();
         let ts = test_trust_store();
@@ -1831,29 +2038,22 @@ formats:
         )
         .with_trust_store(ts);
 
-        let via_helper = engine
-            .effective_registry_fingerprint(Some(&project_dir))
-            .expect("effective fingerprint loads");
-
-        let dispatcher = engine
-            .effective_parser_dispatcher(Some(&project_dir))
-            .expect("effective dispatcher loads");
-        let via_dispatcher = engine.fingerprint_for(dispatcher.parser_tools.fingerprint());
+        let snapshot = engine
+            .effective_request_snapshot(Some(&project_dir))
+            .expect("effective request snapshot loads");
+        let via_dispatcher =
+            engine.fingerprint_for(snapshot.parser_dispatcher.parser_tools.fingerprint());
 
         assert_eq!(
-            via_helper, via_dispatcher,
-            "the two spellings of the per-request fingerprint MUST \
-             agree — `build_plan` relies on this to derive its cache \
-             key from the same dispatcher snapshot it executes \
-             against. Divergence here means a concurrent overlay \
-             write could produce a plan whose runtime behaviour and \
-             cache key disagree."
+            snapshot.registry_fingerprint, via_dispatcher,
+            "the request snapshot fingerprint must describe the dispatcher \
+             in that same snapshot"
         );
 
         // Test setup sanity: the overlay must actually shift the
         // fingerprint, otherwise the equality above is vacuous.
         assert_ne!(
-            via_helper,
+            snapshot.registry_fingerprint,
             engine.registry_fingerprint(),
             "test setup must produce a non-trivial overlay shift"
         );

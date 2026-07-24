@@ -160,6 +160,10 @@ pub enum DispatchError {
         executor_ref: String,
         detail: String,
     },
+    /// A pre-minted launch reservation was cancelled before thread creation or
+    /// the irreversible spawn handoff.
+    #[error("launch was cancelled before {stage}")]
+    LaunchCancelled { stage: &'static str },
     /// A declared required secret was not found in any source.
     /// Generic at the dispatch layer; the `source_kind`/`source_name`
     /// fields attribute which subsystem demanded the secret without
@@ -358,9 +362,10 @@ impl DispatchError {
                 StatusCode::NOT_IMPLEMENTED
             }
             // State-conflict: push-first, checkout race, etc.
-            Self::ProjectSource(_) | Self::ProjectSourcePushFirst(_) | Self::Conflict(_) => {
-                StatusCode::CONFLICT
-            }
+            Self::ProjectSource(_)
+            | Self::ProjectSourcePushFirst(_)
+            | Self::Conflict(_)
+            | Self::LaunchCancelled { .. } => StatusCode::CONFLICT,
             // Bad gateway: the daemon reached out to a subsystem
             // (service handler, runtime binary, CAS) and it was
             // missing, unavailable, or returned an error.
@@ -428,6 +433,7 @@ impl DispatchError {
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
             Self::ExecutionNotRestartEligible { .. } => "execution_not_restart_eligible",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
+            Self::LaunchCancelled { .. } => "launch_cancelled",
             Self::RequiredSecretMissing { .. } => "required_secret_missing",
             Self::LaunchPreparationFailed { code, .. } => code,
             Self::LaunchPolicyForbidden { code, .. }
@@ -578,6 +584,16 @@ mod tests {
         };
         assert_eq!(error.code(), "execution_not_restart_eligible");
         assert_eq!(error.http_status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!error.retryable());
+    }
+
+    #[test]
+    fn launch_cancellation_has_stable_conflict_contract() {
+        let error = DispatchError::LaunchCancelled {
+            stage: "irreversible thread handoff",
+        };
+        assert_eq!(error.code(), "launch_cancelled");
+        assert_eq!(error.http_status(), StatusCode::CONFLICT);
         assert!(!error.retryable());
     }
 

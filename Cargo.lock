@@ -2619,6 +2619,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -2662,6 +2663,7 @@ dependencies = [
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
+ "ryeos-scheduler",
  "ryeos-state",
  "ryeos-tracing",
  "serde",

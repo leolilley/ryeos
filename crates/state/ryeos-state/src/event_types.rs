@@ -70,6 +70,7 @@ pub const ARTIFACT_PUBLISHED: &str = "artifact_published";
 pub const AS_LAUNCHED_RESOLUTION: &str = "as_launched_resolution";
 pub const AS_LAUNCHED_REF_BINDINGS: &str = "as_launched_ref_bindings";
 pub const RUNTIME_LAUNCH_FACTS: &str = "runtime_launch_facts";
+pub const LAUNCH_AUGMENTATION_CACHE_HIT: &str = "launch_augmentation_cache_hit";
 pub const THREAD_FACET_SET: &str = "thread_facet_set";
 pub const THREAD_RECONCILED: &str = "thread_reconciled";
 pub const ORPHAN_PROCESS_KILLED: &str = "orphan_process_killed";

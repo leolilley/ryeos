@@ -22,8 +22,8 @@ use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
 use crate::write_barrier::{WriteBarrier, WritePermit};
 pub use runtime_db::{
-    CommandRecord, HookDispatchReservation, NewCommandRecord, NewHookDispatch, RuntimeInfo,
-    StopIntent,
+    CommandRecord, HookDispatchReservation, LaunchPlanningCapacityExceeded, LaunchPlanningRecord,
+    NewCommandRecord, NewHookDispatch, RuntimeInfo, StopIntent,
 };
 
 mod projection_access;
@@ -47,11 +47,61 @@ const MAX_THREAD_LIST_FACET_RESPONSE_BYTES: usize = 6 * 1024 * 1024;
 const MAX_THREAD_LIST_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_THREAD_LIST_EVENT_PAYLOAD_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_THREAD_LIST_ERROR_PREVIEW_BYTES: usize = 2 * 1024;
+const MAX_ACTIVE_LAUNCH_SIGNALS: usize = 4_096;
 /// Exact JSON budget for the response-facing thread result record. The
 /// projection content itself is capped by the 512 KiB ThreadEvent ceiling;
 /// four MiB also covers worst-case JSON escaping of a malformed stored error
 /// converted to a JSON string.
 const MAX_THREAD_RESULT_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchCancellationResolution {
+    Cancelled,
+    Bound {
+        thread_id: String,
+    },
+    Terminal {
+        state: String,
+        outcome_code: Option<String>,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchTaskAbortRegistrationError {
+    #[error("active launch task signal registry reached its bounded capacity")]
+    CapacityExceeded,
+    #[error(transparent)]
+    Internal(#[from] anyhow::Error),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum LaunchPlanningReservationError {
+    #[error(transparent)]
+    CapacityExceeded(#[from] LaunchPlanningCapacityExceeded),
+    #[error(transparent)]
+    Internal(anyhow::Error),
+}
+
+fn map_launch_planning_reservation_error(error: anyhow::Error) -> LaunchPlanningReservationError {
+    if error
+        .chain()
+        .any(|cause| cause.is::<LaunchPlanningCapacityExceeded>())
+    {
+        LaunchPlanningReservationError::CapacityExceeded(LaunchPlanningCapacityExceeded)
+    } else {
+        LaunchPlanningReservationError::Internal(error)
+    }
+}
+
+/// A durable planning cancel or daemon-generation fence won before the
+/// authoritative root or continuation row could be published.
+///
+/// This typed marker may travel through `anyhow` context so route-independent
+/// launchers can preserve the stable public `launch_cancelled` contract without
+/// inspecting an error message.
+#[derive(Debug, thiserror::Error)]
+#[error("launch planning admission is no longer active")]
+pub struct LaunchPlanningInactive;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
@@ -747,6 +797,12 @@ pub struct ThreadDetail {
     pub runtime: RuntimeInfo,
 }
 
+#[derive(Debug)]
+pub(crate) struct CreatedThreadPublication {
+    pub(crate) persisted: Vec<PersistedEventRecord>,
+    pub(crate) successor: ThreadDetail,
+}
+
 /// Result of an idempotent operator continuation create-or-get.
 #[derive(Debug)]
 pub enum ContinuationOutcome {
@@ -887,6 +943,10 @@ pub struct StateStore {
     /// Persisted claims prove fencing identity; this registry separately proves
     /// that a current task still owns the post-exit settlement window.
     active_launch_owners: Mutex<HashSet<String>>,
+    /// Process-local cancellation signals for durable, still-unbound launch
+    /// admissions. Persisted planning state remains the authority; this map
+    /// only stops work promptly after that state commits cancelled.
+    launch_task_abort_handles: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 /// Enforces the global mutation order for every StateStore write: the
@@ -1054,6 +1114,42 @@ impl std::fmt::Debug for StateStore {
         f.debug_struct("StateStore")
             .field("inner", &"<Mutex<Inner>>")
             .finish()
+    }
+}
+
+fn thread_detail_from_created_snapshot(
+    snapshot: ThreadSnapshot,
+    runtime: RuntimeInfo,
+) -> ThreadDetail {
+    let lifecycle_authority = runtime
+        .launch_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.resume_context.as_ref())
+        .map(|resume| resume.lifecycle_authority);
+    ThreadDetail {
+        thread_id: snapshot.thread_id,
+        chain_root_id: snapshot.chain_root_id,
+        kind: snapshot.kind_name,
+        status: snapshot.status.as_str().to_string(),
+        item_ref: snapshot.item_ref,
+        executor_ref: snapshot.executor_ref,
+        launch_mode: snapshot.launch_mode,
+        current_site_id: snapshot.current_site_id,
+        origin_site_id: snapshot.origin_site_id,
+        upstream_thread_id: snapshot.upstream_thread_id,
+        successor_thread_id: None,
+        requested_by: snapshot.requested_by,
+        project_root: snapshot
+            .project_root
+            .map(|path| path.to_string_lossy().into_owned()),
+        project_authority: Some(snapshot.project_authority),
+        lifecycle_authority,
+        admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash,
+        created_at: snapshot.created_at,
+        updated_at: snapshot.updated_at,
+        started_at: snapshot.started_at,
+        finished_at: snapshot.finished_at,
+        runtime,
     }
 }
 
@@ -1329,14 +1425,19 @@ const LAUNCH_ATTEMPT_AUDIT_TYPES: [ryeos_runtime::RuntimeEventType; 3] = [
 ];
 
 fn validate_launch_attempt_audit(events: &[NewEventRecord]) -> Result<()> {
-    if events.len() != LAUNCH_ATTEMPT_AUDIT_TYPES.len() {
+    if events.len() < LAUNCH_ATTEMPT_AUDIT_TYPES.len() {
         bail!(
-            "launch attempt audit must contain exactly {} events, received {}",
+            "launch attempt audit must contain the {} required authority events, received {}",
             LAUNCH_ATTEMPT_AUDIT_TYPES.len(),
             events.len()
         );
     }
-    for (index, (event, expected)) in events.iter().zip(LAUNCH_ATTEMPT_AUDIT_TYPES).enumerate() {
+    for (index, (event, expected)) in events
+        .iter()
+        .take(LAUNCH_ATTEMPT_AUDIT_TYPES.len())
+        .zip(LAUNCH_ATTEMPT_AUDIT_TYPES)
+        .enumerate()
+    {
         if event.event_type != expected.as_str() {
             bail!(
                 "launch attempt audit event {index} must be '{}', received '{}'",
@@ -1351,6 +1452,19 @@ fn validate_launch_attempt_audit(events: &[NewEventRecord]) -> Result<()> {
                 event.event_type,
                 expected_storage,
                 event.storage_class
+            );
+        }
+    }
+    for (index, event) in events
+        .iter()
+        .enumerate()
+        .skip(LAUNCH_ATTEMPT_AUDIT_TYPES.len())
+    {
+        if event.event_type != ryeos_runtime::RuntimeEventType::LaunchAugmentationCacheHit.as_str()
+        {
+            bail!(
+                "launch attempt audit event {index} must be a canonical launch augmentation audit, received '{}'",
+                event.event_type
             );
         }
     }
@@ -1905,6 +2019,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             active_launch_owners: Mutex::new(HashSet::new()),
+            launch_task_abort_handles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1944,6 +2059,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             active_launch_owners: Mutex::new(HashSet::new()),
+            launch_task_abort_handles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2049,6 +2165,7 @@ impl StateStore {
             write_barrier,
             process_attachment_admission_open: AtomicBool::new(true),
             active_launch_owners: Mutex::new(HashSet::new()),
+            launch_task_abort_handles: Mutex::new(HashMap::new()),
         })
     }
 
@@ -2341,7 +2458,7 @@ impl StateStore {
     pub(crate) fn create_admitted_root_thread(
         &self,
         thread: &NewThreadRecord,
-    ) -> Result<Vec<PersistedEventRecord>> {
+    ) -> Result<CreatedThreadPublication> {
         if thread.thread_id != thread.chain_root_id {
             bail!("admitted root persistence requires thread_id == chain_root_id");
         }
@@ -2351,7 +2468,7 @@ impl StateStore {
                 thread.thread_id
             );
         }
-        self.create_thread_inner(thread)
+        self.create_root_thread_with_events_and_launch_metadata(thread, Vec::new(), None)
     }
 
     /// State-layer fixture for tests which exercise persistence below the
@@ -2365,6 +2482,7 @@ impl StateStore {
     ) -> Result<Vec<PersistedEventRecord>> {
         if thread.thread_id == thread.chain_root_id {
             self.create_admitted_root_thread(thread)
+                .map(|publication| publication.persisted)
         } else {
             self.create_child_thread_admitted(thread)
         }
@@ -2372,11 +2490,9 @@ impl StateStore {
 
     fn create_thread_inner(&self, thread: &NewThreadRecord) -> Result<Vec<PersistedEventRecord>> {
         if thread.thread_id == thread.chain_root_id {
-            return self.create_root_thread_with_events_and_launch_metadata(
-                thread,
-                Vec::new(),
-                None,
-            );
+            return self
+                .create_root_thread_with_events_and_launch_metadata(thread, Vec::new(), None)
+                .map(|publication| publication.persisted);
         }
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
@@ -2445,17 +2561,18 @@ impl StateStore {
         initial_events: Vec<NewEventRecord>,
     ) -> Result<Vec<PersistedEventRecord>> {
         self.create_root_thread_with_events_and_launch_metadata(thread, initial_events, None)
+            .map(|publication| publication.persisted)
     }
 
     /// Create a managed-launch root with its resume identity installed before
     /// the authoritative chain head becomes visible. The runtime row is
     /// auxiliary, so it is prepared first and removed if chain creation fails.
-    pub fn create_root_thread_with_events_and_launch_metadata(
+    pub(crate) fn create_root_thread_with_events_and_launch_metadata(
         &self,
         thread: &NewThreadRecord,
         initial_events: Vec<NewEventRecord>,
         launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
-    ) -> Result<Vec<PersistedEventRecord>> {
+    ) -> Result<CreatedThreadPublication> {
         if thread.thread_id != thread.chain_root_id || thread.upstream_thread_id.is_some() {
             bail!("create_root_thread_with_events requires a root thread record");
         }
@@ -2467,6 +2584,14 @@ impl StateStore {
         }
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let launch_planning = g.runtime_db.launch_planning_by_thread(&thread.thread_id)?;
+        if let Some(planning) = launch_planning.as_ref() {
+            if planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
+            {
+                return Err(LaunchPlanningInactive.into());
+            }
+        }
         // Initial facet events are subject to the same collection/key/value
         // limits as ordinary appends. The new thread is not projected yet, so
         // the validator correctly evaluates this batch against an empty set.
@@ -2499,6 +2624,10 @@ impl StateStore {
             build_snapshot(thread),
             launch_metadata,
         )?;
+        let thread_runtime = RuntimeInfo {
+            launch_metadata: launch_metadata.cloned(),
+            ..RuntimeInfo::default()
+        };
         // Establish the auxiliary runtime row before the authoritative commit.
         // If chain creation fails, remove it; an orphan auxiliary row is
         // recoverable, while a committed launch row with no runtime ledger is
@@ -2527,6 +2656,13 @@ impl StateStore {
         let result = match committed {
             Ok(committed) => committed_value(committed),
             Err(error) => {
+                if let Err(settle_error) = g.runtime_db.fail_launch_planning(&thread.thread_id) {
+                    tracing::error!(
+                        thread_id = %thread.thread_id,
+                        error = %settle_error,
+                        "failed to settle launch planning after root-chain creation failed"
+                    );
+                }
                 if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&thread.thread_id) {
                     tracing::error!(
                         thread_id = %thread.thread_id,
@@ -2537,7 +2673,55 @@ impl StateStore {
                 return Err(error);
             }
         };
-        persisted_from_add_thread_with_events(&result, &events)
+        // The signed root birth is authoritative from this point onward.
+        // Planning settlement and live publication are auxiliary and must not
+        // turn a committed root into a pre-launch error.
+        if let Some(planning) = launch_planning {
+            match g.runtime_db.bind_launch_planning(&thread.thread_id) {
+                Ok(true) => {}
+                Ok(false) => tracing::error!(
+                    thread_id = %thread.thread_id,
+                    launch_id = %planning.launch_id,
+                    "authoritative root committed but launch planning bind changed no row"
+                ),
+                Err(error) => tracing::error!(
+                    thread_id = %thread.thread_id,
+                    launch_id = %planning.launch_id,
+                    error = %error,
+                    "authoritative root committed but launch planning bind failed"
+                ),
+            }
+            match self.launch_task_abort_handles.lock() {
+                Ok(mut handles) => {
+                    handles.remove(&planning.launch_id);
+                }
+                Err(poisoned) => {
+                    tracing::error!(
+                        thread_id = %thread.thread_id,
+                        launch_id = %planning.launch_id,
+                        "launch task abort registry was poisoned after root commit"
+                    );
+                    poisoned.into_inner().remove(&planning.launch_id);
+                }
+            }
+        }
+        let persisted = match persisted_from_add_thread_with_events(&result, &events) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                tracing::error!(
+                    thread_id = %thread.thread_id,
+                    chain_root_id = %thread.chain_root_id,
+                    error = %error,
+                    "authoritative root committed but live event reconstruction failed"
+                );
+                Vec::new()
+            }
+        };
+        let successor = thread_detail_from_created_snapshot(result.snapshot, thread_runtime);
+        Ok(CreatedThreadPublication {
+            persisted,
+            successor,
+        })
     }
 
     #[tracing::instrument(
@@ -3205,9 +3389,19 @@ impl StateStore {
         reason: Option<&str>,
         initial_events: Vec<NewEventRecord>,
         launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
-    ) -> Result<Vec<PersistedEventRecord>> {
+    ) -> Result<CreatedThreadPublication> {
         let permit = self.acquire_write_permit()?;
         let g = self.lock()?;
+        let launch_planning = g
+            .runtime_db
+            .launch_planning_by_thread(&successor.thread_id)?;
+        if let Some(planning) = launch_planning.as_ref() {
+            if planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
+            {
+                return Err(LaunchPlanningInactive.into());
+            }
+        }
         validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
         if !self
             .process_attachment_admission_open
@@ -3276,6 +3470,10 @@ impl StateStore {
             build_snapshot(&successor_with_upstream),
             launch_metadata,
         )?;
+        let successor_runtime = RuntimeInfo {
+            launch_metadata: launch_metadata.cloned(),
+            ..RuntimeInfo::default()
+        };
         {
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
@@ -3332,6 +3530,13 @@ impl StateStore {
         let successor_result = match successor_commit {
             Ok(committed) => committed_value(committed),
             Err(error) => {
+                if let Err(settle_error) = g.runtime_db.fail_launch_planning(&successor.thread_id) {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        error = %settle_error,
+                        "failed to settle launch planning after continuation creation failed"
+                    );
+                }
                 if let Err(cleanup_error) = g.runtime_db.delete_thread_runtime(&successor.thread_id)
                 {
                     tracing::error!(
@@ -3343,9 +3548,60 @@ impl StateStore {
                 return Err(error);
             }
         };
+        // The signed successor/source transition is authoritative from this
+        // point onward. Auxiliary planning and live-notification bookkeeping
+        // must not turn that committed continuation into a pre-launch error.
+        if let Some(planning) = launch_planning {
+            match g.runtime_db.bind_launch_planning(&successor.thread_id) {
+                Ok(true) => {}
+                Ok(false) => tracing::error!(
+                    thread_id = %successor.thread_id,
+                    launch_id = %planning.launch_id,
+                    "authoritative continuation committed but launch planning bind changed no row"
+                ),
+                Err(error) => tracing::error!(
+                    thread_id = %successor.thread_id,
+                    launch_id = %planning.launch_id,
+                    error = %error,
+                    "authoritative continuation committed but launch planning bind failed"
+                ),
+            }
+            match self.launch_task_abort_handles.lock() {
+                Ok(mut handles) => {
+                    handles.remove(&planning.launch_id);
+                }
+                Err(poisoned) => {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        launch_id = %planning.launch_id,
+                        "launch task abort registry was poisoned after continuation commit"
+                    );
+                    poisoned.into_inner().remove(&planning.launch_id);
+                }
+            }
+        }
         let mut all_input_events = successor_events;
         all_input_events.push(source_event);
-        persisted_from_add_thread_with_events(&successor_result, &all_input_events)
+        let persisted =
+            match persisted_from_add_thread_with_events(&successor_result, &all_input_events) {
+                Ok(persisted) => persisted,
+                Err(error) => {
+                    tracing::error!(
+                        thread_id = %successor.thread_id,
+                        source_thread_id,
+                        chain_root_id,
+                        error = %error,
+                        "authoritative continuation committed but live event reconstruction failed"
+                    );
+                    Vec::new()
+                }
+            };
+        let successor =
+            thread_detail_from_created_snapshot(successor_result.snapshot, successor_runtime);
+        Ok(CreatedThreadPublication {
+            persisted,
+            successor,
+        })
     }
 
     /// Raw continuation fixture for state-layer tests. Absent in production.
@@ -3365,6 +3621,7 @@ impl StateStore {
             Vec::new(),
             None,
         )
+        .map(|publication| publication.persisted)
     }
 
     /// Machine continuation handoff (limit cut-off) — the autonomous path.
@@ -4028,6 +4285,202 @@ impl StateStore {
         ))
     }
 
+    /// Reserve a durable, owner-bound planning handle before any launch task is
+    /// spawned. The reserved thread id remains internal until authoritative
+    /// thread publication binds it.
+    pub fn reserve_launch_planning(
+        &self,
+        reserved_thread_id: &str,
+        requested_by: &str,
+    ) -> std::result::Result<String, LaunchPlanningReservationError> {
+        let _permit = self
+            .acquire_write_permit()
+            .map_err(LaunchPlanningReservationError::Internal)?;
+        let g = self
+            .lock()
+            .map_err(LaunchPlanningReservationError::Internal)?;
+        let launch_id = format!("L-{}", uuid::Uuid::new_v4().simple());
+        g.runtime_db
+            .reserve_launch_planning(&launch_id, reserved_thread_id, requested_by)
+            .map_err(map_launch_planning_reservation_error)?;
+        Ok(launch_id)
+    }
+
+    pub fn ensure_launch_planning_active(&self, reserved_thread_id: &str) -> Result<()> {
+        let g = self.lock()?;
+        let Some(record) = g.runtime_db.launch_planning_by_thread(reserved_thread_id)? else {
+            return Ok(());
+        };
+        if record.state != "planning"
+            || record.daemon_generation_id != runtime_db::daemon_generation_id()
+        {
+            return Err(LaunchPlanningInactive.into());
+        }
+        Ok(())
+    }
+
+    pub fn register_launch_task_abort(
+        &self,
+        reserved_thread_id: &str,
+        abort_handle: tokio::task::AbortHandle,
+    ) -> std::result::Result<(), LaunchTaskAbortRegistrationError> {
+        self.register_launch_task_abort_bounded(
+            reserved_thread_id,
+            abort_handle,
+            MAX_ACTIVE_LAUNCH_SIGNALS,
+        )
+    }
+
+    fn register_launch_task_abort_bounded(
+        &self,
+        reserved_thread_id: &str,
+        abort_handle: tokio::task::AbortHandle,
+        max_active_signals: usize,
+    ) -> std::result::Result<(), LaunchTaskAbortRegistrationError> {
+        let g = self.lock()?;
+        let planning = g.runtime_db.launch_planning_by_thread(reserved_thread_id)?;
+        let Some(record) = planning else {
+            return Ok(());
+        };
+        if record.state == "bound" {
+            return Ok(());
+        }
+        if record.state != "planning"
+            || record.daemon_generation_id != runtime_db::daemon_generation_id()
+        {
+            abort_handle.abort();
+            return Ok(());
+        }
+        let launch_id = record.launch_id;
+        let mut handles = self
+            .launch_task_abort_handles
+            .lock()
+            .map_err(|_| anyhow!("launch task abort registry lock poisoned"))?;
+        if handles.len() >= max_active_signals && !handles.contains_key(&launch_id) {
+            abort_handle.abort();
+            return Err(LaunchTaskAbortRegistrationError::CapacityExceeded);
+        }
+        if let Some(previous) = handles.insert(launch_id, abort_handle) {
+            previous.abort();
+        }
+        drop(handles);
+        drop(g);
+        Ok(())
+    }
+
+    pub fn unregister_launch_task_abort(&self, reserved_thread_id: &str) -> Result<()> {
+        let launch_id = {
+            let g = self.lock()?;
+            g.runtime_db
+                .launch_planning_by_thread(reserved_thread_id)?
+                .map(|record| record.launch_id)
+        };
+        if let Some(launch_id) = launch_id {
+            self.launch_task_abort_handles
+                .lock()
+                .map_err(|_| anyhow!("launch task abort registry lock poisoned"))?
+                .remove(&launch_id);
+        }
+        Ok(())
+    }
+
+    /// Settle a pre-bind task exit, including unwind/abort paths. If the
+    /// authoritative row committed first, repair the planning record to bound;
+    /// otherwise mark it terminal failed. Already-terminal records are a no-op.
+    pub fn settle_launch_planning_task_exit(&self, reserved_thread_id: &str) -> Result<()> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(record) = g.runtime_db.launch_planning_by_thread(reserved_thread_id)? else {
+            return Ok(());
+        };
+        if record.state != "planning" {
+            return Ok(());
+        }
+        if g.state_db.get_thread(reserved_thread_id)?.is_some() {
+            g.runtime_db.bind_launch_planning(reserved_thread_id)?;
+        } else {
+            g.runtime_db.fail_launch_planning(reserved_thread_id)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve cancel-vs-bind while holding the same store mutex used by root
+    /// and continuation publication. A committed authoritative row always wins
+    /// and is repaired to `bound` before the caller delegates to normal durable
+    /// thread cancel.
+    pub fn cancel_launch_planning(
+        &self,
+        launch_id: &str,
+        requested_by: &str,
+    ) -> Result<Option<LaunchCancellationResolution>> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let Some(record) = g.runtime_db.launch_planning_by_id(launch_id)? else {
+            return Ok(None);
+        };
+        if record.requested_by != requested_by {
+            return Ok(None);
+        }
+        if record.state == "planning" {
+            if g.state_db.get_thread(&record.reserved_thread_id)?.is_some() {
+                g.runtime_db
+                    .bind_launch_planning(&record.reserved_thread_id)?;
+                self.launch_task_abort_handles
+                    .lock()
+                    .map_err(|_| anyhow!("launch task abort registry lock poisoned"))?
+                    .remove(launch_id);
+                return Ok(Some(LaunchCancellationResolution::Bound {
+                    thread_id: record.reserved_thread_id,
+                }));
+            }
+            if g.runtime_db.cancel_unbound_launch_planning(launch_id)? {
+                drop(g);
+                if let Some(abort_handle) = self
+                    .launch_task_abort_handles
+                    .lock()
+                    .map_err(|_| anyhow!("launch task abort registry lock poisoned"))?
+                    .remove(launch_id)
+                {
+                    abort_handle.abort();
+                }
+                return Ok(Some(LaunchCancellationResolution::Cancelled));
+            }
+        }
+        if record.state == "bound" {
+            let thread_id = record.bound_thread_id.ok_or_else(|| {
+                anyhow!(
+                    "bound launch planning record `{launch_id}` has no authoritative thread binding"
+                )
+            })?;
+            if thread_id != record.reserved_thread_id {
+                bail!(
+                    "bound launch planning record `{launch_id}` has divergent reserved and authoritative thread identities"
+                );
+            }
+            return Ok(Some(LaunchCancellationResolution::Bound { thread_id }));
+        }
+        Ok(Some(LaunchCancellationResolution::Terminal {
+            state: record.state,
+            outcome_code: record.outcome_code,
+        }))
+    }
+
+    pub fn reconcile_launch_planning(&self) -> Result<usize> {
+        let _permit = self.acquire_write_permit()?;
+        let g = self.lock()?;
+        let mut repaired = 0usize;
+        for record in g.runtime_db.pending_launch_planning()? {
+            if g.state_db.get_thread(&record.reserved_thread_id)?.is_some()
+                && g.runtime_db
+                    .bind_launch_planning(&record.reserved_thread_id)?
+            {
+                repaired += 1;
+            }
+        }
+        repaired += g.runtime_db.expire_stale_launch_planning()?;
+        Ok(repaired)
+    }
+
     pub fn get_thread(&self, thread_id: &str) -> Result<Option<ThreadDetail>> {
         let g = self.lock()?;
         let thread_row = match g.state_db.get_thread(thread_id)? {
@@ -4122,36 +4575,7 @@ impl StateStore {
         let runtime = g.runtime_db.get_runtime_info(thread_id)?.ok_or_else(|| {
             anyhow!("continuation successor {thread_id} is missing runtime state")
         })?;
-        let lifecycle_authority = runtime
-            .launch_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.resume_context.as_ref())
-            .map(|resume| resume.lifecycle_authority);
-        Ok(Some(ThreadDetail {
-            thread_id: snapshot.thread_id,
-            chain_root_id: snapshot.chain_root_id,
-            kind: snapshot.kind_name,
-            status: snapshot.status.as_str().to_string(),
-            item_ref: snapshot.item_ref,
-            executor_ref: snapshot.executor_ref,
-            launch_mode: snapshot.launch_mode,
-            current_site_id: snapshot.current_site_id,
-            origin_site_id: snapshot.origin_site_id,
-            upstream_thread_id: snapshot.upstream_thread_id,
-            successor_thread_id: None,
-            requested_by: snapshot.requested_by,
-            project_root: snapshot
-                .project_root
-                .map(|path| path.to_string_lossy().into_owned()),
-            project_authority: Some(snapshot.project_authority),
-            lifecycle_authority,
-            admitted_launch_capsule_hash: snapshot.admitted_launch_capsule_hash,
-            created_at: snapshot.created_at,
-            updated_at: snapshot.updated_at,
-            started_at: snapshot.started_at,
-            finished_at: snapshot.finished_at,
-            runtime,
-        }))
+        Ok(Some(thread_detail_from_created_snapshot(snapshot, runtime)))
     }
 
     pub fn touch_seat_lease(
@@ -7383,6 +7807,530 @@ mod tests {
             Arc::new(head_trust),
         )
         .expect("state store")
+    }
+
+    #[tokio::test]
+    async fn unbound_launch_cancel_commits_then_aborts_registered_task() {
+        let store = test_store();
+        let launch_id = store
+            .reserve_launch_planning("T-planning", "fp:owner")
+            .expect("reserve planning");
+        assert!(store
+            .get_thread("T-planning")
+            .expect("read absent authoritative row")
+            .is_none());
+        let task = tokio::spawn(std::future::pending::<()>());
+        store
+            .register_launch_task_abort("T-planning", task.abort_handle())
+            .expect("register abort signal");
+
+        assert_eq!(
+            store
+                .cancel_launch_planning(&launch_id, "fp:owner")
+                .expect("cancel planning"),
+            Some(LaunchCancellationResolution::Cancelled)
+        );
+        assert!(task.await.expect_err("task must be aborted").is_cancelled());
+        store
+            .settle_launch_planning_task_exit("T-planning")
+            .expect("cancelled task exit must preserve cancelled outcome");
+        assert!(store
+            .get_thread("T-planning")
+            .expect("read absent authoritative row after cancel")
+            .is_none());
+        assert_eq!(
+            store
+                .cancel_launch_planning(&launch_id, "fp:owner")
+                .expect("read terminal planning outcome"),
+            Some(LaunchCancellationResolution::Terminal {
+                state: "cancelled".to_string(),
+                outcome_code: Some("cancelled_by_requester".to_string()),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_before_task_registration_aborts_at_registration() {
+        let store = test_store();
+        let launch_id = store
+            .reserve_launch_planning("T-late-registration", "fp:owner")
+            .expect("reserve planning");
+        store
+            .cancel_launch_planning(&launch_id, "fp:owner")
+            .expect("cancel planning");
+        let task = tokio::spawn(std::future::pending::<()>());
+        store
+            .register_launch_task_abort("T-late-registration", task.abort_handle())
+            .expect("late registration");
+        assert!(task.await.expect_err("task must be aborted").is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn launch_abort_registry_capacity_refusal_aborts_and_can_be_settled() {
+        let store = test_store();
+        store
+            .reserve_launch_planning("T-capacity-one", "fp:owner")
+            .expect("reserve first planning");
+        let refused_launch_id = store
+            .reserve_launch_planning("T-capacity-two", "fp:owner")
+            .expect("reserve second planning");
+        let first = tokio::spawn(std::future::pending::<()>());
+        store
+            .register_launch_task_abort_bounded("T-capacity-one", first.abort_handle(), 1)
+            .expect("register first signal");
+        let refused = tokio::spawn(std::future::pending::<()>());
+        assert!(matches!(
+            store.register_launch_task_abort_bounded("T-capacity-two", refused.abort_handle(), 1,),
+            Err(LaunchTaskAbortRegistrationError::CapacityExceeded)
+        ));
+        assert!(refused
+            .await
+            .expect_err("capacity-refused task must be aborted")
+            .is_cancelled());
+
+        store
+            .settle_launch_planning_task_exit("T-capacity-two")
+            .expect("settle refused planning");
+        assert_eq!(
+            store
+                .cancel_launch_planning(&refused_launch_id, "fp:owner")
+                .expect("read settled planning"),
+            Some(LaunchCancellationResolution::Terminal {
+                state: "failed".to_string(),
+                outcome_code: Some("thread_creation_failed".to_string()),
+            })
+        );
+        first.abort();
+        assert!(first
+            .await
+            .expect_err("first task must be aborted during cleanup")
+            .is_cancelled());
+    }
+
+    #[test]
+    fn planning_reservation_maps_only_typed_capacity_and_preserves_internal_errors() {
+        let capacity = map_launch_planning_reservation_error(
+            anyhow::Error::new(LaunchPlanningCapacityExceeded)
+                .context("reserve durable planning row"),
+        );
+        assert!(matches!(
+            capacity,
+            LaunchPlanningReservationError::CapacityExceeded(_)
+        ));
+
+        let internal =
+            map_launch_planning_reservation_error(anyhow::anyhow!("runtime database unavailable"));
+        assert!(matches!(
+            internal,
+            LaunchPlanningReservationError::Internal(_)
+        ));
+    }
+
+    #[test]
+    fn foreign_launch_id_is_indistinguishable_from_nonexistent_and_does_not_cancel() {
+        let store = test_store();
+        let launch_id = store
+            .reserve_launch_planning("T-owned-planning", "fp:owner")
+            .expect("reserve planning");
+        let foreign = store
+            .cancel_launch_planning(&launch_id, "fp:other")
+            .expect("hide non-owner");
+        let nonexistent = store
+            .cancel_launch_planning("L-does-not-exist", "fp:other")
+            .expect("hide nonexistent");
+        assert_eq!(foreign, nonexistent);
+        assert_eq!(foreign, None);
+        store
+            .ensure_launch_planning_active("T-owned-planning")
+            .expect("non-owner must not mutate planning");
+    }
+
+    #[tokio::test]
+    async fn row_commit_before_handoff_routes_cancel_to_thread_without_aborting_launch_task() {
+        let store = test_store();
+        let launch_id = store
+            .reserve_launch_planning("T-row-before-handoff", "fp:owner")
+            .expect("reserve planning");
+        let task = tokio::spawn(std::future::pending::<()>());
+        store
+            .register_launch_task_abort("T-row-before-handoff", task.abort_handle())
+            .expect("register launch task");
+        let mut root = thread_record("T-row-before-handoff", "T-row-before-handoff");
+        root.requested_by = Some("fp:owner".to_string());
+        store
+            .create_thread_for_test(&root)
+            .expect("commit and bind authoritative root");
+
+        assert_eq!(
+            store
+                .cancel_launch_planning(&launch_id, "fp:owner")
+                .expect("resolve post-row cancel"),
+            Some(LaunchCancellationResolution::Bound {
+                thread_id: "T-row-before-handoff".to_string(),
+            })
+        );
+        assert!(
+            !task.is_finished(),
+            "binding must transfer cancellation to the durable thread rather than aborting its launch task"
+        );
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("test cleanup must abort launch task")
+            .is_cancelled());
+        store
+            .settle_launch_planning_task_exit("T-row-before-handoff")
+            .expect("post-bind task exit must preserve thread binding");
+        assert_eq!(
+            store
+                .cancel_launch_planning(&launch_id, "fp:owner")
+                .expect("read binding after task exit"),
+            Some(LaunchCancellationResolution::Bound {
+                thread_id: "T-row-before-handoff".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn cancel_after_handoff_resolves_to_canonical_durable_thread_stop() {
+        let store = test_store();
+        let launch_id = store
+            .reserve_launch_planning("T-after-handoff", "fp:owner")
+            .expect("reserve planning");
+        let mut root = thread_record("T-after-handoff", "T-after-handoff");
+        root.requested_by = Some("fp:owner".to_string());
+        store
+            .create_thread_for_test(&root)
+            .expect("commit and bind authoritative root");
+
+        let foreign = store
+            .cancel_launch_planning(&launch_id, "fp:other")
+            .expect("hide foreign handed-off launch");
+        let nonexistent = store
+            .cancel_launch_planning("L-missing-after-handoff", "fp:other")
+            .expect("hide nonexistent launch");
+        assert_eq!(foreign, nonexistent);
+        assert_eq!(foreign, None);
+
+        let resolution = store
+            .cancel_launch_planning(&launch_id, "fp:owner")
+            .expect("resolve handed-off launch")
+            .expect("owned launch");
+        let LaunchCancellationResolution::Bound { thread_id } = resolution else {
+            panic!("handed-off launch must resolve to its durable thread");
+        };
+        let runtime = store
+            .request_thread_stop(&thread_id, StopIntent::Cancel)
+            .expect("request canonical durable stop");
+        assert_eq!(runtime.stop_intent, Some(StopIntent::Cancel));
+        assert_eq!(thread_id, "T-after-handoff");
+    }
+
+    #[test]
+    fn pre_bind_augmentation_or_launch_task_exit_settles_failed() {
+        let store = test_store();
+        let launch_id = store
+            .reserve_launch_planning("T-pre-bind-task-exit", "fp:owner")
+            .expect("reserve planning");
+
+        store
+            .settle_launch_planning_task_exit("T-pre-bind-task-exit")
+            .expect("settle pre-bind task exit");
+
+        assert!(store
+            .get_thread("T-pre-bind-task-exit")
+            .expect("read absent authoritative row")
+            .is_none());
+        assert_eq!(
+            store
+                .cancel_launch_planning(&launch_id, "fp:owner")
+                .expect("read settled launch outcome"),
+            Some(LaunchCancellationResolution::Terminal {
+                state: "failed".to_string(),
+                outcome_code: Some("thread_creation_failed".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn root_publication_binds_planning_before_return() {
+        let store = test_store();
+        let thread_id = "T-root-direct-bind";
+        let launch_id = store
+            .reserve_launch_planning(thread_id, "fp:owner")
+            .expect("reserve root planning");
+        let mut root = thread_record(thread_id, thread_id);
+        root.requested_by = Some("fp:owner".to_string());
+
+        let publication = store
+            .create_root_thread_with_events_and_launch_metadata(&root, Vec::new(), None)
+            .expect("publish root and bind planning");
+        assert_eq!(publication.successor.thread_id, thread_id);
+        assert_eq!(publication.successor.chain_root_id, thread_id);
+        assert!(publication.successor.upstream_thread_id.is_none());
+        assert_eq!(publication.successor.status, ThreadStatus::Created.as_str());
+        assert!(publication.successor.runtime.pid.is_none());
+        assert!(publication.successor.runtime.launch_metadata.is_none());
+
+        let g = store.lock().expect("inspect root publication");
+        let planning = g
+            .runtime_db
+            .launch_planning_by_thread(thread_id)
+            .expect("read planning directly")
+            .expect("root planning record");
+        assert_eq!(planning.launch_id, launch_id);
+        assert_eq!(planning.state, "bound");
+        assert_eq!(planning.bound_thread_id.as_deref(), Some(thread_id));
+        assert!(g
+            .state_db
+            .get_thread(thread_id)
+            .expect("read authoritative root directly")
+            .is_some());
+    }
+
+    #[test]
+    fn launch_cancel_and_authoritative_root_bind_have_one_atomic_winner() {
+        let store = Arc::new(test_store());
+        let launch_id = store
+            .reserve_launch_planning("T-bind-race", "fp:owner")
+            .expect("reserve planning");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let creator_store = store.clone();
+        let creator_barrier = barrier.clone();
+        let creator = std::thread::spawn(move || {
+            creator_barrier.wait();
+            let mut root = thread_record("T-bind-race", "T-bind-race");
+            root.requested_by = Some("fp:owner".to_string());
+            creator_store.create_thread_for_test(&root)
+        });
+
+        let canceller_store = store.clone();
+        let canceller_barrier = barrier.clone();
+        let canceller = std::thread::spawn(move || {
+            canceller_barrier.wait();
+            canceller_store.cancel_launch_planning(&launch_id, "fp:owner")
+        });
+
+        barrier.wait();
+        let created = creator.join().expect("creator thread");
+        let cancelled = canceller
+            .join()
+            .expect("canceller thread")
+            .expect("cancel resolution")
+            .expect("owned planning record");
+        match (created, cancelled) {
+            (Ok(_), LaunchCancellationResolution::Bound { thread_id }) => {
+                assert_eq!(thread_id, "T-bind-race")
+            }
+            (Err(error), LaunchCancellationResolution::Cancelled) => {
+                assert!(
+                    error
+                        .chain()
+                        .any(|cause| cause.is::<LaunchPlanningInactive>()),
+                    "cancel-won publication must retain typed planning-inactive authority: {error:#}"
+                );
+            }
+            (created, cancelled) => {
+                panic!("invalid cancel-vs-bind race outcome: created={created:?}, cancelled={cancelled:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn continuation_publication_binds_planning_before_return() {
+        let store = test_store();
+        let source_thread_id = "T-continuation-direct-bind-source";
+        let successor_thread_id = "T-continuation-direct-bind-successor";
+        let mut source = thread_record(source_thread_id, source_thread_id);
+        source.requested_by = Some("fp:owner".to_string());
+        store
+            .create_thread_for_test(&source)
+            .expect("create continuation source");
+        let launch_id = store
+            .reserve_launch_planning(successor_thread_id, "fp:owner")
+            .expect("reserve continuation planning");
+        let mut successor = thread_record(successor_thread_id, source_thread_id);
+        successor.requested_by = Some("fp:owner".to_string());
+
+        let publication = store
+            .create_continuation_admitted(
+                &successor,
+                source_thread_id,
+                source_thread_id,
+                Some("chained_resume"),
+                Vec::new(),
+                None,
+            )
+            .expect("publish continuation and bind planning");
+        assert_eq!(publication.successor.thread_id, successor_thread_id);
+        assert_eq!(publication.successor.chain_root_id, source_thread_id);
+        assert_eq!(
+            publication.successor.upstream_thread_id.as_deref(),
+            Some(source_thread_id)
+        );
+        assert_eq!(publication.successor.status, ThreadStatus::Created.as_str());
+        assert!(publication.successor.runtime.pid.is_none());
+        assert!(publication.successor.runtime.launch_metadata.is_none());
+
+        let g = store.lock().expect("inspect continuation publication");
+        let planning = g
+            .runtime_db
+            .launch_planning_by_thread(successor_thread_id)
+            .expect("read planning directly")
+            .expect("continuation planning record");
+        assert_eq!(planning.launch_id, launch_id);
+        assert_eq!(planning.state, "bound");
+        assert_eq!(
+            planning.bound_thread_id.as_deref(),
+            Some(successor_thread_id)
+        );
+        assert!(g
+            .state_db
+            .get_thread(successor_thread_id)
+            .expect("read authoritative successor directly")
+            .is_some());
+        assert_eq!(
+            queries::continuation_successor(g.state_db.projection(), source_thread_id)
+                .expect("read continuation edge directly")
+                .as_deref(),
+            Some(successor_thread_id)
+        );
+    }
+
+    #[test]
+    fn cancelled_planning_refuses_continuation_publication_with_typed_inactivity() {
+        let store = test_store();
+        let source_thread_id = "T-continuation-cancelled-source";
+        let successor_thread_id = "T-continuation-cancelled-successor";
+        let mut source = thread_record(source_thread_id, source_thread_id);
+        source.requested_by = Some("fp:owner".to_string());
+        store
+            .create_thread_for_test(&source)
+            .expect("create continuation source");
+        let launch_id = store
+            .reserve_launch_planning(successor_thread_id, "fp:owner")
+            .expect("reserve continuation planning");
+        assert_eq!(
+            store
+                .cancel_launch_planning(&launch_id, "fp:owner")
+                .expect("cancel continuation planning"),
+            Some(LaunchCancellationResolution::Cancelled)
+        );
+
+        let mut successor = thread_record(successor_thread_id, source_thread_id);
+        successor.requested_by = Some("fp:owner".to_string());
+        let error = store
+            .create_continuation_for_test(
+                &successor,
+                source_thread_id,
+                source_thread_id,
+                Some("chained_resume"),
+            )
+            .expect_err("cancelled planning must fence continuation publication");
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.is::<LaunchPlanningInactive>()),
+            "continuation publication must retain typed planning inactivity: {error:#}"
+        );
+        assert!(store
+            .get_thread(successor_thread_id)
+            .expect("read absent continuation successor")
+            .is_none());
+        let source = store
+            .get_thread(source_thread_id)
+            .expect("read unchanged continuation source")
+            .expect("continuation source");
+        assert_eq!(source.status, ThreadStatus::Created.as_str());
+        assert!(source.successor_thread_id.is_none());
+    }
+
+    #[test]
+    fn launch_cancel_and_authoritative_continuation_bind_have_one_atomic_winner() {
+        let store = Arc::new(test_store());
+        let source_thread_id = "T-continuation-bind-race-source";
+        let successor_thread_id = "T-continuation-bind-race-successor";
+        let mut source = thread_record(source_thread_id, source_thread_id);
+        source.requested_by = Some("fp:owner".to_string());
+        store
+            .create_thread_for_test(&source)
+            .expect("create continuation source");
+        let launch_id = store
+            .reserve_launch_planning(successor_thread_id, "fp:owner")
+            .expect("reserve continuation planning");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+
+        let creator_store = store.clone();
+        let creator_barrier = barrier.clone();
+        let creator = std::thread::spawn(move || {
+            creator_barrier.wait();
+            let mut successor = thread_record(successor_thread_id, source_thread_id);
+            successor.requested_by = Some("fp:owner".to_string());
+            creator_store.create_continuation_for_test(
+                &successor,
+                source_thread_id,
+                source_thread_id,
+                Some("chained_resume"),
+            )
+        });
+
+        let canceller_store = store.clone();
+        let canceller_barrier = barrier.clone();
+        let canceller = std::thread::spawn(move || {
+            canceller_barrier.wait();
+            canceller_store.cancel_launch_planning(&launch_id, "fp:owner")
+        });
+
+        barrier.wait();
+        let created = creator.join().expect("creator thread");
+        let cancelled = canceller
+            .join()
+            .expect("canceller thread")
+            .expect("cancel resolution")
+            .expect("owned planning record");
+        match (created, cancelled) {
+            (Ok(_), LaunchCancellationResolution::Bound { thread_id }) => {
+                assert_eq!(thread_id, successor_thread_id);
+                let source = store
+                    .get_thread(source_thread_id)
+                    .expect("read continued source")
+                    .expect("continuation source");
+                assert_eq!(source.status, ThreadStatus::Continued.as_str());
+                assert_eq!(
+                    source.successor_thread_id.as_deref(),
+                    Some(successor_thread_id)
+                );
+                assert!(store
+                    .get_thread(successor_thread_id)
+                    .expect("read published successor")
+                    .is_some());
+            }
+            (Err(error), LaunchCancellationResolution::Cancelled) => {
+                assert!(
+                    error
+                        .chain()
+                        .any(|cause| cause.is::<LaunchPlanningInactive>()),
+                    "cancel-won continuation publication must retain typed planning inactivity: {error:#}"
+                );
+                let source = store
+                    .get_thread(source_thread_id)
+                    .expect("read unchanged source")
+                    .expect("continuation source");
+                assert_eq!(source.status, ThreadStatus::Created.as_str());
+                assert!(source.successor_thread_id.is_none());
+                assert!(store
+                    .get_thread(successor_thread_id)
+                    .expect("read absent successor")
+                    .is_none());
+            }
+            (created, cancelled) => {
+                panic!(
+                    "invalid continuation cancel-vs-bind race outcome: \
+                     created={created:?}, cancelled={cancelled:?}"
+                )
+            }
+        }
     }
 
     #[test]

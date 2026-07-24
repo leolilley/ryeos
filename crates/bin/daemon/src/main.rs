@@ -802,6 +802,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 ryeos_node::StartupPhase::ReconcilingThreads,
                 "reconciling active thread execution state",
             )?;
+            let launch_planning_repaired = app_state
+                .state_store
+                .reconcile_launch_planning()
+                .context("reconcile durable launch planning admissions")?;
+            if launch_planning_repaired != 0 {
+                tracing::info!(
+                    repaired = launch_planning_repaired,
+                    "reconciled durable launch planning admissions"
+                );
+            }
             let active_reconcile = reconcile::reconcile_active_threads(&app_state).await?;
             startup.progress(|snapshot| {
                 snapshot.recovery_threads = Some(active_reconcile.active_thread_ids.len() as u64);

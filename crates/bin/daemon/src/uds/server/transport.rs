@@ -58,6 +58,10 @@ pub(super) async fn handle_connection(
         );
         if let Some(tid) = request.params.get("thread_id").and_then(|v| v.as_str()) {
             span.record("thread_id", tid);
+            // This is a daemon-clock receive timestamp only. Callback
+            // authentication remains in method routing and no authority
+            // decision consumes this advisory observability marker.
+            ryeos_app::launch_stage_timings::observe_child_callback(tid);
         }
 
         // The decoded request, its memory charge, and any kernel-authenticated

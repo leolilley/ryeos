@@ -1404,11 +1404,7 @@ fn repair_detached_spawn_links(state: &AppState) -> Result<()> {
                         authority.clone(),
                         initial_events.clone(),
                         Some(metadata),
-                    )?;
-                state
-                    .state_store
-                    .get_thread(&intent.child_thread_id)?
-                    .ok_or_else(|| anyhow::anyhow!("repaired detached child birth disappeared"))?
+                    )?
             }
         };
         if child.project_authority.as_ref() != intent.child_project_authority.as_ref() {
