@@ -2513,7 +2513,12 @@ async fn run_claimed_thread_row_inner(
                             })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                ryeos_accounting::credential_binding_digest(&authority, &secrets).map_err(|error| {
+                ryeos_accounting::credential_binding_digest(
+                    accounting.credential_binding_key(),
+                    &authority,
+                    &secrets,
+                )
+                .map_err(|error| {
                     BuildAndLaunchError::Internal(anyhow::anyhow!(
                         "seal launch credential binding: {error}"
                     ))

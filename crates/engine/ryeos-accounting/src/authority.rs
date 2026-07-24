@@ -258,30 +258,49 @@ impl ProviderAccountingAuthority {
     }
 }
 
+/// Contract tag for the credential binding MAC construction. Bound into the
+/// digest so the construction can never be silently swapped.
+pub const CREDENTIAL_BINDING_MAC_CONTRACT: &str = "hmac-sha256/v1";
+
 /// Non-secret digest binding one sealed financial authority to the exact
 /// credential values resolved for its launch. Both launch and issue compute
 /// this through daemon-owned secret resolution; a runtime never supplies it.
+///
+/// Secret values enter only as HMAC-SHA256 under `binding_key`, a random
+/// daemon-held key persisted outside the ledger database — the stored digest
+/// must never become an offline verification oracle for a reader of the
+/// ledger file alone.
 pub fn credential_binding_digest(
+    binding_key: &[u8],
     authority: &ProviderAccountingAuthority,
     secrets: &[(String, String)],
 ) -> Result<HexDigest, String> {
+    if binding_key.len() < 16 {
+        return Err("credential binding key must be at least 16 bytes".to_string());
+    }
     let mut bindings: Vec<(&str, String)> = secrets
         .iter()
-        .map(|(name, value)| (name.as_str(), lillux::cas::sha256_hex(value.as_bytes())))
+        .map(|(name, value)| {
+            (
+                name.as_str(),
+                lillux::crypto::hmac_sha256_hex(binding_key, value.as_bytes()),
+            )
+        })
         .collect();
     bindings.sort_by(|left, right| left.0.cmp(right.0));
     if bindings.windows(2).any(|pair| pair[0].0 == pair[1].0) {
         return Err("credential binding contains duplicate secret names".to_string());
     }
     let value = serde_json::json!({
+        "binding_mac": CREDENTIAL_BINDING_MAC_CONTRACT,
         "credential_authority_generation": &authority.credential_authority_generation,
         "billing_principal_digest": authority.billing_principal_digest.as_str(),
         "pricing_contract_subject_digest": authority.pricing_contract_subject_digest.as_str(),
         "secrets": bindings
             .into_iter()
-            .map(|(name, value_digest)| serde_json::json!({
+            .map(|(name, value_mac)| serde_json::json!({
                 "name": name,
-                "value_digest": value_digest,
+                "value_mac": value_mac,
             }))
             .collect::<Vec<_>>(),
     });
@@ -524,10 +543,13 @@ mod tests {
         assert!(tampered.validate().is_err());
     }
 
+    const BINDING_KEY: &[u8] = b"test-credential-binding-key-32b!";
+
     #[test]
     fn credential_binding_is_order_independent_and_value_sensitive() {
         let sealed = authority();
         let first = credential_binding_digest(
+            BINDING_KEY,
             &sealed,
             &[
                 ("SECONDARY_KEY".to_string(), "two".to_string()),
@@ -536,6 +558,7 @@ mod tests {
         )
         .unwrap();
         let reordered = credential_binding_digest(
+            BINDING_KEY,
             &sealed,
             &[
                 ("API_KEY".to_string(), "one".to_string()),
@@ -546,6 +569,7 @@ mod tests {
         assert_eq!(first, reordered);
 
         let changed = credential_binding_digest(
+            BINDING_KEY,
             &sealed,
             &[
                 ("API_KEY".to_string(), "rotated".to_string()),
@@ -561,6 +585,7 @@ mod tests {
         assert_ne!(
             first,
             credential_binding_digest(
+                BINDING_KEY,
                 &next_generation,
                 &[
                     ("API_KEY".to_string(), "one".to_string()),
@@ -572,8 +597,24 @@ mod tests {
     }
 
     #[test]
+    fn credential_binding_is_keyed_not_an_offline_oracle() {
+        // The same authority and secret values under a different daemon key
+        // must produce an unrelated digest: a reader of the ledger file
+        // alone cannot verify guesses against the stored digest.
+        let sealed = authority();
+        let secrets = [("API_KEY".to_string(), "one".to_string())];
+        let under_first_key = credential_binding_digest(BINDING_KEY, &sealed, &secrets).unwrap();
+        let under_other_key =
+            credential_binding_digest(b"other-credential-binding-key-32!", &sealed, &secrets)
+                .unwrap();
+        assert_ne!(under_first_key, under_other_key);
+        assert!(credential_binding_digest(b"short", &sealed, &secrets).is_err());
+    }
+
+    #[test]
     fn credential_binding_rejects_duplicate_secret_names() {
         assert!(credential_binding_digest(
+            BINDING_KEY,
             &authority(),
             &[
                 ("API_KEY".to_string(), "one".to_string()),

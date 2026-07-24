@@ -2579,6 +2579,22 @@ mod tests {
     }
 
     #[test]
+    fn accounting_transition_projection_tolerates_identical_replay_at_later_chain_seq() {
+        // A lost publisher ack can legally re-append a byte-identical
+        // transition at a later chain position; the projection must not
+        // poison itself — the first projected chain_seq stays
+        // authoritative.
+        let db = test_db();
+        project_event(&db, &budget_transition_event(1, "cfg")).unwrap();
+        project_event(&db, &budget_transition_event(7, "cfg")).unwrap();
+        let transition_id = ryeos_accounting::transition_id("A-projection", 1);
+        let identity = get_provider_attempt_budget_transition_identity(&db, &transition_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(identity.chain_seq, 1);
+    }
+
+    #[test]
     fn accounting_transition_projection_rejects_reused_id_with_changed_payload() {
         let db = test_db();
         project_event(&db, &budget_transition_event(1, "cfg")).unwrap();

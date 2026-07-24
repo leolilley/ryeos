@@ -59,6 +59,8 @@ const ACCOUNTING_SCHEMA_VERSION: i32 = 1;
 pub const ACCOUNTING_DB_FILENAME: &str = "accounting.sqlite3";
 pub(crate) const ACCOUNTING_INITIALIZED_FILENAME: &str = "accounting.initialized";
 const ACCOUNTING_INITIALIZED_CONTENT: &[u8] = b"ryeos-accounting-v1\n";
+const CREDENTIAL_BINDING_KEY_FILENAME: &str = "accounting.credential-binding-key";
+const CREDENTIAL_BINDING_KEY_LEN: usize = 32;
 
 const SCHEMA_SQL: &str = r#"
 PRAGMA journal_mode=WAL;
@@ -829,6 +831,7 @@ pub struct AccountingDb {
     epoch: u64,
     anchor: Arc<AccountingAnchor>,
     hard_admission: AtomicBool,
+    credential_binding_key: [u8; CREDENTIAL_BINDING_KEY_LEN],
     _runtime_directory: lillux::PinnedDirectory,
     _directory_lock: DirectoryGuard,
     _database_file: File,
@@ -972,6 +975,7 @@ impl AccountingDb {
             None => write_initialized_marker(runtime_directory)?,
         };
 
+        let credential_binding_key = load_or_create_credential_binding_key(&raw.runtime_directory)?;
         let db = AccountingDb {
             conn: Mutex::new(raw.conn),
             path: raw.path,
@@ -979,6 +983,7 @@ impl AccountingDb {
             epoch,
             anchor,
             hard_admission: AtomicBool::new(true),
+            credential_binding_key,
             _runtime_directory: raw.runtime_directory,
             _directory_lock: raw.directory_lock,
             _database_file: raw.database_file,
@@ -992,6 +997,13 @@ impl AccountingDb {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Daemon-held random key for the launch/issue credential binding MAC.
+    /// Persisted outside the ledger database so the stored binding digests
+    /// are useless to a reader of the database file alone.
+    pub fn credential_binding_key(&self) -> &[u8] {
+        &self.credential_binding_key
     }
 
     /// The persisted `(budget_authority_site_id, ledger_epoch)` identity.
@@ -4551,6 +4563,51 @@ fn inspect_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<Opt
         );
     }
     Ok(Some(marker))
+}
+
+/// Load the persistent credential-binding MAC key, creating it on first use.
+///
+/// The key lives beside the ledger — not inside it — as 64 lowercase hex
+/// characters, mode 0600. Loss of the key is fail-closed: existing launch
+/// gates stop reproducing their binding at issue time and release before
+/// provider contact; new launches mint bindings under the fresh key.
+fn load_or_create_credential_binding_key(
+    directory: &lillux::PinnedDirectory,
+) -> Result<[u8; CREDENTIAL_BINDING_KEY_LEN]> {
+    let name = OsStr::new(CREDENTIAL_BINDING_KEY_FILENAME);
+    let decode = |content: &[u8]| -> Option<[u8; CREDENTIAL_BINDING_KEY_LEN]> {
+        let text = std::str::from_utf8(content).ok()?.trim();
+        if text.len() != CREDENTIAL_BINDING_KEY_LEN * 2 {
+            return None;
+        }
+        let mut key = [0u8; CREDENTIAL_BINDING_KEY_LEN];
+        for (index, byte) in key.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).ok()?;
+        }
+        Some(key)
+    };
+    if let Some(mut file) = directory
+        .open_regular(name, false)
+        .context("open accounting credential-binding key through pinned directory")?
+    {
+        let mut content = Vec::new();
+        file.read_to_end(&mut content)
+            .context("read accounting credential-binding key")?;
+        return decode(&content).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid accounting credential-binding key (expected {} hex chars): {}",
+                CREDENTIAL_BINDING_KEY_LEN * 2,
+                directory.path().join(CREDENTIAL_BINDING_KEY_FILENAME).display()
+            )
+        });
+    }
+    let key: [u8; CREDENTIAL_BINDING_KEY_LEN] = rand::random();
+    let mut encoded: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+    encoded.push('\n');
+    directory
+        .atomic_write_if_same(name, None, encoded.as_bytes(), 0o600)
+        .context("publish accounting credential-binding key")?;
+    Ok(key)
 }
 
 fn write_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<File> {

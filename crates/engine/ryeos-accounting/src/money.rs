@@ -104,12 +104,43 @@ impl UsdNanos {
     /// Returns the enforcement value and whether rounding occurred. Callers
     /// may use this ONLY when the route's signed final-charge contract
     /// explicitly permits the reported scale; the raw text is retained
-    /// separately as bounded audit truth. Sign, exponent, and non-digit
-    /// characters are still rejected.
+    /// separately as bounded audit truth. Exponent notation is accepted here
+    /// (providers emit JSON number tokens like `2.25e-5` for sub-cent
+    /// charges); sign and non-digit characters are still rejected.
     pub fn parse_reported_round_up(input: &str) -> Result<(Self, bool), MoneyError> {
-        let (int_part, frac_part) = match input.split_once('.') {
+        // Exponent magnitudes beyond this either round up to one nano
+        // (negative) or overflow the fixed-point range (positive) for any
+        // nonzero mantissa; clamping keeps the shifted strings small.
+        const MAX_EXPONENT_MAGNITUDE: i64 = 64;
+
+        let (mantissa, exponent) = match input.find(['e', 'E']) {
+            None => (input, 0_i64),
+            Some(pos) => {
+                let (mantissa, exp_text) = (&input[..pos], &input[pos + 1..]);
+                let (negative, exp_digits) = match exp_text.as_bytes().first() {
+                    Some(b'+') => (false, &exp_text[1..]),
+                    Some(b'-') => (true, &exp_text[1..]),
+                    _ => (false, exp_text),
+                };
+                if exp_digits.is_empty() || !exp_digits.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(MoneyError::NotCanonical(input.to_string()));
+                }
+                let trimmed = exp_digits.trim_start_matches('0');
+                let magnitude: i64 = if trimmed.is_empty() {
+                    0
+                } else {
+                    trimmed
+                        .parse()
+                        .unwrap_or(MAX_EXPONENT_MAGNITUDE + 1)
+                        .min(MAX_EXPONENT_MAGNITUDE + 1)
+                };
+                (mantissa, if negative { -magnitude } else { magnitude })
+            }
+        };
+
+        let (int_part, frac_part) = match mantissa.split_once('.') {
             Some((i, f)) => (i, Some(f)),
-            None => (input, None),
+            None => (mantissa, None),
         };
         if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
             return Err(MoneyError::NotCanonical(input.to_string()));
@@ -118,6 +149,42 @@ impl UsdNanos {
         if frac_part.is_some() && (frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit())) {
             return Err(MoneyError::NotCanonical(input.to_string()));
         }
+
+        let (int_part, frac) = if exponent == 0 {
+            (int_part.to_string(), frac.to_string())
+        } else {
+            let digits = format!("{int_part}{frac}");
+            let nonzero = digits.bytes().any(|b| b != b'0');
+            if exponent > MAX_EXPONENT_MAGNITUDE {
+                if nonzero {
+                    return Err(MoneyError::Overflow);
+                }
+                return Ok((Self::ZERO, false));
+            }
+            if exponent < -MAX_EXPONENT_MAGNITUDE {
+                return Ok(if nonzero {
+                    (Self(1), true)
+                } else {
+                    (Self::ZERO, false)
+                });
+            }
+            let point = int_part.len() as i64 + exponent;
+            if point <= 0 {
+                (
+                    "0".to_string(),
+                    format!("{}{digits}", "0".repeat(point.unsigned_abs() as usize)),
+                )
+            } else if point as usize >= digits.len() {
+                (
+                    format!("{digits}{}", "0".repeat(point as usize - digits.len())),
+                    String::new(),
+                )
+            } else {
+                let (i, f) = digits.split_at(point as usize);
+                (i.to_string(), f.to_string())
+            }
+        };
+        let (int_part, frac) = (int_part.as_str(), frac.as_str());
 
         let whole: i64 = int_part.parse().map_err(|_| MoneyError::Overflow)?;
         let whole_nanos = whole
@@ -290,7 +357,57 @@ mod tests {
         assert_eq!(v.as_nanos(), 1);
         assert!(!rounded);
         assert!(UsdNanos::parse_reported_round_up("-0.1").is_err());
-        assert!(UsdNanos::parse_reported_round_up("1e-3").is_err());
+    }
+
+    #[test]
+    fn reported_round_up_accepts_exponent_notation() {
+        // Python's json emits e-notation for small floats; sub-cent
+        // provider costs are the common case, and must settle at the
+        // actual, not fall back to the reserved maximum.
+        for (raw, nanos, rounded) in [
+            ("1e-3", 1_000_000, false),
+            ("2.25e-5", 22_500, false),
+            ("2.25E-5", 22_500, false),
+            ("1e3", 1_000 * NANOS_PER_USD, false),
+            ("1.5e+2", 150 * NANOS_PER_USD, false),
+            ("5e0", 5 * NANOS_PER_USD, false),
+            ("0.000000001e0", 1, false),
+            ("1e-9", 1, false),
+            ("1e-10", 1, true),
+            ("1.23e-12", 1, true),
+            ("1e-999", 1, true),
+            ("0e-999", 0, false),
+            ("0e999", 0, false),
+            ("00.50e1", 5 * NANOS_PER_USD, false),
+        ] {
+            let (v, r) = UsdNanos::parse_reported_round_up(raw)
+                .unwrap_or_else(|e| panic!("{raw:?} should parse: {e}"));
+            assert_eq!(v.as_nanos(), nanos, "{raw:?}");
+            assert_eq!(r, rounded, "{raw:?}");
+        }
+        assert_eq!(
+            UsdNanos::parse_reported_round_up("1e999"),
+            Err(MoneyError::Overflow)
+        );
+        assert_eq!(
+            UsdNanos::parse_reported_round_up("1e99999999999999999999"),
+            Err(MoneyError::Overflow)
+        );
+        assert_eq!(
+            UsdNanos::parse_reported_round_up("1e-99999999999999999999")
+                .unwrap()
+                .0
+                .as_nanos(),
+            1
+        );
+        for bad in ["1e", "1e+", "1e-", "1e1.5", "e5", "1ee5", "1e 5", ".5e1", "5.e1"] {
+            assert!(
+                UsdNanos::parse_reported_round_up(bad).is_err(),
+                "should reject {bad:?}"
+            );
+        }
+        // Canonical authority parsing still rejects exponent forms.
+        assert!(UsdNanos::parse_canonical("1e-3").is_err());
     }
 
     #[test]

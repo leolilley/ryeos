@@ -352,8 +352,11 @@ fn project_provider_attempt_budget_latest(
 
     // Persist the exact append-once identity before updating the lossy
     // latest-state summary. Re-projecting the same chain event is
-    // idempotent; reusing either its transition ID or attempt/sequence
-    // coordinate with different content is an integrity failure.
+    // idempotent, and a byte-identical payload re-appended at a later
+    // chain position (a lost-ack publisher retry) is benign — the first
+    // projected chain_seq stays authoritative. Reusing the transition ID
+    // or attempt/sequence coordinate with different content is an
+    // integrity failure.
     let existing_identity: Option<(String, i64, String, i64)> = db
         .connection()
         .query_row(
@@ -365,11 +368,10 @@ fn project_provider_attempt_budget_latest(
         )
         .optional()
         .context("read accounting transition publication identity")?;
-    if let Some((attempt_id, sequence, fingerprint, chain_seq)) = existing_identity {
+    if let Some((attempt_id, sequence, fingerprint, _chain_seq)) = existing_identity {
         if attempt_id != transition.attempt_id
             || sequence != i64::from(transition.transition_sequence)
             || fingerprint != payload_fingerprint
-            || chain_seq != incoming_chain_seq
         {
             anyhow::bail!(
                 "accounting transition ID {} contradicts its projected publication identity",

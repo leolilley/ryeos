@@ -16,7 +16,8 @@ pub use authority::{
     credential_binding_digest, BillableDimension, ChargeReconciliationAuthority,
     ClosedBillableDimensionSet, Currency, FinalityContract, HexDigest, ProviderAccountingAuthority,
     ProviderChargeCapContract, SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument,
-    PROVIDER_CHARGE_CAP_SCHEMA_VERSION, SPEND_TARIFF_SCHEMA_VERSION,
+    CREDENTIAL_BINDING_MAC_CONTRACT, PROVIDER_CHARGE_CAP_SCHEMA_VERSION,
+    SPEND_TARIFF_SCHEMA_VERSION,
 };
 pub use event::{
     transition_id, ProviderAttemptBudgetTransitionV1, PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,

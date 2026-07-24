@@ -19,3 +19,27 @@ pub fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
 pub fn fingerprint(key: &VerifyingKey) -> String {
     crate::sha256_hex(key.as_bytes())
 }
+
+/// HMAC-SHA256 of `message` under `key`, rendered as lowercase hex.
+pub fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha2::Sha256>>::new_from_slice(key)
+        .expect("HMAC-SHA256 accepts keys of any length");
+    mac.update(message);
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hmac_sha256_hex_matches_rfc_4231_test_case_2() {
+        assert_eq!(
+            super::hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+}

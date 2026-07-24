@@ -182,24 +182,35 @@ pub(super) fn handle_provider_attempt_mark_issued(
         i64::try_from(state.config.accounting_issue_acceptance_window_ms).unwrap_or(i64::MAX);
     let sealed = sealed_financial_authority(state, &cap.thread_id)?;
     // Re-read through the same daemon-owned principal and project authority
-    // used at launch. Any missing, revoked, or otherwise unreadable credential
-    // is represented as a non-matching binding so the ledger durably releases
-    // the reservation before provider contact.
-    let current_binding = ryeos_app::vault::read_required_secrets_with_authority(
+    // used at launch. A definitively missing or revoked credential is
+    // represented as a non-matching binding so the ledger durably releases
+    // the reservation before provider contact. A transient read failure is
+    // NOT revocation evidence: it must surface as a retryable RPC error, not
+    // durably brand the attempt as released.
+    let current_binding = match ryeos_app::vault::read_required_secrets_with_authority(
         state.vault.as_ref(),
         &thread_auth.acting_principal,
         &sealed.required_secret_names,
         cap.provenance.project_authority(),
-    )
-    .ok()
-    .and_then(|values| {
-        let secrets = sealed
+    ) {
+        Ok(values) => sealed
             .required_secret_names
             .iter()
             .map(|name| values.get(name).cloned().map(|value| (name.clone(), value)))
-            .collect::<Option<Vec<_>>>()?;
-        credential_binding_digest(&sealed.authority, &secrets).ok()
-    });
+            .collect::<Option<Vec<_>>>()
+            .and_then(|secrets| {
+                credential_binding_digest(
+                    ledger.credential_binding_key(),
+                    &sealed.authority,
+                    &secrets,
+                )
+                .ok()
+            }),
+        Err(ryeos_app::vault::VaultReadError::MissingSecrets { .. }) => None,
+        Err(ryeos_app::vault::VaultReadError::Internal(error)) => {
+            return Err(error.context("re-read launch credentials at provider-attempt issue"));
+        }
+    };
     let outcome = ledger.mark_provider_attempt_issued_with_credential_binding(
         &cap.thread_id,
         launch_owner,
