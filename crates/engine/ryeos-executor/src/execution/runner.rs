@@ -4036,6 +4036,11 @@ async fn run_existing_recovered_thread(
                     .into(),
                 )
             }
+            error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+                guard.fail_thread("vault_read_failed");
+                guard.cleanup();
+                ResumeError::VaultRead(error.into())
+            }
             ryeos_app::vault::VaultReadError::Internal(e) => {
                 guard.fail_thread("vault_read_failed");
                 guard.cleanup();

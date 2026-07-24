@@ -206,7 +206,8 @@ pub(super) fn handle_provider_attempt_mark_issued(
                 )
                 .ok()
             }),
-        Err(ryeos_app::vault::VaultReadError::MissingSecrets { .. }) => None,
+        Err(ryeos_app::vault::VaultReadError::MissingSecrets { .. })
+        | Err(ryeos_app::vault::VaultReadError::AuthorityViolation(_)) => None,
         Err(ryeos_app::vault::VaultReadError::Internal(error)) => {
             return Err(error.context("re-read launch credentials at provider-attempt issue"));
         }

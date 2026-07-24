@@ -343,6 +343,18 @@ fn project_provider_attempt_budget_latest(
     transition
         .validate()
         .map_err(|error| anyhow::anyhow!("invalid budget transition payload: {error}"))?;
+    // The daemon outbox appends each transition to exactly the audit chain
+    // named inside the payload. Pinning that here means a byte-identical
+    // payload can never project from any OTHER chain — so the lost-ack
+    // replay tolerance below only ever absorbs same-chain duplicates.
+    if event.chain_root_id != transition.audit_chain_root_id {
+        anyhow::bail!(
+            "accounting transition {} appended to chain {} but declares audit chain {}",
+            transition.transition_id,
+            event.chain_root_id,
+            transition.audit_chain_root_id
+        );
+    }
     let payload_fingerprint = lillux::sha256_hex(
         lillux::canonical_json(&event.payload)
             .context("canonicalize budget transition payload")?

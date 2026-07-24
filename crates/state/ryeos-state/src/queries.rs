@@ -2502,9 +2502,17 @@ mod tests {
     }
 
     fn budget_transition_event(chain_seq: u64, config_hash: &str) -> crate::ThreadEvent {
+        budget_transition_event_on_chain("T-root", chain_seq, config_hash)
+    }
+
+    fn budget_transition_event_on_chain(
+        chain_root_id: &str,
+        chain_seq: u64,
+        config_hash: &str,
+    ) -> crate::ThreadEvent {
         let attempt_id = "A-projection";
         NewEvent::new(
-            "T-root",
+            chain_root_id,
             "T-runtime",
             crate::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1,
         )
@@ -2592,6 +2600,18 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(identity.chain_seq, 1);
+    }
+
+    #[test]
+    fn accounting_transition_projection_rejects_identical_payload_on_a_different_chain() {
+        // The replay tolerance is same-chain only: a byte-identical payload
+        // appended to a chain other than its declared audit chain is an
+        // integrity failure, not a benign duplicate.
+        let db = test_db();
+        project_event(&db, &budget_transition_event(1, "cfg")).unwrap();
+        let error = project_event(&db, &budget_transition_event_on_chain("T-other", 2, "cfg"))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("declares audit chain"));
     }
 
     #[test]

@@ -22,7 +22,7 @@ pub use authority::{
 pub use event::{
     transition_id, ProviderAttemptBudgetTransitionV1, PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
 };
-pub use money::{MoneyError, UsdNanos, NANOS_PER_USD};
+pub use money::{reported_decimal_scale, MoneyError, UsdNanos, NANOS_PER_USD};
 pub use rpc::{
     ProviderAttemptBudgetRecord, ProviderAttemptGetParams, ProviderAttemptMarkIssuedParams,
     ProviderAttemptMarkIssuedResponse, ProviderAttemptReleaseUnissuedParams,

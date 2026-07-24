@@ -764,10 +764,6 @@ fn attempt_key(thread_id: &str, launch_generation: &str, turn: u32, attempt_numb
     format!("{thread_id}/{launch_generation}/{turn}/{attempt_number}")
 }
 
-fn fraction_digits(raw: &str) -> usize {
-    raw.split_once('.').map(|(_, frac)| frac.len()).unwrap_or(0)
-}
-
 fn wall_clock_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
@@ -975,7 +971,8 @@ impl AccountingDb {
             None => write_initialized_marker(runtime_directory)?,
         };
 
-        let credential_binding_key = load_or_create_credential_binding_key(&raw.runtime_directory)?;
+        let credential_binding_key =
+            load_or_create_credential_binding_key(&raw.runtime_directory, established_epoch)?;
         let db = AccountingDb {
             conn: Mutex::new(raw.conn),
             path: raw.path,
@@ -1304,6 +1301,46 @@ impl AccountingDb {
                 }
                 return Ok(());
             }
+            // Supersession fence: a thread has exactly one live launch
+            // generation, so opening a gate for a NEW generation proves
+            // ownership moved. Any other open gate on this thread belongs
+            // to a dead predecessor (crash-then-resume) whose holds would
+            // otherwise dangle until thread terminal — starving the shared
+            // allowance the live generation is about to draw on. Close
+            // them here, in the same transaction that admits the new gate.
+            let superseded: Vec<String> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT launch_generation FROM launch_accounting_gate
+                         WHERE budget_authority_site_id = ?1 AND ledger_epoch = ?2
+                           AND thread_id = ?3 AND launch_generation != ?4
+                           AND state = 'open'",
+                    )
+                    .context("prepare superseded gate scan")?;
+                let generations = stmt
+                    .query_map(
+                        rusqlite::params![
+                            self.site_id,
+                            self.epoch_i64(),
+                            thread_id,
+                            launch_generation
+                        ],
+                        |row| row.get(0),
+                    )
+                    .context("scan superseded launch gates")?
+                    .collect::<std::result::Result<Vec<String>, _>>()
+                    .context("collect superseded launch gates")?;
+                generations
+            };
+            for generation in &superseded {
+                self.fence_generation_in_tx(
+                    &conn,
+                    thread_id,
+                    generation,
+                    ReconciliationReason::OwnerGenerationFenced,
+                    now_ms,
+                )?;
+            }
             let account = self
                 .load_account(&conn, "execution", execution_budget_id)?
                 .ok_or_else(|| {
@@ -1354,143 +1391,157 @@ impl AccountingDb {
     ) -> Result<FenceOutcome> {
         let conn = self.lock_conn()?;
         immediate_transaction(&conn, "accounting gate fence", || {
-            // Fence the gate when it exists and is open; the attempt sweep
-            // below runs REGARDLESS. A nonterminal attempt behind a missing
-            // or already-fenced gate is unreachable through normal paths,
-            // but if one ever exists its hold must still close
-            // conservatively rather than dangle forever.
-            let gate = self.load_gate(&conn, thread_id, launch_generation)?;
-            let gate_was_open = matches!(&gate, Some(gate) if gate.state == "open");
-            if gate_was_open {
-                conn.execute(
-                    "UPDATE launch_accounting_gate
-                     SET state = 'fenced', fenced_reason = ?1, terminal_publication_due = 1,
-                         updated_at_ms = ?2
-                     WHERE budget_authority_site_id = ?3 AND ledger_epoch = ?4
-                       AND thread_id = ?5 AND launch_generation = ?6",
-                    rusqlite::params![
-                        reason.as_str(),
-                        now_ms,
-                        self.site_id,
-                        self.epoch_i64(),
-                        thread_id,
-                        launch_generation,
-                    ],
-                )
-                .context("fence launch accounting gate")?;
-            }
-            let fence_replayed = !gate_was_open;
+            self.fence_generation_in_tx(&conn, thread_id, launch_generation, reason, now_ms)
+        })
+    }
 
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT {RESERVATION_COLUMNS} FROM provider_attempt_reservation
-                     WHERE thread_id = ?1 AND launch_generation = ?2
-                       AND state IN ('reserved', 'issued')
-                     ORDER BY turn, attempt_number"
-                ))
-                .context("prepare fence attempt scan")?;
-            let rows: Vec<ReservationRow> = stmt
-                .query_map(
-                    rusqlite::params![thread_id, launch_generation],
-                    reservation_from_row,
-                )
-                .context("scan nonterminal attempts for fence")?
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .context("collect nonterminal attempts for fence")?;
-            drop(stmt);
-
-            let mut released_attempt_ids = Vec::new();
-            let mut charged_attempt_ids = Vec::new();
-            for row in rows {
-                match row.state {
-                    AttemptBudgetState::Reserved => {
-                        self.release_attempt_holds(&conn, &row.attempt_id, now_ms)?;
-                        conn.execute(
-                            "UPDATE provider_attempt_reservation
-                             SET state = 'released_unissued', reconciliation_reason = ?1,
-                                 settled_at_ms = ?2
-                             WHERE attempt_id = ?3",
-                            rusqlite::params![reason.as_str(), now_ms, row.attempt_id],
-                        )
-                        .context("release reserved attempt during fence")?;
-                        self.enqueue_transition(
-                            &conn,
-                            &row,
-                            &TransitionExtras {
-                                sequence: 2,
-                                state: AttemptBudgetState::ReleasedUnissued,
-                                observation: false,
-                                budget_charge_nanos: None,
-                                provider_actual_nanos: None,
-                                released_nanos: Some(row.reserved_nanos),
-                                charge_basis: None,
-                                reason: Some(reason),
-                                occurred_at_ms: now_ms,
-                            },
-                        )?;
-                        released_attempt_ids.push(row.attempt_id.clone());
-                    }
-                    AttemptBudgetState::Issued => {
-                        self.charge_attempt(&conn, &row.attempt_id, row.reserved_nanos, now_ms)?;
-                        conn.execute(
-                            "UPDATE provider_attempt_reservation
-                             SET state = 'charged_reserved_maximum',
-                                 budget_charge_usd_nanos = ?1,
-                                 charge_basis = 'reserved_maximum',
-                                 reconciliation_reason = ?2, settled_at_ms = ?3
-                             WHERE attempt_id = ?4",
-                            rusqlite::params![
-                                row.reserved_nanos,
-                                reason.as_str(),
-                                now_ms,
-                                row.attempt_id
-                            ],
-                        )
-                        .context("charge issued attempt during fence")?;
-                        self.enqueue_transition(
-                            &conn,
-                            &row,
-                            &TransitionExtras {
-                                sequence: 3,
-                                state: AttemptBudgetState::ChargedReservedMaximum,
-                                observation: false,
-                                budget_charge_nanos: Some(row.reserved_nanos),
-                                provider_actual_nanos: None,
-                                released_nanos: Some(0),
-                                charge_basis: Some(ChargeBasis::ReservedMaximum),
-                                reason: Some(reason),
-                                occurred_at_ms: now_ms,
-                            },
-                        )?;
-                        charged_attempt_ids.push(row.attempt_id.clone());
-                    }
-                    other => bail!(
-                        "fence scan returned terminal attempt {} in state {}",
-                        row.attempt_id,
-                        other.as_str()
-                    ),
-                }
-            }
-            if gate_was_open {
-                let gate = gate.as_ref().expect("gate_was_open implies a gate row");
-                self.insert_fact(
-                    &conn,
-                    "launch_gate_fenced",
-                    None,
-                    None,
-                    Some(&gate.execution_budget_id),
-                    None,
-                    Some(&gate.audit_chain_root_id),
-                    Some(reason.as_str()),
+    /// The fence body, callable inside an already-open transaction (the
+    /// supersession sweep at gate open composes it with the new gate's
+    /// admission).
+    fn fence_generation_in_tx(
+        &self,
+        conn: &Connection,
+        thread_id: &str,
+        launch_generation: &str,
+        reason: ReconciliationReason,
+        now_ms: i64,
+    ) -> Result<FenceOutcome> {
+        // Fence the gate when it exists and is open; the attempt sweep
+        // below runs REGARDLESS. A nonterminal attempt behind a missing
+        // or already-fenced gate is unreachable through normal paths,
+        // but if one ever exists its hold must still close
+        // conservatively rather than dangle forever.
+        let gate = self.load_gate(conn, thread_id, launch_generation)?;
+        let gate_was_open = matches!(&gate, Some(gate) if gate.state == "open");
+        if gate_was_open {
+            conn.execute(
+                "UPDATE launch_accounting_gate
+                 SET state = 'fenced', fenced_reason = ?1, terminal_publication_due = 1,
+                     updated_at_ms = ?2
+                 WHERE budget_authority_site_id = ?3 AND ledger_epoch = ?4
+                   AND thread_id = ?5 AND launch_generation = ?6",
+                rusqlite::params![
+                    reason.as_str(),
                     now_ms,
-                    None,
-                )?;
+                    self.site_id,
+                    self.epoch_i64(),
+                    thread_id,
+                    launch_generation,
+                ],
+            )
+            .context("fence launch accounting gate")?;
+        }
+        let fence_replayed = !gate_was_open;
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT {RESERVATION_COLUMNS} FROM provider_attempt_reservation
+                 WHERE thread_id = ?1 AND launch_generation = ?2
+                   AND state IN ('reserved', 'issued')
+                 ORDER BY turn, attempt_number"
+            ))
+            .context("prepare fence attempt scan")?;
+        let rows: Vec<ReservationRow> = stmt
+            .query_map(
+                rusqlite::params![thread_id, launch_generation],
+                reservation_from_row,
+            )
+            .context("scan nonterminal attempts for fence")?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("collect nonterminal attempts for fence")?;
+        drop(stmt);
+
+        let mut released_attempt_ids = Vec::new();
+        let mut charged_attempt_ids = Vec::new();
+        for row in rows {
+            match row.state {
+                AttemptBudgetState::Reserved => {
+                    self.release_attempt_holds(conn, &row.attempt_id, now_ms)?;
+                    conn.execute(
+                        "UPDATE provider_attempt_reservation
+                         SET state = 'released_unissued', reconciliation_reason = ?1,
+                             settled_at_ms = ?2
+                         WHERE attempt_id = ?3",
+                        rusqlite::params![reason.as_str(), now_ms, row.attempt_id],
+                    )
+                    .context("release reserved attempt during fence")?;
+                    self.enqueue_transition(
+                        conn,
+                        &row,
+                        &TransitionExtras {
+                            sequence: 2,
+                            state: AttemptBudgetState::ReleasedUnissued,
+                            observation: false,
+                            budget_charge_nanos: None,
+                            provider_actual_nanos: None,
+                            released_nanos: Some(row.reserved_nanos),
+                            charge_basis: None,
+                            reason: Some(reason),
+                            occurred_at_ms: now_ms,
+                        },
+                    )?;
+                    released_attempt_ids.push(row.attempt_id.clone());
+                }
+                AttemptBudgetState::Issued => {
+                    self.charge_attempt(conn, &row.attempt_id, row.reserved_nanos, now_ms)?;
+                    conn.execute(
+                        "UPDATE provider_attempt_reservation
+                         SET state = 'charged_reserved_maximum',
+                             budget_charge_usd_nanos = ?1,
+                             charge_basis = 'reserved_maximum',
+                             reconciliation_reason = ?2, settled_at_ms = ?3
+                         WHERE attempt_id = ?4",
+                        rusqlite::params![
+                            row.reserved_nanos,
+                            reason.as_str(),
+                            now_ms,
+                            row.attempt_id
+                        ],
+                    )
+                    .context("charge issued attempt during fence")?;
+                    self.enqueue_transition(
+                        conn,
+                        &row,
+                        &TransitionExtras {
+                            sequence: 3,
+                            state: AttemptBudgetState::ChargedReservedMaximum,
+                            observation: false,
+                            budget_charge_nanos: Some(row.reserved_nanos),
+                            provider_actual_nanos: None,
+                            released_nanos: Some(0),
+                            charge_basis: Some(ChargeBasis::ReservedMaximum),
+                            reason: Some(reason),
+                            occurred_at_ms: now_ms,
+                        },
+                    )?;
+                    charged_attempt_ids.push(row.attempt_id.clone());
+                }
+                other => bail!(
+                    "fence scan returned terminal attempt {} in state {}",
+                    row.attempt_id,
+                    other.as_str()
+                ),
             }
-            Ok(FenceOutcome {
-                released_attempt_ids,
-                charged_attempt_ids,
-                replayed: fence_replayed,
-            })
+        }
+        if gate_was_open {
+            let gate = gate.as_ref().expect("gate_was_open implies a gate row");
+            self.insert_fact(
+                conn,
+                "launch_gate_fenced",
+                None,
+                None,
+                Some(&gate.execution_budget_id),
+                None,
+                Some(&gate.audit_chain_root_id),
+                Some(reason.as_str()),
+                now_ms,
+                None,
+            )?;
+        }
+        Ok(FenceOutcome {
+            released_attempt_ids,
+            charged_attempt_ids,
+            replayed: fence_replayed,
         })
     }
 
@@ -2342,15 +2393,31 @@ fn resolve_actual(
             else {
                 return ResolvedActual::Unavailable { raw };
             };
+            // Providers emit JSON number tokens, which include exponent
+            // notation (`2.25e-5`) and excess scale. Canonical parsing is
+            // tried first; every other well-formed non-negative decimal is
+            // valued through the round-up parser. A value that is exactly
+            // representable in nanos is accepted regardless of textual
+            // form; a value genuinely finer than nanos rounds up only when
+            // the signed final-charge contract permits its VALUE scale.
             let parsed = match UsdNanos::parse_canonical(raw_decimal) {
                 Ok(value) => Ok(value),
-                Err(MoneyError::ExcessScale(_)) => {
-                    if fraction_digits(raw_decimal)
-                        <= usize::from(finality_contract.max_reported_fraction_digits)
-                    {
-                        UsdNanos::parse_reported_round_up(raw_decimal).map(|(value, _)| value)
-                    } else {
-                        return ResolvedActual::Unavailable { raw };
+                Err(MoneyError::ExcessScale(_)) | Err(MoneyError::NotCanonical(_)) => {
+                    match UsdNanos::parse_reported_round_up(raw_decimal) {
+                        Ok((value, false)) => Ok(value),
+                        Ok((value, true)) => {
+                            let permitted = ryeos_accounting::reported_decimal_scale(raw_decimal)
+                                .is_some_and(|scale| {
+                                    scale
+                                        <= u32::from(finality_contract.max_reported_fraction_digits)
+                                });
+                            if permitted {
+                                Ok(value)
+                            } else {
+                                return ResolvedActual::Unavailable { raw };
+                            }
+                        }
+                        Err(error) => Err(error),
                     }
                 }
                 Err(other) => Err(other),
@@ -3188,6 +3255,19 @@ impl AccountingDb {
         thread_id: &str,
         attempt_id: &str,
     ) -> Result<Option<ProviderAttemptBudgetRecord>> {
+        // Recovery reads are acknowledgements: a runner that sees `Issued`
+        // here proceeds to provider contact. When hard admission is
+        // disabled the anchor may not cover the recorded transition, so
+        // this read fails closed exactly like the mutating operations —
+        // otherwise it becomes a side door around the anchor-coverage bail
+        // that disabled admission in the first place.
+        if !self.hard_admission_enabled() {
+            bail!(
+                "provider attempt state is unavailable while hard admission is disabled; \
+                 recorded operations cannot be acknowledged until the financial anchor \
+                 covers them"
+            );
+        }
         let conn = self.lock_conn()?;
         let Some(row) = self.load_reservation_by_id(&conn, attempt_id)? else {
             return Ok(None);
@@ -4573,6 +4653,7 @@ fn inspect_initialized_marker(directory: &lillux::PinnedDirectory) -> Result<Opt
 /// provider contact; new launches mint bindings under the fresh key.
 fn load_or_create_credential_binding_key(
     directory: &lillux::PinnedDirectory,
+    established_epoch: bool,
 ) -> Result<[u8; CREDENTIAL_BINDING_KEY_LEN]> {
     let name = OsStr::new(CREDENTIAL_BINDING_KEY_FILENAME);
     let decode = |content: &[u8]| -> Option<[u8; CREDENTIAL_BINDING_KEY_LEN]> {
@@ -4595,11 +4676,25 @@ fn load_or_create_credential_binding_key(
             .context("read accounting credential-binding key")?;
         return decode(&content).ok_or_else(|| {
             anyhow::anyhow!(
-                "invalid accounting credential-binding key (expected {} hex chars): {}",
+                "invalid accounting credential-binding key (expected {} hex chars): {}; \
+                 delete the file to mint a fresh key — launch gates bound under the old \
+                 key will then release fail-closed before issue",
                 CREDENTIAL_BINDING_KEY_LEN * 2,
                 directory.path().join(CREDENTIAL_BINDING_KEY_FILENAME).display()
             )
         });
+    }
+    if established_epoch {
+        // Minting a key under an established epoch means the old key file
+        // was lost (upgrade, restore, manual deletion). Every gate opened
+        // under the old key will release fail-closed at issue time — say
+        // so loudly instead of letting it surface as scattered
+        // per-attempt credential releases.
+        tracing::warn!(
+            path = %directory.path().join(CREDENTIAL_BINDING_KEY_FILENAME).display(),
+            "credential-binding key regenerated under an established accounting epoch; \
+             launch gates bound under the previous key will release before issue"
+        );
     }
     let key: [u8; CREDENTIAL_BINDING_KEY_LEN] = rand::random();
     let mut encoded: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -5802,6 +5897,103 @@ mod tests {
     }
 
     #[test]
+    fn get_provider_attempt_fails_closed_while_hard_admission_is_disabled() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        let attempt_id = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
+        );
+        issue(&db, &attempt_id, "h1").unwrap();
+        assert!(db.get_provider_attempt(THREAD, &attempt_id).unwrap().is_some());
+        // Once hard admission is disabled, the recovery read must not
+        // acknowledge the recorded Issued state — it would be a side door
+        // around the anchor-coverage bail.
+        db.disable_hard_admission();
+        let error = db.get_provider_attempt(THREAD, &attempt_id).unwrap_err();
+        assert!(format!("{error:#}").contains("hard admission is disabled"));
+    }
+
+    #[test]
+    fn exponent_notation_reported_cost_settles_at_actual() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        let attempt_id = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
+        );
+        issue(&db, &attempt_id, "h1").unwrap();
+        // Python-style JSON emits e-notation for sub-cent charges; the
+        // value (2.25e-5 USD = 22_500 nanos) must settle as the actual,
+        // never fall back to the reserved maximum.
+        let outcome = settle(
+            &db,
+            &attempt_id,
+            "h1",
+            SpendAccounting::ProviderReportedFinal {
+                raw_decimal: "2.25e-5".to_string(),
+            },
+            &authority,
+        )
+        .unwrap();
+        assert_eq!(outcome.state, AttemptBudgetState::Reconciled);
+        assert_eq!(
+            outcome.budget_charge,
+            UsdNanos::from_nanos(22_500).unwrap()
+        );
+        assert_eq!(outcome.charge_basis, ChargeBasis::ProviderReported);
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn exponent_cost_finer_than_nanos_requires_contract_scale() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        // The contract signs for scale 9 only: a 12-scale value charges
+        // the reserved maximum instead of rounding outside the contract.
+        let narrow = reported_authority("a", "0.5", 9, false);
+        let attempt_id = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &narrow, EXEC, None).unwrap(),
+        );
+        issue(&db, &attempt_id, "h1").unwrap();
+        let outcome = settle(
+            &db,
+            &attempt_id,
+            "h1",
+            SpendAccounting::ProviderReportedFinal {
+                raw_decimal: "1.23e-12".to_string(),
+            },
+            &narrow,
+        )
+        .unwrap();
+        assert_eq!(outcome.state, AttemptBudgetState::ChargedReservedMaximum);
+
+        // A contract signed for scale 12 accepts the same value rounded
+        // toward positive infinity.
+        let wide = reported_authority("b", "0.5", 12, false);
+        let attempt_id = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 2, 1, "h2", &wide, EXEC, None).unwrap(),
+        );
+        issue(&db, &attempt_id, "h2").unwrap();
+        let outcome = settle(
+            &db,
+            &attempt_id,
+            "h2",
+            SpendAccounting::ProviderReportedFinal {
+                raw_decimal: "1.23e-12".to_string(),
+            },
+            &wide,
+        )
+        .unwrap();
+        assert_eq!(outcome.state, AttemptBudgetState::Reconciled);
+        assert_eq!(outcome.budget_charge, UsdNanos::from_nanos(1).unwrap());
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
     fn unrepresentable_actual_quarantines_and_disables_hard_admission() {
         let (dir, db) = setup();
         birth(&db, EXEC, None, Some("10"));
@@ -5938,6 +6130,48 @@ mod tests {
             .is_err());
         // Issue after release fails via the recorded operation conflict.
         assert!(issue(&db, &attempt_id, "h1").is_err());
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
+    fn opening_a_new_generation_gate_fences_the_superseded_generation() {
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        let reserved_attempt = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
+        );
+        let issued_attempt = reserved_id(
+            &reserve(&db, THREAD, GENERATION, 1, 2, "h2", &authority, EXEC, None).unwrap(),
+        );
+        issue(&db, &issued_attempt, "h2").unwrap();
+
+        // A crashed-then-resumed thread opens its gate under a NEW launch
+        // generation. Ownership has provably moved, so the predecessor's
+        // gate fences and its holds close in the same transaction —
+        // nothing dangles until thread terminal.
+        open_gate(&db, THREAD, "G-resumed", EXEC);
+        let record = db
+            .get_provider_attempt(THREAD, &reserved_attempt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, AttemptBudgetState::ReleasedUnissued);
+        let record = db
+            .get_provider_attempt(THREAD, &issued_attempt)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, AttemptBudgetState::ChargedReservedMaximum);
+        // The issued worst case is committed; the reserved hold is gone,
+        // so the live generation draws on a truthful allowance.
+        assert_amounts(&db, EXEC, "execution", "0.5", "0");
+        let error =
+            reserve(&db, THREAD, GENERATION, 2, 1, "h3", &authority, EXEC, None).unwrap_err();
+        assert!(format!("{error:#}").contains("fenced"));
+        assert!(matches!(
+            reserve(&db, THREAD, "G-resumed", 2, 1, "h4", &authority, EXEC, None).unwrap(),
+            ReserveOutcome::Reserved { .. }
+        ));
         assert_healthy_verify(&db);
     }
 

@@ -619,6 +619,11 @@ impl Runner {
             http_client: reqwest::Client::builder()
                 .pool_max_idle_per_host(8)
                 .timeout(std::time::Duration::from_secs(600))
+                // The prepared request is a sealed contract: exact bytes,
+                // frozen credential, exact endpoint. Following a redirect
+                // would replay the credential to a host the sealed provider
+                // config never authorized, so a 3xx is an error, not a hop.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client builder"),
             terminal_persistence: TerminalPersistence {

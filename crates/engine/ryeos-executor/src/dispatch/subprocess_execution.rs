@@ -1122,6 +1122,9 @@ async fn dispatch_tool_subprocess(
                 remediation: crate::dispatch_error::required_secret_remediation(&env_var),
             }
         }
+        error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+            DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
+        }
         ryeos_app::vault::VaultReadError::Internal(e) => {
             DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}"))
         }

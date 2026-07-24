@@ -20,6 +20,16 @@
 //!   legal (a delayed waiter for `N` observes an anchor already at `N+1`);
 //! - the inactive slot is written with `slot_generation + 1`, `fdatasync`ed,
 //!   and re-read/verified before success is reported.
+//!
+//! Accepted residual: the two-slot format cannot distinguish a legitimate
+//! torn-write crash from post-fsync corruption of the newest slot. If the
+//! acknowledged slot at sequence N+1 is corrupted after fsync AND the
+//! database is simultaneously restored to exactly sequence N with a
+//! matching digest, verification reports agreement and the acknowledged
+//! history at N+1 is silently lost. This double fault requires independent
+//! corruption of both stores at coordinated points; defending against it
+//! needs an external witness (a third replica or remote anchor), which this
+//! design intentionally does not require.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};

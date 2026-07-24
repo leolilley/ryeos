@@ -102,87 +102,42 @@ impl UsdNanos {
     /// infinity when it carries more than nine fractional digits.
     ///
     /// Returns the enforcement value and whether rounding occurred. Callers
-    /// may use this ONLY when the route's signed final-charge contract
-    /// explicitly permits the reported scale; the raw text is retained
-    /// separately as bounded audit truth. Exponent notation is accepted here
-    /// (providers emit JSON number tokens like `2.25e-5` for sub-cent
-    /// charges); sign and non-digit characters are still rejected.
+    /// may use a `rounded` value ONLY when the route's signed final-charge
+    /// contract explicitly permits the reported scale (see
+    /// [`reported_decimal_scale`]); the raw text is retained separately as
+    /// bounded audit truth. Exponent notation is accepted here (providers
+    /// emit JSON number tokens like `2.25e-5` for sub-cent charges); sign
+    /// and non-digit characters are still rejected.
     pub fn parse_reported_round_up(input: &str) -> Result<(Self, bool), MoneyError> {
-        // Exponent magnitudes beyond this either round up to one nano
-        // (negative) or overflow the fixed-point range (positive) for any
-        // nonzero mantissa; clamping keeps the shifted strings small.
-        const MAX_EXPONENT_MAGNITUDE: i64 = 64;
-
-        let (mantissa, exponent) = match input.find(['e', 'E']) {
-            None => (input, 0_i64),
-            Some(pos) => {
-                let (mantissa, exp_text) = (&input[..pos], &input[pos + 1..]);
-                let (negative, exp_digits) = match exp_text.as_bytes().first() {
-                    Some(b'+') => (false, &exp_text[1..]),
-                    Some(b'-') => (true, &exp_text[1..]),
-                    _ => (false, exp_text),
-                };
-                if exp_digits.is_empty() || !exp_digits.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(MoneyError::NotCanonical(input.to_string()));
-                }
-                let trimmed = exp_digits.trim_start_matches('0');
-                let magnitude: i64 = if trimmed.is_empty() {
-                    0
-                } else {
-                    trimmed
-                        .parse()
-                        .unwrap_or(MAX_EXPONENT_MAGNITUDE + 1)
-                        .min(MAX_EXPONENT_MAGNITUDE + 1)
-                };
-                (mantissa, if negative { -magnitude } else { magnitude })
-            }
-        };
-
-        let (int_part, frac_part) = match mantissa.split_once('.') {
-            Some((i, f)) => (i, Some(f)),
-            None => (mantissa, None),
-        };
-        if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+        let Some((digits, point)) = decompose_reported_decimal(input) else {
             return Err(MoneyError::NotCanonical(input.to_string()));
+        };
+        if digits.is_empty() {
+            return Ok((Self::ZERO, false));
         }
-        let frac = frac_part.unwrap_or("");
-        if frac_part.is_some() && (frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit())) {
-            return Err(MoneyError::NotCanonical(input.to_string()));
+        // The value is 0.<digits> × 10^point USD, so it lies in
+        // [10^(point−1), 10^point); i64::MAX nanos ≈ 9.22×10^9 USD.
+        if point >= 11 {
+            return Err(MoneyError::Overflow);
         }
-
-        let (int_part, frac) = if exponent == 0 {
-            (int_part.to_string(), frac.to_string())
+        if point <= -9 {
+            // Positive but strictly below one nano: round up.
+            return Ok((Self(1), true));
+        }
+        let point = point as i64;
+        let (int_part, frac) = if point <= 0 {
+            (
+                "0".to_string(),
+                format!("{}{digits}", "0".repeat(point.unsigned_abs() as usize)),
+            )
+        } else if point as usize >= digits.len() {
+            (
+                format!("{digits}{}", "0".repeat(point as usize - digits.len())),
+                String::new(),
+            )
         } else {
-            let digits = format!("{int_part}{frac}");
-            let nonzero = digits.bytes().any(|b| b != b'0');
-            if exponent > MAX_EXPONENT_MAGNITUDE {
-                if nonzero {
-                    return Err(MoneyError::Overflow);
-                }
-                return Ok((Self::ZERO, false));
-            }
-            if exponent < -MAX_EXPONENT_MAGNITUDE {
-                return Ok(if nonzero {
-                    (Self(1), true)
-                } else {
-                    (Self::ZERO, false)
-                });
-            }
-            let point = int_part.len() as i64 + exponent;
-            if point <= 0 {
-                (
-                    "0".to_string(),
-                    format!("{}{digits}", "0".repeat(point.unsigned_abs() as usize)),
-                )
-            } else if point as usize >= digits.len() {
-                (
-                    format!("{digits}{}", "0".repeat(point as usize - digits.len())),
-                    String::new(),
-                )
-            } else {
-                let (i, f) = digits.split_at(point as usize);
-                (i.to_string(), f.to_string())
-            }
+            let (i, f) = digits.split_at(point as usize);
+            (i.to_string(), f.to_string())
         };
         let (int_part, frac) = (int_part.as_str(), frac.as_str());
 
@@ -259,6 +214,69 @@ impl UsdNanos {
     pub fn display_usd_lossy(self) -> f64 {
         self.0 as f64 / NANOS_PER_USD as f64
     }
+}
+
+/// Split a non-negative decimal token with optional exponent into its
+/// significant digits and shifted decimal-point position: the value is
+/// `0.<digits> × 10^point` USD, with no leading zero in `digits`. An
+/// all-zero mantissa yields empty digits. `None` for a malformed token
+/// (sign, separators, empty parts, non-digit characters).
+fn decompose_reported_decimal(input: &str) -> Option<(String, i128)> {
+    let (mantissa, exponent) = match input.find(['e', 'E']) {
+        None => (input, 0_i128),
+        Some(pos) => {
+            let (mantissa, exp_text) = (&input[..pos], &input[pos + 1..]);
+            let (negative, exp_digits) = match exp_text.as_bytes().first() {
+                Some(b'+') => (false, &exp_text[1..]),
+                Some(b'-') => (true, &exp_text[1..]),
+                _ => (false, exp_text),
+            };
+            if exp_digits.is_empty() || !exp_digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let trimmed = exp_digits.trim_start_matches('0');
+            // Saturate far beyond any representable shift; callers decide by
+            // point-position thresholds, so the exact magnitude is moot.
+            let magnitude: i128 = if trimmed.is_empty() {
+                0
+            } else {
+                trimmed.parse().unwrap_or(i128::from(u64::MAX))
+            };
+            (mantissa, if negative { -magnitude } else { magnitude })
+        }
+    };
+    let (int_part, frac_part) = match mantissa.split_once('.') {
+        Some((i, f)) => (i, Some(f)),
+        None => (mantissa, None),
+    };
+    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let frac = frac_part.unwrap_or("");
+    if frac_part.is_some() && (frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let digits = format!("{int_part}{frac}");
+    let significant = digits.trim_start_matches('0');
+    let leading_zeros = digits.len() - significant.len();
+    let point = int_part.len() as i128 - leading_zeros as i128 + exponent;
+    Some((significant.to_string(), point))
+}
+
+/// Minimal fraction-digit scale needed to represent a reported decimal's
+/// VALUE exactly, across plain and exponent forms: `"2.25e-5"` → 7,
+/// `"1000e-12"` → 9, `"0.50"` → 1, `"3"` → 0. `None` for a malformed
+/// token. This is the quantity a signed final-charge contract's
+/// `max_reported_fraction_digits` bounds; textual digit counts are wrong
+/// for exponent forms and trailing zeros.
+pub fn reported_decimal_scale(input: &str) -> Option<u32> {
+    let (digits, point) = decompose_reported_decimal(input)?;
+    let trimmed = digits.trim_end_matches('0');
+    if trimmed.is_empty() {
+        return Some(0);
+    }
+    let scale = trimmed.len() as i128 - point;
+    Some(u32::try_from(scale.max(0)).unwrap_or(u32::MAX))
 }
 
 impl Serialize for UsdNanos {
@@ -379,6 +397,9 @@ mod tests {
             ("0e-999", 0, false),
             ("0e999", 0, false),
             ("00.50e1", 5 * NANOS_PER_USD, false),
+            ("1234.5678e-3", 1_234_567_800, false),
+            ("9.999999999e0", 9_999_999_999, false),
+            ("0.1e10", 1_000_000_000 * NANOS_PER_USD, false),
         ] {
             let (v, r) = UsdNanos::parse_reported_round_up(raw)
                 .unwrap_or_else(|e| panic!("{raw:?} should parse: {e}"));
@@ -408,6 +429,57 @@ mod tests {
         }
         // Canonical authority parsing still rejects exponent forms.
         assert!(UsdNanos::parse_canonical("1e-3").is_err());
+    }
+
+    #[test]
+    fn reported_round_up_is_exact_at_extreme_shifted_positions() {
+        // A long mantissa with a large negative exponent must land on its
+        // true value, not collapse to one nano: 10^57 × 10^-65 USD is
+        // exactly 10 nanos.
+        let raw = format!("1{}e-65", "0".repeat(57));
+        assert_eq!(
+            UsdNanos::parse_reported_round_up(&raw).unwrap(),
+            (UsdNanos::from_nanos(10).unwrap(), false)
+        );
+        // A tiny mantissa with a large positive exponent is representable,
+        // not overflow: 10^-70 × 10^65 USD is exactly 10^-5 USD.
+        let raw = format!("0.{}1e65", "0".repeat(69));
+        assert_eq!(
+            UsdNanos::parse_reported_round_up(&raw).unwrap(),
+            (UsdNanos::from_nanos(10_000).unwrap(), false)
+        );
+        // Exact i64::MAX boundary survives an exponent shift.
+        assert_eq!(
+            UsdNanos::parse_reported_round_up("922337203.6854775807e1")
+                .unwrap()
+                .0
+                .as_nanos(),
+            i64::MAX
+        );
+        assert_eq!(
+            UsdNanos::parse_reported_round_up("922337203.6854775808e1"),
+            Err(MoneyError::Overflow)
+        );
+    }
+
+    #[test]
+    fn reported_decimal_scale_measures_value_not_text() {
+        for (raw, scale) in [
+            ("3", 0),
+            ("0.5", 1),
+            ("0.50", 1),
+            ("2.25e-5", 7),
+            ("1000e-12", 9),
+            ("2.250e-5", 7),
+            ("1.5e3", 0),
+            ("0.0000000001", 10),
+            ("0e-999", 0),
+            ("1e-30", 30),
+        ] {
+            assert_eq!(reported_decimal_scale(raw), Some(scale), "{raw:?}");
+        }
+        assert_eq!(reported_decimal_scale("-1"), None);
+        assert_eq!(reported_decimal_scale("1e"), None);
     }
 
     #[test]
