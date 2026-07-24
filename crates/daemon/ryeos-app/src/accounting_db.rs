@@ -5973,7 +5973,7 @@ mod tests {
             &attempt_id,
             "h1",
             SpendAccounting::ProviderReportedFinal {
-                raw_decimal: "1.23e-12".to_string(),
+                raw_decimal: "1.23e-10".to_string(),
             },
             &narrow,
         )
@@ -5992,7 +5992,7 @@ mod tests {
             &attempt_id,
             "h2",
             SpendAccounting::ProviderReportedFinal {
-                raw_decimal: "1.23e-12".to_string(),
+                raw_decimal: "1.23e-10".to_string(),
             },
             &wide,
         )
