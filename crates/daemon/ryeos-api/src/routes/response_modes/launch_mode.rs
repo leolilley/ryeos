@@ -14,7 +14,7 @@
 //! decides root-executability inside `dispatch::dispatch`.
 //!
 //! Body→params shape: the request body is wrapped in a stable
-//! [`LaunchEnvelope`] so directives have a single contract regardless
+//! `LaunchEnvelope` so directives have a single contract regardless
 //! of request body format. JSON bodies surface as
 //! `envelope.body = <parsed-Value>`; text bodies (form-encoded is
 //! the canonical case) surface as `envelope.body = "<raw-utf8>"`.

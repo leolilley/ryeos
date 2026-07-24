@@ -21,7 +21,7 @@ use ryeos_executor::executor::ServiceAvailability;
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
-    /// Ed25519 public key in "ed25519:<base64>" format.
+    /// Ed25519 public key in `ed25519:<base64>` format.
     pub public_key: String,
     /// Human-readable label for the authorized key.
     pub label: String,

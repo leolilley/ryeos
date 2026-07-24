@@ -229,7 +229,7 @@ impl RemoteClient {
         Ok(Self::from_remote_cfg(state, &remote))
     }
 
-    /// Build a client from an already-resolved [`RemoteConfig`].
+    /// Build a client from an already-resolved `RemoteConfig`.
     /// Callers that need project layering should resolve via
     /// [`super::config::load_remotes_layered`] first.
     pub fn from_remote_cfg(state: &AppState, remote: &super::config::RemoteConfig) -> Self {

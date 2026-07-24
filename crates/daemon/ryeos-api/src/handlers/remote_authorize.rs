@@ -25,7 +25,7 @@ pub struct Request {
     /// Pass-through for the CLI's `--no-project` flag.
     #[serde(default)]
     pub no_project: bool,
-    /// Ed25519 public key in "ed25519:<base64>" format.
+    /// Ed25519 public key in `ed25519:<base64>` format.
     pub public_key: String,
     /// Human-readable label.
     pub label: String,
