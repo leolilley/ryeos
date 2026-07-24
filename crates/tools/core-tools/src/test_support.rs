@@ -26,7 +26,7 @@
 //! ## Implementation choice
 //!
 //! The re-sign step uses the `ryeos-core-tools` library API
-//! ([`rebuild_bundle_manifest`](crate::actions::build_bundle::rebuild_bundle_manifest))
+//! ([`crate::actions::build_bundle::rebuild_bundle_manifest`])
 //! rather than shelling out to `cargo run --bin ryeos publish`,
 //! because the subprocess overhead would be paid once per consuming
 //! test crate (the per-test `OnceLock` initializer in the consumer

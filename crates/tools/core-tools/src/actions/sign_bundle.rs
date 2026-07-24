@@ -9,10 +9,12 @@
 //! explicit `--key`. No ambient machine state.
 //!
 //! Usage:
-//!   ryeos publish sign-items \
-//!       --source <bundle-root>          \
-//!       --registry-root <signed-core>   \
-//!       --key <author.pem>
+//! ```text
+//! ryeos publish sign-items \
+//!     --source <bundle-root>        \
+//!     --registry-root <signed-core> \
+//!     --key <author.pem>
+//! ```
 
 use std::fs;
 use std::path::{Path, PathBuf};

@@ -42,7 +42,7 @@ pub struct RebuildReport {
     pub signer_fingerprint: String,
 }
 
-/// Recompute every bin/<triple>/* item source and the top-level
+/// Recompute every `bin/<triple>/*` item source and the top-level
 /// SourceManifest in CAS.
 pub fn rebuild_bundle_manifest(
     bundle_root: &Path,
