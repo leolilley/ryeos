@@ -1442,6 +1442,7 @@ mod tests {
             require_auth: false,
             authorized_keys_dir: temp.path().join("auth"),
             tool_env_passthrough: Vec::new(),
+            accounting_issue_acceptance_window_ms: 60_000,
         };
         let identity =
             ryeos_app::identity::NodeIdentity::create(&key_path).expect("test node identity");
@@ -1546,6 +1547,7 @@ mod tests {
             scheduler_reload_tx: None,
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
+            accounting: None,
         };
         (temp, state)
     }
