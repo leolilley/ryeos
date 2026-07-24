@@ -313,7 +313,7 @@ const MAX_LAUNCH_TTL_SECS: u64 = 7 * 24 * 3600;
 /// the absolute launch-token backstop rather than the short default TTL.
 ///
 /// CAVEAT: a run whose effective finite `duration_seconds` exceeds
-/// [`MAX_LAUNCH_TTL_SECS`] (7 days), or an unlimited run that actually lives
+/// `MAX_LAUNCH_TTL_SECS` (7 days), or an unlimited run that actually lives
 /// that long, can outlive callback authority. Longer runs need renewal rather
 /// than a silent larger constant here.
 pub fn launch_token_ttl(duration_seconds: Option<u64>) -> Duration {

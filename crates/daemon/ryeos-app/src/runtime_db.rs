@@ -5628,7 +5628,7 @@ impl RuntimeDb {
     }
 
     /// Read one command by id, or `None` if it does not exist. Unlike
-    /// [`Self::load_command`] this is not an error on absence — `commands.get`
+    /// `Self::load_command` this is not an error on absence — `commands.get`
     /// and `commands.wait` distinguish "no such command" from a real row.
     pub fn get_command(&self, command_id: i64) -> Result<Option<CommandRecord>> {
         let sql = format!("{BOUNDED_COMMAND_SELECT} WHERE command_id = ?4");

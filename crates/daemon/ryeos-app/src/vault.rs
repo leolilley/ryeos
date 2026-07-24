@@ -4,7 +4,7 @@
 //! ## Architectural role
 //!
 //! The daemon owns a single shared secret store. At request-build time
-//! ([`dispatch::dispatch_subprocess`] and the runner's resume path), the
+//! (`dispatch::dispatch_subprocess` and the runner's resume path), the
 //! daemon reads the operator's secrets via [`NodeVault::read_all`] and
 //! threads them through `ExecutionParams.vault_bindings` →
 //! `spawn_item` → `spec.env` → `Command::env()` so every spawned

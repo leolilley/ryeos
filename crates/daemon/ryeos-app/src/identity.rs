@@ -93,7 +93,7 @@ impl NodeIdentity {
         self.write_public_identity_at(path, &lillux::time::iso8601_now())
     }
 
-    /// Like [`write_public_identity`] but takes the timestamp explicitly,
+    /// Like [`Self::write_public_identity`] but takes the timestamp explicitly,
     /// for byte-deterministic test fixtures.
     pub fn write_public_identity_at(&self, path: &Path, now: &str) -> Result<()> {
         if let Some(parent) = path.parent() {

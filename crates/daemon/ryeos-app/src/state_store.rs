@@ -4036,7 +4036,7 @@ impl StateStore {
     /// Atomically finalize a nonterminal row, or report the terminal/shutdown
     /// winner without a check-then-write race. A durable Cancel/Kill tombstone
     /// is folded into the effective terminal record by
-    /// [`Self::finalize_thread_with_rows`].
+    /// `Self::finalize_thread_with_rows`.
     pub fn finalize_if_nonterminal(
         &self,
         thread_id: &str,
@@ -9147,7 +9147,7 @@ impl StateStore {
     }
 
     /// Whether a `kill` command was ever submitted for `thread_id` (the launcher's
-    /// kill-intent marker). See [`RuntimeDb::thread_has_kill_command`].
+    /// kill-intent marker). See `RuntimeDb::thread_has_kill_command`.
     pub fn thread_has_kill_command(&self, thread_id: &str) -> Result<bool> {
         let g = self.lock()?;
         g.runtime_db.thread_has_kill_command(thread_id)
@@ -9155,7 +9155,7 @@ impl StateStore {
 
     /// Settle every still-open command for a finalized thread (fulfilled →
     /// `completed`, else `rejected`), returning the affected records so waiters
-    /// can be woken. See [`RuntimeDb::settle_open_commands`].
+    /// can be woken. See `RuntimeDb::settle_open_commands`.
     pub fn settle_open_commands(
         &self,
         thread_id: &str,

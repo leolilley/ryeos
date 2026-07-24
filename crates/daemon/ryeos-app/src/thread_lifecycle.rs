@@ -199,13 +199,13 @@ pub mod follow_role {
 /// carries no follow fact at all).
 pub mod follow_display_state {
     /// A suspended parent awaiting its followed child chain
-    /// ([`follow_role::SUSPENDED_PARENT`]).
+    /// (`follow_role::SUSPENDED_PARENT`).
     pub const SUSPENDED: &str = "suspended";
     /// A resume successor has been created and is waiting for the followed
     /// child chain to finish before it can consume the result.
     pub const RESUME_QUEUED: &str = "resume_queued";
     /// A resume successor consuming (or having consumed) the child's result
-    /// ([`follow_role::RESUME_SUCCESSOR`]).
+    /// (`follow_role::RESUME_SUCCESSOR`).
     pub const RESUMED: &str = "resumed";
 }
 
@@ -3097,7 +3097,7 @@ impl ThreadLifecycleService {
 
     /// Operator follow-up continuation, idempotent by request fingerprint.
     ///
-    /// The lifecycle-layer wrapper over [`StateStore::create_or_get_continuation`]:
+    /// The lifecycle-layer wrapper over `StateStore::create_or_get_continuation_admitted`:
     /// it enforces the source-kind `supports_continuation` policy (which the raw
     /// state-store method cannot, having no kind registry), drives the chain root
     /// from the source (never trusting the caller), publishes the persisted events
@@ -3834,7 +3834,7 @@ impl ThreadLifecycleService {
         self.finalize_thread_inner(params, None, false, Some(launch_owner))
     }
 
-    /// Like [`finalize_thread`], but carries the runtime's canonical managed
+    /// Like [`Self::finalize_thread`], but carries the runtime's canonical managed
     /// envelope (outputs / warnings / raw cost). The executor-supervised fallback
     /// finalization uses this so a followed child's structured return survives even
     /// when the runtime exited without self-finalizing over the callback.
