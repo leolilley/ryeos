@@ -182,7 +182,7 @@ mod types {
     }
 }
 
-/// Parameters for [`append_events`].
+/// Parameters for `append_events`.
 pub struct AppendEventsInput<'a> {
     pub cas_root: &'a Path,
     pub refs_root: &'a Path,

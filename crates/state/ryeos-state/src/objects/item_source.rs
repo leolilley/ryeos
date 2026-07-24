@@ -11,7 +11,7 @@ pub struct ItemSource {
     pub item_ref: String,
     /// SHA-256 hash of the content blob in CAS.
     pub content_blob_hash: String,
-    /// Integrity check identifier (e.g. "ed25519:<fingerprint>").
+    /// Integrity check identifier (for example, `ed25519:<fingerprint>`).
     pub integrity: String,
     /// Optional signature metadata.
     pub signature_info: Option<Value>,
