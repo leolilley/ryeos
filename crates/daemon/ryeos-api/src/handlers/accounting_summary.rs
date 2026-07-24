@@ -159,7 +159,15 @@ pub async fn handle(
         });
     }
 
-    let (gte, lt) = effective_window(req.occurred_at_gte_ms, req.occurred_at_lt_ms)?;
+    // The cursor pins the effective window: every page of one logical
+    // pagination must run against the SAME (gte, lt), or the default
+    // `lt = now` recomputes per page and rows drift across page
+    // boundaries while attempts settle.
+    let cursor = req.cursor.as_deref().map(decode_cursor).transpose()?;
+    let (gte, lt) = match &cursor {
+        Some(cursor) => (cursor.occurred_at_gte_ms, cursor.occurred_at_lt_ms),
+        None => effective_window(req.occurred_at_gte_ms, req.occurred_at_lt_ms)?,
+    };
     let filter = AccountingSummaryFilter {
         occurred_at_gte_ms: Some(gte),
         occurred_at_lt_ms: Some(lt),
@@ -182,18 +190,15 @@ pub async fn handle(
 
     let (rows, next_cursor) = if req.detail {
         let limit = req.limit.unwrap_or(DEFAULT_LIMIT);
-        let after = req.cursor.as_deref().map(decode_cursor).transpose()?;
-        let after_ref = after
-            .as_ref()
-            .map(|(occurred, attempt)| (*occurred, attempt.as_str()));
+        let after_attempt_id = cursor.as_ref().map(|cursor| cursor.attempt_id.as_str());
         let rows = state
             .state_store
-            .list_provider_attempt_budget(&filter, limit, after_ref)
+            .list_provider_attempt_budget(&filter, limit, after_attempt_id)
             .map_err(|e| HandlerError::Internal(e.to_string()))?;
         let next_cursor = (rows.len() as u32 == limit)
             .then(|| {
                 rows.last()
-                    .map(|row| encode_cursor(row.occurred_at_ms, &row.attempt_id))
+                    .map(|row| encode_cursor(gte, lt, &row.attempt_id))
             })
             .flatten();
         let rows = rows
@@ -225,25 +230,41 @@ pub async fn handle(
     };
 
     let observed_at_ms = now_ms();
+    // A ledger READ error must not 500 the whole summary — this endpoint is
+    // the operator's accounting-health surface, and it matters most exactly
+    // when the ledger is degraded. Report `ledger_available: false` (with
+    // the projection-derived totals intact) instead of discarding them.
     let (ledger_available, hard_admission_enabled, outbox_backlog, active_reservations) =
         match &state.accounting {
             Some(ledger) => {
-                let (unpublished, oldest_created_at_ms) = ledger
-                    .unpublished_outbox_stats()
-                    .map_err(|error| HandlerError::Internal(error.to_string()))?;
-                let backlog = Some(OutboxBacklog {
-                    unpublished,
-                    oldest_created_at_ms,
-                });
-                let stats = ledger
-                    .active_reservation_stats()
-                    .map_err(|error| HandlerError::Internal(error.to_string()))?;
-                let active = Some(ActiveReservations {
-                    unresolved: stats.unresolved_count,
-                    held_usd_nanos: stats.held_usd_nanos,
-                    oldest_created_at_ms: stats.oldest_created_at_ms,
-                });
-                (true, ledger.hard_admission_enabled(), backlog, active)
+                let backlog = ledger.unpublished_outbox_stats().map(
+                    |(unpublished, oldest_created_at_ms)| OutboxBacklog {
+                        unpublished,
+                        oldest_created_at_ms,
+                    },
+                );
+                let active =
+                    ledger
+                        .active_reservation_stats()
+                        .map(|stats| ActiveReservations {
+                            unresolved: stats.unresolved_count,
+                            held_usd_nanos: stats.held_usd_nanos,
+                            oldest_created_at_ms: stats.oldest_created_at_ms,
+                        });
+                match (backlog, active) {
+                    (Ok(backlog), Ok(active)) => (
+                        true,
+                        ledger.hard_admission_enabled(),
+                        Some(backlog),
+                        Some(active),
+                    ),
+                    (backlog, active) => {
+                        for error in [backlog.err(), active.err()].into_iter().flatten() {
+                            tracing::warn!(%error, "accounting ledger health read failed");
+                        }
+                        (false, false, None, None)
+                    }
+                }
             }
             None => (false, false, None, None),
         };
@@ -333,39 +354,50 @@ fn validate_request(req: &Request) -> Result<(), HandlerError> {
     Ok(())
 }
 
-fn encode_cursor(occurred_at_ms: i64, attempt_id: &str) -> String {
-    base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(format!("v1:{occurred_at_ms}:{attempt_id}"))
+/// Pagination cursor: the immutable resume key plus the PINNED window the
+/// pagination started with, so later pages never recompute `lt = now`.
+struct Cursor {
+    occurred_at_gte_ms: i64,
+    occurred_at_lt_ms: i64,
+    attempt_id: String,
 }
 
-fn decode_cursor(cursor: &str) -> Result<(i64, String), HandlerError> {
+fn encode_cursor(occurred_at_gte_ms: i64, occurred_at_lt_ms: i64, attempt_id: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(format!("v2:{occurred_at_gte_ms}:{occurred_at_lt_ms}:{attempt_id}"))
+}
+
+fn decode_cursor(cursor: &str) -> Result<Cursor, HandlerError> {
+    let malformed = || HandlerError::BadRequest("malformed cursor".to_string());
     if cursor.is_empty() || cursor.len() > 512 {
-        return Err(HandlerError::BadRequest("malformed cursor".to_string()));
+        return Err(malformed());
     }
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(cursor)
-        .map_err(|_| HandlerError::BadRequest("malformed cursor".to_string()))?;
-    let decoded = std::str::from_utf8(&decoded)
-        .map_err(|_| HandlerError::BadRequest("malformed cursor".to_string()))?;
-    let (version, rest) = decoded
-        .split_once(':')
-        .ok_or_else(|| HandlerError::BadRequest("malformed cursor".to_string()))?;
-    if version != "v1" {
-        return Err(HandlerError::BadRequest("malformed cursor".to_string()));
+        .map_err(|_| malformed())?;
+    let decoded = std::str::from_utf8(&decoded).map_err(|_| malformed())?;
+    let (version, rest) = decoded.split_once(':').ok_or_else(malformed)?;
+    if version != "v2" {
+        return Err(malformed());
     }
-    let (occurred, attempt) = rest
-        .split_once(':')
-        .ok_or_else(|| HandlerError::BadRequest("malformed cursor".to_string()))?;
-    let occurred: i64 = occurred
-        .parse()
-        .map_err(|_| HandlerError::BadRequest("malformed cursor".to_string()))?;
+    let (gte, rest) = rest.split_once(':').ok_or_else(malformed)?;
+    let (lt, attempt) = rest.split_once(':').ok_or_else(malformed)?;
+    let gte: i64 = gte.parse().map_err(|_| malformed())?;
+    let lt: i64 = lt.parse().map_err(|_| malformed())?;
+    if gte >= lt || lt.saturating_sub(gte) > MAX_WINDOW_MS {
+        return Err(malformed());
+    }
     if attempt.is_empty()
         || attempt.len() > 128
         || attempt.bytes().any(|byte| byte.is_ascii_control())
     {
-        return Err(HandlerError::BadRequest("malformed cursor".to_string()));
+        return Err(malformed());
     }
-    Ok((occurred, attempt.to_string()))
+    Ok(Cursor {
+        occurred_at_gte_ms: gte,
+        occurred_at_lt_ms: lt,
+        attempt_id: attempt.to_string(),
+    })
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

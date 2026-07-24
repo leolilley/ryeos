@@ -190,10 +190,13 @@ fn update_usage_latest(
         update.metadata_anomalies = metadata_anomalies;
         let mut spend_anomalies = previous.spend_anomalies;
         spend_anomalies.extend(update.spend_anomalies);
-        // A later snapshot reporting a LOWER cost than an earlier one is a
-        // spend anomaly in latest mode just as in cumulative mode: the
-        // final (lower) value would otherwise silently become settlement
-        // truth.
+        update.spend_anomalies = spend_anomalies;
+        // In latest-snapshot mode the newest snapshot IS the provider's
+        // declared truth, so a downward cost revision (cache-discount
+        // recalculation) is recorded as a metadata warning — NOT a spend
+        // anomaly, which would discard a perfectly good final cost and
+        // charge the reserved maximum. Cumulative mode keeps the stricter
+        // spend-anomaly treatment because its counters must never regress.
         if let (Some(previous_raw), Some(update_raw)) = (
             previous.reported_cost_usd_raw.as_deref(),
             update.reported_cost_usd_raw.as_deref(),
@@ -203,14 +206,27 @@ fn update_usage_latest(
                 ryeos_accounting::UsdNanos::parse_reported_round_up(update_raw),
             ) {
                 if update_cost < previous_cost {
-                    spend_anomalies.push(format!(
-                        "reported_cost_usd regressed from {previous_raw} to {update_raw} in \
-                         latest-snapshot usage metadata"
+                    update.metadata_anomalies.push(format!(
+                        "reported_cost_usd revised downward from {previous_raw} to {update_raw} \
+                         in latest-snapshot usage metadata"
                     ));
                 }
             }
         }
-        update.spend_anomalies = spend_anomalies;
+        // A later snapshot that carries no cost fields must not erase an
+        // earlier reported cost — "provider did not report a usable final
+        // charge" would then settle at the reserved maximum even though it
+        // did report one.
+        if update.reported_cost_usd_raw.is_none() {
+            update.reported_cost_usd = previous.reported_cost_usd;
+            update.reported_cost_usd_raw = previous.reported_cost_usd_raw;
+        }
+        if update.cost_details.is_none() {
+            update.cost_details = previous.cost_details;
+        }
+        if update.is_byok.is_none() {
+            update.is_byok = previous.is_byok;
+        }
         let mut contract_anomalies = previous.contract_anomalies;
         contract_anomalies.extend(update.contract_anomalies);
         if single_snapshot {

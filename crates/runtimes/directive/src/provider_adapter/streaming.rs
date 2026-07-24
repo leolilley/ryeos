@@ -1299,6 +1299,20 @@ pub async fn send_prepared_streaming(
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
+        // Redirects are never followed (the prepared request is sealed to
+        // its exact endpoint), so a 3xx is terminal here — and body-less.
+        // The Location header is the one actionable fact it carries.
+        let redirect_location = resp
+            .status()
+            .is_redirection()
+            .then(|| {
+                resp.headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(|value| format!(" redirect_location={value:?} (not followed)"))
+            })
+            .flatten()
+            .unwrap_or_default();
         let text = resp.text().await.unwrap_or_else(|e| {
             tracing::warn!(
                 "failed to read error response body: {:#}",
@@ -1312,7 +1326,7 @@ pub async fn send_prepared_streaming(
         // Carry the status code as a typed `ProviderStreamError` so the runner's
         // retry loop can key off it; Display still renders this full message.
         let detail = format!(
-            "provider returned {status} (streaming): {safe_body} \
+            "provider returned {status} (streaming): {safe_body}{redirect_location} \
              [provider={provider_id} profile={matched_profile:?} \
              config_hash={config_hash} request_body_sha256={request_body_sha256}]",
             status = status,

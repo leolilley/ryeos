@@ -166,6 +166,14 @@ struct RunGuard {
 /// only recover the recorded transition — never create a second one.
 const LEDGER_RPC_RETRIES: usize = 2;
 
+/// Paced spacing between ledger RPC retries. A vault or anchor blip that
+/// outlives three back-to-back calls should not be thread-fatal; a few
+/// hundred milliseconds of spacing lets transient faults clear without
+/// meaningfully delaying the failure path.
+async fn ledger_retry_backoff(retry: usize) {
+    tokio::time::sleep(std::time::Duration::from_millis(250 * (retry as u64 + 1))).await;
+}
+
 /// Live handle to one daemon-admitted provider attempt reservation. Mirrors
 /// daemon authority but never calculates availability locally.
 #[derive(Debug)]
@@ -1323,6 +1331,24 @@ impl Runner {
                                     warnings.push(format!(
                                         "provider_metadata_malformed on turn {turn}: {}",
                                         usage.metadata_anomalies.join("; ")
+                                    ));
+                                }
+                                if !usage.spend_anomalies.is_empty() {
+                                    // This one silently changes money: the
+                                    // reported charge is distrusted and the
+                                    // attempt settles at the reserved
+                                    // maximum. Say so where the operator
+                                    // can see it.
+                                    tracing::warn!(
+                                        turn,
+                                        anomalies = ?usage.spend_anomalies,
+                                        "provider-reported spend is untrustworthy; the attempt \
+                                         settles conservatively at the reserved maximum"
+                                    );
+                                    warnings.push(format!(
+                                        "provider_spend_anomaly on turn {turn} (settled at \
+                                         reserved maximum): {}",
+                                        usage.spend_anomalies.join("; ")
                                     ));
                                 }
                             }
@@ -3073,13 +3099,34 @@ impl Runner {
         // the issue boundary: once issued, even a never-sent request is
         // conservatively charged the reserved maximum (§7.4).
         if cancel_flag.load(Ordering::Relaxed) {
-            self.release_ledger_attempt(&ledger, ReconciliationReason::ReleasedByRunner)
-                .await?;
+            // The cancel is real either way: the reservation is provably
+            // unissued and the terminal fence releases it. Never convert a
+            // user cancel into a thread failure over release bookkeeping.
+            if let Err(error) = self
+                .release_ledger_attempt(&ledger, ReconciliationReason::ReleasedByRunner)
+                .await
+            {
+                tracing::warn!(
+                    attempt_id = %ledger.attempt_id,
+                    %error,
+                    "pre-issue release unprovable during cancel; the terminal fence releases \
+                     the held reservation"
+                );
+            }
             return Ok(LedgerAdmission::CancelledBeforeIssue);
         }
         if interrupt_flag.load(Ordering::Relaxed) {
-            self.release_ledger_attempt(&ledger, ReconciliationReason::ReleasedByRunner)
-                .await?;
+            if let Err(error) = self
+                .release_ledger_attempt(&ledger, ReconciliationReason::ReleasedByRunner)
+                .await
+            {
+                tracing::warn!(
+                    attempt_id = %ledger.attempt_id,
+                    %error,
+                    "pre-issue release unprovable during interrupt; the terminal fence \
+                     releases the held reservation"
+                );
+            }
             return Ok(LedgerAdmission::InterruptedBeforeIssue);
         }
         let issue_params = ProviderAttemptMarkIssuedParams {
@@ -3139,6 +3186,9 @@ impl Runner {
                         "provider_attempt_reserve failed; retrying the exact same reservation"
                     );
                     last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
                 }
             }
         }
@@ -3176,6 +3226,9 @@ impl Runner {
                         "provider_attempt_mark_issued failed; retrying the exact same transition"
                     );
                     last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
                 }
             }
         }
@@ -3187,7 +3240,20 @@ impl Runner {
             })
             .await
         {
-            Ok(Some(record)) if record.request_hash == params.request_hash => Ok(record.state),
+            Ok(Some(record)) if record.request_hash == params.request_hash => {
+                if record.state == AttemptBudgetState::Reserved {
+                    // The reservation is proven intact and unissued, so the
+                    // earlier failures were transient (vault blip, anchor
+                    // IO) — issuing is still legal and idempotent. One more
+                    // paced attempt before declaring the issue unprovable.
+                    ledger_retry_backoff(LEDGER_RPC_RETRIES + 1).await;
+                    if let Ok(response) = self.callback.provider_attempt_mark_issued(params).await
+                    {
+                        return Ok(response.state);
+                    }
+                }
+                Ok(record.state)
+            }
             Ok(Some(record)) => Err(anyhow::anyhow!(
                 "recorded attempt {} carries request hash {} but this attempt issued {}; \
                  integrity conflict",
@@ -3253,6 +3319,9 @@ impl Runner {
                         "provider_attempt_settle failed; retrying the exact same settlement"
                     );
                     last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
                 }
             }
         }
@@ -3329,6 +3398,9 @@ impl Runner {
                         "provider_attempt_release_unissued failed; retrying the exact release"
                     );
                     last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
                 }
             }
         }

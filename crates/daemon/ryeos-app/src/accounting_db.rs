@@ -2437,7 +2437,16 @@ fn resolve_actual(
                         }
                     }
                 }
-                Err(MoneyError::Overflow) => ResolvedActual::Unrepresentable { raw },
+                // A reported decimal whose VALUE overflows the fixed-point
+                // range (> ~9.2×10^9 USD) is provider garbage, not credible
+                // financial truth. It charges the reserved maximum like any
+                // other untrustworthy report — it must NOT reach the
+                // Unrepresentable quarantine, which durably disables hard
+                // admission daemon-wide: that would let a single hostile or
+                // buggy provider response act as a fleet kill switch.
+                // Quarantine remains for tariff-derived overflow, where the
+                // inputs are our own sealed rates and counted units.
+                Err(MoneyError::Overflow) => ResolvedActual::Unavailable { raw },
                 Err(_) => ResolvedActual::Unavailable { raw },
             }
         }
@@ -5994,22 +6003,69 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_reported_charge_settles_conservatively_without_quarantine() {
+        // A provider reporting an absurd value ("1e999", 20-digit dollars)
+        // is garbage, not financial truth: it charges the reserved maximum
+        // like any other untrustworthy report. It must NOT disable hard
+        // admission daemon-wide — that would let one hostile provider
+        // response kill every paid launch until operator repair.
+        let (_dir, db) = setup();
+        birth(&db, EXEC, None, Some("10"));
+        open_gate(&db, THREAD, GENERATION, EXEC);
+        let authority = reported_authority("a", "0.5", 9, false);
+        for (turn, raw) in [(1, "99999999999999999999"), (2, "1e999")] {
+            let hash = format!("h{turn}");
+            let attempt_id = reserved_id(
+                &reserve(&db, THREAD, GENERATION, turn, 1, &hash, &authority, EXEC, None).unwrap(),
+            );
+            issue(&db, &attempt_id, &hash).unwrap();
+            let outcome = settle(
+                &db,
+                &attempt_id,
+                &hash,
+                SpendAccounting::ProviderReportedFinal {
+                    raw_decimal: raw.to_string(),
+                },
+                &authority,
+            )
+            .unwrap();
+            assert_eq!(outcome.state, AttemptBudgetState::ChargedReservedMaximum, "{raw}");
+            assert_eq!(outcome.budget_charge, usd("0.5"), "{raw}");
+            assert!(db.hard_admission_enabled(), "{raw}");
+        }
+        assert_healthy_verify(&db);
+    }
+
+    #[test]
     fn unrepresentable_actual_quarantines_and_disables_hard_admission() {
         let (dir, db) = setup();
         birth(&db, EXEC, None, Some("10"));
         open_gate(&db, THREAD, GENERATION, EXEC);
-        let authority = reported_authority("a", "0.5", 9, false);
+        let tariff = tariff_io();
+        let authority = tariff_authority("a", "0.5", None, &tariff);
         let attempt_id = reserved_id(
             &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
         );
         issue(&db, &attempt_id, "h1").unwrap();
         assert!(db.hard_admission_enabled());
+        // Tariff-derived overflow: OUR sealed rates times counted units
+        // exceeding the fixed-point range is an internal integrity failure,
+        // and stays quarantine territory.
         let outcome = settle(
             &db,
             &attempt_id,
             "h1",
-            SpendAccounting::ProviderReportedFinal {
-                raw_decimal: "99999999999999999999".to_string(),
+            SpendAccounting::TariffUnits {
+                unit_counts: vec![
+                    UnitCount {
+                        dimension: BillableDimension::InputTokens,
+                        units: u64::MAX,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::OutputTokens,
+                        units: 0,
+                    },
+                ],
             },
             &authority,
         )

@@ -77,12 +77,27 @@ pub fn verify_prepared_spend_bound(
             "route accounting authority is advisory-only; it is ineligible for reservation \
              and the caller must not reserve for it"
         ),
-        SpendBoundAuthority::ExplicitlyFree { contract_digest } => (
-            UsdNanos::ZERO,
-            SpendBoundCommitments::ExplicitlyFree {
-                contract_digest: contract_digest.clone(),
-            },
-        ),
+        SpendBoundAuthority::ExplicitlyFree { contract_digest } => {
+            // Symmetric with the Paid branches: the zero-maximum proof must
+            // fail closed if the runner's resolved provider snapshot has
+            // drifted to a configuration that is no longer explicitly free.
+            if !provider
+                .pricing
+                .as_ref()
+                .is_some_and(|pricing| pricing.explicitly_free)
+            {
+                bail!(
+                    "sealed contract is explicitly-free but the resolved provider \
+                     configuration no longer declares pricing.explicitly_free"
+                );
+            }
+            (
+                UsdNanos::ZERO,
+                SpendBoundCommitments::ExplicitlyFree {
+                    contract_digest: contract_digest.clone(),
+                },
+            )
+        }
         SpendBoundAuthority::Paid {
             maximum,
             certificate,
@@ -644,7 +659,13 @@ mod tests {
             contract_digest: contract_digest.clone(),
         };
         let authority = authority.sealed().unwrap();
-        let provider = provider_with(None);
+        let mut provider = provider_with(None);
+        provider.pricing = Some(ryeos_directive_core::PricingConfig {
+            explicitly_free: true,
+            input_per_million: None,
+            output_per_million: None,
+            models: Default::default(),
+        });
         let prepared = prepared(serde_json::json!({"messages": []}), Some(OUTPUT_CEILING));
         let verified = verify_prepared_spend_bound(
             &prepared,
@@ -659,6 +680,20 @@ mod tests {
             verified.commitments,
             SpendBoundCommitments::ExplicitlyFree { contract_digest }
         );
+
+        // A resolved provider that no longer declares explicitly-free
+        // pricing must fail the zero-maximum proof, mirroring the Paid
+        // branches' drift checks.
+        let drifted = provider_with(None);
+        let error = verify_prepared_spend_bound(
+            &prepared,
+            &authority,
+            &drifted,
+            CONTEXT_WINDOW,
+            OUTPUT_CEILING,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("explicitly_free"));
     }
 
     #[test]

@@ -5188,10 +5188,15 @@ impl StateStore {
         &self,
         filter: &queries::AccountingSummaryFilter<'_>,
         limit: u32,
-        after: Option<(i64, &str)>,
+        after_attempt_id: Option<&str>,
     ) -> Result<Vec<queries::ProviderAttemptBudgetRow>> {
         let g = self.lock()?;
-        queries::list_provider_attempt_budget(g.state_db.projection(), filter, limit, after)
+        queries::list_provider_attempt_budget(
+            g.state_db.projection(),
+            filter,
+            limit,
+            after_attempt_id,
+        )
     }
 
     pub fn list_thread_children(&self, thread_id: &str) -> Result<Vec<ThreadDetail>> {

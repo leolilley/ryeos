@@ -692,7 +692,8 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                         Err(error) => {
                             tracing::error!(
                                 %error,
-                                "accounting ledger failed startup verification;                                  hard-budget admission is disabled"
+                                "accounting ledger failed startup verification; hard-budget \
+                                 admission is disabled"
                             );
                             None
                         }

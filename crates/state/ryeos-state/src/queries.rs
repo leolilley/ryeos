@@ -2435,11 +2435,19 @@ pub fn summarize_provider_attempt_budget(
 }
 
 /// Bounded drill-down rows, stably ordered by `(occurred_at_ms, attempt_id)`.
+/// Drill-down page over the latest-transition projection.
+///
+/// Pagination keys on `attempt_id` ALONE — the only immutable column. The
+/// natural-feeling `(occurred_at_ms, attempt_id)` keyset is wrong here:
+/// `occurred_at_ms` is the LATEST transition's timestamp, so a row that
+/// settles between pages moves in the sort order and is skipped or
+/// double-counted. Callers pin the time window inside their cursor so every
+/// page of one pagination sees the same window.
 pub fn list_provider_attempt_budget(
     db: &ProjectionDb,
     filter: &AccountingSummaryFilter<'_>,
     limit: u32,
-    after: Option<(i64, &str)>,
+    after_attempt_id: Option<&str>,
 ) -> anyhow::Result<Vec<ProviderAttemptBudgetRow>> {
     let sql = format!(
         "SELECT {PROVIDER_ATTEMPT_BUDGET_COLUMNS} FROM provider_attempt_budget_latest
@@ -2451,10 +2459,9 @@ pub fn list_provider_attempt_budget(
            AND (?6 IS NULL OR transition = ?6)
            AND (?7 IS NULL OR execution_budget_id = ?7)
            AND (NOT ?8 OR transition IN ('reserved', 'issued'))
-           AND (?9 IS NULL OR occurred_at_ms > ?9
-                OR (occurred_at_ms = ?9 AND attempt_id > ?10))
-         ORDER BY occurred_at_ms, attempt_id
-         LIMIT ?11"
+           AND (?9 IS NULL OR attempt_id > ?9)
+         ORDER BY attempt_id
+         LIMIT ?10"
     );
     let mut stmt = db
         .connection()
@@ -2471,8 +2478,7 @@ pub fn list_provider_attempt_budget(
                 filter.transition,
                 filter.execution_budget_id,
                 filter.unresolved_only,
-                after.map(|(occurred, _)| occurred),
-                after.map(|(_, attempt)| attempt),
+                after_attempt_id,
                 limit,
             ],
             ProviderAttemptBudgetRow::from_row,

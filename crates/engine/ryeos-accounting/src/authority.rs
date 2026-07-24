@@ -119,10 +119,12 @@ pub struct FinalityContract {
     /// The reported charge is final when the response/stream completes; no
     /// later adjustment is trusted for settlement.
     pub final_on_response: bool,
-    /// Maximum fractional digits the contract permits in the reported raw
-    /// decimal. Reports within nine digits are exact; a report beyond nine
-    /// digits may be rounded toward positive infinity for enforcement only
-    /// when it is within this declared scale.
+    /// Maximum fraction-digit scale the contract permits for the reported
+    /// charge's VALUE (not its textual form — exponent notation and
+    /// trailing zeros are valued first; see `reported_decimal_scale`). A
+    /// value exact within nine digits settles as-is; a value genuinely
+    /// finer than nanos may be rounded toward positive infinity for
+    /// enforcement only when its scale is within this declared bound.
     pub max_reported_fraction_digits: u8,
     /// A zero reported charge on a BYOK response is a covered final charge.
     /// Never inferred from a zero or missing report without this.
