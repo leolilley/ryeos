@@ -7,10 +7,10 @@
 //! `RyeOsCore`'s public API is unchanged.
 //!
 //! Clusters:
-//! - [`input`] — input buffers, routing, targeting, submit.
-//! - [`tiles`] — workspace/tile motion and lens/tab switching.
-//! - [`affordances`] — content affordance resolution and facet/view fetch effects.
-//! - [`effect_results`] — platform effect-result application (launch/ratchet, parse/store).
+//! - `input` — input buffers, routing, targeting, submit.
+//! - `tiles` — workspace/tile motion and lens/tab switching.
+//! - `affordances` — content affordance resolution and facet/view fetch effects.
+//! - `effect_results` — platform effect-result application (launch/ratchet, parse/store).
 //!
 //! Growth policy: a new interaction cluster gets a new module; any module
 //! crossing ~800 impl lines splits. `view_model.rs` gets the same recipe when it

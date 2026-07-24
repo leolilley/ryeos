@@ -116,7 +116,7 @@ pub const RENDER_H: usize = 360;
 /// Rasterize scene primitives into a flat RGBA pixel buffer.
 ///
 /// `buf` must be `RENDER_W * RENDER_H * 4` bytes.
-/// All primitives use normalized [0,1] coordinates — scaled to render resolution.
+/// All primitives use normalized `[0, 1]` coordinates — scaled to render resolution.
 pub fn rasterize_to_rgba(primitives: &[ScenePrimitive], buf: &mut [u8]) {
     let w = RENDER_W as f32;
     let h = RENDER_H as f32;
