@@ -248,7 +248,7 @@ pub struct InputFeeds {
 }
 
 /// One field a live-filter box can target: the source param it feeds and an
-/// optional label for the prompt strip ("filter by <label>…").
+/// optional label for the prompt strip (`filter by <label>…`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FilterField {
     pub param: String,

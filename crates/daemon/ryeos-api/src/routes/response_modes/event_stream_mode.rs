@@ -136,6 +136,7 @@ impl EventStreamMode {
 
 pub struct CompiledEventStreamMode {
     strategy: EventStreamStrategy,
+    is_dispatch_launch: bool,
 }
 
 impl ResponseMode for EventStreamMode {
@@ -183,7 +184,10 @@ impl ResponseMode for EventStreamMode {
 
         let strategy = compiler.compile(raw)?;
 
-        Ok(Arc::new(CompiledEventStreamMode { strategy }))
+        Ok(Arc::new(CompiledEventStreamMode {
+            strategy,
+            is_dispatch_launch: source == "dispatch_launch",
+        }))
     }
 }
 
@@ -452,6 +456,10 @@ impl CompiledResponseMode for CompiledEventStreamMode {
         true
     }
 
+    fn is_dispatch_launch(&self) -> bool {
+        self.is_dispatch_launch
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -461,6 +469,12 @@ impl CompiledResponseMode for CompiledEventStreamMode {
         compiled: &CompiledRoute,
         ctx: RouteDispatchContext,
     ) -> Result<axum::response::Response, RouteDispatchError> {
+        let launch_timings = ctx
+            .request_parts
+            .extensions
+            .get::<ryeos_app::launch_stage_timings::LaunchStageTimings>()
+            .cloned()
+            .filter(|_| self.is_dispatch_launch);
         // Prepare invocation input depending on strategy.
         let (invoker, input): (&Arc<dyn CompiledRouteInvocation>, Value) = match &self.strategy {
             EventStreamStrategy::BodyJson { invoker } => {
@@ -506,6 +520,7 @@ impl CompiledResponseMode for CompiledEventStreamMode {
             input,
             principal: Some(ctx.principal),
             workspace_lifeline: None,
+            launch_timings: launch_timings.clone(),
             state: ctx.state,
             webhook_dedupe: ctx.webhook_dedupe,
         };
@@ -530,7 +545,12 @@ impl CompiledResponseMode for CompiledEventStreamMode {
                     .events
                     .map(|result| result.map(|env| envelope_to_sse(&env)));
                 let sse = Sse::new(sse_stream).keep_alive(keep_alive);
-                Ok(sse.into_response())
+                let response = sse.into_response();
+                if let Some(timings) = launch_timings.as_ref() {
+                    timings.mark("http_response_constructed");
+                    timings.emit("http_response_constructed");
+                }
+                Ok(response)
             }
             // invoke_checked guarantees Stream.
             _ => unreachable!("invoke_checked enforces Stream"),
@@ -663,15 +683,19 @@ mod tests {
     #[test]
     fn compile_gateway_succeeds() {
         let raw = make_gateway_raw("r1", "/execute/stream");
-        let result = EventStreamMode::default().compile(&raw);
-        assert!(result.is_ok(), "gateway compile should succeed");
+        let compiled = EventStreamMode::default()
+            .compile(&raw)
+            .expect("gateway compile should succeed");
+        assert!(compiled.is_dispatch_launch());
     }
 
     #[test]
     fn compile_subscription_succeeds() {
         let raw = make_subscription_raw("r1", "/threads/{id}/stream");
-        let result = EventStreamMode::default().compile(&raw);
-        assert!(result.is_ok(), "subscription compile should succeed");
+        let compiled = EventStreamMode::default()
+            .compile(&raw)
+            .expect("subscription compile should succeed");
+        assert!(!compiled.is_dispatch_launch());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Provides:
 //! - [`init_subscriber`] — unified subscriber initialization for all binaries
-//! - [`test`] — trace-capture harness for asserting spans in tests (enable `test-harness` feature)
+//! - [`mod@test`] — trace-capture harness for asserting spans in tests (enable `test-harness` feature)
 
 pub mod subscriber;
 

@@ -4,7 +4,7 @@
 //! ## Architectural role
 //!
 //! The daemon owns a single shared secret store. At request-build time
-//! ([`dispatch::dispatch_subprocess`] and the runner's resume path), the
+//! (`dispatch::dispatch_subprocess` and the runner's resume path), the
 //! daemon reads the operator's secrets via [`NodeVault::read_all`] and
 //! threads them through `ExecutionParams.vault_bindings` →
 //! `spawn_item` → `spec.env` → `Command::env()` so every spawned
@@ -245,6 +245,13 @@ pub enum VaultReadError {
         principal: String,
         names: Vec<String>,
     },
+    /// Deterministic refusal: the admitted launch metadata itself forbids
+    /// this read (declared-name authority, overlay identity). Retrying with
+    /// the same admitted authority can never succeed, so callers may treat
+    /// this as final — unlike [`VaultReadError::Internal`], which covers
+    /// transient IO/config faults.
+    #[error("vault authority violation: {0}")]
+    AuthorityViolation(String),
     #[error("vault read error: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -370,7 +377,7 @@ pub fn read_required_secrets_with_authority(
         .cloned()
         .collect();
     if !unauthorized.is_empty() {
-        return Err(VaultReadError::Internal(anyhow!(
+        return Err(VaultReadError::AuthorityViolation(format!(
             "declared secret name(s) exceed the admitted environment authority: [{}]",
             unauthorized.join(", ")
         )));
@@ -400,9 +407,10 @@ pub fn read_required_secrets_with_authority(
                     ..
                 } => stable_project_identity,
                 ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
-                    return Err(VaultReadError::Internal(anyhow!(
+                    return Err(VaultReadError::AuthorityViolation(
                         "projectless authority cannot carry a project environment overlay"
-                    )))
+                            .to_string(),
+                    ))
                 }
             };
             let expected_authority_id = lillux::sha256_hex(
@@ -414,13 +422,14 @@ pub fn read_required_secrets_with_authority(
                 .as_bytes(),
             );
             if project_authority_id != &expected_authority_id {
-                return Err(VaultReadError::Internal(anyhow!(
+                return Err(VaultReadError::AuthorityViolation(
                     "project environment authority id does not match the descriptor-opened overlay root"
-                )));
+                        .to_string(),
+                ));
             }
             let expected_source = format!("dotenv:{}", root.path().join(".env").display());
             if source_identity != &expected_source {
-                return Err(VaultReadError::Internal(anyhow!(
+                return Err(VaultReadError::AuthorityViolation(format!(
                     "project environment source identity mismatch: expected {expected_source:?}, got {source_identity:?}"
                 )));
             }

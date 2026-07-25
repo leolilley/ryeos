@@ -6,7 +6,57 @@ use super::{
     ExecutionProjectAuthority, ExecutionRecoveryAuthority,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 4;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 6;
+
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// Immutable daemon-minted accounting scope sealed with an admitted launch.
+/// A paid descendant reserves against exactly these identities; recovery
+/// rejects a ledger that cannot satisfy them and never remints allowance
+/// from configured limits alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdmittedAccountingScope {
+    pub budget_authority_site_id: String,
+    pub ledger_epoch: u64,
+    pub execution_budget_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directive_budget_id: Option<String>,
+}
+
+impl AdmittedAccountingScope {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        validate_trimmed_control_free(
+            "accounting scope site",
+            &self.budget_authority_site_id,
+            false,
+        )?;
+        validate_trimmed_control_free(
+            "accounting scope execution budget id",
+            &self.execution_budget_id,
+            false,
+        )?;
+        if let Some(directive_budget_id) = &self.directive_budget_id {
+            validate_trimmed_control_free(
+                "accounting scope directive budget id",
+                directive_budget_id,
+                false,
+            )?;
+        }
+        if self.ledger_epoch == 0 {
+            anyhow::bail!("accounting scope ledger epoch must be positive");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
@@ -286,7 +336,13 @@ pub struct AdmittedLaunchCapsule {
     /// Exact secret-free output of launch preparation. Managed recovery
     /// consumes this CAS-rooted value rather than re-running mutable config,
     /// binding resolution, augmentations, or launch-preparer handlers.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
     pub prepared_launch: Option<serde_json::Value>,
+    /// Sealed accounting scope for launches whose runtime declares a
+    /// financial authority. `None` states the launch performs no direct paid
+    /// provider work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounting_scope: Option<AdmittedAccountingScope>,
     pub effective_caps: Vec<String>,
     pub runtime_ref: String,
     pub executor_ref: String,
@@ -330,6 +386,11 @@ impl AdmittedLaunchCapsule {
         {
             anyhow::bail!("invalid admitted launch capsule wire identity");
         }
+        if self.launch_driver == ExecutionLaunchDriver::InProcessHandler {
+            anyhow::bail!(
+                "in-process handler launch drivers cannot carry admitted subprocess capsules"
+            );
+        }
         if !self.exact_program.is_object() {
             anyhow::bail!("admitted launch capsule exact_program must be an object");
         }
@@ -353,11 +414,24 @@ impl AdmittedLaunchCapsule {
         let invocation_object = invocation_program
             .as_object_mut()
             .ok_or_else(|| anyhow::anyhow!("sealed invocation must be an object"))?;
+        let invocation_project_authority: ExecutionProjectAuthority = serde_json::from_value(
+            invocation_object
+                .get("project_authority")
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "admitted launch capsule sealed invocation is missing project_authority"
+                    )
+                })?,
+        )
+        .context("decode sealed invocation project authority")?;
+        invocation_project_authority.validate()?;
         for invocation_field in [
             "parameters",
             "requested_by",
             "planning_principal",
             "project_context",
+            "project_authority",
             "usage_subject",
             "usage_subject_asserted_by",
         ] {
@@ -400,6 +474,12 @@ impl AdmittedLaunchCapsule {
             (ExecutionLaunchDriver::DirectItemExecutor, Some(_)) => anyhow::bail!(
                 "direct admitted launch capsule cannot carry managed prepared launch state"
             ),
+            (ExecutionLaunchDriver::InProcessHandler, _) => anyhow::bail!(
+                "in-process handler launch drivers cannot carry admitted subprocess capsules"
+            ),
+        }
+        if let Some(scope) = &self.accounting_scope {
+            scope.validate()?;
         }
         if self.artifact_identity.executor_ref() != self.executor_ref {
             anyhow::bail!("admitted launch artifact identity contradicts executor ref");
@@ -450,6 +530,7 @@ impl AdmittedLaunchCapsule {
             && self.launch_driver == other.launch_driver
             && self.artifact_identity == other.artifact_identity
             && self.prepared_launch == other.prepared_launch
+            && self.accounting_scope == other.accounting_scope
             && self.effective_caps == other.effective_caps
             && self.runtime_ref == other.runtime_ref
             && self.executor_ref == other.executor_ref)
@@ -483,6 +564,10 @@ mod tests {
         ] {
             object.insert(field.to_string(), serde_json::Value::Null);
         }
+        object.insert(
+            "project_authority".to_string(),
+            serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
+        );
         AdmittedLaunchCapsule {
             schema: ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
             kind: "admitted_launch_capsule".to_string(),
@@ -518,6 +603,7 @@ mod tests {
                 },
             },
             prepared_launch: None,
+            accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:direct".to_string(),
             executor_ref: "tool:test/executor".to_string(),
@@ -544,6 +630,10 @@ mod tests {
         ] {
             object.insert(field.to_string(), serde_json::Value::Null);
         }
+        object.insert(
+            "project_authority".to_string(),
+            serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
+        );
         AdmittedLaunchCapsule {
             schema: ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
             kind: "admitted_launch_capsule".to_string(),
@@ -569,6 +659,7 @@ mod tests {
                 executor_bundle_signer_fingerprint: "fp:executor-bundle".to_string(),
             },
             prepared_launch,
+            accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:test/directive".to_string(),
             executor_ref: "executor:test/subprocess".to_string(),
@@ -582,6 +673,18 @@ mod tests {
         });
         capsule.validate().unwrap();
         assert_eq!(capsule.content_hash().unwrap().len(), 64);
+    }
+
+    #[test]
+    fn in_process_handler_driver_is_not_an_admitted_subprocess_capsule() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        capsule.launch_driver = ExecutionLaunchDriver::InProcessHandler;
+        let error = capsule.validate().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("cannot carry admitted subprocess capsules"));
     }
 
     #[test]
@@ -634,6 +737,51 @@ mod tests {
         });
         let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn current_decoder_requires_explicit_prepared_launch_field() {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value
+            .as_object_mut()
+            .expect("capsule object")
+            .remove("prepared_launch");
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("missing field `prepared_launch`"),
+            "unexpected error chain: {error:#}"
+        );
+    }
+
+    #[test]
+    fn current_capsule_requires_typed_sealed_invocation_project_authority() {
+        let mut missing = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        missing
+            .sealed_invocation
+            .as_object_mut()
+            .unwrap()
+            .remove("project_authority");
+        let error = missing.validate().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("sealed invocation is missing project_authority"));
+
+        let mut malformed = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        malformed.sealed_invocation.as_object_mut().unwrap().insert(
+            "project_authority".to_string(),
+            serde_json::json!({"kind": "predecessor_shape"}),
+        );
+        let error = malformed.validate().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("decode sealed invocation project authority"));
     }
 
     #[test]

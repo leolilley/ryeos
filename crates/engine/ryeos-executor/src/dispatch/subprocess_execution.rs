@@ -326,6 +326,7 @@ async fn dispatch_managed_subprocess(
     let result = launch::build_and_launch(launch::BuildAndLaunchParams {
         state,
         lifecycle_authority: request.lifecycle_authority,
+        launch_timings: request.launch_timings.clone(),
         // The serving runtime's canonical ref, captured so a continuation
         // successor reattaches the same runtime identity (not just the kind's
         // current default).
@@ -364,6 +365,9 @@ async fn dispatch_managed_subprocess(
         }
         launch::BuildAndLaunchError::CapabilityRejected { reason } => {
             DispatchError::CapabilityRejected { reason }
+        }
+        launch::BuildAndLaunchError::LaunchCancelled { stage, .. } => {
+            DispatchError::LaunchCancelled { stage }
         }
         other => {
             let msg = other.to_string();
@@ -495,16 +499,42 @@ async fn dispatch_streaming_subprocess(
         .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state");
-    let executor = crate::execution::launch::materialize_native_executor(
-        &bundle_roots,
-        &executor_ref,
-        &cache_root,
-        &ctx.engine.node_trust_store,
-        ryeos_engine::resolution::TrustClass::TrustedBundle,
-    )
-    .map_err(|e| DispatchError::RuntimeMaterializationFailed {
+    let materialization_engine = (*ctx.engine).clone();
+    let materialization_bundle_roots = bundle_roots.clone();
+    let materialization_executor_ref = executor_ref.clone();
+    let materialization_timings = request.launch_timings.clone();
+    let materialization_queue_timer = materialization_timings.as_ref().map(|timings| {
+        timings.nested(
+            "background_dispatch",
+            "executor_materialization_blocking_queue_wait",
+        )
+    });
+    let executor = tokio::task::spawn_blocking(move || {
+        drop(materialization_queue_timer);
+        let _materialization_work_timer = materialization_timings.as_ref().map(|timings| {
+            timings.nested(
+                "background_dispatch",
+                "executor_materialization_blocking_work",
+            )
+        });
+        crate::execution::launch::materialize_native_executor_for_engine(
+            &materialization_engine,
+            &materialization_bundle_roots,
+            &materialization_executor_ref,
+            &cache_root,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+            materialization_timings.as_ref(),
+        )
+    })
+    .await
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "streaming executor materialization worker failed: {error}"
+        ))
+    })?
+    .map_err(|error| DispatchError::RuntimeMaterializationFailed {
         executor_ref: executor_ref.clone(),
-        detail: e.to_string(),
+        detail: error.to_string(),
     })?;
 
     let executor_path = executor.path.clone();
@@ -521,10 +551,7 @@ async fn dispatch_streaming_subprocess(
             DispatchError::Internal(anyhow::anyhow!("streaming project path is not valid UTF-8"))
         })?
         .to_owned();
-    let isolation_verified_code = [ryeos_engine::isolation::IsolationVerifiedCode {
-        source_path: executor.path,
-        content_hash: executor.content_hash,
-    }];
+    let isolation_verified_command = executor.verified_command.clone();
     // Mint the authoritative id before building the protocol environment so
     // the child and its durable lifecycle row observe the exact same identity.
     // This is still pure pre-launch setup: no row exists until every declared
@@ -817,8 +844,8 @@ async fn dispatch_streaming_subprocess(
                     daemon_socket_path: None,
                     bundle_roots: &bundle_roots,
                     node_trusted_keys_dir: Some(&state.config.runtime_root().trusted_keys_dir()),
-                    verified_code: &isolation_verified_code,
-                    verified_command: Some(&isolation_verified_code[0]),
+                    verified_code: &[],
+                    verified_command: Some(&isolation_verified_command),
                     item_ref: &subject_item_ref,
                     thread_id: &thread_id,
                 },
@@ -989,18 +1016,19 @@ async fn dispatch_tool_subprocess(
     let mut resolved = ryeos_app::thread_lifecycle::resolve_root_execution(
         ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
             engine: &ctx.engine,
+            plan_context: ctx.plan_ctx.clone(),
+            project_binding: ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                &ctx.engine,
+                &ctx.plan_ctx,
+                &request.provenance,
+            )?,
             node_history_policy: &state.node_history_policy,
-            site_id: &ctx.plan_ctx.current_site_id,
-            project_path: request.project_path,
             item_ref: &item_ref,
             ref_bindings: request.ref_bindings.clone(),
             launch_mode: request.launch_mode,
             parameters: request.params.clone(),
-            requested_by: request.acting_principal.to_string(),
             usage_subject: request.usage_subject.clone(),
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-            caller_scopes: ctx.caller_scopes.clone(),
-            validate_only: request.validate_only,
             creates_chain_root: request.previous_thread_id.is_none()
                 && request.root_admission.is_none(),
         },
@@ -1121,6 +1149,9 @@ async fn dispatch_tool_subprocess(
                 source_name: "item metadata".to_string(),
                 remediation: crate::dispatch_error::required_secret_remediation(&env_var),
             }
+        }
+        error @ ryeos_app::vault::VaultReadError::AuthorityViolation(_) => {
+            DispatchError::Internal(anyhow::anyhow!("vault read refused: {error}"))
         }
         ryeos_app::vault::VaultReadError::Internal(e) => {
             DispatchError::Internal(anyhow::anyhow!("vault read failed: {e}"))

@@ -36,6 +36,7 @@ use ryeos_app::thread_lifecycle::{
 };
 use ryeos_runtime::callback_client::MAX_RUNTIME_REPLAY_PAGE_LIMIT;
 
+mod accounting;
 mod routing;
 mod transport;
 
@@ -283,7 +284,13 @@ pub(crate) async fn dispatch_runtime_method(
         None
     } else if matches!(
         method,
-        "runtime.poll_input" | "runtime.author_item" | "runtime.project_snapshot"
+        "runtime.poll_input"
+            | "runtime.author_item"
+            | "runtime.project_snapshot"
+            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_mark_issued"
+            | "runtime.provider_attempt_settle"
+            | "runtime.provider_attempt_release_unissued"
     ) {
         // runtime.poll_input drains staged operator inputs and persists them as
         // durable `cognition_in` for the running thread. Require BOTH proofs the
@@ -301,7 +308,12 @@ pub(crate) async fn dispatch_runtime_method(
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow!("missing thread_id"))?;
         let thread_auth = state.thread_auth.validate(tat, thread_id)?;
-        if matches!(method, "runtime.author_item" | "runtime.project_snapshot") {
+        if matches!(
+            method,
+            "runtime.author_item"
+                | "runtime.project_snapshot"
+                | "runtime.provider_attempt_mark_issued"
+        ) {
             validated_thread_auth = Some(thread_auth);
         }
         let token = params
@@ -444,6 +456,54 @@ pub(crate) async fn dispatch_runtime_method(
             handle_attach_process(&clean_params, state, peer, owner).await
         }
         "runtime.poll_input" => handle_poll_input(&clean_params, state),
+        "runtime.provider_attempt_reserve" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_reserve requires a callback capability")
+            })?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("provider_attempt_reserve requires a launch owner"))?;
+            accounting::handle_provider_attempt_reserve(&clean_params, state, cap, owner)
+        }
+        "runtime.provider_attempt_mark_issued" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_mark_issued requires a callback capability")
+            })?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("provider_attempt_mark_issued requires a launch owner"))?;
+            let thread_auth = validated_thread_auth.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_mark_issued requires validated thread authority")
+            })?;
+            accounting::handle_provider_attempt_mark_issued(
+                &clean_params,
+                state,
+                cap,
+                owner,
+                thread_auth,
+            )
+        }
+        "runtime.provider_attempt_settle" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("provider_attempt_settle requires a callback capability"))?;
+            let owner = callback_launch_owner
+                .ok_or_else(|| anyhow!("provider_attempt_settle requires a launch owner"))?;
+            accounting::handle_provider_attempt_settle(&clean_params, state, cap, owner)
+        }
+        "runtime.provider_attempt_release_unissued" => {
+            let cap = callback_cap.as_ref().ok_or_else(|| {
+                anyhow!("provider_attempt_release_unissued requires a callback capability")
+            })?;
+            let owner = callback_launch_owner.ok_or_else(|| {
+                anyhow!("provider_attempt_release_unissued requires a launch owner")
+            })?;
+            accounting::handle_provider_attempt_release_unissued(&clean_params, state, cap, owner)
+        }
+        "runtime.provider_attempt_get" => {
+            let cap = callback_cap
+                .as_ref()
+                .ok_or_else(|| anyhow!("provider_attempt_get requires a callback capability"))?;
+            accounting::handle_provider_attempt_get(&clean_params, state, cap)
+        }
         other => anyhow::bail!("unknown runtime method: {other}"),
     }
 }
@@ -491,18 +551,26 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.publish_artifact"
             | "runtime.submit_command"
             | "runtime.poll_input"
+            | "runtime.provider_attempt_reserve"
+            | "runtime.provider_attempt_mark_issued"
     )
 }
 
 fn is_stop_completion_method(method: &str) -> bool {
     matches!(
         method,
-        "runtime.finalize_thread" | "runtime.claim_commands" | "runtime.complete_command"
+        "runtime.finalize_thread"
+            | "runtime.claim_commands"
+            | "runtime.complete_command"
+            | "runtime.provider_attempt_settle"
+            | "runtime.provider_attempt_release_unissued"
     )
 }
 
 fn is_unrestricted_runtime_read_method(method: &str) -> bool {
-    is_chain_read_method(method) || method == "runtime.get_facets"
+    is_chain_read_method(method)
+        || method == "runtime.get_facets"
+        || method == "runtime.provider_attempt_get"
 }
 
 /// Reads that expose bundle state or vault material are live authority, not
@@ -831,12 +899,36 @@ fn handle_finalize(
         continuation_request: None,
         metadata: None,
     };
+    // Terminal admission closes every nonterminal financial attempt first:
+    // the accounting gate is fenced (releasing Reserved, conservatively
+    // charging Issued) before terminal thread state commits, so a racing
+    // reserve/issue callback loses to the fence inside the ledger.
+    crate::accounting_terminal::fence_accounting_for_terminal(
+        state,
+        &params.thread_id,
+        Some(launch_owner),
+        ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
+    )?;
     let finalized = state.threads.finalize_from_runtime_completion_owned(
         &params.thread_id,
         launch_owner,
         &completion,
         Some(managed_envelope),
     )?;
+    // Terminal thread state (the CAS publication) is durable; clear the
+    // gate's terminal-publication marker. Startup recovery completes this if
+    // we crash in between.
+    if let Err(error) = crate::accounting_terminal::confirm_terminal_accounting_publication(
+        state,
+        &params.thread_id,
+        launch_owner,
+    ) {
+        tracing::warn!(
+            thread_id = %params.thread_id,
+            %error,
+            "terminal accounting publication confirmation failed; startup recovery will repair"
+        );
+    }
     // Terminal state is authoritative even while the wrapper remains alive.
     // Revoke both in-memory credential classes immediately; an already-admitted
     // concurrent request is still bounded by the StateStore lifecycle check.
@@ -1583,6 +1675,7 @@ mod tests {
             require_auth: false,
             authorized_keys_dir: tmpdir.path().join("auth"),
             tool_env_passthrough: Vec::new(),
+            accounting_issue_acceptance_window_ms: 60_000,
         };
 
         let identity = NodeIdentity::create(&key_path).unwrap();
@@ -1622,15 +1715,27 @@ mod tests {
         // `system_task` profile. Follow-reconciliation fixtures truthfully use
         // the standard bundle's `graph_run` profile without teaching the
         // production registry any hardcoded schema kinds.
-        let kind_profiles = Arc::new(KindProfileRegistry::build(None).with_test_profile(
-            "graph_run",
-            ThreadKindProfile {
-                root_executable: true,
-                supports_interrupt: false,
-                supports_continuation: true,
-                supports_operator_followup: false,
-            },
-        ));
+        let kind_profiles = Arc::new(
+            KindProfileRegistry::build(None)
+                .with_test_profile(
+                    "graph_run",
+                    ThreadKindProfile {
+                        root_executable: true,
+                        supports_interrupt: false,
+                        supports_continuation: true,
+                        supports_operator_followup: false,
+                    },
+                )
+                .with_test_profile(
+                    "directive_run",
+                    ThreadKindProfile {
+                        root_executable: true,
+                        supports_interrupt: true,
+                        supports_continuation: true,
+                        supports_operator_followup: true,
+                    },
+                ),
+        );
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
@@ -1643,6 +1748,8 @@ mod tests {
             )
             .expect("HOSTNAME not set in test environment"),
         );
+        let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
+        threads.set_live_input_queue(live_input.clone());
         let commands = Arc::new(CommandService::new(
             state_store.clone(),
             kind_profiles,
@@ -1665,7 +1772,7 @@ mod tests {
             ),
             identity: Arc::new(identity),
             threads,
-            live_input: Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new()),
+            live_input,
             events,
             event_streams,
             commands,
@@ -1702,6 +1809,7 @@ mod tests {
             scheduler_reload_tx: None,
             ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
             vault_fingerprint: None,
+            accounting: None,
         };
 
         (tmpdir, state)
@@ -1811,6 +1919,194 @@ mod tests {
             .create_thread_for_test(&make_create_params(thread_id, thread_id))
             .unwrap();
         state.threads.mark_running(thread_id).unwrap();
+    }
+
+    fn create_running_directive_thread(state: &AppState, thread_id: &str) {
+        let mut params = make_create_params(thread_id, thread_id);
+        params.kind = "directive_run".to_string();
+        state.threads.create_thread_for_test(&params).unwrap();
+        state.threads.mark_running(thread_id).unwrap();
+    }
+
+    fn cognition_inputs(state: &AppState, thread_id: &str) -> Vec<String> {
+        state
+            .state_store
+            .latest_thread_events(thread_id, 32)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == "cognition_in")
+            .map(|event| {
+                event.payload["content"]
+                    .as_str()
+                    .expect("cognition_in content")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn poll_input_persists_and_delivers_each_staged_input_exactly_once() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-poll-once";
+        create_running_test_thread(&state, thread_id);
+        assert!(matches!(
+            state.live_input.enqueue(
+                thread_id,
+                ryeos_state::objects::LiveInput::new(
+                    "operator once",
+                    ryeos_state::objects::LiveInputIntent::Steer,
+                ),
+            ),
+            ryeos_app::live_input_queue::EnqueueOutcome::Accepted { pending: 1 }
+        ));
+
+        let first = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        let second = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+
+        assert_eq!(first["inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            first["inputs"][0]["content"].as_str(),
+            Some("operator once")
+        );
+        assert_eq!(second, json!({"inputs": []}));
+        assert_eq!(state.live_input.pending_len(thread_id), 0);
+        assert_eq!(
+            cognition_inputs(&state, thread_id),
+            vec!["operator once".to_string()]
+        );
+    }
+
+    #[test]
+    fn poll_input_preserves_fifo_in_response_and_durable_braid() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-poll-fifo";
+        create_running_test_thread(&state, thread_id);
+        for (content, intent, pending) in [
+            ("first", ryeos_state::objects::LiveInputIntent::Steer, 1),
+            (
+                "second",
+                ryeos_state::objects::LiveInputIntent::Interrupt,
+                2,
+            ),
+        ] {
+            assert!(matches!(
+                state.live_input.enqueue(
+                    thread_id,
+                    ryeos_state::objects::LiveInput::new(content, intent),
+                ),
+                ryeos_app::live_input_queue::EnqueueOutcome::Accepted {
+                    pending: observed
+                } if observed == pending
+            ));
+        }
+
+        let response = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        let contents = response["inputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|input| input["content"].as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(contents, vec!["first", "second"]);
+        assert_eq!(
+            cognition_inputs(&state, thread_id),
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
+    #[test]
+    fn poll_input_discards_staged_input_when_thread_finalized_before_poll() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-poll-terminal";
+        create_running_test_thread(&state, thread_id);
+        assert!(matches!(
+            state.live_input.enqueue(
+                thread_id,
+                ryeos_state::objects::LiveInput::new(
+                    "too late",
+                    ryeos_state::objects::LiveInputIntent::Steer,
+                ),
+            ),
+            ryeos_app::live_input_queue::EnqueueOutcome::Accepted { pending: 1 }
+        ));
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread_id.to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: Some(json!({"ok": true})),
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let response = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+
+        assert_eq!(response, json!({"inputs": []}));
+        assert!(cognition_inputs(&state, thread_id).is_empty());
+        assert!(state
+            .state_store
+            .get_thread(thread_id)
+            .unwrap()
+            .unwrap()
+            .successor_thread_id
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_process_interrupt_degrades_to_steer_and_poll_folds_once() {
+        use ryeos_app::handler_context::HandlerContext;
+
+        let (_tmp, state) = setup_app_state();
+        let state = Arc::new(state);
+        let thread_id = "T-directive-missing-process";
+        create_running_directive_thread(&state, thread_id);
+        let request: ryeos_api::handlers::threads_input::Request = serde_json::from_value(json!({
+            "input": "change course",
+            "target": {"kind": "thread", "thread_id": thread_id},
+            "intent": "interrupt",
+        }))
+        .unwrap();
+
+        let response = ryeos_api::handlers::threads_input::handle(
+            request,
+            HandlerContext::new("user:test".to_string(), Vec::new(), true),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["delivery"], "submitted");
+        assert_eq!(response["thread_id"].as_str(), Some(thread_id));
+        assert_eq!(response["pending"].as_u64(), Some(1));
+        assert!(response["notice"]
+            .as_str()
+            .unwrap()
+            .contains("missing_pgid"));
+        let first = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        let second = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
+        assert_eq!(first["inputs"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            first["inputs"][0]["content"].as_str(),
+            Some("change course")
+        );
+        assert_eq!(second, json!({"inputs": []}));
+        assert_eq!(
+            cognition_inputs(&state, thread_id),
+            vec!["change course".to_string()]
+        );
+        assert!(state
+            .state_store
+            .get_thread(thread_id)
+            .unwrap()
+            .unwrap()
+            .successor_thread_id
+            .is_none());
     }
 
     fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {
@@ -2535,6 +2831,7 @@ mod tests {
             parent_thread_id: "P".to_string(),
             hard_limits: serde_json::Value::Null,
             depth: 0,
+            accounting_scope: None,
         });
         state
             .state_store

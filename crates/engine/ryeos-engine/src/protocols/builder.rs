@@ -64,7 +64,7 @@ pub struct BuildRequest<'a> {
 
     /// Resolved binary path.
     pub binary_path: &'a Path,
-    /// Argv excluding cmd[0].
+    /// Argv excluding `cmd[0]`.
     pub args: &'a [String],
 
     /// Working directory for the child.
@@ -480,6 +480,8 @@ mod tests {
             },
             inventory: HashMap::new(),
             runtime_data: BTreeMap::new(),
+            financial_authority: None,
+            accounting_scope: None,
         }
     }
 

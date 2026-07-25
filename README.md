@@ -236,6 +236,19 @@ without extra capabilities or an isolation backend. Back up the `ryeos-data`
 volume before upgrades; it contains node identity, trust, vault, and durable
 execution state.
 
+This release is an explicit no-backcompat runtime-schema cutover. Before
+restarting the new daemon on every existing node, stop the daemon and discard
+the incompatible thread history and project heads:
+
+```bash
+ryeos node gc --discard-thread-history --discard-project-heads \
+  --confirm-discard-thread-history --confirm-discard-project-heads
+```
+
+The reset is destructive, so retain the pre-upgrade backup. Startup fails
+closed when predecessor launch metadata is still present rather than silently
+projecting it into the current runtime contract.
+
 ### From source
 
 Source installs do not stage an isolation implementation. Backend bundles are

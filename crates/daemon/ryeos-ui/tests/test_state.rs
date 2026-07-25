@@ -44,6 +44,7 @@ pub fn build_test_state() -> (tempfile::TempDir, AppState) {
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
         tool_env_passthrough: Vec::new(),
+        accounting_issue_acceptance_window_ms: 60_000,
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
@@ -129,6 +130,7 @@ pub fn build_test_state_with_live_bundles() -> (tempfile::TempDir, AppState) {
         require_auth: false,
         authorized_keys_dir: tmpdir.path().join("auth"),
         tool_env_passthrough: Vec::new(),
+        accounting_issue_acceptance_window_ms: 60_000,
     };
     let identity = ryeos_app::identity::NodeIdentity::create(&key_path).unwrap();
     let signer = Arc::new(ryeos_app::state_store::NodeIdentitySigner::from_identity(
@@ -292,6 +294,7 @@ fn build_app_state(
         scheduler_reload_tx: None,
         ignore_matcher: Arc::new(ryeos_app::ignore::matcher_from_builtins()),
         vault_fingerprint: None,
+        accounting: None,
     };
 
     (tmpdir, state)

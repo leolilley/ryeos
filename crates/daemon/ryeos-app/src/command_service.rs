@@ -94,10 +94,11 @@ impl CommandService {
             .get_thread(&params.thread_id)?
             .ok_or_else(|| anyhow::anyhow!("thread not found: {}", params.thread_id))?;
 
-        // AUTHZ NOTE: per-thread ownership is enforced upstream in
-        // handlers/commands_submit.rs (`ctx.require_owner`, commit 4510c4bc) —
-        // this service runs only after the caller is confirmed the thread's
-        // owner. This layer gates on capability + allowed_actions(kind,status).
+        // Reject commands that are not valid for the durable thread state
+        // before consulting live launch ownership. A terminal recorded
+        // in-process thread deliberately retains its launch driver after its
+        // live owner is gone; treating that settled state as contradictory
+        // authority would hide the authoritative terminal command gate.
         let allowed = self.kind_profiles.allowed_actions(
             &thread.kind,
             &thread.status,
@@ -112,6 +113,19 @@ impl CommandService {
             );
         }
 
+        if matches!(params.command_type.as_str(), "cancel" | "kill") {
+            if let Some(refusal) = self
+                .state_store
+                .in_process_handler_stop_refusal(&params.thread_id)?
+            {
+                bail!("{}", refusal.message(&params.thread_id));
+            }
+        }
+
+        // AUTHZ NOTE: per-thread ownership is enforced upstream in
+        // handlers/commands_submit.rs (`ctx.require_owner`, commit 4510c4bc) —
+        // this service runs only after the caller is confirmed the thread's
+        // owner. This layer gates on capability + allowed_actions(kind,status).
         let command = self.state_store.submit_command(&NewCommandRecord {
             thread_id: params.thread_id.clone(),
             command_type: params.command_type.clone(),

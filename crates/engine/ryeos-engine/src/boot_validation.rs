@@ -47,10 +47,11 @@ use crate::runtime_registry::{
     RuntimeFactKind, RuntimeRegistry,
 };
 use ryeos_handler_protocol::{
-    ConfigMergeModeWire, HandlerRequest, HandlerResponse, ItemSpaceWire, LaunchConfigInputDeclWire,
-    LaunchSecretPolicyDeclWire, RefBindingDeclWire, RuntimeFactDeclWire, RuntimeFactKindWire,
-    TrustClassWire, ValidateComposerConfigRequest, ValidateLaunchPreparerConfigRequest,
-    ValidateLaunchPreparerConfigResponse, ValidateParserConfigRequest,
+    ConfigMergeModeWire, FinancialAuthorityDeclWire, HandlerRequest, HandlerResponse,
+    ItemSpaceWire, LaunchConfigInputDeclWire, LaunchSecretPolicyDeclWire, RefBindingDeclWire,
+    RuntimeFactDeclWire, RuntimeFactKindWire, TrustClassWire, ValidateComposerConfigRequest,
+    ValidateLaunchPreparerConfigRequest, ValidateLaunchPreparerConfigResponse,
+    ValidateParserConfigRequest,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -714,6 +715,14 @@ fn launch_preparer_validation_request(
         },
         required_runtime_data: contract.required_runtime_data.clone(),
         runtime_facts,
+        financial_authority: match contract.financial_authority {
+            crate::runtime_registry::FinancialAuthorityDecl::None => {
+                FinancialAuthorityDeclWire::None
+            }
+            crate::runtime_registry::FinancialAuthorityDecl::ProviderAccountingAuthorityV1 => {
+                FinancialAuthorityDeclWire::ProviderAccountingAuthorityV1
+            }
+        },
     }
 }
 

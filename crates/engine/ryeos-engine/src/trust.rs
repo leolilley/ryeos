@@ -388,6 +388,23 @@ impl TrustStore {
         self.signers.is_empty()
     }
 
+    /// Stable identity for the exact signer set used by a request snapshot.
+    ///
+    /// This intentionally includes public-key bytes and labels, not only map
+    /// keys, so a malformed caller overlay cannot alias a prior trust state by
+    /// reusing a declared fingerprint.
+    pub fn fingerprint(&self) -> String {
+        let mut signers = self.signers.values().collect::<Vec<_>>();
+        signers.sort_by(|left, right| left.fingerprint.cmp(&right.fingerprint));
+        let mut bytes = Vec::new();
+        for signer in signers {
+            append_fingerprint_field(&mut bytes, signer.fingerprint.as_bytes());
+            append_fingerprint_field(&mut bytes, signer.verifying_key.as_bytes());
+            append_fingerprint_field(&mut bytes, signer.label.as_deref().unwrap_or("").as_bytes());
+        }
+        lillux::cas::sha256_hex(&bytes)
+    }
+
     /// Return a trust store that includes project-local keys.
     ///
     /// Project keys take priority (first-wins): if a fingerprint exists
@@ -413,6 +430,11 @@ impl TrustStore {
         }
         Ok(std::borrow::Cow::Owned(Self { signers: merged }))
     }
+}
+
+fn append_fingerprint_field(bytes: &mut Vec<u8>, field: &[u8]) {
+    bytes.extend_from_slice(&(field.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(field);
 }
 
 // ── Key loading ─────────────────────────────────────────────────────

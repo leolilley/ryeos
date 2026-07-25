@@ -228,12 +228,8 @@ pub fn compile_service_invoker_from(
     }
 
     Ok(Arc::new(service_invocation::CompiledServiceInvocation {
+        service_ref: source_ref.to_string(),
         endpoint: descriptor.endpoint.to_string(),
-        required_caps: descriptor
-            .required_caps
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
     }))
 }
 
@@ -386,12 +382,11 @@ mod tests {
     }
 
     #[test]
-    fn service_invoker_extracts_real_caps() {
-        // node-sign declares required_caps: &["node.maintenance"] and is ServiceAvailability::Both.
+    fn service_invoker_accepts_a_cap_protected_descriptor() {
+        // node-sign declares node.maintenance and is available in live mode.
+        // Runtime enforcement comes from the verified service item, not a
+        // second descriptor copy stored on the compiled invoker.
         let invoker = compile_canonical_ref_invoker("service:node-sign", "r1").unwrap();
-        // The invoker should be a CompiledServiceInvocation with node.maintenance caps.
-        // We can't directly inspect the caps (they're inside an Arc<dyn>),
-        // but we can verify it compiled successfully for a cap-protected service.
         let contract = invoker.contract();
         assert!(matches!(
             contract.output,

@@ -261,13 +261,19 @@ fn standard_bundle_has_no_old_tool_descriptors() {
 #[test]
 fn no_old_state_graph_executor_ids_in_fixtures() {
     let workspace = workspace_root();
-    let fixtures = workspace.join("tests/e2e/.ai");
-    if !fixtures.exists() {
+    let fixtures_root = workspace.join("tests/e2e");
+    if !fixtures_root.exists() {
         return;
     }
 
     let mut yaml_files = Vec::new();
-    walk_yaml_files(&fixtures, &mut yaml_files);
+    for entry in std::fs::read_dir(&fixtures_root).unwrap() {
+        let project_root = entry.unwrap().path();
+        let project_ai = project_root.join(".ai");
+        if project_ai.is_dir() {
+            walk_yaml_files(&project_ai, &mut yaml_files);
+        }
+    }
     for path in yaml_files {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(

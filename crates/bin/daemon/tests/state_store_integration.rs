@@ -1430,7 +1430,7 @@ mod integration_tests {
             )
             .expect("first create_or_get");
         assert!(
-            matches!(outcome, ContinuationOutcome::Created(_)),
+            matches!(outcome, ContinuationOutcome::Created { .. }),
             "first submit creates a successor"
         );
         assert_eq!(

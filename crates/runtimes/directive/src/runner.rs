@@ -12,9 +12,17 @@ use crate::dispatcher::{DispatchKind, Dispatcher};
 use crate::harness::{Harness, HookAction};
 use crate::result_guard::ResultGuard;
 use crate::resume::ResumeState;
+use ryeos_accounting::{
+    AttemptBudgetState, BillableDimension, ChargeReconciliationAuthority, HexDigest,
+    ProviderAccountingAuthority, ProviderAttemptGetParams, ProviderAttemptMarkIssuedParams,
+    ProviderAttemptReleaseUnissuedParams, ProviderAttemptReserveParams,
+    ProviderAttemptReserveResponse, ProviderAttemptSettleParams, ReconciliationReason,
+    SpendAccounting, SpendBoundAuthority, TokenAccounting, UnitCount, VerifiedPreparedSpendBound,
+};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
-    normalize_hook_dispatch_result, RuntimeCost, RuntimeResult, RuntimeResultStatus,
+    normalize_hook_dispatch_result, EnvelopeAccountingScope, RuntimeCost, RuntimeResult,
+    RuntimeResultStatus,
 };
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
@@ -96,6 +104,17 @@ pub struct Runner {
     matched_profile: Option<String>,
     /// SHA-256 of the canonical-JSON provider config from the snapshot.
     config_hash: String,
+    /// Sealed financial authority when the launch carried one. `Paid` /
+    /// `ExplicitlyFree` spend bounds make this a ledger route: the daemon
+    /// owns the attempt budget lifecycle (reserve → issue → settle).
+    financial_authority: Option<ProviderAccountingAuthority>,
+    /// Daemon-minted budget scope identities; cross-checked against each
+    /// reservation response (the daemon derives authoritative scope
+    /// server-side, never from runtime fields).
+    accounting_scope: Option<EnvelopeAccountingScope>,
+    /// Declared model context window; the input-side unit bound for the
+    /// spend verifier.
+    context_window: u64,
     execution: ExecutionConfig,
     model_name: String,
     thread_id: String,
@@ -141,87 +160,49 @@ struct RunGuard {
     finalized: bool,
 }
 
+/// Bounded lost-reply recovery: how many exact idempotent retries a ledger
+/// RPC gets before the runner attempts a recorded-state read (or fails
+/// closed). Every retry carries the byte-identical params, so a replay can
+/// only recover the recorded transition — never create a second one.
+const LEDGER_RPC_RETRIES: usize = 2;
+
+/// Paced spacing between ledger RPC retries. A vault or anchor blip that
+/// outlives three back-to-back calls should not be thread-fatal; a few
+/// hundred milliseconds of spacing lets transient faults clear without
+/// meaningfully delaying the failure path.
+async fn ledger_retry_backoff(retry: usize) {
+    tokio::time::sleep(std::time::Duration::from_millis(250 * (retry as u64 + 1))).await;
+}
+
+/// Live handle to one daemon-admitted provider attempt reservation. Mirrors
+/// daemon authority but never calculates availability locally.
 #[derive(Debug)]
-struct ProviderAttemptAccountingPersistenceError(String);
-
-impl std::fmt::Display for ProviderAttemptAccountingPersistenceError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
+struct LedgerAttempt {
+    /// Daemon-minted attempt ID (keyed server-side by thread/generation/
+    /// turn/attempt-number — the runner never invents this).
+    attempt_id: String,
+    /// Reservation intent hash (§9.3) frozen for every later transition.
+    request_hash: String,
+    /// Sealed authority digest echoed back by the reserve transition.
+    authority_digest: HexDigest,
 }
 
-impl std::error::Error for ProviderAttemptAccountingPersistenceError {}
-
-#[derive(Debug, Default)]
-struct AttemptAccountingLifecycle {
-    last: Option<String>,
-    active: Option<String>,
-    closing_payload: Option<Value>,
-}
-
-impl AttemptAccountingLifecycle {
-    fn admit_after_pending_ack(&mut self, attempt_id: String) -> Result<(), String> {
-        if let Some(active) = self.active.as_deref() {
-            return Err(format!(
-                "cannot admit provider attempt `{attempt_id}` while `{active}` remains active"
-            ));
-        }
-        self.last = Some(attempt_id.clone());
-        self.active = Some(attempt_id);
-        self.closing_payload = None;
-        Ok(())
-    }
-
-    fn active_for_close(&self) -> Result<String, String> {
-        self.active.clone().ok_or_else(|| {
-            "provider attempt accounting lifecycle has no active attempt".to_string()
-        })
-    }
-
-    fn ack_closed(&mut self, attempt_id: &str) -> Result<(), String> {
-        match self.active.as_deref() {
-            Some(active) if active == attempt_id => {
-                self.active = None;
-                self.closing_payload = None;
-                Ok(())
-            }
-            Some(active) => Err(format!(
-                "provider attempt closure ACK for `{attempt_id}` does not match active `{active}`"
-            )),
-            None => Err(format!(
-                "provider attempt closure ACK for `{attempt_id}` has no active attempt"
-            )),
-        }
-    }
-
-    fn last(&self) -> Option<&str> {
-        self.last.as_deref()
-    }
-
-    fn has_active(&self) -> bool {
-        self.active.is_some()
-    }
-
-    fn bind_closing_payload(&mut self, payload: Value) -> Result<Value, String> {
-        if self.active.is_none() {
-            return Err("cannot bind a terminal payload without an active attempt".to_string());
-        }
-        if let Some(bound) = self.closing_payload.as_ref() {
-            if bound != &payload {
-                return Err(
-                    "provider attempt already has a different terminal payload bound".to_string(),
-                );
-            }
-            return Ok(bound.clone());
-        }
-        self.closing_payload = Some(payload.clone());
-        Ok(payload)
-    }
-
-    #[cfg(test)]
-    fn closing_payload(&self) -> Option<&Value> {
-        self.closing_payload.as_ref()
-    }
+/// Outcome of ledger admission for one physical attempt.
+#[derive(Debug)]
+enum LedgerAdmission {
+    /// Reserved and durably issued: the exact prepared bytes may be sent.
+    Admitted(LedgerAttempt),
+    /// The daemon durably denied the reservation (insufficient budget).
+    Denied,
+    /// A runner signal arrived between reserve and issue; the reservation
+    /// was released (`ReleasedByRunner`) and no provider contact happened.
+    CancelledBeforeIssue,
+    InterruptedBeforeIssue,
+    /// The daemon released the reservation before issue (certificate expiry
+    /// or credential unavailability). Fail closed without provider contact.
+    ReleasedByDaemon {
+        detail: String,
+    },
 }
 
 impl Drop for RunGuard {
@@ -328,7 +309,7 @@ fn retry_backoff(
         // The stream died mid-read (chunk timeout/reset). The request is
         // idempotent; the durable `provider_retry` event records the count of
         // live/ephemeral deltas emitted before the cut.
-        Some(ProviderStreamError::MidStream { .. }) => execution.retry_mid_stream,
+        Some(ProviderStreamError::MidStream(_)) => execution.retry_mid_stream,
         None => false,
     };
     if !retryable {
@@ -337,6 +318,212 @@ fn retry_backoff(
     let factor = 1u64 << attempt.min(16);
     let delay_ms = execution.backoff_base_ms.saturating_mul(factor);
     Some(std::time::Duration::from_millis(delay_ms))
+}
+
+/// Reservation intent hash (§9.3): binds the attempt coordinate, provider
+/// snapshot/config hash, route facts, effective provider output limit, the
+/// proven maximum charge authority, and the canonical body digest. The
+/// attempt KEY deliberately excludes this hash — replaying the key with the
+/// exact fingerprint recovers the recorded operation, while replaying it
+/// with different prepared bytes is an integrity conflict daemon-side.
+#[allow(clippy::too_many_arguments)] // one field per bound fact, by design
+fn provider_attempt_request_hash(
+    thread_id: &str,
+    turn: u32,
+    attempt_number: u32,
+    config_hash: &str,
+    provider_id: &str,
+    model_name: &str,
+    requested_output_tokens: Option<u64>,
+    authority_digest: &str,
+    body_sha256: &str,
+) -> String {
+    let value = json!({
+        "thread_id": thread_id,
+        "turn": turn,
+        "attempt_number": attempt_number,
+        "config_hash": config_hash,
+        "provider_id": provider_id,
+        "model_name": model_name,
+        "requested_output_tokens": requested_output_tokens,
+        "authority_digest": authority_digest,
+        "body_sha256": body_sha256,
+    });
+    let canonical = lillux::cas::canonical_json(&value)
+        .expect("request-hash input is plain scalar JSON and must canonicalize");
+    lillux::cas::sha256_hex(canonical.as_bytes())
+}
+
+/// Truncate a settlement diagnostic to the shared RPC bound (char-safe).
+fn bound_diagnostic(text: &str) -> String {
+    if text.len() <= ryeos_accounting::MAX_DIAGNOSTIC_LEN {
+        return text.to_string();
+    }
+    let mut end = ryeos_accounting::MAX_DIAGNOSTIC_LEN;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
+}
+
+/// Render the adapter's parsed `f64` provider-reported charge as a canonical
+/// decimal string for the daemon's raw-decimal settlement boundary.
+///
+/// Documented lossy step: the adapter parses the wire number to `f64` today,
+/// so digits beyond f64 precision are already gone before this runs. We
+/// render at nine fractional digits — exactly the `UsdNanos` resolution the
+/// daemon settles at — then trim trailing zeros. Non-finite, negative, or
+/// over-length renderings return `None` (settled as `Unavailable` rather
+/// than inventing a charge).
+/// Extract any provider usage carried on a typed adapter failure so the
+/// daemon settlement (and the reporting path) can preserve it.
+fn carried_usage_from_error(
+    error: &anyhow::Error,
+) -> Option<&crate::provider_adapter::http::TokenUsage> {
+    error
+        .downcast_ref::<crate::provider_adapter::LocalOutputByteLimitError>()
+        .and_then(|e| e.usage.as_ref())
+        .or_else(|| {
+            error
+                .downcast_ref::<crate::provider_adapter::ProviderReportedStreamError>()
+                .and_then(|e| e.usage.as_ref())
+        })
+        .or_else(|| {
+            error
+                .downcast_ref::<crate::provider_adapter::ProviderProtocolStreamError>()
+                .and_then(|e| e.usage.as_ref())
+        })
+        .or_else(|| {
+            error
+                .downcast_ref::<crate::provider_adapter::streaming::RuntimeCallbackPublicationError>()
+                .and_then(|e| e.usage.as_ref())
+        })
+        .or_else(|| {
+            error
+                .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
+                .and_then(|e| match e {
+                    crate::provider_adapter::ProviderStreamError::MidStream(mid_stream) => {
+                        mid_stream.usage.as_ref()
+                    }
+                    _ => None,
+                })
+        })
+}
+
+/// Build the typed daemon settlement observations for one issued attempt.
+///
+/// Token and spend validity are independent (§7.5): tokens settle from the
+/// reported usage snapshot; spend settles per the sealed reconciliation
+/// authority. Anything unusable becomes `Unavailable` — the daemon then
+/// conservatively charges the reserved maximum, never a synthetic zero.
+/// A stream that did not complete never claims a final reported charge or
+/// tariff cost: finality contracts bind to a completed response.
+fn build_ledger_settlement(
+    authority: &ProviderAccountingAuthority,
+    stream_completed: bool,
+    usage: Option<&crate::provider_adapter::http::TokenUsage>,
+    diagnostic: Option<&str>,
+) -> (SpendAccounting, TokenAccounting) {
+    let tokens = match usage {
+        None => TokenAccounting::Unavailable,
+        Some(usage) => match usage.complete_token_counts() {
+            Some((input_tokens, output_tokens)) if usage.anomalies.is_empty() => {
+                TokenAccounting::Reported {
+                    input_tokens,
+                    output_tokens,
+                    reasoning_tokens: usage.reasoning_tokens,
+                }
+            }
+            _ => TokenAccounting::Invalid {
+                diagnostic: bound_diagnostic(&if usage.anomalies.is_empty() {
+                    "required input/output token counts are incomplete".to_string()
+                } else {
+                    usage.anomalies.join("; ")
+                }),
+            },
+        },
+    };
+
+    // Explicitly-free routes settle exact zero under their contract
+    // regardless of the stream outcome; token validity stays independent.
+    if matches!(
+        authority.spend_bound,
+        SpendBoundAuthority::ExplicitlyFree { .. }
+    ) {
+        return (SpendAccounting::ExplicitlyFree, tokens);
+    }
+
+    if !stream_completed {
+        return (
+            SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(
+                    diagnostic.unwrap_or("provider stream did not complete after issue"),
+                ),
+            },
+            tokens,
+        );
+    }
+
+    let spend =
+        match &authority.reconciliation {
+            ChargeReconciliationAuthority::ProviderReportedFinalCharge { .. } => match usage {
+                Some(usage) if !usage.spend_anomalies.is_empty() => SpendAccounting::Unavailable {
+                    diagnostic: bound_diagnostic(&usage.spend_anomalies.join("; ")),
+                },
+                Some(usage) if usage.reported_cost_usd_raw.is_some() => {
+                    SpendAccounting::ProviderReportedFinal {
+                        raw_decimal: usage
+                            .reported_cost_usd_raw
+                            .clone()
+                            .expect("guarded by is_some"),
+                    }
+                }
+                _ => SpendAccounting::Unavailable {
+                    diagnostic: bound_diagnostic(
+                        "provider did not report a usable final charge for the attempt",
+                    ),
+                },
+            },
+            ChargeReconciliationAuthority::DeterministicTariff { tariff } => {
+                match usage.filter(|usage| usage.anomalies.is_empty()).and_then(|usage| {
+                tariff
+                    .covered_dimensions
+                    .as_slice()
+                    .iter()
+                    .map(|dimension| {
+                        let units = match dimension {
+                            BillableDimension::InputTokens => usage.input_tokens?,
+                            BillableDimension::OutputTokens => usage.output_tokens?,
+                            BillableDimension::ReasoningTokens => usage.reasoning_tokens?,
+                            BillableDimension::CacheReadTokens => usage.cache_read_tokens?,
+                            BillableDimension::CacheWriteTokens => usage.cache_write_tokens?,
+                            // The daemon adds the tariff's flat per-request
+                            // rate itself; no provider observation is needed.
+                            BillableDimension::PerRequest => return Some(None),
+                        };
+                        Some(Some(UnitCount {
+                            dimension: *dimension,
+                            units,
+                        }))
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .map(|counts| counts.into_iter().flatten().collect())
+            }) {
+                Some(unit_counts) => SpendAccounting::TariffUnits { unit_counts },
+                None => SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(
+                        "deterministic tariff settlement is missing a covered billable dimension",
+                ),
+            },
+            }
+            }
+            ChargeReconciliationAuthority::Unavailable => SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(
+                    "route declares no charge reconciliation authority for issued attempts",
+                ),
+            },
+        };
+    (spend, tokens)
 }
 
 pub struct RunnerConfig {
@@ -356,6 +543,10 @@ pub struct RunnerConfig {
     pub matched_profile: Option<String>,
     /// SHA-256 of the canonical-JSON provider config from the snapshot.
     pub config_hash: String,
+    /// Sealed financial authority from the launch envelope, when present.
+    pub financial_authority: Option<ProviderAccountingAuthority>,
+    /// Daemon-minted accounting scope identities from the launch envelope.
+    pub accounting_scope: Option<EnvelopeAccountingScope>,
     pub execution: ExecutionConfig,
     pub model_name: String,
     pub thread_id: String,
@@ -395,6 +586,8 @@ impl Runner {
             sampling,
             matched_profile,
             config_hash,
+            financial_authority,
+            accounting_scope,
             terminal_state_root,
             terminal_source_path,
         } = config;
@@ -416,6 +609,9 @@ impl Runner {
             provider_id,
             matched_profile,
             config_hash,
+            financial_authority,
+            accounting_scope,
+            context_window,
             execution,
             model_name,
             thread_id,
@@ -428,9 +624,27 @@ impl Runner {
             return_nudge_sent: false,
             continuation_config: continuation,
             sampling,
+            // Retain the existing per-process client and pool size; no
+            // protocol or keepalive tuning is added without measurement. The
+            // custom resolver preserves reqwest's default getaddrinfo behavior
+            // while exposing DNS timing. The connector layer records only the
+            // honest aggregate connection-establishment boundary, which can
+            // include DNS, TCP, proxy negotiation, and TLS. Response versions
+            // are observed after negotiation rather than forced here.
             http_client: reqwest::Client::builder()
                 .pool_max_idle_per_host(8)
+                .dns_resolver(std::sync::Arc::new(
+                    crate::provider_transport_timing::InstrumentedDnsResolver,
+                ))
+                .connector_layer(
+                    crate::provider_transport_timing::ConnectionEstablishmentTimingLayer,
+                )
                 .timeout(std::time::Duration::from_secs(600))
+                // The prepared request is a sealed contract: exact bytes,
+                // frozen credential, exact endpoint. Following a redirect
+                // would replay the credential to a host the sealed provider
+                // config never authorized, so a 3xx is an error, not a hop.
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client builder"),
             terminal_persistence: TerminalPersistence {
@@ -564,12 +778,41 @@ impl Runner {
         let mut guard = RunGuard { finalized: false };
         // The entrypoint has already attached the process and durably moved
         // the thread to running before it constructs the runner.
-        let mut state = State::CheckingLimits;
+        // Ledger routes (Paid / ExplicitlyFree sealed authority): the daemon
+        // ledger owns the attempt budget lifecycle. Cloned once so the
+        // admission/settlement helpers never pin an immutable `self` borrow
+        // across the mutable reporting-settlement paths.
+        let ledger_authority: Option<ProviderAccountingAuthority> = self
+            .financial_authority
+            .as_ref()
+            .filter(|authority| {
+                matches!(
+                    authority.spend_bound,
+                    SpendBoundAuthority::Paid { .. } | SpendBoundAuthority::ExplicitlyFree { .. }
+                )
+            })
+            .cloned();
+        // Hard budget mode is only meaningful when the daemon reservation
+        // ledger backs the route. main.rs enforces this at startup; this is
+        // the fail-closed backstop for alternate construction paths.
+        let mut state = if self.execution.accounting.budget_mode
+            == crate::directive::AccountingBudgetMode::Hard
+            && ledger_authority.is_none()
+        {
+            State::Errored {
+                error: "provider_accounting_policy_invalid: accounting.budget_mode=hard \
+                        requires a Paid or ExplicitlyFree sealed financial authority; this \
+                        route is advisory-only"
+                    .to_string(),
+            }
+        } else {
+            State::CheckingLimits
+        };
         let mut turn = self.initial_turn;
-        // Admission happens only after the pending event is acknowledged.
-        // Closure is two-phase: the ID remains active until the exact terminal
-        // event is acknowledged or recovered by replay.
-        let mut attempt_accounting = AttemptAccountingLifecycle::default();
+        // Diagnostic locator for terminal failure payloads: the most recent
+        // admitted attempt (daemon attempt ID on ledger routes, the local
+        // coordinate string otherwise).
+        let mut last_attempt_id: Option<String> = None;
         // Collected non-fatal callback failures. P2.2 — runtime no
         // longer silently drops `append_event` errors; everything that
         // would have hit `let _ = ...` is now recorded here and
@@ -668,56 +911,185 @@ impl Runner {
                             ));
                         }
                         let attempt_number = attempt + 1;
-                        let attempt_id = format!("{}:{turn}:{attempt_number}", self.thread_id);
-                        let pending_state = match self.execution.accounting.budget_mode {
-                            crate::directive::AccountingBudgetMode::Settled => "accounting_pending",
-                            crate::directive::AccountingBudgetMode::Hard => {
-                                break Err(anyhow::anyhow!(
-                                    "provider_accounting_policy_invalid: hard budget mode requires the durable reservation/reconciliation backend, which is not enabled by this runtime build"
-                                ));
-                            }
+                        last_attempt_id =
+                            Some(format!("{}:{turn}:{attempt_number}", self.thread_id));
+                        let call_input = crate::provider_adapter::StreamingCallInput {
+                            client: &self.http_client,
+                            provider: &self.provider_config,
+                            provider_id: &self.provider_id,
+                            matched_profile: self.matched_profile.as_deref(),
+                            config_hash: &self.config_hash,
+                            execution: &self.execution,
+                            model: &self.model_name,
+                            messages: &self.messages,
+                            tools: &visible_tools_owned,
+                            callback: &self.callback,
+                            turn,
+                            attempt: attempt_number,
+                            sampling: self.sampling.as_ref(),
+                            cancel_flag: Some(cancel_flag.clone()),
+                            interrupt_flag: Some(interrupt_flag.clone()),
                         };
-                        if let Err(error) = self
-                            .persist_provider_attempt_accounting(json!({
-                                "attempt_id": &attempt_id,
-                                "attempt_number": attempt_number,
-                                "turn": turn,
-                                "state": pending_state,
-                                "budget_mode": "settled",
-                                "settlement_semantics": "post_attempt_may_overshoot_by_one_attempt",
-                            }))
-                            .await
-                        {
-                            break Err(anyhow::anyhow!(
-                                "resume-critical provider attempt accounting-pending persistence failed before request issue: {error}"
-                            ));
-                        }
-                        if let Err(error) =
-                            attempt_accounting.admit_after_pending_ack(attempt_id.clone())
-                        {
-                            break Err(anyhow::anyhow!(
-                                "provider attempt accounting admission failed: {error}"
-                            ));
-                        }
-                        let call = crate::provider_adapter::call_provider_streaming(
-                            crate::provider_adapter::StreamingCallInput {
-                                client: &self.http_client,
-                                provider: &self.provider_config,
-                                provider_id: &self.provider_id,
-                                matched_profile: self.matched_profile.as_deref(),
-                                config_hash: &self.config_hash,
-                                execution: &self.execution,
-                                model: &self.model_name,
-                                messages: &self.messages,
-                                tools: &visible_tools_owned,
-                                callback: &self.callback,
-                                turn,
-                                sampling: self.sampling.as_ref(),
-                                cancel_flag: Some(cancel_flag.clone()),
-                                interrupt_flag: Some(interrupt_flag.clone()),
-                            },
+                        // Prepare the immutable request BEFORE budget admission:
+                        // the reservation binds to these exact bytes (§9.2) and
+                        // transport later sends them verbatim.
+                        let prepared =
+                            match crate::provider_adapter::prepare_provider_request(&call_input) {
+                                Ok(prepared) => prepared,
+                                Err(error) => break Err(error),
+                            };
+                        // Ledger admission: verify → reserve → (release on a
+                        // pre-issue signal) → mark issued. No provider request
+                        // may start unless the issue is durably proven.
+                        let ledger_attempt = if let Some(authority) = ledger_authority.as_ref() {
+                            let verified = match crate::spend_verifier::verify_prepared_spend_bound(
+                                &prepared,
+                                authority,
+                                &self.provider_config,
+                                self.context_window,
+                                self.execution.max_provider_output_tokens_per_turn,
+                            ) {
+                                Ok(verified) => verified,
+                                Err(error) => {
+                                    break Err(anyhow::anyhow!(
+                                        "provider_spend_bound_unverified: {error:#}"
+                                    ))
+                                }
+                            };
+                            match self
+                                .admit_ledger_attempt(
+                                    turn,
+                                    attempt_number,
+                                    &prepared,
+                                    authority,
+                                    verified,
+                                    &cancel_flag,
+                                    &interrupt_flag,
+                                )
+                                .await
+                            {
+                                Ok(LedgerAdmission::Admitted(ledger)) => {
+                                    last_attempt_id = Some(ledger.attempt_id.clone());
+                                    Some(ledger)
+                                }
+                                Ok(LedgerAdmission::Denied) => {
+                                    // Terminal directive error — the ledger
+                                    // durably recorded the denial; the retry
+                                    // loop must not spin against it.
+                                    break Err(anyhow::anyhow!(
+                                        "budget_exceeded: the daemon ledger denied the provider \
+                                         attempt reservation (insufficient available balance for \
+                                         the route maximum); zero provider requests"
+                                    ));
+                                }
+                                Ok(LedgerAdmission::CancelledBeforeIssue) => {
+                                    break Ok(crate::provider_adapter::StreamOutcome::Cancelled {
+                                        attempt:
+                                            crate::provider_adapter::streaming::CutAttemptState {
+                                                usage: None,
+                                                generation_header_id: None,
+                                                response_id: None,
+                                                requested_output_tokens: prepared
+                                                    .requested_output_tokens,
+                                                observed_output: Default::default(),
+                                            },
+                                    });
+                                }
+                                Ok(LedgerAdmission::InterruptedBeforeIssue) => {
+                                    break Ok(crate::provider_adapter::StreamOutcome::Interrupted {
+                                        partial_message: ProviderMessage {
+                                            role: "assistant".to_string(),
+                                            content: None,
+                                            tool_calls: None,
+                                            tool_call_id: None,
+                                            reasoning_content: None,
+                                        },
+                                        events: Vec::new(),
+                                        attempt:
+                                            crate::provider_adapter::streaming::CutAttemptState {
+                                                usage: None,
+                                                generation_header_id: None,
+                                                response_id: None,
+                                                requested_output_tokens: prepared
+                                                    .requested_output_tokens,
+                                                observed_output: Default::default(),
+                                            },
+                                    });
+                                }
+                                Ok(LedgerAdmission::ReleasedByDaemon { detail }) => {
+                                    break Err(anyhow::anyhow!(
+                                        "provider_attempt_released_before_issue: {detail}; \
+                                         zero provider connections"
+                                    ));
+                                }
+                                Err(error) => break Err(error),
+                            }
+                        } else {
+                            None
+                        };
+                        // Send the exact prepared bytes.
+                        let call = crate::provider_adapter::send_prepared_streaming(
+                            &call_input,
+                            &prepared,
                         )
                         .await;
+                        // One terminal daemon settlement per issued attempt,
+                        // BEFORE retry classification: a retry is a NEW attempt
+                        // and may only be admitted after its predecessor's
+                        // financial state is durable (§9.4).
+                        if let Some(ledger) = ledger_attempt {
+                            let (stream_completed, ledger_usage, ledger_diag): (
+                                bool,
+                                Option<&crate::provider_adapter::http::TokenUsage>,
+                                Option<String>,
+                            ) = match &call {
+                                Ok(crate::provider_adapter::StreamOutcome::Completed {
+                                    response,
+                                    ..
+                                }) => (true, response.usage.as_ref(), None),
+                                Ok(crate::provider_adapter::StreamOutcome::Cancelled {
+                                    attempt: cut,
+                                }) => (
+                                    false,
+                                    cut.usage.as_ref(),
+                                    Some("cancelled after the issue boundary".to_string()),
+                                ),
+                                Ok(crate::provider_adapter::StreamOutcome::Interrupted {
+                                    attempt: cut,
+                                    ..
+                                }) => (
+                                    false,
+                                    cut.usage.as_ref(),
+                                    Some("interrupted after the issue boundary".to_string()),
+                                ),
+                                Err(error) => (
+                                    false,
+                                    carried_usage_from_error(error),
+                                    Some(format!(
+                                        "provider attempt failed after the issue boundary: \
+                                         {error:#}"
+                                    )),
+                                ),
+                            };
+                            let authority = ledger_authority
+                                .as_ref()
+                                .expect("ledger attempt implies ledger authority");
+                            let (spend, tokens) = build_ledger_settlement(
+                                authority,
+                                stream_completed,
+                                ledger_usage,
+                                ledger_diag.as_deref(),
+                            );
+                            if let Err(settle_error) =
+                                self.settle_ledger_attempt(&ledger, spend, tokens).await
+                            {
+                                // Terminal settlement unprovable: no retry,
+                                // fail-safe termination.
+                                break Err(anyhow::anyhow!(
+                                    "provider_attempt_settlement_unprovable: {settle_error:#}"
+                                ));
+                            }
+                        }
                         match call {
                             Err(e) => match retry_backoff(&e, attempt, &self.execution) {
                                 Some(delay) => {
@@ -733,21 +1105,6 @@ impl Runner {
                                                 }
                                         ));
                                     if usage_required && ambiguous_without_accounting {
-                                        if let Err(close_error) = self
-                                            .close_active_provider_attempt_accounting(
-                                                &mut attempt_accounting,
-                                                json!({
-                                                    "attempt_number": attempt + 1,
-                                                    "turn": turn,
-                                                    "state": "accounting_unavailable_fail_closed",
-                                                    "ambiguous_provider_acceptance": true,
-                                                    "error": format!("{e:#}"),
-                                                }),
-                                            )
-                                            .await
-                                        {
-                                            break Err(close_error);
-                                        }
                                         break Err(anyhow::anyhow!(
                                             "provider_accounting_invalid: refusing an ambiguous retry because the provider may have accepted work but required attempt usage is unavailable; original error: {e:#}"
                                         ));
@@ -755,23 +1112,16 @@ impl Runner {
                                     let mid_stream_attempt = e
                                         .downcast_ref::<crate::provider_adapter::ProviderStreamError>()
                                         .and_then(|error| match error {
-                                            crate::provider_adapter::ProviderStreamError::MidStream {
-                                                accepted_bytes,
-                                                accepted_output_events,
-                                                live_output_events_emitted,
-                                                usage,
-                                                generation_header_id,
-                                                response_id,
-                                                requested_output_tokens,
-                                                ..
-                                            } => Some((
-                                                *accepted_bytes,
-                                                *accepted_output_events,
-                                                *live_output_events_emitted,
-                                                usage.clone(),
-                                                generation_header_id.clone(),
-                                                response_id.clone(),
-                                                *requested_output_tokens,
+                                            crate::provider_adapter::ProviderStreamError::MidStream(
+                                                mid_stream,
+                                            ) => Some((
+                                                mid_stream.accepted_bytes,
+                                                mid_stream.accepted_output_events,
+                                                mid_stream.live_output_events_emitted,
+                                                mid_stream.usage.clone(),
+                                                mid_stream.generation_header_id.clone(),
+                                                mid_stream.response_id.clone(),
+                                                mid_stream.requested_output_tokens,
                                             )),
                                             _ => None,
                                         });
@@ -794,46 +1144,6 @@ impl Runner {
                                                 "provider attempt accounting settlement failed before retry: {settlement_error:#}"
                                             ));
                                         }
-                                    }
-                                    if let Err(close_error) = self
-                                        .close_active_provider_attempt_accounting(
-                                            &mut attempt_accounting,
-                                            json!({
-                                                "attempt_number": attempt + 1,
-                                                "turn": turn,
-                                                "state": if usage_required && mid_stream_attempt.is_some() && !usage_valid {
-                                                    if mid_stream_attempt
-                                                        .as_ref()
-                                                        .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref())
-                                                        .and_then(|usage| usage.reported_cost_usd)
-                                                        .is_some()
-                                                    {
-                                                        "reported_spend_only_fail_closed"
-                                                    } else {
-                                                        "accounting_unavailable_fail_closed"
-                                                    }
-                                                } else {
-                                                    mid_stream_attempt
-                                                        .as_ref()
-                                                        .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref())
-                                                        .map(|usage| if usage.is_valid() {
-                                                            "reported"
-                                                        } else if usage.reported_cost_usd.is_some() {
-                                                            "reported_spend_only"
-                                                        } else {
-                                                            "accounting_unavailable_retry"
-                                                        })
-                                                        .unwrap_or("accounting_unavailable_retry")
-                                                },
-                                                "usage": mid_stream_attempt
-                                                    .as_ref()
-                                                    .and_then(|(_, _, _, usage, _, _, _)| usage.as_ref()),
-                                                "retry_error": format!("{e:#}"),
-                                            }),
-                                        )
-                                        .await
-                                    {
-                                        break Err(close_error);
                                     }
                                     if usage_required
                                         && mid_stream_attempt.is_some()
@@ -873,10 +1183,9 @@ impl Runner {
                                         .downcast_ref::<crate::provider_adapter::ProviderStreamError>(
                                         )
                                         .and_then(|pe| match pe {
-                                            crate::provider_adapter::ProviderStreamError::MidStream {
-                                                live_output_events_emitted,
-                                                ..
-                                            } => Some(*live_output_events_emitted),
+                                            crate::provider_adapter::ProviderStreamError::MidStream(
+                                                mid_stream,
+                                            ) => Some(mid_stream.live_output_events_emitted),
                                             _ => None,
                                         });
                                     tracing::warn!(
@@ -1030,6 +1339,24 @@ impl Runner {
                                         usage.metadata_anomalies.join("; ")
                                     ));
                                 }
+                                if !usage.spend_anomalies.is_empty() {
+                                    // This one silently changes money: the
+                                    // reported charge is distrusted and the
+                                    // attempt settles at the reserved
+                                    // maximum. Say so where the operator
+                                    // can see it.
+                                    tracing::warn!(
+                                        turn,
+                                        anomalies = ?usage.spend_anomalies,
+                                        "provider-reported spend is untrustworthy; the attempt \
+                                         settles conservatively at the reserved maximum"
+                                    );
+                                    warnings.push(format!(
+                                        "provider_spend_anomaly on turn {turn} (settled at \
+                                         reserved maximum): {}",
+                                        usage.spend_anomalies.join("; ")
+                                    ));
+                                }
                             }
                             let valid_usage = resp.usage.as_ref().filter(|usage| usage.is_valid());
                             // Token-schema validity and provider-reported spend
@@ -1050,26 +1377,10 @@ impl Runner {
                                         )
                                         .await
                                     {
-                                        let settlement_error = format!(
-                                            "independent provider-reported spend settlement failed: {error:#}"
-                                        );
-                                        let close_result = self
-                                            .close_active_provider_attempt_accounting(
-                                                &mut attempt_accounting,
-                                                json!({
-                                                    "turn": turn,
-                                                    "state": "settlement_failed",
-                                                    "settlement_error": &settlement_error,
-                                                }),
-                                            )
-                                            .await;
                                         state = State::Errored {
-                                            error: match close_result {
-                                                Ok(()) => settlement_error,
-                                                Err(close_error) => format!(
-                                                    "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
-                                                ),
-                                            },
+                                            error: format!(
+                                                "independent provider-reported spend settlement failed: {error:#}"
+                                            ),
                                         };
                                         continue;
                                     }
@@ -1107,33 +1418,6 @@ impl Runner {
                                         resp.usage,
                                     ),
                                 };
-                                let original_accounting_error = match &state {
-                                    State::Errored { error } => error.clone(),
-                                    _ => {
-                                        unreachable!("required accounting failure set error state")
-                                    }
-                                };
-                                if let Err(error) = self
-                                    .close_active_provider_attempt_accounting(
-                                        &mut attempt_accounting,
-                                        json!({
-                                            "turn": turn,
-                                            "state": "accounting_unavailable_fail_closed",
-                                            "usage": resp.usage,
-                                            "requested_output_tokens": resp.requested_output_tokens,
-                                            "generation_header_id": resp.generation_header_id,
-                                            "response_id": resp.response_id,
-                                            "observed_output": resp.observed_output,
-                                        }),
-                                    )
-                                    .await
-                                {
-                                    state = State::Errored {
-                                        error: format!(
-                                            "{original_accounting_error}; resume-critical provider attempt accounting closure failed: {error}"
-                                        ),
-                                    };
-                                }
                                 continue;
                             }
                             if resp.usage.is_some() && valid_usage.is_none() {
@@ -1240,58 +1524,11 @@ impl Runner {
                                     )
                                     .await
                                 {
-                                    let settlement_error =
-                                        format!("provider usage settlement failed: {e:#}");
-                                    let close_result = self
-                                        .close_active_provider_attempt_accounting(
-                                            &mut attempt_accounting,
-                                            json!({
-                                                "turn": turn,
-                                                "state": "settlement_failed",
-                                                "settlement_error": &settlement_error,
-                                            }),
-                                        )
-                                        .await;
                                     state = State::Errored {
-                                        error: match close_result {
-                                            Ok(()) => settlement_error,
-                                            Err(close_error) => format!(
-                                                "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
-                                            ),
-                                        },
+                                        error: format!("provider usage settlement failed: {e:#}"),
                                     };
                                     continue;
                                 }
-                            }
-                            if let Err(error) = self
-                                .close_active_provider_attempt_accounting(
-                                    &mut attempt_accounting,
-                                    json!({
-                                        "turn": turn,
-                                        "state": if valid_usage.is_some() {
-                                            "reported"
-                                        } else if settled_spend_only {
-                                            "reported_spend_only"
-                                        } else {
-                                            "accounting_unavailable_warn"
-                                        },
-                                        "usage": resp.usage,
-                                        "settled_cost_usd": usd,
-                                        "pricing_source": cost.source.as_str(),
-                                        "requested_output_tokens": resp.requested_output_tokens,
-                                        "generation_header_id": resp.generation_header_id,
-                                        "response_id": resp.response_id,
-                                        "observed_output": resp.observed_output,
-                                    }),
-                                )
-                                .await
-                            {
-                                state = State::Errored {
-                                    error: format!(
-                                        "resume-critical completed provider attempt accounting closure failed: {error}"
-                                    ),
-                                };
-                                continue;
                             }
                             if crate::directive::normalize_finish_reason(
                                 resp.finish_reason.as_deref(),
@@ -1403,64 +1640,20 @@ impl Runner {
                             State::Streaming { events }
                         }
                         Ok(crate::provider_adapter::StreamOutcome::Cancelled { attempt: cut }) => {
-                            if attempt_accounting.has_active() {
-                                let settlement = match self
-                                    .settle_available_attempt_accounting(
-                                        turn,
-                                        cut.usage.as_ref(),
-                                        turn_start.elapsed().as_millis() as u64,
-                                    )
-                                    .await
-                                {
-                                    Ok(true) => "reported",
-                                    Ok(false) => "accounting_unavailable_cancelled",
-                                    Err(error) => {
-                                        let settlement_error = format!(
-                                            "cancelled provider attempt accounting settlement failed: {error:#}"
-                                        );
-                                        let close_result = self
-                                            .close_active_provider_attempt_accounting(
-                                                &mut attempt_accounting,
-                                                json!({
-                                                    "turn": turn,
-                                                    "state": "settlement_failed",
-                                                    "settlement_error": &settlement_error,
-                                                }),
-                                            )
-                                            .await;
-                                        state = State::Errored {
-                                            error: match close_result {
-                                                Ok(()) => settlement_error,
-                                                Err(close_error) => format!(
-                                                    "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
-                                                ),
-                                            },
-                                        };
-                                        continue;
-                                    }
+                            if let Err(error) = self
+                                .settle_available_attempt_accounting(
+                                    turn,
+                                    cut.usage.as_ref(),
+                                    turn_start.elapsed().as_millis() as u64,
+                                )
+                                .await
+                            {
+                                state = State::Errored {
+                                    error: format!(
+                                        "cancelled provider attempt accounting settlement failed: {error:#}"
+                                    ),
                                 };
-                                if let Err(error) = self
-                                    .close_active_provider_attempt_accounting(
-                                        &mut attempt_accounting,
-                                        json!({
-                                            "turn": turn,
-                                            "state": settlement,
-                                            "usage": cut.usage,
-                                            "generation_header_id": cut.generation_header_id,
-                                            "response_id": cut.response_id,
-                                            "requested_output_tokens": cut.requested_output_tokens,
-                                            "observed_output": cut.observed_output,
-                                        }),
-                                    )
-                                    .await
-                                {
-                                    state = State::Errored {
-                                        error: format!(
-                                            "resume-critical cancelled provider attempt accounting closure failed: {error}"
-                                        ),
-                                    };
-                                    continue;
-                                }
+                                continue;
                             }
                             // SIGTERM remains a cancellation, not a provider
                             // failure, after independently settling any usage
@@ -1472,64 +1665,20 @@ impl Runner {
                             events,
                             attempt: cut,
                         }) => {
-                            if attempt_accounting.has_active() {
-                                let settlement = match self
-                                    .settle_available_attempt_accounting(
-                                        turn,
-                                        cut.usage.as_ref(),
-                                        turn_start.elapsed().as_millis() as u64,
-                                    )
-                                    .await
-                                {
-                                    Ok(true) => "reported",
-                                    Ok(false) => "accounting_unavailable_interrupted",
-                                    Err(error) => {
-                                        let settlement_error = format!(
-                                            "interrupted provider attempt accounting settlement failed: {error:#}"
-                                        );
-                                        let close_result = self
-                                            .close_active_provider_attempt_accounting(
-                                                &mut attempt_accounting,
-                                                json!({
-                                                    "turn": turn,
-                                                    "state": "settlement_failed",
-                                                    "settlement_error": &settlement_error,
-                                                }),
-                                            )
-                                            .await;
-                                        state = State::Errored {
-                                            error: match close_result {
-                                                Ok(()) => settlement_error,
-                                                Err(close_error) => format!(
-                                                    "{settlement_error}; resume-critical provider attempt accounting closure failed: {close_error}"
-                                                ),
-                                            },
-                                        };
-                                        continue;
-                                    }
+                            if let Err(error) = self
+                                .settle_available_attempt_accounting(
+                                    turn,
+                                    cut.usage.as_ref(),
+                                    turn_start.elapsed().as_millis() as u64,
+                                )
+                                .await
+                            {
+                                state = State::Errored {
+                                    error: format!(
+                                        "interrupted provider attempt accounting settlement failed: {error:#}"
+                                    ),
                                 };
-                                if let Err(error) = self
-                                    .close_active_provider_attempt_accounting(
-                                        &mut attempt_accounting,
-                                        json!({
-                                            "turn": turn,
-                                            "state": settlement,
-                                            "usage": cut.usage,
-                                            "generation_header_id": cut.generation_header_id,
-                                            "response_id": cut.response_id,
-                                            "requested_output_tokens": cut.requested_output_tokens,
-                                            "observed_output": cut.observed_output,
-                                        }),
-                                    )
-                                    .await
-                                {
-                                    state = State::Errored {
-                                        error: format!(
-                                            "resume-critical interrupted provider attempt accounting closure failed: {error}"
-                                        ),
-                                    };
-                                    continue;
-                                }
+                                continue;
                             }
                             // Live interrupt (SIGUSR1) cut the in-flight cognition.
                             // Surface any provider warnings from the partial stream
@@ -1597,28 +1746,6 @@ impl Runner {
                             State::CheckingLimits
                         }
                         Err(e) => {
-                            if e.downcast_ref::<ProviderAttemptAccountingPersistenceError>()
-                                .is_some()
-                            {
-                                // The exact terminal payload may already be
-                                // durable even though append and replay could
-                                // not prove it. A different fallback transition
-                                // would risk two terminal states for one attempt.
-                                state = State::Errored {
-                                    error: format!("{e:#}"),
-                                };
-                                continue;
-                            }
-                            if !attempt_accounting.has_active() {
-                                // The issued attempt was already closed before a
-                                // retry-admission/backoff failure. Do not attach
-                                // another terminal transition to its diagnostic
-                                // last-attempt locator.
-                                state = State::Errored {
-                                    error: format!("{e:#}"),
-                                };
-                                continue;
-                            }
                             let error = if let Some(limit) = e.downcast_ref::<
                                 crate::provider_adapter::LocalOutputByteLimitError,
                             >() {
@@ -1753,24 +1880,17 @@ impl Runner {
                             } else if let Some(mid_stream) = e.downcast_ref::<
                                 crate::provider_adapter::ProviderStreamError,
                             >().and_then(|error| match error {
-                                crate::provider_adapter::ProviderStreamError::MidStream {
-                                    accepted_bytes,
-                                    accepted_output_events,
-                                    live_output_events_emitted,
-                                    usage,
-                                    generation_header_id,
-                                    response_id,
-                                    requested_output_tokens,
-                                    detail,
-                                } => Some((
-                                    *accepted_bytes,
-                                    *accepted_output_events,
-                                    *live_output_events_emitted,
-                                    usage.clone(),
-                                    generation_header_id.clone(),
-                                    response_id.clone(),
-                                    *requested_output_tokens,
-                                    detail.clone(),
+                                crate::provider_adapter::ProviderStreamError::MidStream(
+                                    mid_stream,
+                                ) => Some((
+                                    mid_stream.accepted_bytes,
+                                    mid_stream.accepted_output_events,
+                                    mid_stream.live_output_events_emitted,
+                                    mid_stream.usage.clone(),
+                                    mid_stream.generation_header_id.clone(),
+                                    mid_stream.response_id.clone(),
+                                    mid_stream.requested_output_tokens,
+                                    mid_stream.detail.clone(),
                                 )),
                                 _ => None,
                             }) {
@@ -1866,65 +1986,7 @@ impl Runner {
                             } else {
                                 format!("{e:#}")
                             };
-                            let carried_usage = e
-                                .downcast_ref::<crate::provider_adapter::LocalOutputByteLimitError>()
-                                .and_then(|error| error.usage.as_ref())
-                                .or_else(|| {
-                                    e.downcast_ref::<crate::provider_adapter::ProviderReportedStreamError>()
-                                        .and_then(|error| error.usage.as_ref())
-                                })
-                                .or_else(|| {
-                                    e.downcast_ref::<crate::provider_adapter::ProviderProtocolStreamError>()
-                                        .and_then(|error| error.usage.as_ref())
-                                })
-                                .or_else(|| {
-                                    e.downcast_ref::<crate::provider_adapter::streaming::RuntimeCallbackPublicationError>()
-                                        .and_then(|error| error.usage.as_ref())
-                                })
-                                .or_else(|| {
-                                    e.downcast_ref::<crate::provider_adapter::ProviderStreamError>()
-                                        .and_then(|error| match error {
-                                            crate::provider_adapter::ProviderStreamError::MidStream { usage, .. } => usage.as_ref(),
-                                            _ => None,
-                                        })
-                                });
-                            if let Err(close_error) = self
-                                .close_active_provider_attempt_accounting(
-                                    &mut attempt_accounting,
-                                    json!({
-                                            "turn": turn,
-                                            "state": if carried_usage.is_some() {
-                                                "reported_settlement_attempted"
-                                            } else {
-                                                "accounting_unavailable_terminal"
-                                            },
-                                            "usage": carried_usage,
-                                            "provider_reported_error": e
-                                                .downcast_ref::<crate::provider_adapter::ProviderReportedStreamError>()
-                                                .map(|provider_error| json!({
-                                                    "code": provider_error.code,
-                                                    "message": provider_error.message,
-                                                    "metadata": provider_error.metadata,
-                                                    "generation_header_id": provider_error.generation_header_id,
-                                                    "response_id": provider_error.response_id,
-                                                    "requested_output_tokens": provider_error.requested_output_tokens,
-                                                    "accepted_bytes": provider_error.accepted_bytes,
-                                                    "accepted_output_events": provider_error.accepted_output_events,
-                                                    "live_output_events_emitted": provider_error.live_output_events_emitted,
-                                                })),
-                                            "terminal_error": &error,
-                                    }),
-                                )
-                                .await
-                            {
-                                State::Errored {
-                                    error: format!(
-                                        "{error}; resume-critical provider attempt accounting closure failed: {close_error}"
-                                    ),
-                                }
-                            } else {
-                                State::Errored { error }
-                            }
+                            State::Errored { error }
                         }
                     }
                 }
@@ -2829,7 +2891,7 @@ impl Runner {
                         &error,
                         &self.thread_id,
                         turn,
-                        attempt_accounting.last(),
+                        last_attempt_id.as_deref(),
                     );
                     let completion = TerminalCompletion {
                         status: ThreadTerminalStatus::Failed,
@@ -2960,77 +3022,409 @@ impl Runner {
         Ok(())
     }
 
-    /// Persist one provider-attempt accounting transition. If the callback ACK
-    /// is lost after the daemon commits the event, replay proves the exact
-    /// payload before the runner changes lifecycle state or issues a request.
-    async fn persist_provider_attempt_accounting(
+    /// Ledger admission for one physical attempt (§9.1): reserve against the
+    /// verified prepared-request bound, release on a pre-issue runner signal,
+    /// then durably mark issued. No provider request may start unless every
+    /// step is proven; ambiguity fails closed with zero provider contact.
+    #[allow(clippy::too_many_arguments)] // one argument per lifecycle input
+    async fn admit_ledger_attempt(
         &self,
-        payload: Value,
-    ) -> Result<(), ProviderAttemptAccountingPersistenceError> {
-        match self
-            .callback
-            .append_runtime_event(RuntimeEventType::ProviderAttemptAccounting, payload.clone())
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(append_error) => {
-                let replay = self
-                    .callback
-                    .replay_thread(&self.thread_id)
-                    .await
-                    .map_err(|replay_error| {
-                        ProviderAttemptAccountingPersistenceError(format!(
-                            "provider attempt accounting append failed: {append_error}; ACK recovery replay also failed: {replay_error}"
-                        ))
-                    })?;
-                if replay.events.iter().rev().any(|event| {
-                    event.event_type == RuntimeEventType::ProviderAttemptAccounting.as_str()
-                        && event.payload == payload
-                }) {
-                    tracing::warn!(
-                        thread_id = %self.thread_id,
-                        "provider attempt accounting ACK was lost; exact persisted payload recovered by replay"
-                    );
-                    Ok(())
-                } else {
-                    Err(ProviderAttemptAccountingPersistenceError(format!(
-                        "provider attempt accounting append failed: {append_error}; replay did not contain the exact transition"
-                    )))
-                }
+        turn: u32,
+        attempt_number: u32,
+        prepared: &crate::provider_adapter::PreparedProviderRequest,
+        authority: &ProviderAccountingAuthority,
+        verified: VerifiedPreparedSpendBound,
+        cancel_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        interrupt_flag: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> anyhow::Result<LedgerAdmission> {
+        use std::sync::atomic::Ordering;
+
+        let request_hash = provider_attempt_request_hash(
+            &self.thread_id,
+            turn,
+            attempt_number,
+            &self.config_hash,
+            &self.provider_id,
+            &self.model_name,
+            prepared.requested_output_tokens,
+            authority.authority_digest.as_str(),
+            &prepared.body_sha256,
+        );
+        let reserve_params = ProviderAttemptReserveParams {
+            thread_id: self.thread_id.clone(),
+            turn,
+            attempt_number,
+            request_hash: request_hash.clone(),
+            config_hash: self.config_hash.clone(),
+            verified_bound: verified,
+        };
+        let response = self.reserve_with_recovery(&reserve_params).await?;
+        if response.state == AttemptBudgetState::ReservationDenied {
+            return Ok(LedgerAdmission::Denied);
+        }
+        if response.state != AttemptBudgetState::Reserved {
+            // A replayed record of an attempt this coordinate already drove
+            // to another state — never reissue it.
+            anyhow::bail!(
+                "provider attempt reservation returned unexpected state `{}` for attempt {}",
+                response.state.as_str(),
+                response.attempt_id
+            );
+        }
+        if response.authority_digest != authority.authority_digest {
+            anyhow::bail!(
+                "daemon reservation authority digest {} contradicts the sealed launch \
+                 authority {}",
+                response.authority_digest.as_str(),
+                authority.authority_digest.as_str()
+            );
+        }
+        if let Some(scope) = &self.accounting_scope {
+            if response.execution_budget_id != scope.execution_budget_id {
+                anyhow::bail!(
+                    "daemon reservation execution budget `{}` contradicts the sealed launch \
+                     scope `{}`",
+                    response.execution_budget_id,
+                    scope.execution_budget_id
+                );
             }
+        }
+        let ledger = LedgerAttempt {
+            attempt_id: response.attempt_id,
+            request_hash,
+            authority_digest: response.authority_digest,
+        };
+        // A signal in the reserve→issue window releases rather than crossing
+        // the issue boundary: once issued, even a never-sent request is
+        // conservatively charged the reserved maximum (§7.4).
+        if cancel_flag.load(Ordering::Relaxed) {
+            // The cancel is real either way: the reservation is provably
+            // unissued and the terminal fence releases it. Never convert a
+            // user cancel into a thread failure over release bookkeeping.
+            if let Err(error) = self
+                .release_ledger_attempt(&ledger, ReconciliationReason::ReleasedByRunner)
+                .await
+            {
+                tracing::warn!(
+                    attempt_id = %ledger.attempt_id,
+                    %error,
+                    "pre-issue release unprovable during cancel; the terminal fence releases \
+                     the held reservation"
+                );
+            }
+            return Ok(LedgerAdmission::CancelledBeforeIssue);
+        }
+        if interrupt_flag.load(Ordering::Relaxed) {
+            if let Err(error) = self
+                .release_ledger_attempt(&ledger, ReconciliationReason::ReleasedByRunner)
+                .await
+            {
+                tracing::warn!(
+                    attempt_id = %ledger.attempt_id,
+                    %error,
+                    "pre-issue release unprovable during interrupt; the terminal fence \
+                     releases the held reservation"
+                );
+            }
+            return Ok(LedgerAdmission::InterruptedBeforeIssue);
+        }
+        let issue_params = ProviderAttemptMarkIssuedParams {
+            thread_id: self.thread_id.clone(),
+            attempt_id: ledger.attempt_id.clone(),
+            request_hash: ledger.request_hash.clone(),
+            expected_state: AttemptBudgetState::Reserved,
+        };
+        match self.mark_issued_with_recovery(&issue_params).await? {
+            AttemptBudgetState::Issued => Ok(LedgerAdmission::Admitted(ledger)),
+            AttemptBudgetState::ReleasedUnissued => Ok(LedgerAdmission::ReleasedByDaemon {
+                detail: format!(
+                    "the daemon released reservation {} before issue (certificate expiry or \
+                     credential unavailability)",
+                    ledger.attempt_id
+                ),
+            }),
+            AttemptBudgetState::Reserved => anyhow::bail!(
+                "issue commit unprovable for attempt {}: the recorded state remains reserved \
+                 after bounded recovery; zero provider connections (daemon reconciliation \
+                 releases the held reservation)",
+                ledger.attempt_id
+            ),
+            other => anyhow::bail!(
+                "mark_issued returned unexpected state `{}` for attempt {}",
+                other.as_str(),
+                ledger.attempt_id
+            ),
         }
     }
 
-    /// Persist and acknowledge the terminal state for the one active attempt.
-    /// The lifecycle remains active if persistence/replay fails, preventing a
-    /// subsequent attempt from being admitted against an unresolved predecessor.
-    async fn close_active_provider_attempt_accounting(
+    /// Reserve with bounded exact-retry lost-reply recovery. The daemon mints
+    /// the attempt ID, so before a first successful reply there is no state
+    /// read available — exhausting the retries means the reservation commit
+    /// is unprovable and the attempt must fail with zero provider requests.
+    async fn reserve_with_recovery(
         &self,
-        lifecycle: &mut AttemptAccountingLifecycle,
-        mut payload: Value,
-    ) -> anyhow::Result<()> {
-        let attempt_id = lifecycle.active_for_close().map_err(anyhow::Error::msg)?;
-        let object = payload.as_object_mut().ok_or_else(|| {
-            anyhow::anyhow!("provider attempt accounting terminal payload must be an object")
-        })?;
-        if let Some(reported_id) = object.get("attempt_id") {
-            if reported_id.as_str() != Some(attempt_id.as_str()) {
-                anyhow::bail!(
-                    "provider attempt accounting terminal payload ID contradicts active attempt `{attempt_id}`"
-                );
+        params: &ProviderAttemptReserveParams,
+    ) -> anyhow::Result<ProviderAttemptReserveResponse> {
+        let mut last_error: Option<String> = None;
+        for retry in 0..=LEDGER_RPC_RETRIES {
+            match self.callback.provider_attempt_reserve(params).await {
+                Ok(response) => {
+                    if response.replayed {
+                        tracing::warn!(
+                            attempt_id = %response.attempt_id,
+                            "reservation reply was lost; exact idempotent retry recovered the \
+                             recorded reservation"
+                        );
+                    }
+                    return Ok(response);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        retry,
+                        error = %error,
+                        "provider_attempt_reserve failed; retrying the exact same reservation"
+                    );
+                    last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
+                }
             }
-        } else {
-            object.insert("attempt_id".to_string(), Value::String(attempt_id.clone()));
         }
-        let payload = lifecycle
-            .bind_closing_payload(payload)
-            .map_err(anyhow::Error::msg)?;
-        self.persist_provider_attempt_accounting(payload)
+        Err(anyhow::anyhow!(
+            "reservation commit unprovable after {} attempts, zero provider requests: {}",
+            LEDGER_RPC_RETRIES + 1,
+            last_error.unwrap_or_else(|| "no error recorded".to_string())
+        ))
+    }
+
+    /// Mark issued with bounded exact-retry recovery, then a recorded-state
+    /// read. Returns the proven daemon state; an unprovable state errors.
+    async fn mark_issued_with_recovery(
+        &self,
+        params: &ProviderAttemptMarkIssuedParams,
+    ) -> anyhow::Result<AttemptBudgetState> {
+        let mut last_error: Option<String> = None;
+        for retry in 0..=LEDGER_RPC_RETRIES {
+            match self.callback.provider_attempt_mark_issued(params).await {
+                Ok(response) => {
+                    if response.replayed {
+                        tracing::warn!(
+                            attempt_id = %params.attempt_id,
+                            "issue reply was lost; exact idempotent retry recovered the \
+                             recorded transition"
+                        );
+                    }
+                    return Ok(response.state);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        retry,
+                        attempt_id = %params.attempt_id,
+                        error = %error,
+                        "provider_attempt_mark_issued failed; retrying the exact same transition"
+                    );
+                    last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
+                }
+            }
+        }
+        match self
+            .callback
+            .provider_attempt_get(&ProviderAttemptGetParams {
+                thread_id: self.thread_id.clone(),
+                attempt_id: params.attempt_id.clone(),
+            })
             .await
-            .map_err(anyhow::Error::new)?;
-        lifecycle
-            .ack_closed(&attempt_id)
-            .map_err(anyhow::Error::msg)
+        {
+            Ok(Some(record)) if record.request_hash == params.request_hash => {
+                if record.state == AttemptBudgetState::Reserved {
+                    // The reservation is proven intact and unissued, so the
+                    // earlier failures were transient (vault blip, anchor
+                    // IO) — issuing is still legal and idempotent. One more
+                    // paced attempt before declaring the issue unprovable.
+                    ledger_retry_backoff(LEDGER_RPC_RETRIES + 1).await;
+                    if let Ok(response) = self.callback.provider_attempt_mark_issued(params).await {
+                        return Ok(response.state);
+                    }
+                }
+                Ok(record.state)
+            }
+            Ok(Some(record)) => Err(anyhow::anyhow!(
+                "recorded attempt {} carries request hash {} but this attempt issued {}; \
+                 integrity conflict",
+                params.attempt_id,
+                record.request_hash,
+                params.request_hash
+            )),
+            Ok(None) => Err(anyhow::anyhow!(
+                "issue commit unprovable: attempt {} has no recorded state; zero provider \
+                 connections",
+                params.attempt_id
+            )),
+            Err(get_error) => Err(anyhow::anyhow!(
+                "issue commit unprovable, zero provider connections: {}; recorded-state read \
+                 also failed: {get_error}",
+                last_error.unwrap_or_else(|| "no error recorded".to_string())
+            )),
+        }
+    }
+
+    /// Settle the issued attempt with bounded exact-retry recovery, then a
+    /// recorded-state read. A terminal settlement that cannot be proven is an
+    /// error — the caller must fail safe without admitting a retry.
+    async fn settle_ledger_attempt(
+        &self,
+        ledger: &LedgerAttempt,
+        spend: SpendAccounting,
+        tokens: TokenAccounting,
+    ) -> anyhow::Result<()> {
+        let params = ProviderAttemptSettleParams {
+            thread_id: self.thread_id.clone(),
+            attempt_id: ledger.attempt_id.clone(),
+            request_hash: ledger.request_hash.clone(),
+            authority_digest: ledger.authority_digest.clone(),
+            spend,
+            tokens,
+        };
+        let mut last_error: Option<String> = None;
+        for retry in 0..=LEDGER_RPC_RETRIES {
+            match self.callback.provider_attempt_settle(&params).await {
+                Ok(response) => {
+                    if !response.state.is_terminal() {
+                        anyhow::bail!(
+                            "settlement for attempt {} returned nonterminal state `{}`",
+                            ledger.attempt_id,
+                            response.state.as_str()
+                        );
+                    }
+                    if response.replayed {
+                        tracing::warn!(
+                            attempt_id = %ledger.attempt_id,
+                            "settlement reply was lost; exact idempotent retry recovered the \
+                             recorded terminal transition"
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        retry,
+                        attempt_id = %ledger.attempt_id,
+                        error = %error,
+                        "provider_attempt_settle failed; retrying the exact same settlement"
+                    );
+                    last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
+                }
+            }
+        }
+        match self
+            .callback
+            .provider_attempt_get(&ProviderAttemptGetParams {
+                thread_id: self.thread_id.clone(),
+                attempt_id: ledger.attempt_id.clone(),
+            })
+            .await
+        {
+            Ok(Some(record))
+                if record.state.is_terminal() && record.request_hash == params.request_hash =>
+            {
+                tracing::warn!(
+                    attempt_id = %ledger.attempt_id,
+                    state = record.state.as_str(),
+                    "settlement replies were lost; recorded terminal state proven by read"
+                );
+                Ok(())
+            }
+            Ok(Some(record)) => Err(anyhow::anyhow!(
+                "terminal settlement unprovable: attempt {} recorded state `{}`",
+                ledger.attempt_id,
+                record.state.as_str()
+            )),
+            Ok(None) => Err(anyhow::anyhow!(
+                "terminal settlement unprovable: attempt {} has no recorded state",
+                ledger.attempt_id
+            )),
+            Err(get_error) => Err(anyhow::anyhow!(
+                "terminal settlement unprovable: {}; recorded-state read also failed: \
+                 {get_error}",
+                last_error.unwrap_or_else(|| "no error recorded".to_string())
+            )),
+        }
+    }
+
+    /// Release a reserved-but-unissued attempt with bounded exact-retry
+    /// recovery, then a recorded-state read.
+    async fn release_ledger_attempt(
+        &self,
+        ledger: &LedgerAttempt,
+        reason: ReconciliationReason,
+    ) -> anyhow::Result<()> {
+        let params = ProviderAttemptReleaseUnissuedParams {
+            thread_id: self.thread_id.clone(),
+            attempt_id: ledger.attempt_id.clone(),
+            request_hash: ledger.request_hash.clone(),
+            reason,
+        };
+        let mut last_error: Option<String> = None;
+        for retry in 0..=LEDGER_RPC_RETRIES {
+            match self
+                .callback
+                .provider_attempt_release_unissued(&params)
+                .await
+            {
+                Ok(response) => {
+                    if response.state != AttemptBudgetState::ReleasedUnissued {
+                        anyhow::bail!(
+                            "release for attempt {} returned unexpected state `{}`",
+                            ledger.attempt_id,
+                            response.state.as_str()
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        retry,
+                        attempt_id = %ledger.attempt_id,
+                        error = %error,
+                        "provider_attempt_release_unissued failed; retrying the exact release"
+                    );
+                    last_error = Some(error.to_string());
+                    if retry < LEDGER_RPC_RETRIES {
+                        ledger_retry_backoff(retry).await;
+                    }
+                }
+            }
+        }
+        match self
+            .callback
+            .provider_attempt_get(&ProviderAttemptGetParams {
+                thread_id: self.thread_id.clone(),
+                attempt_id: ledger.attempt_id.clone(),
+            })
+            .await
+        {
+            Ok(Some(record)) if record.state == AttemptBudgetState::ReleasedUnissued => Ok(()),
+            Ok(Some(record)) => Err(anyhow::anyhow!(
+                "release unprovable: attempt {} recorded state `{}`",
+                ledger.attempt_id,
+                record.state.as_str()
+            )),
+            Ok(None) => Err(anyhow::anyhow!(
+                "release unprovable: attempt {} has no recorded state",
+                ledger.attempt_id
+            )),
+            Err(get_error) => Err(anyhow::anyhow!(
+                "release unprovable: {}; recorded-state read also failed: {get_error}",
+                last_error.unwrap_or_else(|| "no error recorded".to_string())
+            )),
+        }
     }
 
     /// Settle every independently trustworthy part of a provider attempt.
@@ -3164,7 +3558,7 @@ impl Runner {
             (p.clone(), PricingSource::PerModel)
         } else {
             match (pricing.input_per_million, pricing.output_per_million) {
-                (Some(0.0), Some(0.0)) => {
+                (Some(i), Some(o)) if i.is_zero() && o.is_zero() => {
                     return CostBreakdown {
                         usd: 0.0,
                         source: PricingSource::Unpriced,
@@ -3185,8 +3579,12 @@ impl Runner {
                 }
             }
         };
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * rates.input_per_million;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * rates.output_per_million;
+        // Settled reporting derives one-way presentation dollars from the
+        // fixed-point rates; this value never feeds budget authority.
+        let input_cost =
+            (input_tokens as f64 / 1_000_000.0) * rates.input_per_million.display_usd_lossy();
+        let output_cost =
+            (output_tokens as f64 / 1_000_000.0) * rates.output_per_million.display_usd_lossy();
         CostBreakdown {
             usd: input_cost + output_cost,
             source,
@@ -3328,43 +3726,6 @@ mod tests {
     use ryeos_runtime::envelope::{EnvelopeCallback, EnvelopePolicy, HardLimits};
     use std::path::PathBuf;
 
-    #[test]
-    fn attempt_accounting_lifecycle_requires_ack_before_reuse() {
-        let mut lifecycle = AttemptAccountingLifecycle::default();
-        lifecycle
-            .admit_after_pending_ack("T-test:1:1".to_string())
-            .unwrap();
-        let first = lifecycle.active_for_close().unwrap();
-        let first_payload = json!({"attempt_id": &first, "state": "reported"});
-        lifecycle
-            .bind_closing_payload(first_payload.clone())
-            .unwrap();
-
-        // Preparing or failing to persist a closure does not clear the active
-        // attempt, and a second request cannot be admitted over it.
-        assert_eq!(lifecycle.active_for_close().unwrap(), first);
-        assert_eq!(
-            lifecycle.bind_closing_payload(first_payload).unwrap(),
-            lifecycle.closing_payload().unwrap().clone()
-        );
-        assert!(lifecycle
-            .bind_closing_payload(json!({"attempt_id": &first, "state": "different"}))
-            .is_err());
-        assert!(lifecycle
-            .admit_after_pending_ack("T-test:1:2".to_string())
-            .is_err());
-
-        lifecycle.ack_closed(&first).unwrap();
-        assert!(lifecycle.ack_closed(&first).is_err());
-        lifecycle
-            .admit_after_pending_ack("T-test:1:2".to_string())
-            .unwrap();
-        let second = lifecycle.active_for_close().unwrap();
-        assert_ne!(first, second);
-        lifecycle.ack_closed(&second).unwrap();
-        assert_eq!(lifecycle.last(), Some("T-test:1:2"));
-    }
-
     fn make_callback_env() -> EnvelopeCallback {
         EnvelopeCallback {
             socket_path: PathBuf::from("/nonexistent/test.sock"),
@@ -3374,6 +3735,10 @@ mod tests {
 
     fn make_callback() -> CallbackClient {
         CallbackClient::new(&make_callback_env(), "T-test", "/project", "tat-test")
+    }
+
+    fn usd(canonical: &str) -> ryeos_accounting::UsdNanos {
+        ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
     }
 
     fn make_policy() -> EnvelopePolicy {
@@ -3431,13 +3796,14 @@ mod tests {
             schemas: None,
             pricing: Some(PricingConfig {
                 explicitly_free: false,
-                input_per_million: Some(3.0),
-                output_per_million: Some(15.0),
+                input_per_million: Some(usd("3")),
+                output_per_million: Some(usd("15")),
                 models: Default::default(),
             }),
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3455,6 +3821,8 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -3497,6 +3865,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3514,6 +3883,8 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -3546,6 +3917,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3569,6 +3941,8 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -3600,6 +3974,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let outputs = Some(vec![OutputSpec {
@@ -3622,6 +3997,8 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -3663,6 +4040,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let mut budget = BudgetTracker::new(1.0);
@@ -3687,6 +4065,8 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -3835,6 +4215,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3852,6 +4233,8 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -3879,8 +4262,8 @@ mod tests {
         models.insert(
             "claude-haiku-4-5".to_string(),
             ModelPricing {
-                input_per_million: 0.80,
-                output_per_million: 4.00,
+                input_per_million: usd("0.8"),
+                output_per_million: usd("4"),
             },
         );
         let provider = crate::directive::ProviderConfig {
@@ -3892,13 +4275,14 @@ mod tests {
             schemas: None,
             pricing: Some(PricingConfig {
                 explicitly_free: false,
-                input_per_million: Some(0.0), // would yield $0 if used
-                output_per_million: Some(0.0),
+                input_per_million: Some(usd("0")), // would yield $0 if used
+                output_per_million: Some(usd("0")),
                 models,
             }),
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3916,6 +4300,8 @@ mod tests {
             provider_id: "zen".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "claude-haiku-4-5".to_string(),
             thread_id: "T-test".to_string(),
@@ -3959,13 +4345,14 @@ mod tests {
             schemas: None,
             pricing: Some(PricingConfig {
                 explicitly_free: false,
-                input_per_million: Some(1.0),
-                output_per_million: Some(5.0),
+                input_per_million: Some(usd("1")),
+                output_per_million: Some(usd("5")),
                 models: Default::default(),
             }),
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3983,6 +4370,8 @@ mod tests {
             provider_id: "zen".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "unknown-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -4019,6 +4408,7 @@ mod tests {
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -4036,6 +4426,8 @@ mod tests {
             provider_id: "openai".to_string(),
             matched_profile: None,
             config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
             execution: ExecutionConfig::default(),
             model_name: "test-model".to_string(),
             thread_id: "T-test".to_string(),
@@ -4177,16 +4569,18 @@ mod tests {
         // A stream cut mid-read (chunk timeout/reset) is transient: retried by
         // default under the shared budget, and disabled by the knob.
         let mid_stream = || {
-            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream {
-                live_output_events_emitted: 42,
-                accepted_bytes: 128,
-                accepted_output_events: 3,
-                usage: None,
-                generation_header_id: None,
-                response_id: None,
-                requested_output_tokens: Some(32_768),
-                detail: "stream chunk error: operation timed out".into(),
-            })
+            anyhow::Error::new(crate::provider_adapter::ProviderStreamError::MidStream(
+                Box::new(crate::provider_adapter::streaming::ProviderMidStreamError {
+                    live_output_events_emitted: 42,
+                    accepted_bytes: 128,
+                    accepted_output_events: 3,
+                    usage: None,
+                    generation_header_id: None,
+                    response_id: None,
+                    requested_output_tokens: Some(32_768),
+                    detail: "stream chunk error: operation timed out".into(),
+                }),
+            ))
         };
         let mut cfg = retry_cfg();
         assert_eq!(
@@ -4210,5 +4604,1021 @@ mod tests {
             ..retry_cfg()
         };
         assert_eq!(retry_backoff(&status_err(429), 0, &cfg), None);
+    }
+
+    // ── Ledger lifecycle: request hash, settlement payloads, and a
+    //    fault-injectable daemon-ledger mock (RuntimeCallbackAPI) ─────
+
+    use ryeos_accounting::{ClosedBillableDimensionSet, FinalityContract};
+    use ryeos_runtime::callback::{CallbackError, DispatchActionRequest, RuntimeCallbackAPI};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+
+    fn digest_of(tag: &str) -> HexDigest {
+        HexDigest::new(lillux::cas::sha256_hex(tag.as_bytes())).unwrap()
+    }
+
+    #[test]
+    fn request_hash_is_stable_and_body_sensitive() {
+        let hash = |body_sha256: &str| {
+            provider_attempt_request_hash(
+                "T-test",
+                3,
+                2,
+                "cfg-hash",
+                "route",
+                "model",
+                Some(8_192),
+                "a".repeat(64).as_str(),
+                body_sha256,
+            )
+        };
+        assert_eq!(hash("bodybody"), hash("bodybody"), "same inputs, same hash");
+        assert_ne!(
+            hash("bodybody"),
+            hash("otherbody"),
+            "changed body changes hash"
+        );
+        assert_ne!(
+            provider_attempt_request_hash(
+                "T-test",
+                3,
+                3, // different attempt number
+                "cfg-hash",
+                "route",
+                "model",
+                Some(8_192),
+                "a".repeat(64).as_str(),
+                "bodybody",
+            ),
+            hash("bodybody"),
+            "changed coordinate changes hash"
+        );
+    }
+
+    fn base_ledger_authority() -> ryeos_accounting::ProviderAccountingAuthority {
+        ryeos_accounting::ProviderAccountingAuthority {
+            authority_digest: digest_of("seed"),
+            config_hash: "test_hash".to_string(),
+            config_value_digest: digest_of("cfg-value"),
+            billing_principal_digest: digest_of("principal"),
+            credential_authority_generation: "cred-gen-1".to_string(),
+            pricing_contract_subject_digest: digest_of("subject"),
+            provider_id: "route".to_string(),
+            model_name: "model".to_string(),
+            matched_profile: None,
+            spend_bound: SpendBoundAuthority::ExplicitlyFree {
+                contract_digest: digest_of("free"),
+            },
+            reconciliation: ChargeReconciliationAuthority::Unavailable,
+        }
+        .sealed()
+        .unwrap()
+    }
+
+    fn paid_authority(
+        reconciliation: ChargeReconciliationAuthority,
+    ) -> ryeos_accounting::ProviderAccountingAuthority {
+        let mut authority = base_ledger_authority();
+        authority.spend_bound = SpendBoundAuthority::Paid {
+            maximum: usd("0.5"),
+            certificate: ryeos_accounting::SpendBoundCertificate::ProviderEnforcedChargeCap {
+                request_cap_contract_digest: digest_of("cap"),
+                currency: ryeos_accounting::Currency::Usd,
+            },
+        };
+        authority.reconciliation = reconciliation;
+        authority.sealed().unwrap()
+    }
+
+    fn reported_final_reconciliation() -> ChargeReconciliationAuthority {
+        ChargeReconciliationAuthority::ProviderReportedFinalCharge {
+            schema_digest: digest_of("schema"),
+            covered_dimensions: ClosedBillableDimensionSet::new(vec![
+                ryeos_accounting::BillableDimension::InputTokens,
+                ryeos_accounting::BillableDimension::OutputTokens,
+            ])
+            .unwrap(),
+            finality_contract: FinalityContract {
+                final_on_response: true,
+                max_reported_fraction_digits: 9,
+                byok_zero_is_final: false,
+            },
+        }
+    }
+
+    fn tariff_reconciliation() -> ChargeReconciliationAuthority {
+        ChargeReconciliationAuthority::DeterministicTariff {
+            tariff: ryeos_accounting::SpendTariffDocument {
+                schema_version: ryeos_accounting::SPEND_TARIFF_SCHEMA_VERSION,
+                currency: ryeos_accounting::Currency::Usd,
+                pricing_generation: "gen-1".to_string(),
+                input_per_million: Some(ryeos_accounting::UsdNanos::parse_canonical("3").unwrap()),
+                output_per_million: Some(
+                    ryeos_accounting::UsdNanos::parse_canonical("15").unwrap(),
+                ),
+                reasoning_per_million: None,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
+                per_request: None,
+                covered_dimensions: ClosedBillableDimensionSet::new(vec![
+                    ryeos_accounting::BillableDimension::InputTokens,
+                    ryeos_accounting::BillableDimension::OutputTokens,
+                ])
+                .unwrap(),
+                expires_at_ms: None,
+            },
+        }
+    }
+
+    fn valid_usage() -> crate::provider_adapter::http::TokenUsage {
+        crate::provider_adapter::http::TokenUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(40),
+            reasoning_tokens: Some(8),
+            reported_cost_usd: Some(0.0123),
+            reported_cost_usd_raw: Some("0.01230000009".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ledger_settlement_provider_reported_final_charge() {
+        let authority = paid_authority(reported_final_reconciliation());
+        let usage = valid_usage();
+        let (spend, tokens) = build_ledger_settlement(&authority, true, Some(&usage), None);
+        assert_eq!(
+            spend,
+            SpendAccounting::ProviderReportedFinal {
+                raw_decimal: "0.01230000009".to_string()
+            }
+        );
+        assert_eq!(
+            tokens,
+            TokenAccounting::Reported {
+                input_tokens: 100,
+                output_tokens: 40,
+                reasoning_tokens: Some(8),
+            }
+        );
+    }
+
+    #[test]
+    fn ledger_settlement_deterministic_tariff_units() {
+        let authority = paid_authority(tariff_reconciliation());
+        let usage = valid_usage();
+        let (spend, tokens) = build_ledger_settlement(&authority, true, Some(&usage), None);
+        assert_eq!(
+            spend,
+            SpendAccounting::TariffUnits {
+                unit_counts: vec![
+                    UnitCount {
+                        dimension: BillableDimension::InputTokens,
+                        units: 100
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::OutputTokens,
+                        units: 40
+                    }
+                ]
+            }
+        );
+        assert!(matches!(tokens, TokenAccounting::Reported { .. }));
+
+        let mut regressed = usage.clone();
+        regressed
+            .spend_anomalies
+            .push("reported cost regressed".to_string());
+        let (spend, tokens) = build_ledger_settlement(&authority, true, Some(&regressed), None);
+        assert!(
+            matches!(spend, SpendAccounting::TariffUnits { .. }),
+            "an invalid provider-reported charge must not invalidate an independent tariff charge"
+        );
+        assert!(
+            matches!(tokens, TokenAccounting::Reported { .. }),
+            "spend validity must remain independent of complete token accounting"
+        );
+    }
+
+    #[test]
+    fn ledger_settlement_requires_and_preserves_covered_cache_dimensions() {
+        let mut reconciliation = tariff_reconciliation();
+        let ChargeReconciliationAuthority::DeterministicTariff { tariff } = &mut reconciliation
+        else {
+            unreachable!()
+        };
+        tariff.cache_read_per_million = Some(usd("0.3"));
+        tariff.covered_dimensions = ClosedBillableDimensionSet::new(vec![
+            BillableDimension::InputTokens,
+            BillableDimension::OutputTokens,
+            BillableDimension::CacheReadTokens,
+        ])
+        .unwrap();
+        let authority = paid_authority(reconciliation);
+
+        let mut usage = valid_usage();
+        let (spend, _) = build_ledger_settlement(&authority, true, Some(&usage), None);
+        assert!(matches!(spend, SpendAccounting::Unavailable { .. }));
+
+        usage.cache_read_tokens = Some(60);
+        let (spend, _) = build_ledger_settlement(&authority, true, Some(&usage), None);
+        assert_eq!(
+            spend,
+            SpendAccounting::TariffUnits {
+                unit_counts: vec![
+                    UnitCount {
+                        dimension: BillableDimension::InputTokens,
+                        units: 100,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::OutputTokens,
+                        units: 40,
+                    },
+                    UnitCount {
+                        dimension: BillableDimension::CacheReadTokens,
+                        units: 60,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn ledger_settlement_explicitly_free_and_unavailable_cases() {
+        // Explicitly-free settles exact zero under its contract even when
+        // token accounting is independently absent.
+        let free = base_ledger_authority();
+        let (spend, tokens) = build_ledger_settlement(&free, true, None, None);
+        assert_eq!(spend, SpendAccounting::ExplicitlyFree);
+        assert_eq!(tokens, TokenAccounting::Unavailable);
+
+        // A paid route whose stream did not complete never claims a final
+        // charge — the daemon charges the reserved maximum.
+        let authority = paid_authority(reported_final_reconciliation());
+        let usage = valid_usage();
+        let (spend, _) = build_ledger_settlement(
+            &authority,
+            false,
+            Some(&usage),
+            Some("cancelled after the issue boundary"),
+        );
+        assert!(
+            matches!(spend, SpendAccounting::Unavailable { ref diagnostic }
+            if diagnostic.contains("cancelled"))
+        );
+
+        // Malformed token usage under a deterministic tariff cannot settle
+        // tariff units; tokens carry the anomaly diagnostic independently.
+        let authority = paid_authority(tariff_reconciliation());
+        let mut malformed = valid_usage();
+        malformed
+            .anomalies
+            .push("output_tokens regressed".to_string());
+        let (spend, tokens) = build_ledger_settlement(&authority, true, Some(&malformed), None);
+        assert!(matches!(spend, SpendAccounting::Unavailable { .. }));
+        assert!(matches!(tokens, TokenAccounting::Invalid { ref diagnostic }
+            if diagnostic.contains("regressed")));
+    }
+
+    // ── Fault-injectable RuntimeCallbackAPI ledger mock ──────────────
+
+    #[derive(Clone, Copy)]
+    enum Script {
+        Ok,
+        /// Fail the first `n` calls with a transport-style error, then reply
+        /// with the recorded transition (`replayed: true`), mirroring the
+        /// daemon's exact idempotent recovery.
+        ErrThenOk(u32),
+        AlwaysErr,
+    }
+
+    struct MethodState {
+        script: Script,
+        calls: u32,
+    }
+
+    impl MethodState {
+        fn new(script: Script) -> Mutex<MethodState> {
+            Mutex::new(MethodState { script, calls: 0 })
+        }
+
+        /// Returns `(should_error, replayed_recovery)` for the next call.
+        fn next(&mut self) -> (bool, bool) {
+            let call_index = self.calls;
+            self.calls += 1;
+            match self.script {
+                Script::Ok => (false, false),
+                Script::AlwaysErr => (true, false),
+                Script::ErrThenOk(failures) => {
+                    if call_index < failures {
+                        (true, false)
+                    } else {
+                        (false, true)
+                    }
+                }
+            }
+        }
+    }
+
+    struct ScriptedLedger {
+        authority_digest: String,
+        calls: Mutex<Vec<(String, Value)>>,
+        reserve: Mutex<MethodState>,
+        reserve_state: AttemptBudgetState,
+        issue: Mutex<MethodState>,
+        issue_state: AttemptBudgetState,
+        settle: Mutex<MethodState>,
+        release: Mutex<MethodState>,
+        /// Canned `provider_attempt_get` response (`None` → null).
+        get_record: Option<Value>,
+    }
+
+    impl ScriptedLedger {
+        fn new(authority_digest: &str) -> Self {
+            Self {
+                authority_digest: authority_digest.to_string(),
+                calls: Mutex::new(Vec::new()),
+                reserve: MethodState::new(Script::Ok),
+                reserve_state: AttemptBudgetState::Reserved,
+                issue: MethodState::new(Script::Ok),
+                issue_state: AttemptBudgetState::Issued,
+                settle: MethodState::new(Script::Ok),
+                release: MethodState::new(Script::Ok),
+                get_record: None,
+            }
+        }
+
+        fn recorded(&self, method: &str) -> Vec<Value> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(name, _)| name == method)
+                .map(|(_, params)| params.clone())
+                .collect()
+        }
+
+        fn record(&self, method: &str, params: &Value) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((method.to_string(), params.clone()));
+        }
+
+        fn transport_err(method: &str) -> CallbackError {
+            CallbackError::Transport(anyhow::anyhow!("injected {method} transport failure"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RuntimeCallbackAPI for ScriptedLedger {
+        async fn dispatch_action(&self, _: DispatchActionRequest) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn attach_process(&self, _: &str, _: u32) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn mark_running(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn finalize_thread(
+            &self,
+            _: &str,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_thread(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn request_continuation(
+            &self,
+            _: &str,
+            _: Option<&str>,
+            _: TerminalCompletion,
+        ) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+        async fn append_event(
+            &self,
+            _: &str,
+            _: &str,
+            _: Value,
+            _: &str,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn append_events(&self, _: &str, _: Vec<Value>) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn replay_events(&self, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_append(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn bundle_events_read_chain(
+            &self,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn bundle_events_scan(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({"events": []}))
+        }
+        async fn vault_put(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_get(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_delete(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn vault_list(&self, _: &str, r: Value) -> Result<Value, CallbackError> {
+            Ok(r)
+        }
+        async fn claim_commands(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn complete_command(
+            &self,
+            _: &str,
+            _: i64,
+            _: &str,
+            _: Value,
+        ) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn publish_artifact(&self, _: &str, _: Value) -> Result<Value, CallbackError> {
+            Ok(json!({}))
+        }
+        async fn get_facets(&self, _: &str) -> Result<Value, CallbackError> {
+            Ok(Value::Null)
+        }
+
+        async fn provider_attempt_reserve(
+            &self,
+            _thread_id: &str,
+            params: Value,
+        ) -> Result<Value, CallbackError> {
+            self.record("reserve", &params);
+            let (should_error, replayed) = self.reserve.lock().unwrap().next();
+            if should_error {
+                return Err(Self::transport_err("reserve"));
+            }
+            Ok(json!({
+                "attempt_id": "A-daemon-1",
+                "state": self.reserve_state,
+                "reserved": "0.5",
+                "authority_digest": self.authority_digest,
+                "execution_budget_id": "B-exec-1",
+                "replayed": replayed,
+            }))
+        }
+
+        async fn provider_attempt_mark_issued(
+            &self,
+            _thread_id: &str,
+            params: Value,
+        ) -> Result<Value, CallbackError> {
+            self.record("mark_issued", &params);
+            let (should_error, replayed) = self.issue.lock().unwrap().next();
+            if should_error {
+                return Err(Self::transport_err("mark_issued"));
+            }
+            Ok(json!({ "state": self.issue_state, "replayed": replayed }))
+        }
+
+        async fn provider_attempt_settle(
+            &self,
+            _thread_id: &str,
+            params: Value,
+        ) -> Result<Value, CallbackError> {
+            self.record("settle", &params);
+            let (should_error, replayed) = self.settle.lock().unwrap().next();
+            if should_error {
+                return Err(Self::transport_err("settle"));
+            }
+            Ok(json!({
+                "state": "reconciled",
+                "budget_charge": "0.1",
+                "released": "0.4",
+                "charge_basis": "provider_reported",
+                "replayed": replayed,
+            }))
+        }
+
+        async fn provider_attempt_release_unissued(
+            &self,
+            _thread_id: &str,
+            params: Value,
+        ) -> Result<Value, CallbackError> {
+            self.record("release_unissued", &params);
+            let (should_error, replayed) = self.release.lock().unwrap().next();
+            if should_error {
+                return Err(Self::transport_err("release_unissued"));
+            }
+            Ok(json!({ "state": "released_unissued", "replayed": replayed }))
+        }
+
+        async fn provider_attempt_get(
+            &self,
+            _thread_id: &str,
+            params: Value,
+        ) -> Result<Value, CallbackError> {
+            self.record("get", &params);
+            Ok(self.get_record.clone().unwrap_or(Value::Null))
+        }
+    }
+
+    fn ledger_runner(mock: Arc<ScriptedLedger>) -> Runner {
+        let provider = crate::directive::ProviderConfig {
+            category: None,
+            family: crate::directive::ProtocolFamily::ChatCompletions,
+            base_url: "http://localhost".to_string(),
+            auth: Default::default(),
+            headers: Default::default(),
+            schemas: None,
+            pricing: None,
+            extra: Default::default(),
+            body_template: None,
+            body_extra: None,
+            spend_authority: None,
+            profiles: vec![],
+        };
+        Runner::new(RunnerConfig {
+            messages: vec![],
+            tools: vec![],
+            system_prompt: None,
+            harness: Harness::new(&make_policy(), 0, None),
+            continuation: ContinuationConfig::Flag(true),
+            budget: BudgetTracker::new(1.0),
+            callback: CallbackClient::from_inner(
+                mock as Arc<dyn RuntimeCallbackAPI>,
+                "T-test",
+                "/project",
+                "tat-test",
+            ),
+            context_window: 200_000,
+            context_threshold_ratio: 0.9,
+            provider_config: provider,
+            provider_id: "route".to_string(),
+            matched_profile: None,
+            config_hash: "test_hash".to_string(),
+            financial_authority: None,
+            accounting_scope: None,
+            execution: ExecutionConfig::default(),
+            model_name: "model".to_string(),
+            thread_id: "T-test".to_string(),
+            definition_ref: "directive:test/fixture".to_string(),
+            definition_hash: "definition-hash".to_string(),
+            hooks: vec![],
+            outputs: None,
+            return_nudge: ReturnNudge::default(),
+            sampling: None,
+            terminal_state_root: std::env::temp_dir().join("ryeos-directive-runtime-tests"),
+            terminal_source_path: "directive:test/fixture".to_string(),
+        })
+    }
+
+    fn test_prepared() -> crate::provider_adapter::PreparedProviderRequest {
+        let body_bytes = br#"{"messages":[]}"#.to_vec();
+        let body_sha256 = lillux::cas::sha256_hex(&body_bytes);
+        crate::provider_adapter::PreparedProviderRequest {
+            method: reqwest::Method::POST,
+            url: "http://localhost/chat/completions".to_string(),
+            header_names: vec![],
+            body_sha256: body_sha256.clone(),
+            body_bytes,
+            requested_output_tokens: Some(1_024),
+            credential: None,
+            headers: vec![],
+            request_digest: lillux::cas::sha256_hex(body_sha256.as_bytes()),
+        }
+    }
+
+    fn test_verified(
+        authority: &ryeos_accounting::ProviderAccountingAuthority,
+        prepared: &crate::provider_adapter::PreparedProviderRequest,
+    ) -> VerifiedPreparedSpendBound {
+        VerifiedPreparedSpendBound {
+            prepared_request_digest: HexDigest::new(prepared.request_digest.clone()).unwrap(),
+            authority_digest: authority.authority_digest.clone(),
+            maximum: ryeos_accounting::UsdNanos::ZERO,
+            commitments: ryeos_accounting::SpendBoundCommitments::ExplicitlyFree {
+                contract_digest: digest_of("free"),
+            },
+            verifier_contract_digest: digest_of("verifier"),
+        }
+    }
+
+    fn test_request_hash(
+        authority: &ryeos_accounting::ProviderAccountingAuthority,
+        prepared: &crate::provider_adapter::PreparedProviderRequest,
+    ) -> String {
+        provider_attempt_request_hash(
+            "T-test",
+            1,
+            1,
+            "test_hash",
+            "route",
+            "model",
+            prepared.requested_output_tokens,
+            authority.authority_digest.as_str(),
+            &prepared.body_sha256,
+        )
+    }
+
+    fn unset_flag() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
+    }
+
+    #[tokio::test]
+    async fn ledger_admission_reserves_then_issues_once() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        match admission {
+            LedgerAdmission::Admitted(ledger) => {
+                assert_eq!(ledger.attempt_id, "A-daemon-1");
+                assert_eq!(ledger.authority_digest, authority.authority_digest);
+            }
+            _ => panic!("expected Admitted"),
+        }
+        assert_eq!(mock.recorded("reserve").len(), 1);
+        assert_eq!(mock.recorded("mark_issued").len(), 1);
+        assert!(mock.recorded("release_unissued").is_empty());
+    }
+
+    #[tokio::test]
+    async fn reservation_denied_makes_no_further_calls() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.reserve_state = AttemptBudgetState::ReservationDenied;
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, LedgerAdmission::Denied));
+        assert_eq!(mock.recorded("reserve").len(), 1);
+        assert!(
+            mock.recorded("mark_issued").is_empty(),
+            "a denied reservation must never reach the issue boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn lost_reserve_reply_recovers_with_one_exact_retry() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.reserve = MethodState::new(Script::ErrThenOk(1));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, LedgerAdmission::Admitted(_)));
+        let reserves = mock.recorded("reserve");
+        assert_eq!(reserves.len(), 2, "one failure, one exact retry");
+        assert_eq!(
+            reserves[0]["request_hash"], reserves[1]["request_hash"],
+            "the retry must carry the byte-identical reservation intent"
+        );
+        assert_eq!(
+            mock.recorded("mark_issued").len(),
+            1,
+            "a recovered reservation is a single reservation"
+        );
+    }
+
+    #[tokio::test]
+    async fn unprovable_reserve_fails_without_issue() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.reserve = MethodState::new(Script::AlwaysErr);
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+
+        let error = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unprovable"),
+            "expected unprovable reservation, got: {error:#}"
+        );
+        assert_eq!(
+            mock.recorded("reserve").len(),
+            LEDGER_RPC_RETRIES + 1,
+            "bounded exact retries only"
+        );
+        assert!(mock.recorded("mark_issued").is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_before_issue_releases_unissued() {
+        let authority = base_ledger_authority();
+        let mock = Arc::new(ScriptedLedger::new(authority.authority_digest.as_str()));
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+        let cancelled = Arc::new(AtomicBool::new(true));
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &cancelled,
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, LedgerAdmission::CancelledBeforeIssue));
+        assert_eq!(mock.recorded("reserve").len(), 1);
+        let releases = mock.recorded("release_unissued");
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0]["reason"], "released_by_runner");
+        assert!(
+            mock.recorded("mark_issued").is_empty(),
+            "a cancelled attempt must never cross the issue boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn daemon_release_at_issue_fails_closed() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue_state = AttemptBudgetState::ReleasedUnissued;
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            admission,
+            LedgerAdmission::ReleasedByDaemon { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn lost_issue_reply_recovers_with_one_exact_retry() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue = MethodState::new(Script::ErrThenOk(1));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let prepared = test_prepared();
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, LedgerAdmission::Admitted(_)));
+        let issues = mock.recorded("mark_issued");
+        assert_eq!(issues.len(), 2, "one failure, one exact retry");
+        assert_eq!(issues[0], issues[1], "issue retry must be byte-identical");
+    }
+
+    #[tokio::test]
+    async fn lost_issue_replies_recover_from_recorded_issued_state() {
+        let authority = base_ledger_authority();
+        let prepared = test_prepared();
+        let request_hash = test_request_hash(&authority, &prepared);
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue = MethodState::new(Script::AlwaysErr);
+        mock.get_record = Some(json!({
+            "attempt_id": "A-daemon-1",
+            "turn": 1,
+            "attempt_number": 1,
+            "state": "issued",
+            "request_hash": request_hash,
+            "authority_digest": authority.authority_digest.clone(),
+            "reserved": "0.5",
+        }));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let verified = test_verified(&authority, &prepared);
+
+        let admission = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(admission, LedgerAdmission::Admitted(_)));
+        assert_eq!(mock.recorded("mark_issued").len(), LEDGER_RPC_RETRIES + 1);
+        assert_eq!(mock.recorded("get").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn unprovable_issue_fails_before_provider_contact() {
+        let authority = base_ledger_authority();
+        let prepared = test_prepared();
+        let request_hash = test_request_hash(&authority, &prepared);
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.issue = MethodState::new(Script::AlwaysErr);
+        mock.get_record = Some(json!({
+            "attempt_id": "A-daemon-1",
+            "turn": 1,
+            "attempt_number": 1,
+            "state": "reserved",
+            "request_hash": request_hash,
+            "authority_digest": authority.authority_digest.clone(),
+            "reserved": "0.5",
+        }));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+        let verified = test_verified(&authority, &prepared);
+
+        let error = runner
+            .admit_ledger_attempt(
+                1,
+                1,
+                &prepared,
+                &authority,
+                verified,
+                &unset_flag(),
+                &unset_flag(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unprovable"));
+        assert_eq!(
+            mock.recorded("mark_issued").len(),
+            LEDGER_RPC_RETRIES + 2,
+            "a proven still-reserved attempt gets one final paced issue retry"
+        );
+        assert_eq!(mock.recorded("get").len(), 1);
+    }
+
+    fn test_ledger_attempt(
+        authority: &ryeos_accounting::ProviderAccountingAuthority,
+    ) -> LedgerAttempt {
+        LedgerAttempt {
+            attempt_id: "A-daemon-1".to_string(),
+            request_hash: "rh-1".to_string(),
+            authority_digest: authority.authority_digest.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_settle_reply_recovers_with_exact_retry() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.settle = MethodState::new(Script::ErrThenOk(1));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+
+        runner
+            .settle_ledger_attempt(
+                &test_ledger_attempt(&authority),
+                SpendAccounting::ExplicitlyFree,
+                TokenAccounting::Unavailable,
+            )
+            .await
+            .unwrap();
+        let settles = mock.recorded("settle");
+        assert_eq!(settles.len(), 2, "one failure, one exact retry");
+        assert_eq!(settles[0], settles[1], "retry is byte-identical");
+    }
+
+    #[tokio::test]
+    async fn settle_recovered_by_state_read_when_replies_lost() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.settle = MethodState::new(Script::AlwaysErr);
+        mock.get_record = Some(json!({
+            "attempt_id": "A-daemon-1",
+            "turn": 1,
+            "attempt_number": 1,
+            "state": "charged_reserved_maximum",
+            "request_hash": "rh-1",
+            "authority_digest": authority.authority_digest,
+            "reserved": "0.5",
+        }));
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+
+        runner
+            .settle_ledger_attempt(
+                &test_ledger_attempt(&authority),
+                SpendAccounting::Unavailable {
+                    diagnostic: "test".to_string(),
+                },
+                TokenAccounting::Unavailable,
+            )
+            .await
+            .unwrap();
+        assert_eq!(mock.recorded("settle").len(), LEDGER_RPC_RETRIES + 1);
+        assert_eq!(
+            mock.recorded("get").len(),
+            1,
+            "recorded state proven by read"
+        );
+    }
+
+    #[tokio::test]
+    async fn unprovable_settle_is_a_hard_error() {
+        let authority = base_ledger_authority();
+        let mut mock = ScriptedLedger::new(authority.authority_digest.as_str());
+        mock.settle = MethodState::new(Script::AlwaysErr);
+        // get_record stays None → the recorded state cannot be proven.
+        let mock = Arc::new(mock);
+        let runner = ledger_runner(mock.clone());
+
+        let error = runner
+            .settle_ledger_attempt(
+                &test_ledger_attempt(&authority),
+                SpendAccounting::ExplicitlyFree,
+                TokenAccounting::Unavailable,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("unprovable"),
+            "expected unprovable settlement, got: {error:#}"
+        );
     }
 }

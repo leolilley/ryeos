@@ -59,9 +59,13 @@ body_template:
   stream: "{{stream}}"
 auth: {{}}
 headers: {{}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
 pricing:
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0.0"
+  output_per_million: "0.0"
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
@@ -510,7 +514,7 @@ async fn sse_dispatch_launch_rejects_detached_launch_mode_before_spawn() {
     )
     .await;
 
-    assert_pre_admission_rejection(resp, "supports launch_mode='inline' only").await;
+    assert_pre_admission_rejection(resp, "supports launch_mode='wait' only").await;
     drop(project);
 }
 

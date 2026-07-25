@@ -416,16 +416,32 @@ pub(crate) enum ProjectRootNormalization {
     CanonicalizeLive,
 }
 
+pub(crate) struct ResolveProjectContextRequest {
+    pub state: ryeos_app::state::AppState,
+    pub source: ProjectSource,
+    pub project_path: PathBuf,
+    pub principal_id: String,
+    pub checkout_id: String,
+    pub pinned_realization: project_source::PinnedContextRealization,
+    pub normalization: ProjectRootNormalization,
+    pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+}
+
 pub(crate) async fn resolve_project_context_off_thread(
-    state: ryeos_app::state::AppState,
-    source: ProjectSource,
-    project_path: PathBuf,
-    principal_id: String,
-    checkout_id: String,
-    pinned_realization: project_source::PinnedContextRealization,
-    normalization: ProjectRootNormalization,
+    request: ResolveProjectContextRequest,
 ) -> Result<project_source::ResolvedProjectContext, project_source::ProjectSourceError> {
-    ryeos_executor::execution::run_bounded_project_capture(move || {
+    let ResolveProjectContextRequest {
+        state,
+        source,
+        project_path,
+        principal_id,
+        checkout_id,
+        pinned_realization,
+        normalization,
+        launch_timings,
+    } = request;
+    let bounded_capture = !matches!(source, ProjectSource::LiveFs);
+    let operation = move || {
         let project_path = if normalization == ProjectRootNormalization::CanonicalizeLive {
             std::fs::canonicalize(&project_path).map_err(|error| {
                 project_source::ProjectSourceError::Other(format!(
@@ -444,8 +460,14 @@ pub(crate) async fn resolve_project_context_off_thread(
             &checkout_id,
             pinned_realization,
         )
-    })
-    .await
+    };
+    if bounded_capture {
+        ryeos_executor::execution::run_bounded_project_capture_observed(operation, launch_timings)
+            .await
+    } else {
+        ryeos_executor::execution::run_unbounded_project_capture_observed(operation, launch_timings)
+            .await
+    }
 }
 
 fn authorize_terminal_publication(
@@ -1073,33 +1095,35 @@ impl CompiledResponseMode for CompiledExecuteMode {
             } => project_source::PinnedContextRealization::ReadOnly,
             _ => project_source::PinnedContextRealization::Cow,
         };
-        let mut project_ctx = match resolve_project_context_off_thread(
-            state.clone(),
-            project_source.clone(),
-            project_path.clone(),
-            caller_principal_id.clone(),
-            checkout_id.clone(),
-            pinned_realization,
-            ProjectRootNormalization::Preserve,
-        )
-        .await
-        {
-            Ok(ctx) => ctx,
-            Err(err) => {
-                use ryeos_executor::dispatch_error::DispatchError;
-                use ryeos_executor::execution::project_source::ProjectSourceError as PSE;
-                let dispatch_err: DispatchError = match err {
-                    err @ PSE::PushFirst { .. } => {
-                        DispatchError::ProjectSourcePushFirst(err.to_string())
-                    }
-                    PSE::CheckoutFailed(detail) => {
-                        DispatchError::ProjectSourceCheckoutFailed(detail)
-                    }
-                    PSE::Other(detail) => DispatchError::ProjectSource(detail),
-                };
-                return Ok(dispatch_error_response(dispatch_err));
-            }
-        };
+        let mut project_ctx =
+            match resolve_project_context_off_thread(ResolveProjectContextRequest {
+                state: state.clone(),
+                source: project_source.clone(),
+                project_path: project_path.clone(),
+                principal_id: caller_principal_id.clone(),
+                checkout_id: checkout_id.clone(),
+                pinned_realization,
+                normalization: ProjectRootNormalization::Preserve,
+                launch_timings: None,
+            })
+            .await
+            {
+                Ok(ctx) => ctx,
+                Err(err) => {
+                    use ryeos_executor::dispatch_error::DispatchError;
+                    use ryeos_executor::execution::project_source::ProjectSourceError as PSE;
+                    let dispatch_err: DispatchError = match err {
+                        err @ PSE::PushFirst { .. } => {
+                            DispatchError::ProjectSourcePushFirst(err.to_string())
+                        }
+                        PSE::CheckoutFailed(detail) => {
+                            DispatchError::ProjectSourceCheckoutFailed(detail)
+                        }
+                        PSE::Other(detail) => DispatchError::ProjectSource(detail),
+                    };
+                    return Ok(dispatch_error_response(dispatch_err));
+                }
+            };
         // The no-project scratch root remains live through capture. Execution
         // itself uses the immutable captured checkout and its own guard.
         let no_project_lifeline = no_project_guard.clone();
@@ -1182,9 +1206,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
             let engine_roots = project_ctx
                 .request_engine
                 .resolution_roots(Some(project_ctx.effective_path.clone()));
-            let effective_parsers = project_ctx
+            let request_snapshot = project_ctx
                 .request_engine
-                .effective_parser_dispatcher(Some(&project_ctx.effective_path))
+                .effective_request_snapshot(Some(&project_ctx.effective_path))
                 .map_err(|e| {
                     RouteDispatchError::Internal(format!("preflight parser dispatcher: {e}"))
                 })?;
@@ -1192,9 +1216,9 @@ impl CompiledResponseMode for CompiledExecuteMode {
             match run_resolution_pipeline(
                 &root_canonical,
                 &project_ctx.request_engine.kinds,
-                &effective_parsers,
+                &request_snapshot.parser_dispatcher,
                 &engine_roots,
-                &project_ctx.request_engine.trust_store,
+                &request_snapshot.trust_store,
                 &project_ctx.request_engine.composers,
             ) {
                 Ok(_resolution_output) => {
@@ -1284,6 +1308,17 @@ impl CompiledResponseMode for CompiledExecuteMode {
             // leaf dispatch + the launch finalize-on-error net, not here.
             // In-process service kinds run synchronously and never thread a
             // pre-minted id, so they are not eligible for accepted launch.
+            let accepted_project_binding =
+                ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                    &exec_ctx.engine,
+                    &exec_ctx.plan_ctx,
+                    &provenance,
+                )
+                .map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "seal accepted-launch project authority: {error:#}"
+                    ))
+                })?;
             let accepted_preflight = match ryeos_executor::dispatch::preflight_root_dispatch(
                 item_ref,
                 root_canonical.kind.as_str(),
@@ -1291,8 +1326,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 &request.ref_bindings,
                 usage_subject.as_ref(),
                 usage_subject_asserted_by.as_deref(),
+                &accepted_project_binding,
                 &exec_ctx,
                 &state,
+                None,
             ) {
                 Ok(preflight) if !preflight.class.persists_pre_minted_root() => {
                     return Ok((
@@ -1595,6 +1632,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             project_path: &project_ctx.effective_path,
             provenance,
             lifecycle_authority,
+            launch_timings: None,
             original_root_kind: root_canonical.kind.as_str(),
             pre_minted_thread_id: None,
             usage_subject,
@@ -1643,8 +1681,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
             Err(e) => {
                 let status = e.http_status();
-                let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);
-                Ok((status, axum::Json(payload.to_value())).into_response())
+                let payload = ryeos_executor::structured_error::dispatch_error_value(&e);
+                Ok((status, axum::Json(payload)).into_response())
             }
         }
     }
@@ -1656,8 +1694,8 @@ fn dispatch_error_response(
     e: ryeos_executor::dispatch_error::DispatchError,
 ) -> axum::response::Response {
     let status = e.http_status();
-    let payload = ryeos_executor::structured_error::StructuredErrorPayload::from(&e);
-    (status, axum::Json(payload.to_value())).into_response()
+    let payload = ryeos_executor::structured_error::dispatch_error_value(&e);
+    (status, axum::Json(payload)).into_response()
 }
 
 fn launch_handoff_failure_response(
@@ -1675,7 +1713,7 @@ fn launch_task_result_response(
             dispatch_error_response(error)
         }
         Ok(Err(error)) => (
-            StatusCode::BAD_REQUEST,
+            error.http_status(),
             axum::Json(json!({
                 "code": error.code(),
                 "error": error.to_string(),

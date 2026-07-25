@@ -25,7 +25,7 @@ mod metadata;
 use metadata::harvest_chunk_meta;
 
 /// Compute a sha256 hex digest of the input bytes.
-fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(data);
     format!("{:x}", h.finalize())
@@ -116,6 +116,9 @@ fn safe_error_body(body: &str) -> String {
 /// Returned wrapped in `anyhow::Error` so diagnostic surfaces can preserve the
 /// typed detail while the runner `downcast_ref`s to read the retry
 /// classification.
+// MidStream carries the full cut-attempt state by design; the pre-stream
+// variants are small rejection records.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProviderStreamError {
     /// The provider returned a non-success HTTP status before streaming began.
@@ -135,16 +138,19 @@ pub enum ProviderStreamError {
     /// protocol error after content started arriving.
     /// `live_output_events_emitted` counts acknowledged live/ephemeral
     /// `cognition_out` publications for this attempt.
-    MidStream {
-        live_output_events_emitted: usize,
-        accepted_bytes: u64,
-        accepted_output_events: usize,
-        usage: Option<TokenUsage>,
-        generation_header_id: Option<String>,
-        response_id: Option<String>,
-        requested_output_tokens: Option<u64>,
-        detail: String,
-    },
+    MidStream(Box<ProviderMidStreamError>),
+}
+
+#[derive(Debug, Clone)]
+pub struct ProviderMidStreamError {
+    pub live_output_events_emitted: usize,
+    pub accepted_bytes: u64,
+    pub accepted_output_events: usize,
+    pub usage: Option<TokenUsage>,
+    pub generation_header_id: Option<String>,
+    pub response_id: Option<String>,
+    pub requested_output_tokens: Option<u64>,
+    pub detail: String,
 }
 
 impl std::fmt::Display for ProviderStreamError {
@@ -152,8 +158,8 @@ impl std::fmt::Display for ProviderStreamError {
         match self {
             ProviderStreamError::Status { detail, .. }
             | ProviderStreamError::Timeout { detail }
-            | ProviderStreamError::Send { detail, .. }
-            | ProviderStreamError::MidStream { detail, .. } => f.write_str(detail),
+            | ProviderStreamError::Send { detail, .. } => f.write_str(detail),
+            ProviderStreamError::MidStream(error) => f.write_str(&error.detail),
         }
     }
 }
@@ -320,9 +326,16 @@ impl std::error::Error for RuntimeCallbackPublicationError {}
 #[derive(Debug, Clone)]
 pub struct CutAttemptState {
     pub usage: Option<TokenUsage>,
+    // Diagnostic parity with `AdapterResponse`; the runner consumes only
+    // `usage` since settlement moved to the daemon ledger, but cut-state
+    // provenance stays available to adapter-level tests and tracing.
+    #[allow(dead_code)]
     pub generation_header_id: Option<String>,
+    #[allow(dead_code)]
     pub response_id: Option<String>,
+    #[allow(dead_code)]
     pub requested_output_tokens: Option<u64>,
+    #[allow(dead_code)]
     pub observed_output: ObservedOutput,
 }
 
@@ -398,6 +411,9 @@ pub fn parse_sse_events_with_state(
     tool_call_state: &mut HashMap<String, String>,
 ) -> Vec<StreamEvent> {
     let raw_events = split_sse_events(data);
+    if !raw_events.is_empty() {
+        crate::startup_timing::mark_first_provider_event();
+    }
     let mut events = Vec::new();
 
     for (event_type, payload) in raw_events {
@@ -471,16 +487,28 @@ fn split_sse_events(data: &str) -> Vec<(String, String)> {
     events
 }
 
-fn provider_reported_error(
-    block: &str,
-    config: Option<&crate::directive::StreamErrorConfig>,
+struct ProviderReportedErrorContext<'a> {
     usage: Option<TokenUsage>,
     generation_header_id: Option<String>,
     response_id: Option<String>,
-    output_meter: &StreamOutputMeter,
+    output_meter: &'a StreamOutputMeter,
     live_output_events_emitted: usize,
     requested_output_tokens: Option<u64>,
+}
+
+fn provider_reported_error(
+    block: &str,
+    config: Option<&crate::directive::StreamErrorConfig>,
+    context: ProviderReportedErrorContext<'_>,
 ) -> Result<Option<ProviderReportedStreamError>> {
+    let ProviderReportedErrorContext {
+        usage,
+        generation_header_id,
+        response_id,
+        output_meter,
+        live_output_events_emitted,
+        requested_output_tokens,
+    } = context;
     let Some(config) = config else {
         return Ok(None);
     };
@@ -1142,6 +1170,8 @@ pub struct StreamingCallInput<'a> {
     pub tools: &'a [ToolSchema],
     pub callback: &'a CallbackClient,
     pub turn: u32,
+    /// One-based attempt number within this turn.
+    pub attempt: u32,
     pub sampling: Option<&'a SamplingConfig>,
     /// Optional cancellation flag (SIGTERM). When set mid-stream, the loop
     /// breaks and the call returns [`StreamOutcome::Cancelled`].
@@ -1155,106 +1185,86 @@ pub struct StreamingCallInput<'a> {
 #[tracing::instrument(
     name = "provider:request_streaming",
     skip(input),
+    fields(
+        adapter_type = "stream",
+        model = %input.model,
+        turn = input.turn,
+        attempt = input.attempt,
+    )
+)]
+#[allow(dead_code)] // legacy prepare-then-send wrapper; adapter tests use it
+pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
+    // Legacy single-call shape (prepare-then-send in one step) for callers
+    // that do not participate in the reservation lifecycle. Ledger routes
+    // must prepare first, reserve against the prepared digest, and only
+    // then call `send_prepared_streaming` with the same object.
+    let prepared = super::prepared::prepare_provider_request(&input)?;
+    send_prepared_streaming(&input, &prepared).await
+}
+
+/// Transport for an immutable [`super::prepared::PreparedProviderRequest`]:
+/// sends the exact prepared bytes with the frozen credential. Nothing is
+/// rebuilt, re-serialized, or re-resolved after the reservation digest was
+/// taken (§9.2) — the send path consumes `prepared.body_bytes` verbatim.
+#[tracing::instrument(
+    name = "provider:send_prepared_streaming",
+    skip(input, prepared),
     fields(adapter_type = "stream", model = %input.model, turn = input.turn)
 )]
-pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<StreamOutcome> {
-    let StreamingCallInput {
-        client,
-        provider,
-        provider_id,
-        matched_profile,
-        config_hash,
-        execution,
-        model,
-        messages,
-        tools,
-        callback,
-        turn,
-        sampling,
-        cancel_flag: _,    // checked inside the stream loop
-        interrupt_flag: _, // checked inside the stream loop
-    } = input;
-    let schemas = provider.schemas.as_ref().and_then(|s| s.messages.as_ref());
-
-    let (converted_messages, system_prompt) =
-        crate::provider_adapter::messages::convert_messages(messages, &schemas.cloned());
-
-    let tool_schema = provider.schemas.as_ref().and_then(|s| s.tools.clone());
-    let tools_val = crate::provider_adapter::tools::serialize_tools(tools, &tool_schema);
-
-    let stream_url = provider.extra.get("stream_url").and_then(|v| v.as_str());
-    // Resolve {model} template in base_url (e.g. gemini profiles use
-    // `{model}:streamGenerateContent`). Stream URL semantics:
-    //   - None        → default to "/chat/completions"
-    //   - Some("")    → base_url is the full endpoint; do not append
-    //   - Some(other) → append (with leading slash if needed)
-    let base_resolved = provider.base_url.replace("{model}", model);
-    let url = match stream_url {
-        Some("") => base_resolved,
-        Some(su) => format!(
-            "{}{}",
-            base_resolved.trim_end_matches('/'),
-            if su.starts_with('/') {
-                su.to_string()
-            } else {
-                format!("/{}", su)
-            }
-        ),
-        None => format!("{}/chat/completions", base_resolved.trim_end_matches('/')),
+pub async fn send_prepared_streaming(
+    input: &StreamingCallInput<'_>,
+    prepared: &super::prepared::PreparedProviderRequest,
+) -> Result<StreamOutcome> {
+    let call_id =
+        crate::startup_timing::begin_provider_call(input.provider_id, input.turn, input.attempt);
+    let result = crate::startup_timing::scope_provider_call(
+        call_id,
+        send_prepared_streaming_inner(input, prepared),
+    )
+    .await;
+    let completion = match &result {
+        Ok(StreamOutcome::Completed { .. }) => "completed",
+        Ok(StreamOutcome::Interrupted { .. }) => "interrupted",
+        Ok(StreamOutcome::Cancelled { .. }) => "cancelled",
+        Err(_) => "error",
     };
+    crate::startup_timing::finish_provider_call(call_id, completion);
+    result
+}
 
-    let mut body = build_request_body(
-        provider,
-        model,
-        &converted_messages,
-        system_prompt.as_deref(),
-        &tools_val,
-        !tools.is_empty(),
-        (execution.max_provider_output_tokens_per_turn != 0)
-            .then_some(execution.max_provider_output_tokens_per_turn),
-    )?;
+async fn send_prepared_streaming_inner(
+    input: &StreamingCallInput<'_>,
+    prepared: &super::prepared::PreparedProviderRequest,
+) -> Result<StreamOutcome> {
+    let client = input.client;
+    let provider = input.provider;
+    let provider_id = input.provider_id;
+    let matched_profile = input.matched_profile;
+    let config_hash = input.config_hash;
+    let execution = input.execution;
+    let callback = input.callback;
+    let turn = input.turn;
 
-    // Sampling parameters — gated by provider capabilities so we
-    // never send a field the upstream API will reject with a 400.
-    inject_sampling(&mut body, provider.family, sampling);
-    apply_declared_output_limit(
-        &mut body,
-        provider
-            .schemas
-            .as_ref()
-            .and_then(|schemas| schemas.output_limit.as_ref()),
-        (execution.max_provider_output_tokens_per_turn != 0)
-            .then_some(execution.max_provider_output_tokens_per_turn),
-    )?;
-    let requested_output_tokens = declared_output_limit_from_body(provider, &body)?;
+    let requested_output_tokens = prepared.requested_output_tokens;
+    let request_body_sha256 = prepared.body_sha256.clone();
+    tracing::debug!(
+        url = %prepared.url,
+        request_digest = %prepared.request_digest,
+        body_sha256 = %prepared.body_sha256,
+        header_names = ?prepared.header_names,
+        "sending immutable prepared provider request"
+    );
 
-    // Pre-compute the request body hash for diagnostic error messages.
-    // This runs before `body` is moved into the request builder.
-    let request_body_str = serde_json::to_string(&body).unwrap_or_default();
-    let request_body_sha256 = sha256_hex(request_body_str.as_bytes());
-
-    let mut req = client.post(&url);
-
-    let auth_header = provider
-        .auth
-        .header_name
-        .as_deref()
-        .unwrap_or("Authorization");
-    let auth_prefix = provider.auth.prefix.as_deref().unwrap_or("Bearer ");
-    if let Some(ref env_var) = provider.auth.env_var {
-        let key = std::env::var(env_var).map_err(|_| {
-            anyhow!(
-                "provider auth env var {env_var} is not set; refusing to call provider \
-                 with no credentials (typed-fail-loud)"
-            )
-        })?;
-        req = req.header(auth_header, format!("{}{}", auth_prefix, key));
+    let mut req = client.request(prepared.method.clone(), &prepared.url);
+    if let Some(credential) = &prepared.credential {
+        req = req.header(
+            credential.header_name.as_str(),
+            format!("{}{}", credential.prefix, credential.value),
+        );
     }
-
-    for (k, v) in &provider.headers {
-        req = req.header(k.as_str(), v.as_str());
+    for (name, value) in &prepared.headers {
+        req = req.header(name.as_str(), value.as_str());
     }
-    req = req.header("Accept", "text/event-stream");
 
     let empty_cut_attempt = || CutAttemptState {
         usage: None,
@@ -1282,10 +1292,18 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         });
     }
 
-    let send = req
-        .json(&body)
-        .timeout(Duration::from_secs(execution.timeout_seconds))
-        .send();
+    let send = async {
+        // Mark inside the future so a ready, biased cancellation branch cannot
+        // claim a request was submitted when reqwest was never polled. Build
+        // the request first so JSON serialization is not mislabeled as
+        // provider service time.
+        let response = req
+            .body(prepared.body_bytes.clone())
+            .timeout(Duration::from_secs(execution.timeout_seconds))
+            .send();
+        crate::startup_timing::mark_provider_request_submitted();
+        response.await
+    };
     tokio::pin!(send);
     let send_result = tokio::select! {
         biased;
@@ -1331,9 +1349,24 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             })
         }
     })?;
+    crate::startup_timing::mark_provider_response_headers(&format!("{:?}", resp.version()));
 
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
+        // Redirects are never followed (the prepared request is sealed to
+        // its exact endpoint), so a 3xx is terminal here — and body-less.
+        // The Location header is the one actionable fact it carries.
+        let redirect_location = resp
+            .status()
+            .is_redirection()
+            .then(|| {
+                resp.headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map(|value| format!(" redirect_location={value:?} (not followed)"))
+            })
+            .flatten()
+            .unwrap_or_default();
         let text = resp.text().await.unwrap_or_else(|e| {
             tracing::warn!(
                 "failed to read error response body: {:#}",
@@ -1347,7 +1380,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         // Carry the status code as a typed `ProviderStreamError` so the runner's
         // retry loop can key off it; Display still renders this full message.
         let detail = format!(
-            "provider returned {status} (streaming): {safe_body} \
+            "provider returned {status} (streaming): {safe_body}{redirect_location} \
              [provider={provider_id} profile={matched_profile:?} \
              config_hash={config_hash} request_body_sha256={request_body_sha256}]",
             status = status,
@@ -1481,16 +1514,18 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         // failing the whole directive thread over one dropped HTTP stream.
         let chunk: Bytes = chunk_res.map_err(|e| {
             let chain = format!("{:#}", anyhow::Error::new(e));
-            anyhow::Error::new(ProviderStreamError::MidStream {
-                live_output_events_emitted,
-                accepted_bytes: u64::try_from(output_meter.total_bytes()).unwrap_or(u64::MAX),
-                accepted_output_events: output_meter.accepted_output_events,
-                usage: last_usage.clone(),
-                generation_header_id: generation_header_id.clone(),
-                response_id: last_response_id.clone(),
-                requested_output_tokens,
-                detail: format!("stream chunk error: {chain}"),
-            })
+            anyhow::Error::new(ProviderStreamError::MidStream(Box::new(
+                ProviderMidStreamError {
+                    live_output_events_emitted,
+                    accepted_bytes: u64::try_from(output_meter.total_bytes()).unwrap_or(u64::MAX),
+                    accepted_output_events: output_meter.accepted_output_events,
+                    usage: last_usage.clone(),
+                    generation_header_id: generation_header_id.clone(),
+                    response_id: last_response_id.clone(),
+                    requested_output_tokens,
+                    detail: format!("stream chunk error: {chain}"),
+                },
+            )))
         })?;
         // Prepend any partial UTF-8 sequence carried from the previous
         // chunk and decode the longest complete-UTF-8 prefix. The
@@ -1532,14 +1567,11 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
         buffer.push_str(&decoded);
 
         // Drain complete SSE event blocks (separated by blank line).
-        loop {
-            // A stream may legally switch line endings between logical events.
-            // Pick the earliest delimiter of either form; `Option::or_else`
-            // would incorrectly prefer a later LF delimiter whenever one
-            // existed, merging an earlier CRLF-framed event into it.
-            let Some((idx, sep_len)) = next_sse_delimiter(&buffer) else {
-                break;
-            };
+        // A stream may legally switch line endings between logical events.
+        // Pick the earliest delimiter of either form; `Option::or_else`
+        // would incorrectly prefer a later LF delimiter whenever one
+        // existed, merging an earlier CRLF-framed event into it.
+        while let Some((idx, sep_len)) = next_sse_delimiter(&buffer) {
             if stream_frame_exceeds(execution.max_provider_stream_frame_bytes, idx) {
                 return Err(anyhow::Error::new(ProviderProtocolStreamError {
                     detail: format!(
@@ -1574,12 +1606,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                 streaming_config
                     .and_then(|streaming| streaming.metadata.as_ref())
                     .and_then(|metadata| metadata.error.as_ref()),
-                last_usage.clone(),
-                generation_header_id.clone(),
-                last_response_id.clone(),
-                &output_meter,
-                live_output_events_emitted,
-                requested_output_tokens,
+                ProviderReportedErrorContext {
+                    usage: last_usage.clone(),
+                    generation_header_id: generation_header_id.clone(),
+                    response_id: last_response_id.clone(),
+                    output_meter: &output_meter,
+                    live_output_events_emitted,
+                    requested_output_tokens,
+                },
             )? {
                 return Err(anyhow::Error::new(error));
             }
@@ -1656,6 +1690,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                                 )
                             })?;
                         live_output_events_emitted += 1;
+                        crate::startup_timing::mark_first_non_whitespace_text_published(text);
                     }
                     StreamEvent::ToolUse {
                         id,
@@ -1805,12 +1840,14 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
             streaming_config
                 .and_then(|streaming| streaming.metadata.as_ref())
                 .and_then(|metadata| metadata.error.as_ref()),
-            last_usage.clone(),
-            generation_header_id.clone(),
-            last_response_id.clone(),
-            &output_meter,
-            live_output_events_emitted,
-            requested_output_tokens,
+            ProviderReportedErrorContext {
+                usage: last_usage.clone(),
+                generation_header_id: generation_header_id.clone(),
+                response_id: last_response_id.clone(),
+                output_meter: &output_meter,
+                live_output_events_emitted,
+                requested_output_tokens,
+            },
         )? {
             return Err(anyhow::Error::new(error));
         }
@@ -1873,6 +1910,7 @@ pub async fn call_provider_streaming(input: StreamingCallInput<'_>) -> Result<St
                             )
                         })?;
                     live_output_events_emitted += 1;
+                    crate::startup_timing::mark_first_non_whitespace_text_published(text);
                 }
                 StreamEvent::ToolUse {
                     id,
@@ -2261,7 +2299,11 @@ fn enforce_per_turn_output_byte_cap(
 
 /// Inject sampling fields into the request body, gated by provider
 /// capabilities. Unknown providers get no fields (fail-closed).
-fn inject_sampling(body: &mut Value, family: ProtocolFamily, sampling: Option<&SamplingConfig>) {
+pub(crate) fn inject_sampling(
+    body: &mut Value,
+    family: ProtocolFamily,
+    sampling: Option<&SamplingConfig>,
+) {
     if let Some(s) = sampling {
         let caps = family_capabilities(family);
         if caps.supports_temperature {
@@ -2388,7 +2430,7 @@ pub fn build_request_body(
     Ok(body)
 }
 
-fn apply_declared_output_limit(
+pub(crate) fn apply_declared_output_limit(
     body: &mut Value,
     config: Option<&crate::directive::OutputLimitConfig>,
     hard_limit: Option<u64>,
@@ -2420,7 +2462,10 @@ fn apply_declared_output_limit(
     write_optional_object_path(body, &segments, Some(Value::Number(effective.into())))
 }
 
-fn declared_output_limit_from_body(provider: &ProviderConfig, body: &Value) -> Result<Option<u64>> {
+pub(crate) fn declared_output_limit_from_body(
+    provider: &ProviderConfig,
+    body: &Value,
+) -> Result<Option<u64>> {
     use ryeos_runtime::template::resolve_path;
 
     let Some(config) = provider
@@ -2494,6 +2539,18 @@ fn merge_stream_usage_update(last_usage: &mut Option<TokenUsage>, update: &Usage
         "reasoning_tokens",
         &mut usage.reasoning_tokens,
         update.reasoning_tokens,
+        &mut usage.anomalies,
+    );
+    merge_stream_usage_counter(
+        "cache_read_tokens",
+        &mut usage.cache_read_tokens,
+        update.cache_read_tokens,
+        &mut usage.anomalies,
+    );
+    merge_stream_usage_counter(
+        "cache_write_tokens",
+        &mut usage.cache_write_tokens,
+        update.cache_write_tokens,
         &mut usage.anomalies,
     );
 }
@@ -2815,12 +2872,14 @@ mod tests {
                     .metadata
                     .as_ref()
                     .and_then(|metadata| metadata.error.as_ref()),
-                usage.clone(),
-                None,
-                response_id.clone(),
-                &meter,
-                0,
-                Some(32_768),
+                ProviderReportedErrorContext {
+                    usage: usage.clone(),
+                    generation_header_id: None,
+                    response_id: response_id.clone(),
+                    output_meter: &meter,
+                    live_output_events_emitted: 0,
+                    requested_output_tokens: Some(32_768),
+                },
             )
             .unwrap()
             .is_none());
@@ -2863,12 +2922,14 @@ mod tests {
         assert!(provider_reported_error(
             block,
             Some(&config),
-            None,
-            None,
-            None,
-            &StreamOutputMeter::default(),
-            0,
-            None,
+            ProviderReportedErrorContext {
+                usage: None,
+                generation_header_id: None,
+                response_id: None,
+                output_meter: &StreamOutputMeter::default(),
+                live_output_events_emitted: 0,
+                requested_output_tokens: None,
+            },
         )
         .unwrap()
         .is_none());
@@ -2878,7 +2939,8 @@ mod tests {
     fn anthropic_split_usage_events_form_complete_accounting() {
         let data = concat!(
             "event: message_start\n",
-            "data: {\"message\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\n",
+            "data: {\"message\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":0,",
+            "\"cache_read_input_tokens\":7,\"cache_creation_input_tokens\":3}}}\n\n",
             "event: message_delta\n",
             "data: {\"delta\":{\"stop_reason\":\"end_turn\"},",
             "\"usage\":{\"output_tokens\":9}}\n\n",
@@ -2892,6 +2954,8 @@ mod tests {
         }
         let usage = usage.expect("merged Anthropic usage");
         assert_eq!(usage.complete_token_counts(), Some((12, 9)));
+        assert_eq!(usage.cache_read_tokens, Some(7));
+        assert_eq!(usage.cache_write_tokens, Some(3));
         assert_eq!(usage.snapshots_seen, 2);
         assert!(usage.is_valid());
     }
@@ -2959,16 +3023,18 @@ mod tests {
         let error = provider_reported_error(
             block,
             Some(&config),
-            Some(TokenUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(2),
-                ..TokenUsage::default()
-            }),
-            Some("gen-header-1".to_string()),
-            Some("gen-body-1".to_string()),
-            &meter,
-            1,
-            Some(32_768),
+            ProviderReportedErrorContext {
+                usage: Some(TokenUsage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(2),
+                    ..TokenUsage::default()
+                }),
+                generation_header_id: Some("gen-header-1".to_string()),
+                response_id: Some("gen-body-1".to_string()),
+                output_meter: &meter,
+                live_output_events_emitted: 1,
+                requested_output_tokens: Some(32_768),
+            },
         )
         .unwrap()
         .expect("top-level provider error must be recognized");
@@ -3483,6 +3549,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 "model_pinned": "{model}",
             })),
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -3515,6 +3582,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: Some(json!({"contents": "{messages}"})),
             body_extra: Some(json!({"generationConfig": {"maxOutputTokens": 1024}})),
+            spend_authority: None,
             profiles: vec![],
         };
         let body = super::build_request_body(
@@ -3555,6 +3623,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 "messages": "{messages}",
             })),
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
 
@@ -3642,6 +3711,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let _ =
@@ -3666,6 +3736,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
                 "contents": "{messages}",
             })),
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let msgs = vec![json!({"role": "user", "parts": [{"text": "hi"}]})];
@@ -3712,6 +3783,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let mut body = json!({});
@@ -3756,6 +3828,7 @@ data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
             extra: Default::default(),
             body_template: None,
             body_extra: None,
+            spend_authority: None,
             profiles: vec![],
         };
         let mut body = json!({"contents": []});
@@ -4294,6 +4367,7 @@ owner = "ryeos-dev"
             ("openai", "gpt-4o-mini"),
             ("anthropic", "claude-sonnet-4-5-20250929"),
             ("openrouter", "anthropic/claude-sonnet-4.6"),
+            ("zai", "glm-5.2"),
             ("zen", "gpt-5.4-nano"),
             ("local-openai", "local-test-model"),
         ] {
@@ -4383,8 +4457,117 @@ owner = "ryeos-dev"
             .as_ref()
             .and_then(|pricing| pricing.models.get(model))
             .expect("routed OpenRouter model must have exact pricing");
-        assert!(pricing.input_per_million > 0.0);
-        assert!(pricing.output_per_million > 0.0);
+        assert!(!pricing.input_per_million.is_zero());
+        assert!(!pricing.output_per_million.is_zero());
+    }
+
+    #[test]
+    fn bundled_zai_uses_direct_api_and_native_stream_contract() {
+        let model = "glm-5.2";
+        let snapshot = resolve("zai", model);
+        let mut transcript = canonical_transcript_with_tool_call();
+        transcript[2].reasoning_content = Some("I should use the calculator.".to_string());
+        let body = build_golden_body(
+            &snapshot,
+            &transcript,
+            &canonical_tool_schemas(),
+            Some(32_768),
+        );
+
+        assert_eq!(snapshot.provider.base_url, "https://api.z.ai/api/paas/v4");
+        assert_eq!(
+            snapshot.provider.auth.env_var.as_deref(),
+            Some("ZAI_API_KEY")
+        );
+        assert_eq!(
+            snapshot.provider.auth.header_name.as_deref(),
+            Some("Authorization")
+        );
+        assert_eq!(snapshot.provider.auth.prefix.as_deref(), Some("Bearer "));
+        assert_eq!(body["model"], model);
+        assert_eq!(body["max_tokens"], 32_768);
+        assert_eq!(body["tool_stream"], true);
+        assert!(
+            body.get("stream_options").is_none(),
+            "Z.AI reports usage in its final SSE frame without stream_options"
+        );
+        assert_eq!(
+            body["messages"][2]["reasoning_content"], "I should use the calculator.",
+            "Z.AI retained reasoning must survive the provider message conversion"
+        );
+        assert_eq!(
+            body["messages"][2]["tool_calls"][0]["function"]["name"],
+            "calculator"
+        );
+
+        let setup = snapshot
+            .provider
+            .setup_projection("zai")
+            .expect("bundled Z.AI setup metadata must validate");
+        assert_eq!(
+            setup.credential.expect("Z.AI credential").secret_name,
+            "ZAI_API_KEY"
+        );
+        let default_model = setup
+            .models
+            .iter()
+            .find(|candidate| candidate.name == model)
+            .expect("GLM-5.2 setup model");
+        assert!(default_model.recommended);
+        assert_eq!(default_model.context_window, Some(1_000_000));
+        let provider_pricing = snapshot
+            .provider
+            .pricing
+            .as_ref()
+            .expect("bundled Z.AI pricing");
+        let zero_priced_models = provider_pricing
+            .models
+            .iter()
+            .filter(|(_, pricing)| {
+                pricing.input_per_million.is_zero() && pricing.output_per_million.is_zero()
+            })
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            zero_priced_models.len(),
+            1,
+            "the bundled Z.AI contract must identify exactly one zero-priced model"
+        );
+        let zero_priced_model_name = zero_priced_models[0].as_str().to_owned();
+        let zero_priced_model = setup
+            .models
+            .iter()
+            .find(|candidate| candidate.name == zero_priced_model_name)
+            .expect("zero-priced Z.AI model must be present in setup projection");
+        assert!(
+            zero_priced_model
+                .pricing
+                .as_ref()
+                .is_some_and(|pricing| pricing.input_per_million.is_zero()
+                    && pricing.output_per_million.is_zero()),
+            "the zero-priced Z.AI setup model must carry exact zero pricing"
+        );
+        let zero_priced_snapshot = resolve("zai", &zero_priced_model_name);
+        let zero_priced_body = build_golden_body(
+            &zero_priced_snapshot,
+            &transcript,
+            &canonical_tool_schemas(),
+            Some(1_024),
+        );
+        assert_eq!(
+            zero_priced_snapshot.matched_profile.as_deref(),
+            Some("free-fast-no-thinking")
+        );
+        assert_eq!(zero_priced_body["thinking"]["type"], "disabled");
+
+        let pricing = snapshot
+            .provider
+            .pricing
+            .as_ref()
+            .and_then(|pricing| pricing.models.get(model))
+            .expect("bundled Z.AI model must have exact pricing");
+        assert_eq!(pricing.input_per_million.as_nanos(), 1_400_000_000);
+        assert_eq!(pricing.output_per_million.as_nanos(), 4_400_000_000);
     }
 
     struct StreamingEventRecorder {
@@ -4633,6 +4816,7 @@ owner = "ryeos-dev"
             tools: &[],
             callback: &callback,
             turn: 15,
+            attempt: 1,
             sampling: None,
             cancel_flag: None,
             interrupt_flag: None,

@@ -1,0 +1,7 @@
+# ryeos:signed:2026-07-23T11:55:01Z:5562ce004e1b0d1a2545578cd61c7e7861a276cbc252f989e68e6815d3a94a18:VPE7Cvy5W9/XcxjDb44G8e2t2wSCx4kDA39FVeMdv6A5cZeD4TQrh5r1389pJIxFrmVXI51xBwRZrbBdlw8UBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+kind: service
+endpoint: launch.cancel
+required_caps: ["ryeos.execute.service.launch/cancel"]
+schema:
+  launch_id: string
+description: "Cancel a pending streamed execution launch"

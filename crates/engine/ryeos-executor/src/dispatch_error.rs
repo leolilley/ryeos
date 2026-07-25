@@ -160,6 +160,10 @@ pub enum DispatchError {
         executor_ref: String,
         detail: String,
     },
+    /// A pre-minted launch reservation was cancelled before thread creation or
+    /// the irreversible spawn handoff.
+    #[error("launch was cancelled before {stage}")]
+    LaunchCancelled { stage: &'static str },
     /// A declared required secret was not found in any source.
     /// Generic at the dispatch layer; the `source_kind`/`source_name`
     /// fields attribute which subsystem demanded the secret without
@@ -262,6 +266,13 @@ pub enum DispatchError {
     /// `Display` is the bare actionable message. Maps to 409.
     #[error("{0}")]
     Conflict(String),
+    /// Exact machine-readable error supplied by a typed service handler.
+    #[error("structured service error: {code}")]
+    StructuredService {
+        code: String,
+        status: u16,
+        body: serde_json::Value,
+    },
     // ── Target-site forwarding errors ────────────────────────────
     /// The requested target site is not configured as a remote.
     #[error("unknown target site '{target_site_id}'; configured sites: [{known_sites}]")]
@@ -319,6 +330,10 @@ pub enum DispatchError {
     /// side effect.
     #[error("hook dispatch integrity failure: {detail}")]
     HookDispatchIntegrity { detail: String },
+    /// A recorded in-process service cannot return until its exact terminal
+    /// outcome is durably confirmed.
+    #[error("recording integrity failure: {detail}")]
+    RecordingIntegrity { detail: String },
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -358,9 +373,10 @@ impl DispatchError {
                 StatusCode::NOT_IMPLEMENTED
             }
             // State-conflict: push-first, checkout race, etc.
-            Self::ProjectSource(_) | Self::ProjectSourcePushFirst(_) | Self::Conflict(_) => {
-                StatusCode::CONFLICT
-            }
+            Self::ProjectSource(_)
+            | Self::ProjectSourcePushFirst(_)
+            | Self::Conflict(_)
+            | Self::LaunchCancelled { .. } => StatusCode::CONFLICT,
             // Bad gateway: the daemon reached out to a subsystem
             // (service handler, runtime binary, CAS) and it was
             // missing, unavailable, or returned an error.
@@ -382,6 +398,9 @@ impl DispatchError {
             | Self::TargetSiteUnsupported { .. }
             | Self::TargetSiteResolutionFailed { .. } => StatusCode::BAD_REQUEST,
             Self::ExecutionNotRestartEligible { .. } => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::StructuredService { status, .. } => {
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+            }
             Self::LaunchPreparationFailed { classification, .. } if classification == "caller" => {
                 StatusCode::BAD_REQUEST
             }
@@ -402,6 +421,7 @@ impl DispatchError {
             }
             Self::StreamingNotDetachable => StatusCode::BAD_REQUEST,
             Self::HookDispatchIntegrity { .. }
+            | Self::RecordingIntegrity { .. }
             | Self::Internal(_)
             | Self::TargetSiteForwardInternal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -428,6 +448,7 @@ impl DispatchError {
             Self::SubprocessRunFailed { .. } => "subprocess_run_failed",
             Self::ExecutionNotRestartEligible { .. } => "execution_not_restart_eligible",
             Self::RuntimeMaterializationFailed { .. } => "runtime_materialization_failed",
+            Self::LaunchCancelled { .. } => "launch_cancelled",
             Self::RequiredSecretMissing { .. } => "required_secret_missing",
             Self::LaunchPreparationFailed { code, .. } => code,
             Self::LaunchPolicyForbidden { code, .. }
@@ -438,6 +459,7 @@ impl DispatchError {
             Self::MissingCap { .. } => "missing_cap",
             Self::NotFound => "not_found",
             Self::Conflict(_) => "conflict",
+            Self::StructuredService { code, .. } => code,
             Self::UnknownMethod { .. } => "unknown_method",
             Self::MethodInvalidArg { .. } => "method_invalid_arg",
             Self::MethodFailed { .. } => "method_failed",
@@ -456,6 +478,7 @@ impl DispatchError {
             Self::HookDispatchIntegrity { .. } => {
                 ryeos_runtime::envelope::HOOK_INTEGRITY_FAILURE_CODE
             }
+            Self::RecordingIntegrity { .. } => "recording_integrity",
             Self::Internal(_) => "internal",
         }
     }
@@ -550,6 +573,16 @@ mod tests {
     }
 
     #[test]
+    fn recording_integrity_is_internal_and_never_retryable() {
+        let error = DispatchError::RecordingIntegrity {
+            detail: "terminal outcome was not confirmed".to_string(),
+        };
+        assert_eq!(error.http_status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code(), "recording_integrity");
+        assert!(!error.retryable());
+    }
+
+    #[test]
     fn service_not_installed_maps_to_404_with_code() {
         let e = DispatchError::ServiceNotInstalled {
             service_ref: "service:scheduler/register".to_string(),
@@ -578,6 +611,16 @@ mod tests {
         };
         assert_eq!(error.code(), "execution_not_restart_eligible");
         assert_eq!(error.http_status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(!error.retryable());
+    }
+
+    #[test]
+    fn launch_cancellation_has_stable_conflict_contract() {
+        let error = DispatchError::LaunchCancelled {
+            stage: "irreversible thread handoff",
+        };
+        assert_eq!(error.code(), "launch_cancelled");
+        assert_eq!(error.http_status(), StatusCode::CONFLICT);
         assert!(!error.retryable());
     }
 

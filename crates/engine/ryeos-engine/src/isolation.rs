@@ -30,8 +30,9 @@ mod policy;
 mod provenance;
 
 pub use authority::{
-    IsolationLaunchContext, IsolationLiveAccessAuthority, IsolationProjectAuthority,
-    IsolationVerifiedCode,
+    IsolationCommandAuthority, IsolationCommandAuthorityRef, IsolationDescriptorBoundCommand,
+    IsolationDescriptorFileIdentity, IsolationLaunchContext, IsolationLiveAccessAuthority,
+    IsolationProjectAuthority, IsolationVerifiedCode,
 };
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
@@ -100,6 +101,10 @@ pub struct IsolationRuntime {
     /// Optional higher-level generation guard retained by standalone
     /// composition roots. Daemon bootstrap owns its guard outside this value.
     _generation_lifeline: Option<Arc<dyn IsolationGenerationLifeline>>,
+    /// Non-repeating process-local identity minted for the exact retained
+    /// admitted generation. Unlike bundle paths, this changes whenever a new
+    /// verified-generation lifeline is installed, even at the same paths.
+    registered_generation_identity: Option<u64>,
     generation_node_trust: Option<TrustStore>,
     generation_bundle_roots: Option<Vec<PathBuf>>,
     generation_registered_bundle_roots: Option<Vec<crate::item_resolution::RegisteredBundleRoot>>,
@@ -1119,7 +1124,12 @@ impl IsolationRuntime {
         node_trust: TrustStore,
         bundle_roots: Vec<crate::item_resolution::RegisteredBundleRoot>,
     ) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_REGISTERED_GENERATION_IDENTITY: AtomicU64 = AtomicU64::new(1);
         self._generation_lifeline = Some(lifeline);
+        self.registered_generation_identity =
+            Some(NEXT_REGISTERED_GENERATION_IDENTITY.fetch_add(1, Ordering::Relaxed));
         self.generation_node_trust = Some(node_trust);
         self.generation_bundle_roots = Some(
             bundle_roots
@@ -1129,6 +1139,13 @@ impl IsolationRuntime {
         );
         self.generation_registered_bundle_roots = Some(bundle_roots);
         self
+    }
+
+    /// Exact process-local identity of the retained admitted bundle
+    /// generation. Cache entries may use this only while also retaining the
+    /// generation operation guard.
+    pub fn registered_generation_identity(&self) -> Option<u64> {
+        self.registered_generation_identity
     }
 
     pub fn registered_generation_node_trust(&self) -> Option<&TrustStore> {
@@ -1419,6 +1436,9 @@ impl IsolationRuntime {
         context: IsolationLaunchContext<'_>,
         lifecycle: RequestedLaunchLifecycle,
     ) -> Result<CompiledIsolationLaunch, EngineError> {
+        let verified_command_authority = context
+            .verified_command
+            .map(|authority| authority.authority());
         if request.argv0.is_some() {
             return Err(refused(
                 "caller-supplied subprocess argv[0] is not admitted by isolation policy"
@@ -1510,9 +1530,9 @@ impl IsolationRuntime {
             if !context.verified_code.is_empty() || context.verified_command.is_some() {
                 use std::os::fd::AsRawFd as _;
 
-                let lexical_command = context
-                    .verified_command
-                    .map(|admitted| {
+                let lexical_command = verified_command_authority
+                    .map(|authority| {
+                        let admitted = authority.identity();
                         let lexical_command = PathBuf::from(&request.cmd);
                         if !lexical_command.is_absolute() {
                             return Err(refused(format!(
@@ -1520,23 +1540,40 @@ impl IsolationRuntime {
                                 lexical_command.display()
                             )));
                         }
-                        let canonical_command =
-                            canonicalize_context_mount("command", &lexical_command)?;
-                        let canonical_admitted =
-                            canonicalize_context_mount("admitted command", &admitted.source_path)?;
-                        if canonical_command != canonical_admitted {
-                            return Err(refused(format!(
-                                "command {} no longer matches its admitted verified identity {}",
-                                lexical_command.display(),
-                                admitted.source_path.display()
-                            )));
+                        match authority {
+                            IsolationCommandAuthorityRef::Revalidate(_) => {
+                                let canonical_command =
+                                    canonicalize_context_mount("command", &lexical_command)?;
+                                let canonical_admitted = canonicalize_context_mount(
+                                    "admitted command",
+                                    &admitted.source_path,
+                                )?;
+                                if canonical_command != canonical_admitted {
+                                    return Err(refused(format!(
+                                        "command {} no longer matches its admitted verified identity {}",
+                                        lexical_command.display(),
+                                        admitted.source_path.display()
+                                    )));
+                                }
+                            }
+                            IsolationCommandAuthorityRef::DescriptorBound(_) => {
+                                if lexical_command != admitted.source_path {
+                                    return Err(refused(format!(
+                                        "descriptor-bound command {} does not match its admitted lexical identity {}",
+                                        lexical_command.display(),
+                                        admitted.source_path.display()
+                                    )));
+                                }
+                            }
                         }
                         Ok(lexical_command)
                     })
                     .transpose()?;
 
                 let mut verified = context.verified_code.iter().collect::<Vec<_>>();
-                if let Some(admitted) = context.verified_command {
+                if let Some(admitted) =
+                    verified_command_authority.map(IsolationCommandAuthorityRef::identity)
+                {
                     if !verified.contains(&admitted) {
                         verified.push(admitted);
                     }
@@ -1544,20 +1581,37 @@ impl IsolationRuntime {
                 let mut sealed_command = None;
                 let mut sealed_code_map = BTreeMap::new();
                 for identity in verified {
-                    let is_command = context
-                        .verified_command
-                        .is_some_and(|admitted| identity == admitted);
-                    let (canonical_source, handle) =
-                        self.seal_verified_code_for_disabled(identity, is_command)?;
+                    let command_authority = verified_command_authority
+                        .filter(|authority| authority.identity() == identity);
+                    let is_command = command_authority.is_some();
+                    let descriptor_bound = matches!(
+                        command_authority,
+                        Some(IsolationCommandAuthorityRef::DescriptorBound(_))
+                    );
+                    let (canonical_source, handle) = match command_authority {
+                        Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
+                            self.seal_descriptor_bound_command_for_disabled(command)?
+                        }
+                        _ => self.seal_verified_code_for_disabled(identity, is_command)?,
+                    };
                     let destination =
                         PathBuf::from(format!("/proc/self/fd/{}", handle.as_raw_fd()));
-                    rewrite_verified_code_references(
-                        &mut request.args,
-                        &mut request.envs,
-                        &identity.source_path,
-                        &canonical_source,
-                        &destination,
-                    )?;
+                    if descriptor_bound {
+                        rewrite_descriptor_bound_code_references(
+                            &mut request.args,
+                            &mut request.envs,
+                            &identity.source_path,
+                            &destination,
+                        )?;
+                    } else {
+                        rewrite_verified_code_references(
+                            &mut request.args,
+                            &mut request.envs,
+                            &identity.source_path,
+                            &canonical_source,
+                            &destination,
+                        )?;
+                    }
                     insert_verified_code_handoff_entry(
                         &mut sealed_code_map,
                         &destination,
@@ -2047,19 +2101,46 @@ impl IsolationRuntime {
             canonical_project: &canonical_project,
             bundle_roots: context.bundle_roots,
         };
-        let mut prepared_code = Vec::with_capacity(context.verified_code.len() + 1);
+        let mut verified_code = context.verified_code.iter().collect::<Vec<_>>();
+        if let Some(command) =
+            verified_command_authority.map(IsolationCommandAuthorityRef::identity)
+        {
+            if !verified_code.contains(&command) {
+                verified_code.push(command);
+            }
+        }
+        let mut prepared_code = Vec::with_capacity(verified_code.len());
         let mut verified_code_handoff = BTreeMap::new();
-        for verified in context.verified_code {
-            let require_executable = context.verified_command == Some(verified);
-            let prepared =
-                self.prepare_verified_code(verified, code_namespace, require_executable)?;
-            rewrite_verified_code_references(
-                &mut args,
-                &mut envs,
-                &verified.source_path,
-                &prepared.canonical_source,
-                &prepared.artifact.destination,
-            )?;
+        for verified in verified_code {
+            let command_authority =
+                verified_command_authority.filter(|authority| authority.identity() == verified);
+            let require_executable = command_authority.is_some();
+            let descriptor_bound = matches!(
+                command_authority,
+                Some(IsolationCommandAuthorityRef::DescriptorBound(_))
+            );
+            let prepared = match command_authority {
+                Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
+                    self.prepare_descriptor_bound_command(command, code_namespace)?
+                }
+                _ => self.prepare_verified_code(verified, code_namespace, require_executable)?,
+            };
+            if descriptor_bound {
+                rewrite_descriptor_bound_code_references(
+                    &mut args,
+                    &mut envs,
+                    &verified.source_path,
+                    &prepared.artifact.destination,
+                )?;
+            } else {
+                rewrite_verified_code_references(
+                    &mut args,
+                    &mut envs,
+                    &verified.source_path,
+                    &prepared.canonical_source,
+                    &prepared.artifact.destination,
+                )?;
+            }
             insert_verified_code_handoff_entry(
                 &mut verified_code_handoff,
                 &prepared.artifact.destination,
@@ -2077,21 +2158,41 @@ impl IsolationRuntime {
                 lexical_command.display()
             )));
         }
-        let canonical_command = canonicalize_context_mount("command", &lexical_command)?;
-        // Preserve argv[0] only when the requested command spelling traversed
-        // a symlink. This retains virtual-environment launcher semantics while
-        // the executable itself comes from the already-resolved target.
-        let command_argv0 = (lexical_command != canonical_command).then(|| cmd.clone());
-        let verified_command = match context.verified_command {
-            Some(admitted) => prepared_code.iter().find(|prepared| {
-                admitted_verified_command_matches(
-                    &admitted.source_path,
-                    &prepared.original,
-                    &prepared.canonical_source,
-                    &lexical_command,
-                    &canonical_command,
-                )
-            }),
+        let (canonical_command, command_argv0) = match verified_command_authority {
+            Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => {
+                if lexical_command != command.identity().source_path {
+                    return Err(refused(format!(
+                        "descriptor-bound command {} does not match its admitted lexical identity {}",
+                        lexical_command.display(),
+                        command.identity().source_path.display()
+                    )));
+                }
+                (command.identity().source_path.clone(), Some(cmd.clone()))
+            }
+            _ => {
+                let canonical_command = canonicalize_context_mount("command", &lexical_command)?;
+                // Preserve argv[0] only when the requested command spelling
+                // traversed a symlink. The executable itself comes from the
+                // already-resolved target.
+                let command_argv0 = (lexical_command != canonical_command).then(|| cmd.clone());
+                (canonical_command, command_argv0)
+            }
+        };
+        let verified_command = match verified_command_authority {
+            Some(IsolationCommandAuthorityRef::DescriptorBound(command)) => prepared_code
+                .iter()
+                .find(|prepared| prepared.original == command.identity().source_path),
+            Some(IsolationCommandAuthorityRef::Revalidate(admitted)) => {
+                prepared_code.iter().find(|prepared| {
+                    admitted_verified_command_matches(
+                        &admitted.source_path,
+                        &prepared.original,
+                        &prepared.canonical_source,
+                        &lexical_command,
+                        &canonical_command,
+                    )
+                })
+            }
             None => prepared_code.iter().find(|prepared| {
                 lexical_command == prepared.original
                     || canonical_command == prepared.canonical_source
@@ -2100,7 +2201,9 @@ impl IsolationRuntime {
         let command_path = if let Some(prepared) = verified_command {
             prepared.artifact.destination.clone()
         } else {
-            if let Some(admitted) = context.verified_command {
+            if let Some(admitted) =
+                verified_command_authority.map(IsolationCommandAuthorityRef::identity)
+            {
                 return Err(refused(format!(
                     "command {} no longer matches its admitted verified identity {}",
                     lexical_command.display(),
@@ -2866,6 +2969,7 @@ impl IsolationRuntime {
             verified_artifacts,
             backend_capture: captured_backend,
             _generation_lifeline: None,
+            registered_generation_identity: None,
             generation_node_trust: None,
             generation_bundle_roots: None,
             generation_registered_bundle_roots: None,
@@ -2944,6 +3048,126 @@ impl IsolationRuntime {
             &content,
             namespace,
         )
+    }
+
+    fn prepare_descriptor_bound_command(
+        &self,
+        command: &IsolationDescriptorBoundCommand,
+        namespace: CodeNamespace<'_>,
+    ) -> Result<PreparedVerifiedCode, EngineError> {
+        validate_descriptor_bound_command(command)?;
+        let identity = command.identity();
+        self.finish_prepared_code(
+            &identity.source_path,
+            identity.source_path.clone(),
+            MaterializedArtifact {
+                path: identity.source_path.clone(),
+                handle: Arc::clone(command.executable()),
+            },
+            namespace,
+        )
+    }
+
+    /// Copy the exact admitted bytes from an already-open descriptor into a
+    /// sealed executable memfd for disabled isolation. `source_path` is
+    /// provenance only: reopening it here would let a pathname replacement
+    /// substitute a different inode after executor materialization.
+    fn seal_descriptor_bound_command_for_disabled(
+        &self,
+        command: &IsolationDescriptorBoundCommand,
+    ) -> Result<(PathBuf, Arc<std::fs::File>), EngineError> {
+        validate_descriptor_bound_command(command)?;
+        let identity = command.identity();
+
+        #[cfg(not(unix))]
+        {
+            let _ = identity;
+            return Err(refused(
+                "descriptor-bound commands require Unix descriptor identity".to_string(),
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileExt as _;
+
+            let max_bytes = self.inspection.limits.verified_artifact_file_bytes;
+            let expected_size = command.file_identity().size;
+            if expected_size > max_bytes {
+                return Err(refused(format!(
+                    "descriptor-bound command {} is {expected_size} bytes, exceeding configured per-file limit {max_bytes}",
+                    identity.source_path.display()
+                )));
+            }
+            let content_len = usize::try_from(expected_size).map_err(|_| {
+                refused(format!(
+                    "descriptor-bound command {} is too large to capture on this platform",
+                    identity.source_path.display()
+                ))
+            })?;
+            let before_metadata = command.executable().metadata().map_err(|error| {
+                refused(format!(
+                    "descriptor-bound command cannot be inspected before capture: {error}"
+                ))
+            })?;
+            let before_identity = descriptor_file_identity(&before_metadata);
+            if before_identity != command.file_identity() {
+                return Err(refused(format!(
+                    "descriptor-bound command {} changed before its bytes were captured",
+                    identity.source_path.display()
+                )));
+            }
+
+            let mut content = Vec::new();
+            content.try_reserve_exact(content_len).map_err(|error| {
+                refused(format!(
+                    "reserve descriptor-bound command capture for {}: {error}",
+                    identity.source_path.display()
+                ))
+            })?;
+            content.resize(content_len, 0);
+            command
+                .executable()
+                .read_exact_at(&mut content, 0)
+                .map_err(|error| {
+                    refused(format!(
+                        "descriptor-bound command {} cannot be read exactly from its retained descriptor: {error}",
+                        identity.source_path.display()
+                    ))
+                })?;
+
+            let actual_hash = lillux::cas::sha256_hex(&content);
+            let after_metadata = command.executable().metadata().map_err(|error| {
+                refused(format!(
+                    "descriptor-bound command cannot be inspected after capture: {error}"
+                ))
+            })?;
+            let after_identity = descriptor_file_identity(&after_metadata);
+            if after_identity != before_identity || after_identity != command.file_identity() {
+                return Err(refused(format!(
+                    "descriptor-bound command {} changed while its bytes were captured",
+                    identity.source_path.display()
+                )));
+            }
+            if actual_hash != identity.content_hash {
+                return Err(refused(format!(
+                    "descriptor-bound command {} failed its admitted content check (expected {}, got {})",
+                    identity.source_path.display(),
+                    identity.content_hash,
+                    actual_hash
+                )));
+            }
+
+            let handle =
+                lillux::sealed_executable_memfd(c"ryeos-descriptor-bound-command", &content)
+                    .map_err(|error| {
+                        refused(format!(
+                            "seal descriptor-bound command {}: {error}",
+                            identity.source_path.display()
+                        ))
+                    })?;
+            Ok((identity.source_path.clone(), handle))
+        }
     }
 
     /// Revalidate admitted code and copy the exact bytes into a kernel-sealed
@@ -3108,6 +3332,94 @@ impl Default for IsolationRuntime {
     }
 }
 
+#[cfg(unix)]
+fn descriptor_file_identity(metadata: &std::fs::Metadata) -> IsolationDescriptorFileIdentity {
+    use std::os::unix::fs::MetadataExt as _;
+
+    IsolationDescriptorFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanoseconds: metadata.mtime_nsec(),
+        changed_seconds: metadata.ctime(),
+        changed_nanoseconds: metadata.ctime_nsec(),
+        mode: metadata.mode(),
+        file_type: metadata.mode() & libc::S_IFMT,
+    }
+}
+
+fn validate_descriptor_bound_command(
+    command: &IsolationDescriptorBoundCommand,
+) -> Result<(), EngineError> {
+    let identity = command.identity();
+    if !identity.source_path.is_absolute()
+        || identity
+            .source_path
+            .components()
+            .enumerate()
+            .any(|(index, component)| {
+                !matches!(
+                    (index, component),
+                    (0, std::path::Component::RootDir) | (_, std::path::Component::Normal(_))
+                )
+            })
+    {
+        return Err(refused(format!(
+            "descriptor-bound command path must be absolute and normalized: {}",
+            identity.source_path.display()
+        )));
+    }
+    if identity.content_hash.len() != 64
+        || !identity
+            .content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err(refused(format!(
+            "descriptor-bound command has invalid SHA-256 digest `{}`",
+            identity.content_hash
+        )));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = command;
+        return Err(refused(
+            "descriptor-bound commands require Unix descriptor identity".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = command.executable().metadata().map_err(|error| {
+            refused(format!(
+                "descriptor-bound command cannot be inspected: {error}"
+            ))
+        })?;
+        let observed = descriptor_file_identity(&metadata);
+        let daemon_uid = unsafe { libc::geteuid() };
+        if !metadata.file_type().is_file()
+            || metadata.uid() != daemon_uid
+            || metadata.mode() & 0o111 == 0
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(refused(format!(
+                "descriptor-bound command must remain a daemon-owned executable regular file without group/other write bits (uid={}, mode={:#o})",
+                metadata.uid(),
+                metadata.mode() & 0o7777,
+            )));
+        }
+        if observed != command.file_identity() {
+            return Err(refused(format!(
+                "descriptor-bound command {} changed after materialization verification",
+                identity.source_path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
 fn validate_policy_semantics(policy: &IsolationPolicy) -> Result<(), EngineError> {
     if policy.mode == IsolationMode::Enforce && policy.backend.is_none() {
         return Err(refused(
@@ -3261,6 +3573,40 @@ fn push_verified_code_handoff(
         serde_json::to_string(&handoff)
             .map_err(|error| refused(format!("encode verified-code handoff: {error}")))?,
     ));
+    Ok(())
+}
+
+fn rewrite_descriptor_bound_code_references(
+    args: &mut [String],
+    envs: &mut [(String, String)],
+    source: &Path,
+    destination: &Path,
+) -> Result<(), EngineError> {
+    let source = source.to_str().ok_or_else(|| {
+        refused(format!(
+            "descriptor-bound code path is not valid UTF-8: {}",
+            source.display()
+        ))
+    })?;
+    let destination = destination.to_str().ok_or_else(|| {
+        refused(format!(
+            "descriptor-bound execution path is not valid UTF-8: {}",
+            destination.display()
+        ))
+    })?;
+    for value in args
+        .iter_mut()
+        .chain(envs.iter_mut().map(|(_, value)| value))
+    {
+        if let Some(rewritten) = replace_delimited_path(value, source, destination) {
+            *value = rewritten;
+        }
+        if value.contains(source) {
+            return Err(refused(format!(
+                "descriptor-bound code reference cannot be rewritten safely: {value:?}"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -4509,6 +4855,110 @@ mod tests {
             .capture_verified_command(&command, Some(&project), Some(&live_access))
             .unwrap_err();
         assert!(error.to_string().contains("path binding changed"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn disabled_descriptor_bound_command_seals_retained_fd_without_reopening_path() {
+        use std::io::Write as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::{FileExt as _, MetadataExt as _, PermissionsExt as _};
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let command_path = cache.path().join("ordinary-executor-cache-entry");
+        let admitted_bytes = std::fs::read("/bin/echo").unwrap();
+        std::fs::write(&command_path, &admitted_bytes).unwrap();
+        std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = Arc::new(std::fs::File::open(&command_path).unwrap());
+        let original_metadata = executable.metadata().unwrap();
+        let original_inode = original_metadata.ino();
+        assert_eq!(
+            unsafe { libc::fcntl(executable.as_raw_fd(), libc::F_GET_SEALS) },
+            -1,
+            "fixture must begin as an ordinary unsealed cache file"
+        );
+        let retained_inode_path = cache.path().join("retained-original-inode");
+        std::fs::rename(&command_path, &retained_inode_path).unwrap();
+        std::fs::write(&command_path, vec![0_u8; admitted_bytes.len()]).unwrap();
+        std::fs::set_permissions(&command_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_ne!(
+            std::fs::metadata(&command_path).unwrap().ino(),
+            original_inode,
+            "fixture replacement must occupy a different pathname inode"
+        );
+        let original_identity = descriptor_file_identity(&executable.metadata().unwrap());
+        let command = IsolationDescriptorBoundCommand::new(
+            IsolationVerifiedCode {
+                source_path: command_path.clone(),
+                content_hash: lillux::cas::sha256_hex(&admitted_bytes),
+            },
+            executable,
+            original_identity,
+        );
+
+        let applied = runtime
+            .apply_with_provenance(
+                lillux::SubprocessRequest {
+                    cmd: command_path.to_string_lossy().into_owned(),
+                    argv0: None,
+                    args: vec!["admitted".to_string()],
+                    cwd: Some(app_root.path().to_string_lossy().into_owned()),
+                    envs: Vec::new(),
+                    stdin_data: None,
+                    timeout: 1.0,
+                    limits: None,
+                    inherited_fds: Vec::new(),
+                    supervised_status: None,
+                },
+                IsolationLaunchContext {
+                    project_path: app_root.path(),
+                    project_authority: IsolationProjectAuthority::ReadOnly,
+                    live_access: None,
+                    state_root: None,
+                    checkpoint_dir: None,
+                    daemon_socket_path: None,
+                    bundle_roots: &[],
+                    node_trusted_keys_dir: None,
+                    verified_code: std::slice::from_ref(command.identity()),
+                    verified_command: Some(&command),
+                    item_ref: "tool:tests/descriptor-bound-disabled",
+                    thread_id: "T-descriptor-bound-disabled",
+                },
+            )
+            .unwrap();
+        assert!(applied.request.cmd.starts_with("/proc/self/fd/"));
+        assert_eq!(
+            applied.request.argv0.as_deref(),
+            Some(command_path.to_str().unwrap())
+        );
+        assert_eq!(applied.request.inherited_fds.len(), 1);
+
+        let mutated_bytes = vec![0_u8; admitted_bytes.len()];
+        std::fs::write(&retained_inode_path, &mutated_bytes).unwrap();
+        assert_eq!(
+            std::fs::metadata(&retained_inode_path).unwrap().ino(),
+            original_inode,
+            "mutation must target the already-open original inode"
+        );
+
+        let prepared = &applied.request.inherited_fds[0];
+        let mut prepared_bytes = vec![0_u8; admitted_bytes.len()];
+        prepared.read_exact_at(&mut prepared_bytes, 0).unwrap();
+        assert_eq!(prepared_bytes, admitted_bytes);
+        let required_seals =
+            libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
+        let seals = unsafe { libc::fcntl(prepared.as_raw_fd(), libc::F_GET_SEALS) };
+        assert_eq!(seals & required_seals, required_seals);
+        assert_ne!(prepared.metadata().unwrap().permissions().mode() & 0o111, 0);
+        let mut attempted_writer = prepared.try_clone().unwrap();
+        assert!(attempted_writer.write_all(b"mutate").is_err());
+
+        let result = lillux::run(applied.request);
+        assert!(result.success, "stderr: {}", result.stderr);
+        assert_eq!(result.stdout.trim_end(), "admitted");
     }
 
     #[test]

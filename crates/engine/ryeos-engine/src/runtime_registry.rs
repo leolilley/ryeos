@@ -107,6 +107,19 @@ pub struct LaunchContractDecl {
     pub secret_policy: LaunchSecretPolicyDecl,
     pub required_runtime_data: Vec<String>,
     pub runtime_facts: BTreeMap<String, RuntimeFactDecl>,
+    /// Required declaration of the financial authority this runtime's launch
+    /// preparation must produce. `none` states the runtime performs no
+    /// direct paid provider work; a paid runtime declares the exact sealed
+    /// authority kind so an old preparer cannot silently satisfy the
+    /// contract.
+    pub financial_authority: FinancialAuthorityDecl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FinancialAuthorityDecl {
+    None,
+    ProviderAccountingAuthorityV1,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -956,6 +969,7 @@ mod tests {
                 },
                 required_runtime_data: vec![],
                 runtime_facts: BTreeMap::new(),
+                financial_authority: FinancialAuthorityDecl::None,
             },
             description: None,
             native_resume: None,
@@ -985,6 +999,8 @@ mod tests {
         "    allowed_names: []\n",
         "  required_runtime_data: []\n",
         "  runtime_facts: {}\n",
+        "  financial_authority:\n",
+        "    kind: none\n",
     );
 
     #[test]

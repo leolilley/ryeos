@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-22T08:09:36Z:fc3a075ac1e7ebe6bd01c2178162f20d8f2e6ab32bf89063a8a7f1f1e3c89660:Uqs2K3jlebTwIcybujbevgmQKkSl4IBcwcyt3d4iqixH1QRyeKRMQ2E8dziowV9H8HPH1dygdYfFb+MXJEiUBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-25T03:38:44Z:ed31ca77e2854d6b2f2f6e752acf77297d8ddd97dbca0da0d0482c65dd0d10ea:9MrUOEZWmZHpt26IYhd2r5O9DescDcUyGNMAeEPZQkVJ4aCZ+dbxd4y5hTfeEvCp+8dItm7HYfPmty1eEwj0Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://openrouter.ai/api/v1"
@@ -66,71 +66,98 @@ body_template:
   stream_options:
     include_usage: true
 pricing:
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0"
+  output_per_million: "0"
   models:
     # Anthropic Claude
-    anthropic/claude-opus-4-7:             {input_per_million: 5.00, output_per_million: 25.00}
-    anthropic/claude-opus-4-6:             {input_per_million: 5.00, output_per_million: 25.00}
-    anthropic/claude-opus-4-5:             {input_per_million: 5.00, output_per_million: 25.00}
-    anthropic/claude-opus-4-1:             {input_per_million: 15.00, output_per_million: 75.00}
-    anthropic/claude-sonnet-4.6:           {input_per_million: 3.00, output_per_million: 15.00}
-    anthropic/claude-sonnet-4-5:           {input_per_million: 3.00, output_per_million: 15.00}
-    anthropic/claude-sonnet-4:             {input_per_million: 3.00, output_per_million: 15.00}
-    anthropic/claude-haiku-4-5:            {input_per_million: 1.00, output_per_million: 5.00}
-    anthropic/claude-3-5-haiku:            {input_per_million: 0.80, output_per_million: 4.00}
+    anthropic/claude-opus-4-7:             {input_per_million: "5", output_per_million: "25"}
+    anthropic/claude-opus-4-6:             {input_per_million: "5", output_per_million: "25"}
+    anthropic/claude-opus-4-5:             {input_per_million: "5", output_per_million: "25"}
+    anthropic/claude-opus-4-1:             {input_per_million: "15", output_per_million: "75"}
+    anthropic/claude-sonnet-4.6:           {input_per_million: "3", output_per_million: "15"}
+    anthropic/claude-sonnet-4-5:           {input_per_million: "3", output_per_million: "15"}
+    anthropic/claude-sonnet-4:             {input_per_million: "3", output_per_million: "15"}
+    anthropic/claude-haiku-4-5:            {input_per_million: "1", output_per_million: "5"}
+    anthropic/claude-3-5-haiku:            {input_per_million: "0.8", output_per_million: "4"}
     # OpenAI
-    openai/gpt-5-5-pro:                    {input_per_million: 30.00, output_per_million: 180.00}
-    openai/gpt-5-5:                        {input_per_million: 5.00, output_per_million: 30.00}
-    openai/gpt-5-4-pro:                    {input_per_million: 30.00, output_per_million: 180.00}
-    openai/gpt-5-4:                        {input_per_million: 2.50, output_per_million: 15.00}
-    openai/gpt-5-4-mini:                   {input_per_million: 0.75, output_per_million: 4.50}
-    openai/gpt-5-4-nano:                   {input_per_million: 0.20, output_per_million: 1.25}
-    openai/gpt-4-1:                        {input_per_million: 2.00, output_per_million: 8.00}
-    openai/gpt-4-1-mini:                   {input_per_million: 0.40, output_per_million: 1.60}
-    openai/gpt-4-1-nano:                   {input_per_million: 0.10, output_per_million: 0.40}
-    openai/gpt-4o:                         {input_per_million: 2.50, output_per_million: 10.00}
-    openai/gpt-4o-mini:                    {input_per_million: 0.15, output_per_million: 0.60}
-    openai/o3:                             {input_per_million: 2.00, output_per_million: 8.00}
-    openai/o3-mini:                        {input_per_million: 1.10, output_per_million: 4.40}
-    openai/o4-mini:                        {input_per_million: 1.10, output_per_million: 4.40}
+    openai/gpt-5-5-pro:                    {input_per_million: "30", output_per_million: "180"}
+    openai/gpt-5-5:                        {input_per_million: "5", output_per_million: "30"}
+    openai/gpt-5-4-pro:                    {input_per_million: "30", output_per_million: "180"}
+    openai/gpt-5-4:                        {input_per_million: "2.5", output_per_million: "15"}
+    openai/gpt-5-4-mini:                   {input_per_million: "0.75", output_per_million: "4.5"}
+    openai/gpt-5-4-nano:                   {input_per_million: "0.2", output_per_million: "1.25"}
+    openai/gpt-4-1:                        {input_per_million: "2", output_per_million: "8"}
+    openai/gpt-4-1-mini:                   {input_per_million: "0.4", output_per_million: "1.6"}
+    openai/gpt-4-1-nano:                   {input_per_million: "0.1", output_per_million: "0.4"}
+    openai/gpt-4o:                         {input_per_million: "2.5", output_per_million: "10"}
+    openai/gpt-4o-mini:                    {input_per_million: "0.15", output_per_million: "0.6"}
+    openai/o3:                             {input_per_million: "2", output_per_million: "8"}
+    openai/o3-mini:                        {input_per_million: "1.1", output_per_million: "4.4"}
+    openai/o4-mini:                        {input_per_million: "1.1", output_per_million: "4.4"}
     # Google Gemini
-    google/gemini-3-5-flash:               {input_per_million: 1.50, output_per_million: 9.00}
-    google/gemini-3-1-pro-preview:         {input_per_million: 2.00, output_per_million: 12.00}
-    google/gemini-2-5-pro:                 {input_per_million: 1.25, output_per_million: 10.00}
-    google/gemini-2-5-flash:               {input_per_million: 0.30, output_per_million: 2.50}
-    google/gemini-2-5-flash-lite:          {input_per_million: 0.10, output_per_million: 0.40}
+    google/gemini-3-5-flash:               {input_per_million: "1.5", output_per_million: "9"}
+    google/gemini-3-1-pro-preview:         {input_per_million: "2", output_per_million: "12"}
+    google/gemini-2-5-pro:                 {input_per_million: "1.25", output_per_million: "10"}
+    google/gemini-2-5-flash:               {input_per_million: "0.3", output_per_million: "2.5"}
+    google/gemini-2-5-flash-lite:          {input_per_million: "0.1", output_per_million: "0.4"}
     # Meta Llama
-    meta-llama/llama-4-maverick:           {input_per_million: 0.15, output_per_million: 0.60}
-    meta-llama/llama-4-scout:              {input_per_million: 0.08, output_per_million: 0.30}
-    meta-llama/llama-3-3-70b-instruct:     {input_per_million: 0.10, output_per_million: 0.32}
+    meta-llama/llama-4-maverick:           {input_per_million: "0.15", output_per_million: "0.6"}
+    meta-llama/llama-4-scout:              {input_per_million: "0.08", output_per_million: "0.3"}
+    meta-llama/llama-3-3-70b-instruct:     {input_per_million: "0.1", output_per_million: "0.32"}
     # DeepSeek
-    deepseek/deepseek-r1-0528:             {input_per_million: 0.50, output_per_million: 2.15}
-    deepseek/deepseek-r1:                  {input_per_million: 0.70, output_per_million: 2.50}
-    deepseek/deepseek-chat:                {input_per_million: 0.23, output_per_million: 0.91}
-    deepseek/deepseek-v4-pro:              {input_per_million: 0.44, output_per_million: 0.87}
-    deepseek/deepseek-v4-flash:            {input_per_million: 0.10, output_per_million: 0.20}
+    deepseek/deepseek-r1-0528:             {input_per_million: "0.5", output_per_million: "2.15"}
+    deepseek/deepseek-r1:                  {input_per_million: "0.7", output_per_million: "2.5"}
+    deepseek/deepseek-chat:                {input_per_million: "0.23", output_per_million: "0.91"}
+    deepseek/deepseek-v4-pro:              {input_per_million: "0.44", output_per_million: "0.87"}
+    deepseek/deepseek-v4-flash:            {input_per_million: "0.1", output_per_million: "0.2"}
     # Qwen
-    qwen/qwen3-7-max:                      {input_per_million: 2.50, output_per_million: 7.50}
-    qwen/qwen3-6-plus:                     {input_per_million: 0.33, output_per_million: 1.95}
-    qwen/qwen3-coder:                      {input_per_million: 0.22, output_per_million: 1.80}
-    qwen/qwen3-coder-plus:                 {input_per_million: 0.65, output_per_million: 3.25}
+    qwen/qwen3-7-max:                      {input_per_million: "2.5", output_per_million: "7.5"}
+    qwen/qwen3-6-plus:                     {input_per_million: "0.33", output_per_million: "1.95"}
+    qwen/qwen3-coder:                      {input_per_million: "0.22", output_per_million: "1.8"}
+    qwen/qwen3-coder-plus:                 {input_per_million: "0.65", output_per_million: "3.25"}
     # xAI Grok
-    x-ai/grok-4-3:                         {input_per_million: 1.25, output_per_million: 2.50}
-    x-ai/grok-4-20:                        {input_per_million: 1.25, output_per_million: 2.50}
+    x-ai/grok-4-3:                         {input_per_million: "1.25", output_per_million: "2.5"}
+    x-ai/grok-4-20:                        {input_per_million: "1.25", output_per_million: "2.5"}
     # Mistral
-    mistralai/mistral-medium-3-5:          {input_per_million: 1.50, output_per_million: 7.50}
-    mistralai/mistral-large-2512:          {input_per_million: 0.50, output_per_million: 1.50}
-    mistralai/codestral-2508:              {input_per_million: 0.30, output_per_million: 0.90}
-    mistralai/devstral-medium:             {input_per_million: 0.40, output_per_million: 2.00}
+    mistralai/mistral-medium-3-5:          {input_per_million: "1.5", output_per_million: "7.5"}
+    mistralai/mistral-large-2512:          {input_per_million: "0.5", output_per_million: "1.5"}
+    mistralai/codestral-2508:              {input_per_million: "0.3", output_per_million: "0.9"}
+    mistralai/devstral-medium:             {input_per_million: "0.4", output_per_million: "2"}
     # Other
-    moonshotai/kimi-k2-6:                  {input_per_million: 0.73, output_per_million: 3.49}
-    z-ai/glm-5-1:                          {input_per_million: 0.98, output_per_million: 3.08}
-    z-ai/glm-5:                            {input_per_million: 0.60, output_per_million: 1.92}
-    amazon/nova-premier-v1:                {input_per_million: 2.50, output_per_million: 12.50}
-    amazon/nova-pro-v1:                    {input_per_million: 0.80, output_per_million: 3.20}
-    bytedance-seed/seed-2-0-lite:          {input_per_million: 0.25, output_per_million: 2.00}
-    nvidia/nemotron-3-super-120b-a12b:     {input_per_million: 0.09, output_per_million: 0.45}
+    moonshotai/kimi-k2-6:                  {input_per_million: "0.73", output_per_million: "3.49"}
+    z-ai/glm-5-1:                          {input_per_million: "0.98", output_per_million: "3.08"}
+    z-ai/glm-5:                            {input_per_million: "0.6", output_per_million: "1.92"}
+    amazon/nova-premier-v1:                {input_per_million: "2.5", output_per_million: "12.5"}
+    amazon/nova-pro-v1:                    {input_per_million: "0.8", output_per_million: "3.2"}
+    bytedance-seed/seed-2-0-lite:          {input_per_million: "0.25", output_per_million: "2"}
+    nvidia/nemotron-3-super-120b-a12b:     {input_per_million: "0.09", output_per_million: "0.45"}
+profiles:
+  - name: deepseek-v4-pro-spend
+    match: ["deepseek/deepseek-v4-pro"]
+    spend_authority:
+      billing_principal: openrouter-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: openrouter-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: openrouter-2026-07
+        input_per_million: "0.44"
+        output_per_million: "0.87"
+        covered_dimensions: [input_tokens, output_tokens]
+  - name: claude-sonnet-4-6-spend
+    match: ["anthropic/claude-sonnet-4.6"]
+    spend_authority:
+      billing_principal: openrouter-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: openrouter-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: openrouter-2026-07
+        input_per_million: "3"
+        output_per_million: "15"
+        covered_dimensions: [input_tokens, output_tokens]
 extra:
   stream_url: "/chat/completions"
   setup:

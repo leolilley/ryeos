@@ -153,6 +153,8 @@ launch_contract:
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {{}}
+  financial_authority:
+    kind: none
 description: "synth runtime for V5.3 dispatch_pin capability tests"
 "#
     );
@@ -361,7 +363,7 @@ async fn legacy_launch_mode_field_is_rejected() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("unknown field 'launch_mode'")),
+            .is_some_and(|error| error.contains("unknown field `launch_mode`")),
         "removed launch_mode field must fail strict request decoding: {body}"
     );
 }
@@ -378,7 +380,7 @@ async fn legacy_target_site_id_field_is_rejected() {
     assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("unknown field 'target_site_id'")),
+            .is_some_and(|error| error.contains("unknown field `target_site_id`")),
         "removed target_site_id field must fail strict request decoding: {body}"
     );
 }
@@ -397,7 +399,7 @@ async fn legacy_project_source_field_is_rejected() {
         .and_then(|v| v.as_str())
         .expect("error str");
     assert!(
-        err.contains("unknown field 'project_source'"),
+        err.contains("unknown field `project_source`"),
         "removed project_source field must fail strict request decoding: {body}"
     );
 }

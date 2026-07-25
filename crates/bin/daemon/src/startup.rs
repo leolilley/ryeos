@@ -225,6 +225,10 @@ async fn ready(State(state): State<DynamicHttpState>) -> Response {
 }
 
 async fn application_dispatch(State(state): State<DynamicHttpState>, request: Request) -> Response {
+    // Preserve the outer monotonic ingress origin as a stack value. Passing it
+    // directly avoids type-erased request-extension allocation; the dispatcher
+    // creates full correlation state only for the canonical launch route.
+    let ingress_started_at = Instant::now();
     let lifecycle = state.lifecycle();
     if lifecycle.status != LifecycleWireState::Running
         || !lifecycle.ready
@@ -237,7 +241,12 @@ async fn application_dispatch(State(state): State<DynamicHttpState>, request: Re
         // protects the invariant if a future caller violates that ordering.
         return unavailable_response(&lifecycle);
     };
-    ryeos_api::routes::dispatcher::route_dispatcher(State((*application).clone()), request).await
+    ryeos_api::routes::dispatcher::route_dispatcher_from_ingress(
+        State((*application).clone()),
+        request,
+        ingress_started_at,
+    )
+    .await
 }
 
 fn unavailable_response(lifecycle: &LifecycleResponse) -> Response {

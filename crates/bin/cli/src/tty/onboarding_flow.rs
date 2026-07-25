@@ -992,7 +992,8 @@ impl FlowUi {
                     .map(|pricing| {
                         format!(
                             " · ${:.2}/${:.2} per M",
-                            pricing.input_per_million, pricing.output_per_million
+                            pricing.input_per_million.display_usd_lossy(),
+                            pricing.output_per_million.display_usd_lossy()
                         )
                     })
                     .unwrap_or_default();

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-16T09:08:17Z:147aa624bd479e3bb86b7bca4adad99b58307785427895bc95619c9ce5b8eed9:yxhTxdKllu69N5V+2p10HP8T7VMQEKRJWbiCZHIBDjvRb0lkgAb3ZhexkjwaCN7KfmKEDhQgQfdq3yeHcUSlCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-24T09:36:55Z:6fcd5bc752a5b9e4c26bbc6b8cea87289cb8a7103cc6c7d9b3f396e76f07da13:slukQ0oK3hIm0As2KJk9Ga3x026FBYqMZsOG4NSWJZnShB8ZRBfG6lQhy0NeOkp6USOT566CWzCpxoNIDxRrAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -51,12 +51,26 @@ launch_contract:
         - bundle
       allowed_trust:
         - trusted_bundle
+    execution:
+      kind: item
+      id: ryeos-runtime/execution
+      required: false
+      merge: deep_merge
+      allowed_spaces:
+        - bundle
+        - project
+      allowed_trust:
+        - trusted_bundle
+        - trusted_project
+  financial_authority:
+    kind: provider_accounting_authority_v1
   secret_policy:
     max_requirements: 4
     allowed_names:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
       - OPENROUTER_API_KEY
+      - ZAI_API_KEY
       - ZEN_API_KEY
   required_runtime_data:
     - provider_snapshot
@@ -70,4 +84,6 @@ launch_contract:
     config_hash: {required: true, kind: string, max_bytes: 66}
     config_value_digest: {required: true, kind: string, max_bytes: 66}
     config_sources: {required: true, kind: json, max_bytes: 4096}
+    authority_digest: {required: true, kind: string, max_bytes: 66}
+    spend_bound: {required: true, kind: string, max_bytes: 32}
 description: "Interprets directive workflows by orchestrating LLM threads"

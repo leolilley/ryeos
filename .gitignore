@@ -122,7 +122,7 @@ yarn-error.log*
 test_project/
 .repoql
 .ruff_cache
-tests/e2e/.venv
+tests/e2e/*/.venv
 .local/
 crates/bin/daemon/bin/
 crates/bin/daemon/Cargo.lock
@@ -131,10 +131,10 @@ crates/bin/daemon/Cargo.lock
 **/.ai/state/
 
 ## E2E test generated knowledge (ephemeral)
-tests/e2e/.ai/knowledge/
+tests/e2e/*/.ai/knowledge/
 target/
 /target
-tests/e2e/.ai/knowledge/agent/threads/
+tests/e2e/*/.ai/knowledge/agent/threads/
 
 ## Local binary scratch dir (source installables live in crates/bin/)
 /bin/

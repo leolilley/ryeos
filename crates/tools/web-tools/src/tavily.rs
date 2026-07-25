@@ -1,7 +1,7 @@
 //! Tavily web search — a dedicated, reliable search provider for LLM use.
 //!
 //! Deliberately separate from the scraper-based `search` tool: this one calls
-//! the Tavily API (https://docs.tavily.com) exclusively, so the legacy tool is
+//! the Tavily API (<https://docs.tavily.com>) exclusively, so the legacy tool is
 //! left exactly as it was. Exposed as the `rye/web/tavily-search` bundle tool,
 //! which declares `TAVILY_API_KEY` as a required secret (the daemon injects it
 //! into the subprocess env).

@@ -10,6 +10,7 @@ axum = { workspace = true }
 chrono = { workspace = true }
 lillux = { workspace = true }
 rand = { workspace = true }
+ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-bundle = { workspace = true }
 ryeos-engine = { workspace = true }
@@ -31,4 +32,5 @@ libc = { workspace = true }
 
 [dev-dependencies]
 ryeos-app = { workspace = true, features = ["test-support"] }
+ryeos-scheduler = { workspace = true }
 tempfile = { workspace = true }

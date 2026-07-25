@@ -243,6 +243,17 @@ impl EventStoreService {
 /// the two — the producer and consumer surfaces both fail to compile
 /// (or accept the new variant) atomically.
 fn validate_event_type(event_type: &str) -> Result<()> {
+    // The budget-transition audit event is daemon-authored only: it is
+    // emitted exclusively from committed ledger transitions through the
+    // transactional outbox publisher (which appends via the state store, not
+    // this runtime-facing service). A runtime-authored copy could poison the
+    // outbox exact-once recovery check.
+    if event_type == ryeos_state::event_types::PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1 {
+        bail!(
+            "event append refused: `{event_type}` is a daemon-authored accounting audit \
+             event and cannot be appended by a runtime"
+        );
+    }
     ryeos_runtime::RuntimeEventType::parse(event_type).map(|_| ())
 }
 

@@ -12,6 +12,7 @@
 
 use crate::registry::ServiceDescriptor;
 
+pub mod accounting_summary;
 pub mod admission_attestations_for_subject;
 pub mod admission_claim;
 pub mod admission_status;
@@ -35,6 +36,7 @@ pub mod health_status;
 pub mod identity_public_key;
 pub mod ingest_ignore;
 pub mod items_effective;
+pub mod launch_cancel;
 pub mod maintenance_gc;
 pub mod model_providers_validate;
 pub mod node_sign;
@@ -126,6 +128,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     push_head::DESCRIPTOR,
     project_apply_snapshot::DESCRIPTOR,
     project_status::DESCRIPTOR,
+    launch_cancel::DESCRIPTOR,
     threads_list::DESCRIPTOR,
     threads_get::DESCRIPTOR,
     threads_receipts::DESCRIPTOR,
@@ -142,6 +145,7 @@ pub const ALL: &[ServiceDescriptor] = &[
     seat::TOUCH_DESCRIPTOR,
     seat::CLOSE_DESCRIPTOR,
     threads_input::DESCRIPTOR,
+    accounting_summary::DESCRIPTOR,
     usage_summary::DESCRIPTOR,
     events_replay::DESCRIPTOR,
     events_chain_replay::DESCRIPTOR,

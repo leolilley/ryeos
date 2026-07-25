@@ -550,7 +550,7 @@ pub fn validate_bare_id_pattern(label: &str, pattern: &str) -> Result<(), String
 
 /// True when a user-composed grant could satisfy *any* capability the manifest
 /// runtime-authority minter can produce — i.e. it overlaps a `(verb, kind)`
-/// surface from [`authority_surfaces`], including wildcard forms (`*`, `ryeos.*`,
+/// surface from `authority_surfaces`, including wildcard forms (`*`, `ryeos.*`,
 /// `ryeos.put.*`, `ryeos.*.vault.*`, …). Matched on parsed segments, so
 /// unrelated grants like `ryeos.execute.tool.echo` or
 /// `ryeos.execute.service.vault/list` are *not* flagged.

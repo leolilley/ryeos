@@ -18,6 +18,7 @@ reqwest = { workspace = true, features = ["json", "rustls-tls", "stream"] }
 futures-util = { workspace = true }
 bytes = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-accounting = { workspace = true }
 ryeos-directive-core = { workspace = true }
 ryeos-runtime = { workspace = true }
 ryeos-state = { workspace = true }
@@ -27,6 +28,7 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 signal-hook = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "signal", "io-util", "net"] }
+tower = "0.5"
 tracing = { workspace = true }
 ryeos-tracing = { workspace = true }
 base64 = { workspace = true }

@@ -70,6 +70,7 @@ pub const ARTIFACT_PUBLISHED: &str = "artifact_published";
 pub const AS_LAUNCHED_RESOLUTION: &str = "as_launched_resolution";
 pub const AS_LAUNCHED_REF_BINDINGS: &str = "as_launched_ref_bindings";
 pub const RUNTIME_LAUNCH_FACTS: &str = "runtime_launch_facts";
+pub const LAUNCH_AUGMENTATION_CACHE_HIT: &str = "launch_augmentation_cache_hit";
 pub const THREAD_FACET_SET: &str = "thread_facet_set";
 pub const THREAD_RECONCILED: &str = "thread_reconciled";
 pub const ORPHAN_PROCESS_KILLED: &str = "orphan_process_killed";
@@ -94,7 +95,7 @@ pub const GRAPH_FOLLOW_SUSPENDED: &str = "graph_follow_suspended";
 pub const GRAPH_NODE_RETRY: &str = "graph_node_retry";
 
 pub const PROVIDER_RETRY: &str = "provider_retry";
-pub const PROVIDER_ATTEMPT_ACCOUNTING: &str = "provider_attempt_accounting";
+pub const PROVIDER_ATTEMPT_BUDGET_TRANSITION_V1: &str = "provider_attempt_budget_transition_v1";
 pub const COST_UNTRACKED: &str = "cost_untracked";
 pub const THREAD_USAGE: &str = "thread_usage";
 

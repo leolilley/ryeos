@@ -154,6 +154,11 @@ impl SchedulerContext for AppSchedulerContext {
             },
             requested_call: None,
         };
+        let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+            &exec_ctx.engine,
+            &exec_ctx.plan_ctx,
+            &provenance,
+        )?;
 
         let preflight = ryeos_executor::dispatch::preflight_root_dispatch(
             &spec.item_ref,
@@ -162,8 +167,10 @@ impl SchedulerContext for AppSchedulerContext {
             &spec.ref_bindings,
             None,
             None,
+            &project_binding,
             &exec_ctx,
             &self.0,
+            None,
         )?;
         if !preflight.class.persists_pre_minted_root() {
             anyhow::bail!(
@@ -187,6 +194,7 @@ impl SchedulerContext for AppSchedulerContext {
             project_path: std::path::Path::new(project_path),
             provenance,
             lifecycle_authority: resolved_authority.lifecycle,
+            launch_timings: None,
             original_root_kind: &original_root_kind,
             pre_minted_thread_id: Some(thread_id.to_string()),
             usage_subject: None,

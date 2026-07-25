@@ -114,6 +114,13 @@ pub(super) fn prepare_managed_launch(
                 ryeos_app::thread_lifecycle::admit_verified_root_execution(
                     &ctx.engine,
                     &ctx.plan_ctx,
+                    &ctx.plan_ctx,
+                    ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                        &ctx.engine,
+                        &ctx.plan_ctx,
+                        &request.provenance,
+                    )
+                    .map_err(DispatchError::Internal)?,
                     verified_subject.clone(),
                     node_history_policy,
                     subject.thread_profile.clone(),

@@ -43,15 +43,95 @@ static PROJECT_CAPTURE_PERMITS: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_PROJECT_CAPTURE_WORK));
 
 pub async fn run_bounded_project_capture<T, E>(
-    operation: impl FnOnce() -> std::result::Result<T, E>,
-) -> std::result::Result<T, E> {
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    run_bounded_project_capture_observed(operation, None).await
+}
+
+pub async fn run_bounded_project_capture_observed<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let semaphore_timer = launch_timings.as_ref().map(|timings| {
+        timings.nested(
+            "project_context_resolution",
+            "project_capture_semaphore_wait",
+        )
+    });
     let permit = PROJECT_CAPTURE_PERMITS
         .acquire()
         .await
         .expect("static project-capture semaphore is never closed");
-    let result = tokio::task::block_in_place(operation);
+    drop(semaphore_timer);
+    let result = run_project_capture_off_thread(operation, launch_timings).await;
     drop(permit);
     result
+}
+
+/// Run lightweight live-project filesystem resolution off the async worker
+/// without consuming one of the scarce CAS capture/materialization permits.
+pub async fn run_unbounded_project_capture<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    run_unbounded_project_capture_observed(operation, None).await
+}
+
+pub async fn run_unbounded_project_capture_observed<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    run_project_capture_off_thread(operation, launch_timings).await
+}
+
+async fn run_project_capture_off_thread<T, E>(
+    operation: impl FnOnce() -> std::result::Result<T, E> + Send + 'static,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> std::result::Result<T, E>
+where
+    T: Send + 'static,
+    E: Send + 'static,
+{
+    let queue_timer = launch_timings.as_ref().map(|timings| {
+        timings.nested(
+            "project_context_resolution",
+            "project_capture_blocking_queue_wait",
+        )
+    });
+    let result = tokio::task::spawn_blocking(move || {
+        drop(queue_timer);
+        let _work_timer = launch_timings.as_ref().map(|timings| {
+            timings.nested(
+                "project_context_resolution",
+                "project_capture_blocking_work",
+            )
+        });
+        operation()
+    });
+    match result.await {
+        Ok(result) => result,
+        Err(join_error) if join_error.is_panic() => {
+            std::panic::resume_unwind(join_error.into_panic())
+        }
+        Err(join_error) => {
+            panic!("project capture blocking task was cancelled: {join_error}")
+        }
+    }
 }
 
 /// A descriptor-pinned CAS publication whose immutable objects are protected
@@ -178,28 +258,31 @@ pub(crate) fn derive_pinned_child_authority(
     parent: &ryeos_state::objects::ExecutionProjectAuthority,
     snapshot_hash: String,
     realization: ryeos_state::objects::PinnedChildProjectRealization,
-    capability_ceiling: &[String],
 ) -> Result<ryeos_state::objects::ExecutionProjectAuthority> {
-    let (stable_identity, display_path, environment) = match parent {
+    let (stable_identity, display_path, environment, capability_ceiling) = match parent {
         ryeos_state::objects::ExecutionProjectAuthority::LiveProject {
             authored_project_identity,
             canonical_root,
             environment,
+            capability_ceiling,
             ..
         } => (
             authored_project_identity.clone(),
             Some(canonical_root.clone()),
             environment.clone(),
+            capability_ceiling.clone(),
         ),
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
             stable_project_identity,
             display_path,
             environment,
+            capability_ceiling,
             ..
         } => (
             stable_project_identity.clone(),
             display_path.clone(),
             environment.clone(),
+            capability_ceiling.clone(),
         ),
         ryeos_state::objects::ExecutionProjectAuthority::Projectless { .. } => {
             anyhow::bail!("pin-at-spawn requires project-backed parent authority")
@@ -220,7 +303,7 @@ pub(crate) fn derive_pinned_child_authority(
             }
         },
         environment,
-        capability_ceiling.to_vec(),
+        capability_ceiling,
     )?
     .with_child_policy(ryeos_state::objects::ChildProjectAuthorityPolicy::Inherit)
 }
@@ -950,4 +1033,45 @@ pub(crate) fn ensure_control_tree_unchanged(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod pinned_child_authority_tests {
+    use super::*;
+    use ryeos_state::objects::{
+        ChildProjectAuthorityPolicy, EnvironmentAuthority, ExecutionProjectAuthority,
+        LiveFilesystemConfinement, LiveProjectAccess, PinnedChildProjectRealization,
+    };
+
+    #[test]
+    fn pin_at_spawn_preserves_the_sealed_parent_capability_ceiling() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = ExecutionProjectAuthority::live(
+            root.path().canonicalize().unwrap(),
+            "project:test".to_string(),
+            LiveProjectAccess::ReadWrite,
+            LiveFilesystemConfinement::standard_descriptor_rooted(),
+            EnvironmentAuthority::None,
+            vec!["sealed.project.cap".to_string()],
+        )
+        .unwrap()
+        .with_child_policy(ChildProjectAuthorityPolicy::PinAtSpawn {
+            realization: PinnedChildProjectRealization::ReadOnly,
+        })
+        .unwrap();
+
+        let child = derive_pinned_child_authority(
+            &parent,
+            "a".repeat(64),
+            PinnedChildProjectRealization::ReadOnly,
+        )
+        .unwrap();
+        let ExecutionProjectAuthority::PinnedGeneration {
+            capability_ceiling, ..
+        } = child
+        else {
+            panic!("pin-at-spawn must produce pinned authority");
+        };
+        assert_eq!(capability_ceiling, vec!["sealed.project.cap".to_string()]);
+    }
 }

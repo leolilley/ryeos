@@ -1,6 +1,6 @@
 [package]
 name = "ryeosd"
-version = "0.5.60"
+version = "0.5.61"
 edition = "2021"
 description = "ryeosd daemon - Rust control plane for Rye OS"
 license.workspace = true
@@ -32,6 +32,7 @@ ryeos-isolation-protocol = { workspace = true }
 ryeos-node = { workspace = true }
 ryeos-state = { workspace = true }
 ryeos-scheduler = { workspace = true }
+ryeos-accounting = { workspace = true }
 ryeos-app = { workspace = true }
 ryeos-executor = { workspace = true }
 ryeos-api = { workspace = true }

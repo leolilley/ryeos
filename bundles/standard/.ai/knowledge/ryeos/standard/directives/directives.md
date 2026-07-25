@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:21Z:c7b41d4fb8d19a7ecd5ef2d4b8b96aa6a8a33a49ab66e0e622afe8066c0d795b:4pLk4GpCkyKkgGrs8Pa4eCIJP4vgTWKq0SRp+wS4O8nMbh8rJXH5wHoTFQiKTJIetcfUJb59VsEFHMTYztMRAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-23T15:25:30Z:2d6607cb750bb26edc60130f87f86a347ceac45bfb965e18e98789186cd5b4e5:ATdp212MbbEm31M5zu5HjbCjYXnfGFTtPfehbUrThNN0Mycj1gp/b9y488zw9Q59TEEdSIW4qkR0iKu8kSCkDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
 version: "2.0.0"
@@ -29,7 +29,7 @@ requires:
 limits:
   turns: 10
   tokens: 8000
-  spend_usd: 0.50
+  spend_usd: "0.5"
   duration_seconds: 300
 context:
   - position: system
@@ -112,8 +112,16 @@ widens beyond the parent fails compose.
 
 ### Limits
 - `limits.turns` — max LLM round-trips
-- `limits.tokens` — max total tokens
-- `limits.spend_usd` — max spend in USD
+- `limits.tokens` — settled provider-native token threshold (checked after
+  each attempt settles; not a pre-issue token reservation)
+- `limits.spend_usd` — hard USD budget as a canonical decimal string (e.g.
+  `"0.5"`; numeric values are rejected). A finite value requires the route to
+  carry a mechanically proven spend bound (signed tariff or provider-enforced
+  charge cap): the daemon reserves each attempt's worst-case charge before any
+  provider contact and shares one allowance across all paid descendants.
+  Routes without a proven bound reject a finite hard limit at launch.
+  Conservative reserved-maximum charges are reported distinctly from
+  provider-reported cost.
 - `limits.duration_seconds` — wall-clock timeout
 
 ### Context

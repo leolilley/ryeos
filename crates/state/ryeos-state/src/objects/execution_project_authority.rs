@@ -15,6 +15,10 @@ pub enum ExecutionLaunchDriver {
     ManagedRuntime,
     /// The item's verified executor is launched directly by the generic runner.
     DirectItemExecutor,
+    /// A verified daemon service handler runs inside the owning daemon process.
+    /// This driver records recovery identity only: it is never replayed after
+    /// ownership is lost.
+    InProcessHandler,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -28,6 +28,13 @@ pub struct Request {
     pub thread_id: String,
 }
 
+fn in_process_stop_refusal_error(
+    refusal: ryeos_app::state_store::InProcessHandlerStopRefusal,
+    thread_id: &str,
+) -> HandlerError {
+    HandlerError::Conflict(refusal.message(thread_id))
+}
+
 pub async fn handle(
     req: Request,
     ctx: HandlerContext,
@@ -57,6 +64,13 @@ pub async fn handle(
             "thread {} has non-cancellable status: {}",
             req.thread_id, current_status
         )));
+    }
+    if let Some(refusal) = state
+        .state_store
+        .in_process_handler_stop_refusal(&req.thread_id)
+        .map_err(|error| HandlerError::Internal(error.to_string()))?
+    {
+        return Err(in_process_stop_refusal_error(refusal, &req.thread_id));
     }
 
     // Atomically close the attach window before deciding whether there is a
@@ -133,7 +147,7 @@ pub async fn handle(
         StopIntent::Cancel => ThreadTerminalStatus::Cancelled.as_str(),
         StopIntent::Kill => ThreadTerminalStatus::Killed.as_str(),
     };
-    let finalized = match state.threads.finalize_thread(&ThreadFinalizeParams {
+    let requested_terminal = ThreadFinalizeParams {
         thread_id: req.thread_id.clone(),
         status: terminal_status.to_string(),
         outcome_code: Some(terminal_status.to_string()),
@@ -149,7 +163,8 @@ pub async fn handle(
         artifacts: Vec::new(),
         final_cost: None,
         summary_json: None,
-    }) {
+    };
+    let finalized = match state.threads.finalize_thread(&requested_terminal) {
         Ok(finalized) => finalized,
         Err(e) => {
             let current = state
@@ -305,5 +320,23 @@ mod tests {
     fn request_deserialize_accepts_valid_without_caller() {
         let req: Request = serde_json::from_value(json!({"thread_id": "T-1234"})).unwrap();
         assert_eq!(req.thread_id, "T-1234");
+    }
+
+    #[test]
+    fn shared_in_process_stop_fences_remain_conflicts_at_the_api_boundary() {
+        use ryeos_app::state_store::InProcessHandlerStopRefusal::{
+            ContradictoryAuthority, MissingCancellationContract, OwnerlessPendingReconciliation,
+        };
+
+        for refusal in [
+            ContradictoryAuthority,
+            MissingCancellationContract,
+            OwnerlessPendingReconciliation,
+        ] {
+            assert!(matches!(
+                in_process_stop_refusal_error(refusal, "T-recorded"),
+                HandlerError::Conflict(_)
+            ));
+        }
     }
 }

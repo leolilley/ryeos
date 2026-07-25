@@ -291,7 +291,14 @@ fn write_string(s: &str, out: &mut String) {
 }
 
 fn write_number(number: &serde_json::Number, out: &mut String) -> Result<(), CanonicalJsonError> {
-    out.push_str(&number.to_string());
+    // Typed floating-point values can retain a longer lexical representation
+    // than serde_json's decoder produces for the same JSON bytes. Normalize
+    // through that decoder before publication so canonical bytes are stable
+    // across the CAS write/read boundary.
+    let rendered = number.to_string();
+    let normalized =
+        serde_json::from_str::<serde_json::Number>(&rendered).map_err(|_| CanonicalJsonError)?;
+    out.push_str(&normalized.to_string());
     Ok(())
 }
 
@@ -335,9 +342,10 @@ fn write_canonical_json(v: &serde_json::Value, out: &mut String) -> Result<(), C
 ///
 /// These bytes are a persistence and signing protocol: object keys use
 /// decoded-string ordering, non-ASCII scalars use lowercase `\u` escapes, and
-/// numbers retain `serde_json::Number` rendering (including `0.0` versus `0`).
-/// This is deliberately not RFC 8785/JCS. Changing any rule changes content
-/// addresses and therefore requires a new, explicit content-address domain.
+/// numbers use decode-stable `serde_json::Number` rendering (including `0.0`
+/// versus `0`). Typed floating-point values are normalized through the same
+/// number decoder used when CAS objects are read. This is deliberately not
+/// RFC 8785/JCS.
 pub fn canonical_json(v: &serde_json::Value) -> Result<String, CanonicalJsonError> {
     let mut canonical = String::new();
     write_canonical_json(v, &mut canonical)?;

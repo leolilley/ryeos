@@ -12,7 +12,7 @@ pub fn serialize_tools(tools: &[ToolSchema], tool_schema: &Option<ToolSchemaConf
 /// Template-driven tool serialization.
 ///
 /// For each tool, render `template` with context:
-///   {"name": <name>, "description": <description>, "schema": <input_schema>}
+/// `{"name": <name>, "description": <description>, "schema": <input_schema>}`
 ///
 /// If `list_wrap` is set, wrap all rendered tools into a single
 /// element under that key. Gemini: `[{functionDeclarations: [...]}]`.

@@ -57,7 +57,7 @@ fn write_signed_runtime(bundle_root: &Path, name: &str, body: &str) {
 
 fn with_empty_launch_contract(body: &str, serves: &str) -> String {
     format!(
-        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n"
+        "{body}launch_contract:\n  primary_allowed_kinds: [{serves}]\n  primary_allowed_spaces: [bundle]\n  primary_allowed_trust: [trusted_bundle]\n  ref_bindings: {{}}\n  preparation:\n    kind: none\n  config_inputs: {{}}\n  secret_policy:\n    max_requirements: 0\n    allowed_names: []\n  required_runtime_data: []\n  runtime_facts: {{}}\n  financial_authority:\n    kind: none\n"
     )
 }
 
@@ -128,6 +128,8 @@ launch_contract:
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {}
+  financial_authority:
+    kind: none
 description: Default directive runtime
 ";
 
@@ -149,6 +151,8 @@ launch_contract:
     allowed_names: []
   required_runtime_data: []
   runtime_facts: {}
+  financial_authority:
+    kind: none
 ";
 
 // ── Parser-only tests ────────────────────────────────────────────────

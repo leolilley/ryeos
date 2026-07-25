@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-22T08:09:36Z:4afbe7ffeb453bb0d64fb6aeccbd6b2a9fbec24508417dc4f11516e422b7a50b:DcMQk2JKQKgYfstn2WE8oyr5GCwdLrBUo1duDRR6usVjhyppVaEQbzIafRqclL3FXpQGl/0qVK9V9uSsUx8nBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-23T15:25:30Z:342bdf398244bcde990dc065027c7a2c4461f5163ae4b87fd5531355d2aee3ca:jpxzluw9dXeQ2+BOkb7lmOV9I2K6uHBLdLCew18RujDZFzPdMLklMDrby1lxlMIxYB8xYxmOadXDUyiK8wpJBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: anthropic_messages
 base_url: "https://api.anthropic.com/v1/messages"
@@ -55,12 +55,57 @@ body_template:
 body_extra:
   max_tokens: 8192
 pricing:
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0"
+  output_per_million: "0"
   models:
-    claude-haiku-4-5-20251001:  {input_per_million: 1.00, output_per_million: 5.00}
-    claude-sonnet-4-5-20250929: {input_per_million: 3.00, output_per_million: 15.00}
-    claude-opus-4-1-20250805:   {input_per_million: 15.00, output_per_million: 75.00}
+    claude-haiku-4-5-20251001:  {input_per_million: "1", output_per_million: "5"}
+    claude-sonnet-4-5-20250929: {input_per_million: "3", output_per_million: "15"}
+    claude-opus-4-1-20250805:   {input_per_million: "15", output_per_million: "75"}
+# Model-specific signed spend authority: the tariff behind each model's
+# DerivedWorstCaseCharge certificate. The frozen request shape sends no
+# cache_control and no thinking block, so input/output tokens are the
+# complete billable dimension set for these routes; reasoning, when a model
+# emits it, is billed inside the provider-native output ceiling.
+profiles:
+  - name: haiku-4-5-spend
+    match: ["claude-haiku-4-5-20251001"]
+    spend_authority:
+      billing_principal: anthropic-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: anthropic-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: anthropic-2026-07
+        input_per_million: "1"
+        output_per_million: "5"
+        covered_dimensions: [input_tokens, output_tokens]
+  - name: sonnet-4-5-spend
+    match: ["claude-sonnet-4-5-20250929"]
+    spend_authority:
+      billing_principal: anthropic-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: anthropic-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: anthropic-2026-07
+        input_per_million: "3"
+        output_per_million: "15"
+        covered_dimensions: [input_tokens, output_tokens]
+  - name: opus-4-1-spend
+    match: ["claude-opus-4-1-20250805"]
+    spend_authority:
+      billing_principal: anthropic-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: anthropic-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: anthropic-2026-07
+        input_per_million: "15"
+        output_per_million: "75"
+        covered_dimensions: [input_tokens, output_tokens]
 extra:
   stream_url: ""
   setup:

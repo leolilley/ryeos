@@ -76,6 +76,32 @@ fn canonical_json_contract_has_stable_bytes_and_hash() {
     );
 }
 
+#[test]
+fn canonical_json_normalizes_typed_floats_to_decode_stable_bytes() {
+    let typed_float =
+        serde_json::to_value(3.0478680000000002_f64).expect("encode typed floating-point value");
+    let canonical = canonical_json(&typed_float).expect("canonical encoding");
+    assert_eq!(canonical, "3.047868");
+
+    let decoded: serde_json::Value =
+        serde_json::from_str(&canonical).expect("decode canonical number");
+    assert_eq!(
+        canonical_json(&decoded).expect("re-encode decoded number"),
+        canonical,
+        "canonical number bytes must survive the CAS decode boundary"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let store = CasStore::new(tmp.path().to_path_buf());
+    let object = serde_json::json!({"spend_usd": typed_float});
+    let hash = store.store_object(&object).expect("store object");
+    let loaded = store
+        .get_object(&hash)
+        .expect("read object")
+        .expect("object exists");
+    assert_eq!(loaded["spend_usd"].as_f64(), Some(3.047868));
+}
+
 // ── CasStore blob round-trip ───────────────────────────────────────────
 
 #[test]

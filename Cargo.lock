@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.60"
+version = "0.5.61"
 dependencies = [
  "anyhow",
  "base64",
@@ -2343,6 +2343,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "ryeos-accounting"
+version = "0.1.0"
+dependencies = [
+ "lillux",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "ryeos-api"
 version = "0.1.0"
 dependencies = [
@@ -2362,6 +2372,7 @@ dependencies = [
  "regex",
  "reqwest",
  "rmp-serde",
+ "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-directive-core",
@@ -2404,6 +2415,7 @@ dependencies = [
  "rand 0.8.6",
  "regex",
  "rusqlite",
+ "ryeos-accounting",
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-isolation-protocol",
@@ -2456,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.60"
+version = "0.5.61"
 dependencies = [
  "anyhow",
  "base64",
@@ -2555,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-core-tools"
-version = "0.5.60"
+version = "0.5.61"
 dependencies = [
  "anyhow",
  "base64",
@@ -2588,6 +2600,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lillux",
+ "ryeos-accounting",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2607,6 +2620,7 @@ dependencies = [
  "lillux",
  "regex",
  "reqwest",
+ "ryeos-accounting",
  "ryeos-directive-core",
  "ryeos-engine",
  "ryeos-runtime",
@@ -2619,6 +2633,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -2633,6 +2648,7 @@ dependencies = [
  "libc",
  "lillux",
  "regex",
+ "ryeos-accounting",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-tracing",
@@ -2656,12 +2672,14 @@ dependencies = [
  "libc",
  "lillux",
  "rand 0.8.6",
+ "ryeos-accounting",
  "ryeos-app",
  "ryeos-bundle",
  "ryeos-engine",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
  "ryeos-runtime",
+ "ryeos-scheduler",
  "ryeos-state",
  "ryeos-tracing",
  "serde",
@@ -2776,7 +2794,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-runtime"
-version = "0.5.60"
+version = "0.5.61"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2786,6 +2804,7 @@ dependencies = [
  "lillux",
  "regex",
  "rmp-serde",
+ "ryeos-accounting",
  "ryeos-engine",
  "ryeos-state",
  "serde",
@@ -2829,6 +2848,7 @@ dependencies = [
  "lillux",
  "rand 0.8.6",
  "rusqlite",
+ "ryeos-accounting",
  "ryeos-tracing",
  "serde",
  "serde_json",
@@ -2906,7 +2926,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.60"
+version = "0.5.61"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2933,6 +2953,7 @@ dependencies = [
  "reqwest",
  "rmp-serde",
  "rusqlite",
+ "ryeos-accounting",
  "ryeos-api",
  "ryeos-app",
  "ryeos-core-tools",

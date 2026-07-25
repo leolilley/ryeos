@@ -61,9 +61,13 @@ body_template:
   stream: "{{stream}}"
 auth:
 {auth_block}headers: {{}}
+schemas:
+  streaming:
+    mode: delta_merge
+  output_limit: {{path: max_tokens, semantics: provider_native_output_tokens}}
 pricing:
-  input_per_million: 0.0
-  output_per_million: 0.0
+  input_per_million: "0.0"
+  output_per_million: "0.0"
 "#
     );
     let signed = lillux::signature::sign_content(&body, signer, "#", None);
@@ -468,7 +472,7 @@ category: "resume_tool"
 description: "test runtime with native_resume"
 native_resume: true
 config:
-  command: "sleep"
+  command: "/usr/bin/sleep"
   args: ["60"]
 "#;
     let signed = lillux::signature::sign_content(runtime_body, signer, "#", None);

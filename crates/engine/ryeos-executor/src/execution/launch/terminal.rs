@@ -3,19 +3,8 @@ use serde_json::{json, Value};
 use super::RuntimeResult;
 use ryeos_app::state_store::ThreadTerminalAuthority;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
-use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
+use ryeos_runtime::envelope::{decode_follow_terminal_envelope, RuntimeCost, RuntimeResultStatus};
 use ryeos_state::objects::ThreadStatus;
-
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuthoritativeRuntimeEnvelope {
-    success: bool,
-    status: RuntimeResultStatus,
-    result: Value,
-    outputs: Value,
-    warnings: Vec<String>,
-    cost: Option<ryeos_runtime::envelope::RuntimeCost>,
-}
 
 pub(super) struct FallbackFinalization {
     pub params: ThreadFinalizeParams,
@@ -76,13 +65,17 @@ pub(super) fn reconcile_callback_finalization(
             "callback-authoritative terminal snapshot is missing its managed runtime envelope"
         )
     })?;
-    let envelope: AuthoritativeRuntimeEnvelope = serde_json::from_value(raw_envelope.clone())
-        .map_err(|error| {
-            anyhow::anyhow!("callback-authoritative managed runtime envelope is malformed: {error}")
-        })?;
-    if envelope.success != envelope.status.is_success()
-        || runtime_terminal_status(envelope.status) != authority.status
-    {
+    let envelope = decode_follow_terminal_envelope(raw_envelope).map_err(|error| {
+        anyhow::anyhow!("callback-authoritative managed runtime envelope is malformed: {error}")
+    })?;
+    if envelope.child_thread_id != runtime_result.thread_id {
+        anyhow::bail!(
+            "callback-authoritative managed runtime envelope child_thread_id `{}` contradicts runtime stdout thread_id `{}`",
+            envelope.child_thread_id,
+            runtime_result.thread_id
+        );
+    }
+    if runtime_terminal_status(envelope.status) != authority.status {
         anyhow::bail!(
             "callback-authoritative managed runtime envelope contradicts its terminal status"
         );
@@ -244,7 +237,7 @@ mod tests {
         RuntimeResult {
             success: status.is_success(),
             status,
-            thread_id: "runtime-thread".to_string(),
+            thread_id: "T-runtime-thread".to_string(),
             result: Some(json!("payload")),
             outputs: json!({"answer": 42}),
             cost: None,
@@ -267,7 +260,7 @@ mod tests {
                     final_cost: None,
                     managed_envelope: Some(json!({
                         "success": false,
-                        "child_thread_id": "T-authority",
+                        "child_thread_id": "T-runtime-thread",
                         "status": "timed_out",
                         "result": "payload",
                         "outputs": {"answer": 42},
@@ -287,7 +280,7 @@ mod tests {
             final_cost: None,
             managed_envelope: Some(json!({
                 "success": result.success,
-                "child_thread_id": "T-authority",
+                "child_thread_id": "T-runtime-thread",
                 "status": result.status,
                 "result": result.result,
                 "outputs": result.outputs,
@@ -463,6 +456,23 @@ mod tests {
             basis: None,
         });
         assert!(reconcile_callback_finalization(&completed, &cost_result).is_err());
+    }
+
+    #[test]
+    fn callback_authority_rejects_child_thread_identity_contradiction() {
+        let mut contradictory = authority(ThreadStatus::Completed);
+        contradictory.managed_envelope.as_mut().unwrap()["child_thread_id"] =
+            json!("T-other-runtime");
+
+        let error = reconcile_callback_finalization(
+            &contradictory,
+            &runtime_result(RuntimeResultStatus::Completed),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains(
+            "child_thread_id `T-other-runtime` contradicts runtime stdout thread_id `T-runtime-thread`"
+        ));
     }
 
     #[test]

@@ -49,7 +49,7 @@ pub struct Request {
     /// Claimant nonce included in the claimant signature.
     pub nonce: String,
     /// Base64 Ed25519 signature by `public_key` over the admission claim
-    /// string produced by [`claim_string`].
+    /// string produced by `claim_string`.
     pub signature: String,
 }
 
