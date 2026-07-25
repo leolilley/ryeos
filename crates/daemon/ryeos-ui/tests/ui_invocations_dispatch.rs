@@ -4,6 +4,8 @@ mod test_state;
 use test_state::{build_test_state, build_test_state_with_live_bundles};
 
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
@@ -29,6 +31,31 @@ fn read_only_context() -> LaunchContext {
         ],
         user_principal_id: None,
     }
+}
+
+#[test]
+fn dispatch_transport_is_unrecorded() {
+    let (_tmp, state) = build_test_state_with_live_bundles();
+    let ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:test-ui-dispatch".into(),
+            scopes: vec![],
+        }),
+        project_context: ProjectContext::None,
+        current_site_id: "site:local".into(),
+        origin_site_id: "site:local".into(),
+        execution_hints: Default::default(),
+        validate_only: true,
+    };
+    let canonical = CanonicalRef::parse("service:ui/invocations/dispatch").unwrap();
+    let resolved = state.engine.resolve(&ctx, &canonical).unwrap();
+    let verified = state.engine.verify(&ctx, resolved).unwrap();
+
+    assert!(
+        !ryeos_app::service_registry::extract_record_thread(&verified.resolved.metadata.extra)
+            .unwrap(),
+        "the UI dispatch transport must not create a thread that triggers another UI refresh"
+    );
 }
 
 #[tokio::test]
