@@ -4820,7 +4820,18 @@ async fn prepare_follow_child_launch_inner(
         // recovery reconstructs and transiently rebinds it from provenance.
         prepared_resume.project_context = resume.project_context.clone();
         let prepared_resume = prepared_resume.clone();
-        prepared.set_sealed_root_request(sealed_request.clone());
+        // The inherited request is only the child's initial identity. A fresh
+        // child may add launch-augmentation outputs (for example
+        // `rendered_contexts`) during its authoritative pass; seal that
+        // augmented resolution so a retry/relaunch receives the same runtime
+        // envelope instead of reusing the parent's pre-augmentation view.
+        let augmented_sealed_request =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::capture_with_resolution(
+                &execution.resolved,
+                authority.selected_runtime.canonical_ref.to_string(),
+                authority.resolution.clone(),
+            )?;
+        prepared.set_sealed_root_request(augmented_sealed_request);
         (prepared, prepared_resume)
     } else {
         // An existing child already has an immutable durable birth record.

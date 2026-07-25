@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-25T03:38:44Z:ed31ca77e2854d6b2f2f6e752acf77297d8ddd97dbca0da0d0482c65dd0d10ea:9MrUOEZWmZHpt26IYhd2r5O9DescDcUyGNMAeEPZQkVJ4aCZ+dbxd4y5hTfeEvCp+8dItm7HYfPmty1eEwj0Cw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-25T04:55:10Z:f8c1c3a4713722bacaacd2db451c925d991a775813b5c5377b3975c732e0094f:KIQGLKpu52HEiFALuxMmugLM9LXZUXwggkS2lBHADfK/X/uHnmABjOnL7rvbfi+YNFHpyO5u78pVvwTL1lokDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://openrouter.ai/api/v1"
@@ -132,6 +132,45 @@ pricing:
     bytedance-seed/seed-2-0-lite:          {input_per_million: "0.25", output_per_million: "2"}
     nvidia/nemotron-3-super-120b-a12b:     {input_per_million: "0.09", output_per_million: "0.45"}
 profiles:
+  - name: claude-haiku-4-5-spend
+    match: ["anthropic/claude-haiku-4.5"]
+    spend_authority:
+      billing_principal: openrouter-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: openrouter-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: openrouter-2026-07
+        input_per_million: "1"
+        output_per_million: "5"
+        covered_dimensions: [input_tokens, output_tokens]
+  - name: qwen3-32b-spend
+    match: ["qwen/qwen3-32b"]
+    spend_authority:
+      billing_principal: openrouter-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: openrouter-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: openrouter-2026-07
+        input_per_million: "0.08"
+        output_per_million: "0.28"
+        covered_dimensions: [input_tokens, output_tokens]
+  - name: gpt-5-4-spend
+    match: ["openai/gpt-5.4"]
+    spend_authority:
+      billing_principal: openrouter-api-key
+      credential_authority_generation: gen-1
+      pricing_contract_subject: openrouter-standard-api-2026-07
+      tariff:
+        schema_version: 1
+        currency: usd
+        pricing_generation: openrouter-2026-07
+        input_per_million: "2.5"
+        output_per_million: "15"
+        covered_dimensions: [input_tokens, output_tokens]
   - name: deepseek-v4-pro-spend
     match: ["deepseek/deepseek-v4-pro"]
     spend_authority:
