@@ -31,7 +31,7 @@ const DEFAULT_OUTPUT_DIR = path.resolve(
 );
 const REQUEST_TIMEOUT_MS = 180_000;
 const CORPUS_ID = "execute-stream-trivial-v1";
-const EXPECTED_OUTPUT = "OK";
+const EXPECTED_OUTPUT = process.env.RYEOS_LATENCY_EXPECTED_OUTPUT ?? "OK";
 const CORPUS_PARAMETERS = Object.freeze({
   message: "Reply with exactly OK.",
   history: "[]",
@@ -55,13 +55,18 @@ const PROJECT_EXECUTION_POLICY = Object.freeze({
     child_policy: { kind: "inherit" },
   },
 });
-const MODELS = Object.freeze({
+const BUILTIN_MODELS = {
   zai_flash: {
     id: "glm-4.7-flash",
     directive_ref: "directive:test/latency/zai_flash",
     fixture_path: ".ai/directives/test/latency/zai_flash.md",
   },
-});
+};
+let externalModels = {};
+if (process.env.RYEOS_LATENCY_MODELS_JSON) {
+  externalModels = JSON.parse(process.env.RYEOS_LATENCY_MODELS_JSON);
+}
+const MODELS = Object.freeze({ ...BUILTIN_MODELS, ...externalModels });
 const CLASSES = Object.freeze([
   "post-install-cold-observed",
   "warm",
@@ -436,6 +441,8 @@ async function runProbe({
   let cancellation = null;
   let parseFailures = 0;
   let cognitionText = "";
+  let streamedCognitionText = "";
+  let completedCognitionText = "";
   try {
     const headers = {
       "content-type": "application/json",
@@ -483,12 +490,14 @@ async function runProbe({
           client.stream_started_ms ??= monotonicMs(started);
           threadId ??= stringField(event.parsed, "thread_id");
         } else if (event.event === "cognition_out") {
-          const delta = stringField(event.parsed, "delta", "content", "text");
-          if (typeof delta === "string") cognitionText += delta;
+          const delta = stringField(event.parsed, "delta");
+          const content = stringField(event.parsed, "content", "text");
+          if (typeof delta === "string") streamedCognitionText += delta;
+          else if (typeof content === "string") completedCognitionText += content;
           if (
             client.first_text_ms === null &&
-            typeof delta === "string" &&
-            /\S/.test(delta)
+            ((typeof delta === "string" && /\S/.test(delta)) ||
+              (typeof content === "string" && /\S/.test(content)))
           ) {
             client.first_text_ms = monotonicMs(started);
           }
@@ -507,6 +516,10 @@ async function runProbe({
         }
       }
     }
+    cognitionText =
+      streamedCognitionText.length > 0
+        ? streamedCognitionText
+        : completedCognitionText;
     const normalizedOutput = cognitionText.trim();
     outcome =
       terminalEvent === "thread_completed" &&
