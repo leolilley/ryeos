@@ -121,9 +121,7 @@ fn failure_reason(payload: &Value) -> String {
                     .and_then(Value::as_str);
                 return thread_id.map_or_else(
                     || summary.to_string(),
-                    |thread_id| {
-                        format!("{summary}; full child diagnostic: `ryeos thread tail {thread_id}`")
-                    },
+                    |thread_id| crate::thread_diagnostics::child_diagnostic(summary, thread_id),
                 );
             }
             return obj.to_string();
