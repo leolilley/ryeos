@@ -10,9 +10,13 @@
 //! the resume path re-spawns the tool with `RYEOS_RESUME=1` and the same
 //! `RYEOS_CHECKPOINT_DIR`, and the tool calls `load_latest()` to recover.
 //!
-//! Atomicity: every `write` goes to `latest.json.tmp.<pid>.<rand>`
-//! first, then `rename()`s into place. A crash during write therefore
-//! never leaves a partial `latest.json`.
+//! Durability: every `write` goes through the shared `lillux` durable
+//! atomic-replace primitive — write a temp sibling, `fsync` it, `rename()`
+//! into place, then `fsync` the containing directory. A crash never leaves a
+//! partial `latest.json`, and a committed checkpoint survives a power loss or
+//! kernel panic, not only a process crash. This is the same barrier vault
+//! secrets and bundle journals rely on; the checkpoint is the most
+//! durability-critical write in the runtime and must not be weaker.
 //!
 //! Checkpoint payloads are schema-agnostic JSON, but they share the runtime
 //! expression language's depth/node/byte shape ceiling. That common boundary
@@ -149,9 +153,14 @@ impl CheckpointWriter {
         if !src.exists() {
             return Ok(false);
         }
+        // Byte-exact durable seed: read the predecessor's bytes verbatim (no
+        // re-serialization) and publish them through the same fsync barrier as
+        // `write`, so a power loss right after seeding cannot leave the
+        // successor's dir empty or half-written.
+        let bytes = std::fs::read(&src).with_context(|| format!("read {}", src.display()))?;
         std::fs::create_dir_all(to_dir).with_context(|| format!("create {}", to_dir.display()))?;
-        std::fs::copy(&src, to_dir.join(LATEST_FILE))
-            .with_context(|| format!("copy {} -> {}", src.display(), to_dir.display()))?;
+        lillux::atomic_write(&to_dir.join(LATEST_FILE), &bytes)
+            .with_context(|| format!("durable copy {} -> {}", src.display(), to_dir.display()))?;
         Ok(true)
     }
 
@@ -191,7 +200,12 @@ impl CheckpointWriter {
         &self.dir
     }
 
-    /// Atomically replace `latest.json` with the serialized `state`.
+    /// Durably and atomically replace `latest.json` with the serialized
+    /// `state`. Routes through the shared `lillux` durable atomic-replace
+    /// primitive (temp + file `fsync` + `rename` + directory `fsync`), so a
+    /// resume after a power loss or kernel panic — not only a process crash —
+    /// sees the committed checkpoint rather than an older one. The primitive
+    /// creates and cleans up its own uniquely named temp sibling.
     pub fn write(&self, state: &Value) -> Result<()> {
         validate_checkpoint_shape(state, "checkpoint payload").map_err(|error| {
             anyhow::anyhow!("checkpoint payload exceeded runtime JSON bounds: {error}")
@@ -199,17 +213,6 @@ impl CheckpointWriter {
         std::fs::create_dir_all(&self.dir)
             .with_context(|| format!("create checkpoint dir {}", self.dir.display()))?;
         let final_path = self.dir.join(LATEST_FILE);
-        // Unique suffix from pid + monotonic nanos avoids pulling a
-        // `rand` dep just for a temp filename.
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp_path = self.dir.join(format!(
-            "{LATEST_FILE}.tmp.{}.{}",
-            std::process::id(),
-            nanos
-        ));
         let bytes = serde_json::to_vec(state).context("serialize checkpoint payload")?;
         if bytes.len() > MAX_CHECKPOINT_FILE_BYTES {
             bail!(
@@ -217,14 +220,8 @@ impl CheckpointWriter {
                 bytes.len()
             );
         }
-        std::fs::write(&tmp_path, &bytes)
-            .with_context(|| format!("write {}", tmp_path.display()))?;
-        std::fs::rename(&tmp_path, &final_path).with_context(|| {
-            format!(
-                "atomic rename {} -> {}",
-                tmp_path.display(),
-                final_path.display()
-            )
+        lillux::atomic_write(&final_path, &bytes).with_context(|| {
+            format!("durable atomic checkpoint write {}", final_path.display())
         })?;
         Ok(())
     }
