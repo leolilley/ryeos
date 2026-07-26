@@ -561,6 +561,40 @@ mod tests {
     }
 
     #[test]
+    fn separately_reported_reasoning_may_exceed_visible_output() {
+        let block = concat!(
+            "data: {\"id\":\"gen-response-123\",\"choices\":[],\"usage\":{",
+            "\"prompt_tokens\":21327,\"completion_tokens\":1847,",
+            "\"completion_tokens_details\":{\"reasoning_tokens\":1924},",
+            "\"cost\":0.00403857}}\n",
+        );
+        let mut usage = None;
+        let mut finish = None;
+        let mut response_id = None;
+        let mut streaming = declared_metadata(UsageAggregation::LatestSnapshot);
+        streaming
+            .metadata
+            .as_mut()
+            .and_then(|metadata| metadata.usage.as_mut())
+            .expect("declared usage metadata")
+            .reasoning_included_in_output = false;
+
+        harvest_chunk_meta(
+            block,
+            &mut usage,
+            &mut finish,
+            &mut response_id,
+            Some(&streaming),
+        );
+
+        let usage = usage.expect("usage snapshot");
+        assert_eq!(usage.complete_token_counts(), Some((21_327, 1_847)));
+        assert_eq!(usage.reasoning_tokens, Some(1_924));
+        assert_eq!(usage.reported_cost_usd, Some(0.00403857));
+        assert!(usage.is_valid());
+    }
+
+    #[test]
     fn usage_totals_are_aggregated_without_provider_identity_branching() {
         let block = concat!(
             "data: {\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\n",
