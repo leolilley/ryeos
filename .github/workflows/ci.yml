@@ -195,7 +195,10 @@ jobs:
   test:
     name: Workspace tests
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # The full two-thread gate now reaches more than 5,250 tests and has
+    # repeatedly been canceled by the previous 90-minute ceiling while still
+    # making progress near the end of the suite.
+    timeout-minutes: 120
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_tests }}
     steps:
       - name: Check out repository
