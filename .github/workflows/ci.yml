@@ -26,6 +26,11 @@ on:
         required: true
         default: false
         type: boolean
+      rust_2024_audit:
+        description: "Inventory Rust 2024 compatibility diagnostics"
+        required: true
+        default: false
+        type: boolean
       bundle_set:
         description: "Bundle set for refresh_bundles"
         required: true
@@ -145,6 +150,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: ${{ github.event_name != 'workflow_dispatch' }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -155,6 +161,27 @@ jobs:
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  secrets-manual:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        uses: taiki-e/install-action@1725d1806acf0cd664ecc8dd0fcff6d896453dcf # gitleaks
+        with:
+          tool: gitleaks@8.24.3
+
+      - name: Scan commits introduced from next
+        run: |
+          base="$(git merge-base HEAD origin/next)"
+          gitleaks git --redact --exit-code=2 --log-opts="$base..HEAD"
 
   test:
     name: Workspace tests
@@ -267,3 +294,97 @@ jobs:
           # use the hardcoded official publisher and need no override.
           RYEOS_SMOKE_TRUST_FILE: /usr/share/ryeos/.ai/PUBLISHER_TRUST.toml
         run: ./scripts/smoke-installed-resume.sh
+
+  rust-2024-audit:
+    name: Rust 2024 compatibility audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.rust_2024_audit }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libcap-dev binutils xz-utils pkg-config libssl-dev ca-certificates openssl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master, pinned
+        with:
+          toolchain: 1.95.0
+          targets: wasm32-unknown-unknown
+
+      - name: Create audit output directory
+        run: mkdir -p "$RUNNER_TEMP/ryeos-rust-2024-diagnostics"
+
+      - name: Audit workspace targets
+        run: |
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-workspace-target" \
+          RUSTFLAGS="-W rust-2024-compatibility" \
+            cargo check --locked --workspace --all-targets --all-features \
+              --keep-going --message-format=json \
+              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/workspace.jsonl" \
+              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/workspace.stderr"
+          printf '%s\n' "$?" \
+            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/workspace.status"
+
+      - name: Audit workspace doctests
+        run: |
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-doctest-target" \
+          RUSTFLAGS="-W rust-2024-compatibility" \
+          RUSTDOCFLAGS="-W rust-2024-compatibility" \
+            cargo test --locked --doc --workspace --all-features \
+              --no-fail-fast --message-format=json \
+              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/doctest.jsonl" \
+              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/doctest.stderr"
+          printf '%s\n' "$?" \
+            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/doctest.status"
+
+      - name: Audit WASM client
+        run: |
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-wasm-target" \
+          RUSTFLAGS="-W rust-2024-compatibility" \
+            cargo check --locked -p ryeos-client-web \
+              --target wasm32-unknown-unknown --lib --message-format=json \
+              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.jsonl" \
+              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.stderr"
+          printf '%s\n' "$?" \
+            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/wasm.status"
+
+      - name: Audit excluded bubblewrap adapter
+        run: |
+          set +e
+          CARGO_TARGET_DIR="$RUNNER_TEMP/ryeos-rust-2024-adapter-target" \
+          RUSTFLAGS="-W rust-2024-compatibility" \
+            cargo check --locked \
+              --manifest-path bundles/sandbox-linux-bubblewrap/adapter/Cargo.toml \
+              --all-targets --message-format=json \
+              >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.jsonl" \
+              2>"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.stderr"
+          printf '%s\n' "$?" \
+            >"$RUNNER_TEMP/ryeos-rust-2024-diagnostics/adapter.status"
+
+      - name: Upload compatibility diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: rust-2024-compatibility-${{ github.sha }}
+          path: ${{ runner.temp }}/ryeos-rust-2024-diagnostics
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Require every audit surface to compile
+        run: |
+          failed=0
+          for surface in workspace doctest wasm adapter; do
+            status="$(cat "$RUNNER_TEMP/ryeos-rust-2024-diagnostics/$surface.status")"
+            if [[ "$status" != 0 ]]; then
+              echo "::error::$surface compatibility audit exited with status $status"
+              failed=1
+            fi
+          done
+          exit "$failed"
