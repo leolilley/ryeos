@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-26T05:37:47Z:1ddd45c636f9f209d849ebfecc43fde858f57751c581249dc5cd8edb07804aa5:NfAoheI0qycEzwEap6/3QFt9rpcJmmh6B2vNBA3VncplndHefE0XsEsy1qTqIJgglTsDQL1Flacg60LybM95Bw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
+# ryeos:signed:2026-07-15T00:27:45Z:f65e49438f21ce8e201f7137b00db38ad7e47b254ffcfed350f561fae1dfbe55:P7R0i7Xz3E2/KyLZRpx4fwkcFioPeoqt2RME4qEDDKAtwNoCdIezxwnYQlPCmIxP4u/yE+Sw65ukTh2i80OqCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - tool
 - env-check
@@ -12,10 +12,6 @@ project:
   bind_parameter: project_path
 defaults:
   ref_bindings: {}
-control_flags:
-- flag: ref-binding
-  help: "Bind a secondary execution ref as name=canonical-ref; repeat for multiple bindings"
-  binding: ref_binding
 dispatch:
   kind: execute_ref
   execute: service:tool/env-check
