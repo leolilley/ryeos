@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-21T03:25:57Z:306a7f53ae369f12c27ef115ff7ec3d3145bb0c565ce5a1388fec212d041e0a8:5lvKT02lPsd54WUamwW5GGXN1ftRshCiUZ/g77B0m66CkOEfWWlP65yc4yswDRo4sIi95iG4cmeJDZ+AfzIACw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-26T04:39:41Z:5ddfb5b14dae1be174d0cc4b534b4b4fe6462d6b5ff5ade78321ab7d055649d7:4kCxfuc1sblEZLOIBcCTZJHqnApxHYJW4DIZ5mi6vLC4ZZAqRUcvgw7EvWL7sVw5dO+qlol8iC3H8CeX9F8CDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "manifest-sign"
 executor_id: "@subprocess"
@@ -21,5 +21,5 @@ config_schema:
       description: "Bundle source directory containing .ai/."
     name:
       type: string
-      description: "Effective bundle id the manifest must carry (first bare-id segment of the bundle's item refs). Defaults to the source directory basename."
+      description: "Effective bundle id the manifest must carry (first bare-id segment of the bundle's item refs). Defaults to the name declared by .ai/manifest.source.yaml."
   required: [source]

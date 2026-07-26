@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_runtime::ReferenceSegment;
 use serde_json::Value;
 
@@ -535,6 +536,83 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
     let _ = referenced_inputs;
 
     result
+}
+
+/// Validate child launches whose lifecycle requires a managed runtime against
+/// the admitted runtime registry used by the node.
+///
+/// Structural graph validation is intentionally registry-independent. The
+/// `graph validate` execution augments it with this check so an authored graph
+/// cannot pass validation and then fail only at the follow/detach handoff.
+pub fn validate_managed_child_kinds(
+    def: &GraphDefinition,
+    managed_kinds: &HashSet<String>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (name, node) in &def.config.nodes {
+        let lifecycle = if node.follow {
+            "follow"
+        } else if node.detach {
+            "detach"
+        } else {
+            continue;
+        };
+        let Some(action) = node.action.as_ref() else {
+            continue;
+        };
+        let Some(item_id) = action.get("item_id").and_then(Value::as_str) else {
+            errors.push(format!(
+                "{lifecycle} node '{name}' must declare a literal canonical action.item_id \
+                 so its managed runtime can be validated"
+            ));
+            continue;
+        };
+        let kind = if item_id.contains("${") {
+            let Some((kind, bare_id)) = item_id.split_once(':') else {
+                errors.push(format!(
+                    "{lifecycle} node '{name}' action.item_id has a dynamic child kind — the \
+                     managed runtime must be provable during graph validation"
+                ));
+                continue;
+            };
+            if kind.contains("${") || bare_id.is_empty() {
+                errors.push(format!(
+                    "{lifecycle} node '{name}' action.item_id has a dynamic or empty child kind — \
+                     the managed runtime must be provable during graph validation"
+                ));
+                continue;
+            }
+            match CanonicalRef::parse(&format!("{kind}:managed-child")) {
+                Ok(item_ref) => item_ref.kind,
+                Err(error) => {
+                    errors.push(format!(
+                        "{lifecycle} node '{name}' action.item_id '{item_id}' has an invalid \
+                         child kind: {error}"
+                    ));
+                    continue;
+                }
+            }
+        } else {
+            match CanonicalRef::parse(item_id) {
+                Ok(item_ref) => item_ref.kind,
+                Err(error) => {
+                    errors.push(format!(
+                        "{lifecycle} node '{name}' action.item_id '{item_id}' is not a canonical \
+                         item ref: {error}"
+                    ));
+                    continue;
+                }
+            }
+        };
+        if !managed_kinds.contains(&kind) {
+            errors.push(format!(
+                "{lifecycle} node '{name}' targets child kind '{}' with no managed runtime — \
+                 a {lifecycle} child must be a managed runtime execution",
+                kind
+            ));
+        }
+    }
+    errors
 }
 
 fn bfs_reachable(start: &str, nodes: &HashMap<String, GraphNode>) -> HashSet<String> {
@@ -1587,6 +1665,96 @@ config:
             "expected follow-without-action rejection, got: {:?}",
             result.errors
         );
+    }
+
+    #[test]
+    fn managed_child_validation_rejects_leaf_follow_kind() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: launch
+  nodes:
+    launch:
+      action: {item_id: "tool:test/worker", ref_bindings: {}}
+      follow: true
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let graph = make_graph(yaml);
+        let managed = HashSet::from(["directive".to_string(), "graph".to_string()]);
+        let errors = validate_managed_child_kinds(&graph, &managed);
+        assert!(
+            errors.iter().any(|error| {
+                error.contains("child kind 'tool'")
+                    && error.contains("no managed runtime")
+                    && error.contains("follow child")
+            }),
+            "leaf follow kind must be rejected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn managed_child_validation_accepts_admitted_runtime_kind() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: launch
+  nodes:
+    launch:
+      action: {item_id: "directive:test/worker", ref_bindings: {}}
+      follow: true
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let graph = make_graph(yaml);
+        let managed = HashSet::from(["directive".to_string()]);
+        assert!(validate_managed_child_kinds(&graph, &managed).is_empty());
+    }
+
+    #[test]
+    fn managed_child_validation_rejects_dynamic_item_id() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: launch
+  nodes:
+    launch:
+      action: {item_id: "${state.child_ref}", ref_bindings: {}}
+      follow: true
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let graph = make_graph(yaml);
+        let managed = HashSet::from(["directive".to_string()]);
+        let errors = validate_managed_child_kinds(&graph, &managed);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("dynamic child kind")),
+            "dynamic managed child kind must be rejected: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn managed_child_validation_accepts_dynamic_bare_id_with_static_kind() {
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: launch
+  nodes:
+    launch:
+      action: {item_id: "directive:test/${state.worker}", ref_bindings: {}}
+      follow: true
+      next: {type: unconditional, to: done}
+    done: {node_type: return}
+"#;
+        let graph = make_graph(yaml);
+        let managed = HashSet::from(["directive".to_string()]);
+        assert!(validate_managed_child_kinds(&graph, &managed).is_empty());
     }
 
     // ── §A per-step retry validation ─────────────────────────────────

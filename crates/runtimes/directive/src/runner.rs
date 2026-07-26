@@ -3465,12 +3465,7 @@ impl Runner {
     ) -> anyhow::Result<()> {
         let mut proposed_cost = self.budget.cost();
         proposed_cost
-            .checked_accumulate(&RuntimeCost {
-                input_tokens: 0,
-                output_tokens: 0,
-                total_usd: usd,
-                basis: Some("provider_reported_spend_only".to_string()),
-            })
+            .checked_accumulate(&provider_reported_spend_runtime_cost(usd))
             .map_err(|error| {
                 anyhow::anyhow!("provider spend violates accounting bounds: {error}")
             })?;
@@ -3652,6 +3647,21 @@ impl Runner {
     }
 }
 
+/// Represent a provider-reported charge in the runtime's own cost.
+///
+/// `RuntimeCost::basis` describes cost ownership, not the evidence used to
+/// determine the charge: `None` is cost incurred by this thread and `rollup`
+/// is cost aggregated from children. The accounting ledger independently
+/// records the charge source as `ChargeBasis::ProviderReported`.
+fn provider_reported_spend_runtime_cost(usd: f64) -> RuntimeCost {
+    RuntimeCost {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_usd: usd,
+        basis: None,
+    }
+}
+
 fn runtime_failure_payload(
     error: &str,
     thread_id: &str,
@@ -3739,6 +3749,16 @@ mod tests {
 
     fn usd(canonical: &str) -> ryeos_accounting::UsdNanos {
         ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
+    }
+
+    #[test]
+    fn provider_reported_spend_is_own_runtime_cost_not_a_rollup_basis() {
+        let cost = provider_reported_spend_runtime_cost(0.125);
+        cost.validate().unwrap();
+        assert_eq!(cost.input_tokens, 0);
+        assert_eq!(cost.output_tokens, 0);
+        assert_eq!(cost.total_usd, 0.125);
+        assert_eq!(cost.basis, None);
     }
 
     fn make_policy() -> EnvelopePolicy {

@@ -1098,6 +1098,36 @@ config:
         valid["accounting"] = json!({"total": total, "nodes": [node.clone()], "hooks": []});
         from_checkpoint_value(&valid, &definition).unwrap();
 
+        // Follow-result splicing decodes and re-encodes the checkpoint through
+        // JSON. Preserve a valid resume when that changes only the USD total's
+        // final representation bit, as observed in a real multi-follow run.
+        let checked_usd = 0.023255329999999998_f64;
+        let mut adjacent_usd = checkpoint(&definition);
+        adjacent_usd["accounting"] = json!({
+            "total": {
+                "input_tokens": 3,
+                "output_tokens": 5,
+                "total_usd": f64::from_bits(checked_usd.to_bits() + 1),
+                "basis": ryeos_runtime::envelope::COST_BASIS_ROLLUP
+            },
+            "nodes": [{
+                "node": "wait",
+                "step": 1,
+                "item_id": "directive:test/work",
+                "cost": {
+                    "input_tokens": 3,
+                    "output_tokens": 5,
+                    "total_usd": checked_usd
+                }
+            }],
+            "hooks": []
+        });
+        from_checkpoint_value(&adjacent_usd, &definition).unwrap();
+
+        let mut non_adjacent_usd = adjacent_usd;
+        non_adjacent_usd["accounting"]["total"]["total_usd"] =
+            json!(f64::from_bits(checked_usd.to_bits() + 2));
+
         let mut missing_total = checkpoint(&definition);
         missing_total["accounting"] = json!({"total": null, "nodes": [node], "hooks": []});
 
@@ -1136,6 +1166,7 @@ config:
             json!([{"step": 1, "node": "removed", "error": "unknown"}]);
 
         for value in [
+            non_adjacent_usd,
             missing_total,
             contradictory_total,
             future_cost,

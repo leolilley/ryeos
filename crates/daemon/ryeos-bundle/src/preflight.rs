@@ -538,17 +538,7 @@ pub fn verify_manifest_signature(
     source_path: &Path,
     trust_store: &TrustStore,
 ) -> Result<()> {
-    let expected_bundle_name = source_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| anyhow::anyhow!("source_path has no directory name"))?;
-    verify_manifest_signature_for_bundle_name(
-        ai_dir,
-        source_path,
-        expected_bundle_name,
-        trust_store,
-        true,
-    )
+    verify_manifest_signature_inner(ai_dir, source_path, None, trust_store, true)
 }
 
 fn verify_manifest_signature_for_bundle_name(
@@ -558,13 +548,29 @@ fn verify_manifest_signature_for_bundle_name(
     trust_store: &TrustStore,
     check_source_mtime: bool,
 ) -> Result<()> {
+    verify_manifest_signature_inner(
+        ai_dir,
+        source_path,
+        Some(expected_bundle_name),
+        trust_store,
+        check_source_mtime,
+    )
+}
+
+fn verify_manifest_signature_inner(
+    ai_dir: &Path,
+    source_path: &Path,
+    expected_bundle_name: Option<&str>,
+    trust_store: &TrustStore,
+    check_source_mtime: bool,
+) -> Result<()> {
     let manifest_path = ai_dir.join("manifest.yaml");
     let manifest_meta = match fs::symlink_metadata(&manifest_path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             bail!(
                 "bundle '{}' has no regular signed .ai/manifest.yaml; installable bundles require a published manifest",
-                expected_bundle_name
+                expected_bundle_name.unwrap_or("<declared>")
             )
         }
         Err(e) => {
@@ -640,14 +646,17 @@ fn verify_manifest_signature_for_bundle_name(
         )
     })?;
 
-    if manifest.name != expected_bundle_name {
-        bail!(
-            "manifest identity mismatch: manifest.yaml name is '{}' but \
-             bundle directory is '{}' — the manifest must be regenerated",
-            manifest.name,
-            expected_bundle_name
-        );
+    if let Some(expected_bundle_name) = expected_bundle_name {
+        if manifest.name != expected_bundle_name {
+            bail!(
+                "manifest identity mismatch: manifest.yaml name is '{}' but \
+                 expected bundle identity is '{}' — the manifest must be regenerated",
+                manifest.name,
+                expected_bundle_name
+            );
+        }
     }
+    let effective_bundle_name = expected_bundle_name.unwrap_or(&manifest.name);
 
     let actual_kinds =
         derive_provides_kinds(ai_dir).context("derive actual provides_kinds from kind schemas")?;
@@ -694,8 +703,9 @@ fn verify_manifest_signature_for_bundle_name(
         let source_body = lillux::signature::strip_signature_lines(&source_raw);
         let source_manifest: BundleManifestSource = serde_yaml::from_str(&source_body)
             .with_context(|| format!("parse manifest source {}", source_manifest_path.display()))?;
-        let expected_manifest = materialize_manifest(source_manifest, ai_dir, expected_bundle_name)
-            .context("materialize manifest.source.yaml for staleness check")?;
+        let expected_manifest =
+            materialize_manifest(source_manifest, ai_dir, effective_bundle_name)
+                .context("materialize manifest.source.yaml for staleness check")?;
         if manifest != expected_manifest {
             bail!(
                 "manifest.yaml is stale relative to manifest.source.yaml — regenerate and re-sign manifest.yaml with the publish pipeline"
@@ -1907,7 +1917,14 @@ description: "fixed parser handler for preflight tests"
             "name: wrong-name\nversion: '1.0'\nprovides_kinds:\n  - mykind\nrequires_kinds: []\n",
         );
         let ts = layout.trust_store();
-        let err = verify_manifest_signature(&layout.ai_dir, &layout.source, &ts).unwrap_err();
+        let err = verify_manifest_signature_for_bundle_name(
+            &layout.ai_dir,
+            &layout.source,
+            "test-bundle",
+            &ts,
+            true,
+        )
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("identity mismatch"),
@@ -1917,6 +1934,23 @@ description: "fixed parser handler for preflight tests"
             msg.contains("test-bundle") && msg.contains("wrong-name"),
             "should name both sides: {msg}"
         );
+    }
+
+    #[test]
+    fn verify_manifest_uses_declared_identity_not_checkout_directory() {
+        let layout = BundleLayout::new("checkout-directory");
+        fs::write(
+            layout.ai_dir.join("manifest.source.yaml"),
+            "name: published-bundle\nversion: '1.0'\n",
+        )
+        .unwrap();
+        layout.write_signed_manifest(
+            "name: published-bundle\nversion: '1.0'\nprovides_kinds: []\nrequires_kinds: []\nuses_kinds: []\n",
+        );
+        let ts = layout.trust_store();
+
+        verify_manifest_signature(&layout.ai_dir, &layout.source, &ts)
+            .expect("authoring verification must use the signed declaration");
     }
 
     #[test]

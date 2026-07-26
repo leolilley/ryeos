@@ -17,7 +17,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Instant;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -155,34 +154,92 @@ pub async fn run(
             .await?;
 
     let mut cache_fill = None;
-    let mut cache_verification: Option<(Arc<CachedComposeProjection>, bool, usize, String)> = None;
-    if super::compose_cache::explicitly_enabled() {
-        let cache_key = build_cache_key(
-            decl,
-            &positions,
-            &per_root,
-            project_path,
-            &request_snapshot,
-            provenance,
-            plan_ctx,
-            principal_fingerprint,
-            verified_runtime,
-            runtime_protocol,
-            &executor_ref,
-            &executor,
-            &runtime_config_snapshot,
-        )?;
-        loop {
-            match super::compose_cache::cache().begin(&cache_key) {
-                CacheLookup::Hit {
-                    projection,
-                    entry_bytes,
-                } => {
+    let cache_key = build_cache_key(
+        decl,
+        &positions,
+        &per_root,
+        project_path,
+        &request_snapshot,
+        provenance,
+        plan_ctx,
+        principal_fingerprint,
+        verified_runtime,
+        runtime_protocol,
+        &executor_ref,
+        &executor,
+        &runtime_config_snapshot,
+    )?;
+    loop {
+        match super::compose_cache::cache().begin(&cache_key) {
+            CacheLookup::Hit {
+                projection,
+                entry_bytes,
+            } => {
+                if validate_hit_snapshot(engine, project_path, &request_snapshot).is_err() {
+                    // Rebuild every mutable authority input before taking
+                    // the cold path. Reusing the pre-mismatch roots or
+                    // runtime config would only disguise a stale hit as a
+                    // cold launch.
+                    super::compose_cache::cache().discard_if_same(
+                        &cache_key,
+                        &projection,
+                        "authority_revalidation_failed",
+                    );
+                    super::compose_cache::emit_metric(
+                        "bypass",
+                        "authority_revalidation_failed",
+                        entry_bytes,
+                        0,
+                    );
+                    let (_refreshed_snapshot, refreshed_per_root) = resolve_compose_authority(
+                        engine,
+                        project_path,
+                        &engine_roots,
+                        &unique_refs,
+                        target_kind,
+                    )?;
+                    per_root = refreshed_per_root;
+                    runtime_config_snapshot = crate::dispatch::method_runtime_config_snapshot(
+                        target_kind,
+                        runtime_config,
+                        &engine_roots,
+                        state,
+                        None,
+                    )
+                    .map_err(|error| {
+                        LaunchAugmentationError::RuntimeRegistry(format!(
+                            "runtime config after cache revalidation miss: {error}"
+                        ))
+                    })?;
+                    executor = materialize_augmentation_executor(
+                        engine,
+                        &bundle_roots,
+                        &executor_ref,
+                        &cache_root,
+                    )
+                    .await?;
+                    break;
+                }
+                // A trust rejection is an authored authority failure, not
+                // a cache miss. It must remain fail-closed.
+                enforce_current_trust(&per_root, target_kind)?;
+                apply_projection(resolution, output_derived, meta_output_derived, &projection)?;
+                let audit = super::compose_cache::record_hit_audit(&cache_key, &projection, false)
+                    .map_err(LaunchAugmentationError::RuntimeRegistry)?;
+                super::compose_cache::emit_metric("hit", "ready", entry_bytes, 0);
+                return Ok(vec![audit]);
+            }
+            CacheLookup::Wait { pending } => {
+                let wait_started = Instant::now();
+                if let Some(projection) = pending.wait().await {
+                    let wait_milliseconds =
+                        u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let entry_bytes = serde_json::to_vec(projection.as_ref())
+                        .map(|bytes| bytes.len())
+                        .unwrap_or(0);
                     if validate_hit_snapshot(engine, project_path, &request_snapshot).is_err() {
-                        // Rebuild every mutable authority input before taking
-                        // the cold path. Reusing the pre-mismatch roots or
-                        // runtime config would only disguise a stale hit as a
-                        // cold launch.
+                        // As with a ready hit, rebuild all mutable
+                        // authority inputs before launching the cold child.
                         super::compose_cache::cache().discard_if_same(
                             &cache_key,
                             &projection,
@@ -192,7 +249,7 @@ pub async fn run(
                             "bypass",
                             "authority_revalidation_failed",
                             entry_bytes,
-                            0,
+                            wait_milliseconds,
                         );
                         let (_refreshed_snapshot, refreshed_per_root) = resolve_compose_authority(
                             engine,
@@ -223,161 +280,70 @@ pub async fn run(
                         .await?;
                         break;
                     }
-                    // A trust rejection is an authored authority failure, not
-                    // a cache miss. It must remain fail-closed.
                     enforce_current_trust(&per_root, target_kind)?;
-                    if super::compose_cache::verify_hits_enabled() {
-                        let hot_digest = projected_resolution_digest(
-                            resolution,
-                            output_derived,
-                            meta_output_derived,
-                            &projection,
-                        )?;
-                        cache_verification = Some((projection, false, entry_bytes, hot_digest));
-                        break;
-                    }
                     apply_projection(resolution, output_derived, meta_output_derived, &projection)?;
                     let audit =
-                        super::compose_cache::record_hit_audit(&cache_key, &projection, false)
+                        super::compose_cache::record_hit_audit(&cache_key, &projection, true)
                             .map_err(LaunchAugmentationError::RuntimeRegistry)?;
-                    super::compose_cache::emit_metric("hit", "ready", entry_bytes, 0);
+                    super::compose_cache::emit_metric(
+                        "hit",
+                        "single_flight",
+                        entry_bytes,
+                        wait_milliseconds,
+                    );
                     return Ok(vec![audit]);
                 }
-                CacheLookup::Wait { pending } => {
-                    let wait_started = Instant::now();
-                    if let Some(projection) = pending.wait().await {
-                        let wait_milliseconds =
-                            u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        let entry_bytes = serde_json::to_vec(projection.as_ref())
-                            .map(|bytes| bytes.len())
-                            .unwrap_or(0);
-                        if validate_hit_snapshot(engine, project_path, &request_snapshot).is_err() {
-                            // As with a ready hit, rebuild all mutable
-                            // authority inputs before launching the cold child.
-                            super::compose_cache::cache().discard_if_same(
-                                &cache_key,
-                                &projection,
-                                "authority_revalidation_failed",
-                            );
-                            super::compose_cache::emit_metric(
-                                "bypass",
-                                "authority_revalidation_failed",
-                                entry_bytes,
-                                wait_milliseconds,
-                            );
-                            let (_refreshed_snapshot, refreshed_per_root) =
-                                resolve_compose_authority(
-                                    engine,
-                                    project_path,
-                                    &engine_roots,
-                                    &unique_refs,
-                                    target_kind,
-                                )?;
-                            per_root = refreshed_per_root;
-                            runtime_config_snapshot =
-                                crate::dispatch::method_runtime_config_snapshot(
-                                    target_kind,
-                                    runtime_config,
-                                    &engine_roots,
-                                    state,
-                                    None,
-                                )
-                                .map_err(|error| {
-                                    LaunchAugmentationError::RuntimeRegistry(format!(
-                                        "runtime config after cache revalidation miss: {error}"
-                                    ))
-                                })?;
-                            executor = materialize_augmentation_executor(
-                                engine,
-                                &bundle_roots,
-                                &executor_ref,
-                                &cache_root,
-                            )
-                            .await?;
-                            break;
-                        }
-                        enforce_current_trust(&per_root, target_kind)?;
-                        if super::compose_cache::verify_hits_enabled() {
-                            let hot_digest = projected_resolution_digest(
-                                resolution,
-                                output_derived,
-                                meta_output_derived,
-                                &projection,
-                            )?;
-                            cache_verification = Some((projection, true, entry_bytes, hot_digest));
-                            break;
-                        }
-                        apply_projection(
-                            resolution,
-                            output_derived,
-                            meta_output_derived,
-                            &projection,
-                        )?;
-                        let audit =
-                            super::compose_cache::record_hit_audit(&cache_key, &projection, true)
-                                .map_err(LaunchAugmentationError::RuntimeRegistry)?;
-                        super::compose_cache::emit_metric(
-                            "hit",
-                            "single_flight",
-                            entry_bytes,
-                            wait_milliseconds,
-                        );
-                        return Ok(vec![audit]);
-                    }
-                    // The builder failed. Failures are never cached; race to
-                    // become the next single-flight builder only if the
-                    // authority used for this lookup is still current.
-                    if validate_hit_snapshot(engine, project_path, &request_snapshot).is_err() {
-                        super::compose_cache::emit_metric(
-                            "bypass",
-                            "authority_revalidation_failed",
-                            0,
-                            u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                        );
-                        let (_refreshed_snapshot, refreshed_per_root) = resolve_compose_authority(
-                            engine,
-                            project_path,
-                            &engine_roots,
-                            &unique_refs,
-                            target_kind,
-                        )?;
-                        per_root = refreshed_per_root;
-                        runtime_config_snapshot = crate::dispatch::method_runtime_config_snapshot(
-                            target_kind,
-                            runtime_config,
-                            &engine_roots,
-                            state,
-                            None,
-                        )
-                        .map_err(|error| {
-                            LaunchAugmentationError::RuntimeRegistry(format!(
-                                "runtime config after failed cache fill: {error}"
-                            ))
-                        })?;
-                        executor = materialize_augmentation_executor(
-                            engine,
-                            &bundle_roots,
-                            &executor_ref,
-                            &cache_root,
-                        )
-                        .await?;
-                        break;
-                    }
-                    continue;
-                }
-                CacheLookup::Build(fill) => {
-                    super::compose_cache::emit_metric("miss", "cold", 0, 0);
-                    cache_fill = Some(fill);
+                // The builder failed. Failures are never cached; race to
+                // become the next single-flight builder only if the
+                // authority used for this lookup is still current.
+                if validate_hit_snapshot(engine, project_path, &request_snapshot).is_err() {
+                    super::compose_cache::emit_metric(
+                        "bypass",
+                        "authority_revalidation_failed",
+                        0,
+                        u64::try_from(wait_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    );
+                    let (_refreshed_snapshot, refreshed_per_root) = resolve_compose_authority(
+                        engine,
+                        project_path,
+                        &engine_roots,
+                        &unique_refs,
+                        target_kind,
+                    )?;
+                    per_root = refreshed_per_root;
+                    runtime_config_snapshot = crate::dispatch::method_runtime_config_snapshot(
+                        target_kind,
+                        runtime_config,
+                        &engine_roots,
+                        state,
+                        None,
+                    )
+                    .map_err(|error| {
+                        LaunchAugmentationError::RuntimeRegistry(format!(
+                            "runtime config after failed cache fill: {error}"
+                        ))
+                    })?;
+                    executor = materialize_augmentation_executor(
+                        engine,
+                        &bundle_roots,
+                        &executor_ref,
+                        &cache_root,
+                    )
+                    .await?;
                     break;
                 }
-                CacheLookup::Bypass => {
-                    super::compose_cache::emit_metric("bypass", "pending_capacity", 0, 0);
-                    break;
-                }
+                continue;
+            }
+            CacheLookup::Build(fill) => {
+                super::compose_cache::emit_metric("miss", "cold", 0, 0);
+                cache_fill = Some(fill);
+                break;
+            }
+            CacheLookup::Bypass => {
+                super::compose_cache::emit_metric("bypass", "pending_capacity", 0, 0);
+                break;
             }
         }
-    } else {
-        super::compose_cache::emit_metric("bypass", "default_off", 0, 0);
     }
 
     // 5. Cache hits never need to construct the child wire payload.
@@ -808,32 +774,7 @@ pub async fn run(
             }
         })?;
         let projection = normalized_projection(output, &positions)?;
-        if let Some((cached, _, _, _)) = cache_verification.as_ref() {
-            if cached.as_ref() != &projection {
-                return Err(LaunchAugmentationError::ProjectionInvariant {
-                    reason: format!(
-                        "compose-cache cold/hot verification diverged (cached={}, cold={})",
-                        cached
-                            .digest()
-                            .unwrap_or_else(|_| "digest-error".to_string()),
-                        projection
-                            .digest()
-                            .unwrap_or_else(|_| "digest-error".to_string()),
-                    ),
-                });
-            }
-        }
         apply_projection(resolution, output_derived, meta_output_derived, &projection)?;
-        if let Some((_, _, _, expected_digest)) = cache_verification.as_ref() {
-            let cold_digest = resolution_digest(resolution)?;
-            if &cold_digest != expected_digest {
-                return Err(LaunchAugmentationError::ProjectionInvariant {
-                    reason: format!(
-                        "compose-cache complete launch-input verification diverged (cached={expected_digest}, cold={cold_digest})"
-                    ),
-                });
-            }
-        }
         Ok(projection)
     })();
     let projection = match write_result {
@@ -857,19 +798,6 @@ pub async fn run(
             return Err(e);
         }
     };
-    if let Some((_, waited_for_fill, entry_bytes, _)) = cache_verification.as_ref() {
-        super::compose_cache::emit_metric(
-            "verification",
-            if *waited_for_fill {
-                "single_flight_match"
-            } else {
-                "ready_match"
-            },
-            *entry_bytes,
-            0,
-        );
-    }
-
     // Success: the daemon publishes terminal child state only after the method
     // result and its parent-view projection have both been validated.
     let finalization = crate::dispatch::finalize_method_thread_if_needed(
@@ -1231,26 +1159,6 @@ fn apply_projection(
         serde_json::to_value(&projection.rendered_meta)?,
     );
     Ok(())
-}
-
-fn projected_resolution_digest(
-    resolution: &ResolutionOutput,
-    output_derived: &str,
-    meta_output_derived: &str,
-    projection: &CachedComposeProjection,
-) -> Result<String, LaunchAugmentationError> {
-    let mut projected = resolution.clone();
-    apply_projection(
-        &mut projected,
-        output_derived,
-        meta_output_derived,
-        projection,
-    )?;
-    resolution_digest(&projected)
-}
-
-fn resolution_digest(resolution: &ResolutionOutput) -> Result<String, LaunchAugmentationError> {
-    digest_json(&serde_json::to_value(resolution)?)
 }
 
 /// Read the position → refs map from the composed view's derived map.

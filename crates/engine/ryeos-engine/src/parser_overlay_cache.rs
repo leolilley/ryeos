@@ -9,8 +9,6 @@ use crate::parsers::ParserDispatcher;
 const MAX_CACHE_ENTRIES: usize = 64;
 const MAX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_IN_FLIGHT_BUILDS: usize = 64;
-const VERIFY_HITS_ENV: &str = "RYEOS_PARSER_OVERLAY_CACHE_VERIFY_HITS";
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ParserOverlayCacheKey {
     pub project_root: PathBuf,
@@ -56,6 +54,28 @@ impl ParserOverlayCache {
         overlay_bytes: u64,
         build: impl FnOnce() -> Result<ParserDispatcher, EngineError>,
     ) -> Result<ParserDispatcher, EngineError> {
+        self.get_or_build_with_verification(key, cacheable, overlay_bytes, false, build)
+    }
+
+    #[cfg(test)]
+    fn get_or_build_verifying_hits(
+        &self,
+        key: ParserOverlayCacheKey,
+        cacheable: bool,
+        overlay_bytes: u64,
+        build: impl FnOnce() -> Result<ParserDispatcher, EngineError>,
+    ) -> Result<ParserDispatcher, EngineError> {
+        self.get_or_build_with_verification(key, cacheable, overlay_bytes, true, build)
+    }
+
+    fn get_or_build_with_verification(
+        &self,
+        key: ParserOverlayCacheKey,
+        cacheable: bool,
+        overlay_bytes: u64,
+        verify_hits: bool,
+        build: impl FnOnce() -> Result<ParserDispatcher, EngineError>,
+    ) -> Result<ParserDispatcher, EngineError> {
         let mut state = self.state.lock().map_err(|_| {
             EngineError::Internal("parser overlay cache mutex was poisoned".to_string())
         })?;
@@ -67,7 +87,7 @@ impl ParserOverlayCache {
                 .map(|entry| entry.dispatcher.clone())
             {
                 touch_lru(&mut state.lru, &key);
-                if verify_hits_enabled() {
+                if verify_hits {
                     drop(state);
                     let rebuilt = build()?;
                     if rebuilt.parser_tools.fingerprint() != dispatcher.parser_tools.fingerprint()
@@ -207,10 +227,6 @@ impl ParserOverlayCache {
         drop(state);
         build_result
     }
-}
-
-fn verify_hits_enabled() -> bool {
-    matches!(std::env::var(VERIFY_HITS_ENV).as_deref(), Ok("1"))
 }
 
 fn insert_entry(
@@ -636,6 +652,27 @@ mod tests {
         }
         assert_eq!(builds.load(Ordering::SeqCst), 2);
         assert!(cache.state.lock().unwrap().entries.is_empty());
+    }
+
+    #[test]
+    fn test_verification_is_explicit_and_rebuilds_a_hit() {
+        let cache = ParserOverlayCache::default();
+        let builds = AtomicUsize::new(0);
+        let dispatcher =
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors();
+        cache
+            .get_or_build(key("/verified-project"), true, 0, || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok(dispatcher.clone())
+            })
+            .unwrap();
+        cache
+            .get_or_build_verifying_hits(key("/verified-project"), true, 0, || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Ok(dispatcher)
+            })
+            .unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 2);
     }
 
     #[test]

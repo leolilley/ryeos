@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use lillux::crypto::SigningKey;
 use serde::Serialize;
 
-use crate::actions::publish::generate_and_sign_manifest_in_place;
+use crate::actions::publish::{declared_manifest_name, generate_and_sign_manifest_in_place};
 
 #[derive(Debug, Serialize)]
 pub struct ManifestSignReport {
@@ -31,9 +31,9 @@ pub struct ManifestSignReport {
 ///
 /// `name` overrides the effective bundle id the manifest must carry — the
 /// first bare-id segment of the bundle's item refs, which runtime authority
-/// requires to equal `manifest.name`. `None` uses the source directory's
-/// basename. The manifest source's declared `name` must equal this value or
-/// materialization fails loudly.
+/// requires to equal `manifest.name`. `None` uses the identity declared by
+/// `.ai/manifest.source.yaml`. An explicit value must equal that declaration
+/// or materialization fails loudly.
 pub fn manifest_sign(
     bundle_source: &Path,
     name: Option<&str>,
@@ -46,14 +46,8 @@ pub fn manifest_sign(
             bundle_source.display()
         )
     })?;
-    let effective_name = match name {
-        Some(name) => name.to_string(),
-        None => canonical_live_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-            .context("bundle_source path has no UTF-8 directory name")?,
-    };
+    let declared_name = declared_manifest_name(&canonical_live_root)?;
+    let effective_name = name.unwrap_or(&declared_name).to_string();
     // This operation authors exactly one file and the shared generator
     // validates/materializes the complete body before its atomic write. A full
     // publisher-generation copy is both unnecessary and incorrect here: it
@@ -146,14 +140,12 @@ mod tests {
             "name: arc\nversion: \"0.1.0\"\n",
         );
 
-        // Without an override the basename is the expected name → mismatch.
-        let err = manifest_sign(&bundle, None, &test_key()).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("identity mismatch"),
-            "got {err:#}"
-        );
+        // The declaration is authoritative even when the checkout directory
+        // has a different name.
+        let report = manifest_sign(&bundle, None, &test_key()).expect("declared identity");
+        assert!(report.manifest_generated.is_file());
 
-        // With the override equal to the declared name it materializes.
+        // An explicit assertion equal to the declared name also materializes.
         let report = manifest_sign(&bundle, Some("arc"), &test_key()).expect("override");
         assert!(report.manifest_generated.is_file());
 

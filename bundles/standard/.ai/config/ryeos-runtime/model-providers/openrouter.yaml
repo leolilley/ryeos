@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-25T04:55:10Z:f8c1c3a4713722bacaacd2db451c925d991a775813b5c5377b3975c732e0094f:KIQGLKpu52HEiFALuxMmugLM9LXZUXwggkS2lBHADfK/X/uHnmABjOnL7rvbfi+YNFHpyO5u78pVvwTL1lokDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-26T07:44:18Z:9d50f8a93db36d45173611e9ff7a4361ff138bc05ec90b53e254aa12d76805b7:ilEg6WLeD//GS3yuQ29OyS/CldpBx+Us2wm9GaM3ofOLR+Q7Dl8gJAHP21KMLtYmyq/rtehnDP1vojc4AVXDAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://openrouter.ai/api/v1"
@@ -45,7 +45,10 @@ schemas:
         reported_cost_unit: usd
         cost_details_path: cost_details
         is_byok_path: is_byok
-        reasoning_included_in_output: true
+        # OpenRouter normalizes heterogeneous upstreams. Some report visible
+        # completion tokens and reasoning tokens as separate dimensions, so
+        # reasoning is not provably a subset of completion_tokens.
+        reasoning_included_in_output: false
         aggregation: latest_snapshot
         single_snapshot: true
       finish_reason_path: choices.0.finish_reason

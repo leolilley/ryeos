@@ -63,8 +63,9 @@ pub enum ProviderLimitContractStatus {
 pub struct TokenUsage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
-    /// Provider-reported completion-token subset spent on reasoning, when the
-    /// protocol exposes it. This remains accounting metadata and never drives
+    /// Provider-reported reasoning-token dimension, when the protocol exposes
+    /// it. A signed provider schema declares whether this is included in the
+    /// output-token count. It remains accounting metadata and never drives
     /// local stream enforcement.
     pub reasoning_tokens: Option<u64>,
     pub cache_read_tokens: Option<u64>,
