@@ -13,7 +13,9 @@ use serde_json::{json, Value};
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
-use ryeos_app::service_registry::{extract_required_caps, extract_ui_read_only};
+use ryeos_app::service_registry::{
+    extract_required_caps, extract_ui_dispatch, extract_ui_read_only, UiDispatchMode,
+};
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_executor::executor::ServiceAvailability;
@@ -78,6 +80,7 @@ struct PreparedInvocation {
 struct UiInvocationPolicy {
     read_only: bool,
     required_caps: Vec<String>,
+    dispatch_mode: UiDispatchMode,
 }
 
 pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> Result<Value> {
@@ -118,6 +121,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     let policy = UiInvocationPolicy {
         read_only: extract_ui_read_only(metadata)?,
         required_caps: extract_required_caps(metadata),
+        dispatch_mode: extract_ui_dispatch(metadata)?,
     };
 
     let required_cap_refs = policy
@@ -153,9 +157,11 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
     }
 
     let invocation_id = uuid::Uuid::new_v4().to_string();
+    let trusted_handler_context =
+        select_trusted_handler_context(policy.dispatch_mode, &ctx, &invocation_ctx);
 
     let result = if policy.read_only {
-        execute_read_only_service(&req, &state, prepared, verified, ctx).await?
+        execute_read_only_service(&req, &state, prepared, verified, trusted_handler_context).await?
     } else {
         execute_prepared_item_ref(
             &req,
@@ -163,7 +169,7 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
             prepared,
             verified,
             &invocation_ctx.scopes,
-            ctx,
+            trusted_handler_context,
         )
         .await?
     };
@@ -184,6 +190,22 @@ pub async fn handle(input: Value, ctx: HandlerContext, state: Arc<AppState>) -> 
         "invocation_id": invocation_id,
         "result": result,
     }))
+}
+
+fn select_trusted_handler_context(
+    dispatch_mode: UiDispatchMode,
+    browser_context: &HandlerContext,
+    invocation_context: &HandlerContext,
+) -> HandlerContext {
+    match dispatch_mode {
+        // These services intentionally operate on the transient browser
+        // session and therefore need its session:<id> principal.
+        UiDispatchMode::SessionLocal => browser_context.clone(),
+        // Ordinary verified services execute under the durable principal and
+        // scopes sealed into the execution context. Supplying the browser
+        // session context here would create an identity mismatch.
+        UiDispatchMode::Verified => invocation_context.clone(),
+    }
 }
 
 fn prepare_item_ref(
@@ -484,5 +506,45 @@ mod tests {
 
         assert!(!request.read_only);
         assert!(request.ref_bindings.is_empty());
+    }
+
+    #[test]
+    fn verified_dispatch_uses_the_durable_invocation_context() {
+        let browser_context = HandlerContext::new("session:session-1".to_string(), vec![], false);
+        let invocation_context = HandlerContext::new(
+            "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            vec!["ui.read".to_string()],
+            true,
+        );
+
+        let selected = select_trusted_handler_context(
+            UiDispatchMode::Verified,
+            &browser_context,
+            &invocation_context,
+        );
+
+        assert_eq!(selected.fingerprint, invocation_context.fingerprint);
+        assert_eq!(selected.scopes, invocation_context.scopes);
+        assert!(selected.verified);
+    }
+
+    #[test]
+    fn session_local_dispatch_keeps_the_browser_session_context() {
+        let browser_context = HandlerContext::new("session:session-1".to_string(), vec![], false);
+        let invocation_context = HandlerContext::new(
+            "fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            vec!["ui.read".to_string()],
+            true,
+        );
+
+        let selected = select_trusted_handler_context(
+            UiDispatchMode::SessionLocal,
+            &browser_context,
+            &invocation_context,
+        );
+
+        assert_eq!(selected.fingerprint, browser_context.fingerprint);
+        assert_eq!(selected.scopes, browser_context.scopes);
+        assert!(!selected.verified);
     }
 }

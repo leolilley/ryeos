@@ -4,6 +4,8 @@ mod test_state;
 use test_state::{build_test_state, build_test_state_with_live_bundles};
 
 use ryeos_app::handler_context::HandlerContext;
+use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use std::sync::Arc;
@@ -29,6 +31,31 @@ fn read_only_context() -> LaunchContext {
         ],
         user_principal_id: None,
     }
+}
+
+#[test]
+fn dispatch_transport_is_unrecorded() {
+    let (_tmp, state) = build_test_state_with_live_bundles();
+    let ctx = PlanContext {
+        requested_by: EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:test-ui-dispatch".into(),
+            scopes: vec![],
+        }),
+        project_context: ProjectContext::None,
+        current_site_id: "site:local".into(),
+        origin_site_id: "site:local".into(),
+        execution_hints: Default::default(),
+        validate_only: true,
+    };
+    let canonical = CanonicalRef::parse("service:ui/invocations/dispatch").unwrap();
+    let resolved = state.engine.resolve(&ctx, &canonical).unwrap();
+    let verified = state.engine.verify(&ctx, resolved).unwrap();
+
+    assert!(
+        !ryeos_app::service_registry::extract_record_thread(&verified.resolved.metadata.extra)
+            .unwrap(),
+        "the UI dispatch transport must not create a thread that triggers another UI refresh"
+    );
 }
 
 #[tokio::test]
@@ -172,10 +199,14 @@ async fn session_local_invocation_publishes_to_session_bus() {
 #[tokio::test]
 async fn read_only_thread_sources_replay_without_recording_service_threads() {
     let (_tmp, state) = build_test_state_with_live_bundles();
+    let mut launch_context = read_only_context();
+    launch_context.granted_caps = vec!["ui.read".into()];
+    launch_context.user_principal_id =
+        Some("fp:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
     let (session_id, _token) = get_ui_state(&state)
         .unwrap()
         .browser_sessions
-        .mint_token(read_only_context());
+        .mint_token(launch_context);
     let ctx = HandlerContext::new(
         format!("session:{session_id}"),
         vec!["ui.read".into()],
@@ -248,7 +279,7 @@ async fn read_only_thread_sources_replay_without_recording_service_threads() {
 
     let listed = (ryeos_ui::handlers::ui_invocations_dispatch::DESCRIPTOR.handler)(
         serde_json::json!({
-            "target": { "kind": "ref", "ref": "service:threads/list" },
+            "target": { "kind": "ref", "ref": "service:ui/ryeos-ui/threads/list" },
             "read_only": true,
             "params": { "limit": 100, "sort": "watch" }
         }),
