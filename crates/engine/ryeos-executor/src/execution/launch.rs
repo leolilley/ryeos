@@ -3,7 +3,6 @@ use std::ffi::OsStr;
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use rand::Rng;
@@ -886,24 +885,6 @@ fn cached_or_verified_executor_chain(
 ) -> Result<(Arc<VerifiedNativeExecutorChain>, Option<Vec<u8>>), MaterializationError> {
     match lookup_or_claim_executor_verification(probe, force_reverify) {
         ExecutorVerificationCacheLookup::Hit(verified) => {
-            if executor_cache_verify_hits_enabled() {
-                let (cold, cold_blob) =
-                    verify_native_executor_chain(probe, bare, trust_store, launch_timings)?;
-                let cold_blob_hash = lillux::cas::sha256_hex(&cold_blob);
-                let cold_blob_len = u64::try_from(cold_blob.len()).ok();
-                if cold.key != verified.key
-                    || cold_blob_hash != verified.key.blob_hash
-                    || cold_blob_len != Some(verified.key.blob_len)
-                {
-                    return Err(MaterializationError::MaterializationFailed {
-                        executor_ref: probe.executor_ref.clone(),
-                        detail: format!(
-                            "verified-chain cache diagnostic diverged from cold verification (hot={:?}, cold={:?}, cold_blob_hash={cold_blob_hash}, cold_blob_len={cold_blob_len:?})",
-                            verified.key, cold.key,
-                        ),
-                    });
-                }
-            }
             tracing::debug!(
                 executor_ref = %probe.executor_ref,
                 bundle_generation = %probe.bundle_generation_fingerprint,
@@ -924,30 +905,6 @@ fn cached_or_verified_executor_chain(
     }
 }
 
-const EXECUTOR_CACHE_VERIFY_HITS_ENV: &str = "RYEOS_EXECUTOR_CACHE_VERIFY_HITS";
-const EXECUTOR_STAT_PIN_ENV: &str = "RYEOS_EXECUTOR_STAT_PIN";
-
-fn exact_env_opt_in(value: Option<&OsStr>) -> bool {
-    value == Some(OsStr::new("1"))
-}
-
-fn executor_cache_verify_hits_enabled() -> bool {
-    exact_env_opt_in(std::env::var_os(EXECUTOR_CACHE_VERIFY_HITS_ENV).as_deref())
-}
-
-fn executor_stat_pin_fast_path_enabled_for(
-    stat_pin: Option<&OsStr>,
-    verify_hits: Option<&OsStr>,
-) -> bool {
-    exact_env_opt_in(stat_pin) && !exact_env_opt_in(verify_hits)
-}
-
-fn executor_stat_pin_fast_path_enabled() -> bool {
-    let stat_pin = std::env::var_os(EXECUTOR_STAT_PIN_ENV);
-    let verify_hits = std::env::var_os(EXECUTOR_CACHE_VERIFY_HITS_ENV);
-    executor_stat_pin_fast_path_enabled_for(stat_pin.as_deref(), verify_hits.as_deref())
-}
-
 /// Content-addressed cache target for a native executor binary.
 ///
 /// Returns `<cache_root>/cache/executors/<blob_hash>/<bare>`.
@@ -957,13 +914,6 @@ fn executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> Path
         .join("executors")
         .join(blob_hash)
         .join(bare)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ExecutorPinKey {
-    cache_root: PathBuf,
-    blob_hash: String,
-    bare: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -979,74 +929,7 @@ struct ExecutorFileIdentity {
     file_type: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExecutorStatPin {
-    identity: ExecutorFileIdentity,
-    capture_granule_seconds: i64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExecutorStatPinState {
-    Unpinned,
-    Pinned(ExecutorStatPin),
-    PermanentlyDisabled,
-}
-
-const EXECUTOR_STAT_PIN_MAX_ENTRIES: usize = 256;
-
-#[derive(Default)]
-struct ExecutorStatPinRegistryState {
-    entries: HashMap<ExecutorPinKey, Arc<Mutex<ExecutorStatPinState>>>,
-    /// Saturation is sticky. Once the bounded registry reaches its cap, every
-    /// entry remains on the full-hash path for the daemon lifetime instead of
-    /// evicting a permanent-disable decision.
-    saturated: bool,
-}
-
-struct ExecutorStatPinRegistry {
-    state: Mutex<ExecutorStatPinRegistryState>,
-}
-
-static EXECUTOR_STAT_PIN_REGISTRY: OnceLock<ExecutorStatPinRegistry> = OnceLock::new();
-
-fn executor_stat_pin_registry() -> &'static ExecutorStatPinRegistry {
-    EXECUTOR_STAT_PIN_REGISTRY.get_or_init(|| ExecutorStatPinRegistry {
-        state: Mutex::new(ExecutorStatPinRegistryState::default()),
-    })
-}
-
-impl ExecutorStatPinRegistry {
-    fn entry(&self, key: ExecutorPinKey) -> Option<Arc<Mutex<ExecutorStatPinState>>> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.saturated {
-            return None;
-        }
-        if let Some(entry) = state.entries.get(&key) {
-            return Some(Arc::clone(entry));
-        }
-        if state.entries.len() >= EXECUTOR_STAT_PIN_MAX_ENTRIES {
-            state.saturated = true;
-            let entries = state.entries.values().cloned().collect::<Vec<_>>();
-            drop(state);
-            for entry in entries {
-                *entry
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                    ExecutorStatPinState::PermanentlyDisabled;
-            }
-            return None;
-        }
-        let entry = Arc::new(Mutex::new(ExecutorStatPinState::Unpinned));
-        state.entries.insert(key, Arc::clone(&entry));
-        Some(entry)
-    }
-}
-
 struct ExecutorCacheLayout {
-    cache_root: PathBuf,
     state_root: lillux::secure_fs::PinnedDirectory,
     cache: lillux::secure_fs::PinnedDirectory,
     executors: lillux::secure_fs::PinnedDirectory,
@@ -1123,54 +1006,6 @@ fn executor_file_identity(metadata: &std::fs::Metadata) -> ExecutorFileIdentity 
     }
 }
 
-fn reusable_executor_stat_pin(
-    identity: ExecutorFileIdentity,
-    capture_time: SystemTime,
-) -> Option<ExecutorStatPin> {
-    let capture_granule_seconds = capture_time
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| i64::try_from(duration.as_secs()).ok())?;
-    // Git-style racy-clean protection: a timestamp in the capture clock
-    // second may not advance for a subsequent same-granule mutation.
-    if identity.modified_seconds >= capture_granule_seconds
-        || identity.changed_seconds >= capture_granule_seconds
-    {
-        return None;
-    }
-    Some(ExecutorStatPin {
-        identity,
-        capture_granule_seconds,
-    })
-}
-
-fn remember_executor_stat_pin(
-    state: Option<&Arc<Mutex<ExecutorStatPinState>>>,
-    pin: Option<ExecutorStatPin>,
-) {
-    let Some(state) = state else {
-        return;
-    };
-    let mut state = state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if *state != ExecutorStatPinState::PermanentlyDisabled {
-        *state = pin.map_or(ExecutorStatPinState::Unpinned, ExecutorStatPinState::Pinned);
-    }
-}
-
-fn executor_pin_state(
-    layout: &ExecutorCacheLayout,
-    verified: &VerifiedNativeExecutorChain,
-    bare: &str,
-) -> Option<Arc<Mutex<ExecutorStatPinState>>> {
-    executor_stat_pin_registry().entry(ExecutorPinKey {
-        cache_root: layout.cache_root.clone(),
-        blob_hash: verified.key.blob_hash.clone(),
-        bare: bare.to_string(),
-    })
-}
-
 fn validate_executor_cache_ancestors(
     layout: &ExecutorCacheLayout,
     blob_dir: &lillux::secure_fs::PinnedDirectory,
@@ -1209,11 +1044,8 @@ fn open_executor_cache_layout(
             detail: format!("failed to securely open native executor cache: {error}"),
         })?;
     // Security eligibility is checked only after the complete descriptor
-    // hierarchy and per-entry pin key exist. That ordering lets any ancestor
-    // anomaly permanently disable this logical entry instead of returning
-    // before the daemon-lifetime disable decision can be recorded.
+    // hierarchy exists.
     Ok(ExecutorCacheLayout {
-        cache_root: cache_root.to_path_buf(),
         state_root,
         cache,
         executors,
@@ -1232,7 +1064,7 @@ fn verify_opened_executor_file(
     expected_len: u64,
     expected_mode: u32,
     executor_ref: &str,
-) -> Result<(VerifiedOpenedExecutor, Option<ExecutorStatPin>), String> {
+) -> Result<VerifiedOpenedExecutor, String> {
     #[cfg(unix)]
     let before_identity = {
         use std::os::unix::fs::MetadataExt as _;
@@ -1315,14 +1147,10 @@ fn verify_opened_executor_file(
         if before_identity != after_identity {
             return Err("opened executor identity changed while hashing".to_string());
         }
-        let pin = reusable_executor_stat_pin(after_identity, SystemTime::now());
-        Ok((
-            VerifiedOpenedExecutor {
-                handle: Arc::new(file),
-                identity: after_identity,
-            },
-            pin,
-        ))
+        Ok(VerifiedOpenedExecutor {
+            handle: Arc::new(file),
+            identity: after_identity,
+        })
     }
 }
 
@@ -1331,26 +1159,6 @@ fn inspect_materialized_executor(
     verified: &VerifiedNativeExecutorChain,
     bare: &str,
 ) -> MaterializedArtifactInspection {
-    inspect_materialized_executor_with_pin_policy(
-        layout,
-        verified,
-        bare,
-        executor_stat_pin_fast_path_enabled(),
-    )
-}
-
-fn inspect_materialized_executor_with_pin_policy(
-    layout: &ExecutorCacheLayout,
-    verified: &VerifiedNativeExecutorChain,
-    bare: &str,
-    stat_pin_fast_path_enabled: bool,
-) -> MaterializedArtifactInspection {
-    let pin_state = executor_pin_state(layout, verified, bare);
-    let mut pin_state_guard = pin_state.as_ref().map(|state| {
-        state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    });
     let blob_dir = match layout
         .executors
         .open_child_directory(OsStr::new(&verified.key.blob_hash))
@@ -1362,37 +1170,21 @@ fn inspect_materialized_executor_with_pin_policy(
                 .open_entry(OsStr::new(&verified.key.blob_hash), false)
             {
                 Ok(None) => MaterializedArtifactInspection::Missing,
-                Ok(Some(_)) => {
-                    if let Some(state) = pin_state_guard.as_deref_mut() {
-                        *state = ExecutorStatPinState::PermanentlyDisabled;
-                    }
-                    MaterializedArtifactInspection::Invalid(
-                        "content-addressed executor entry is not a directory".to_string(),
-                    )
-                }
-                Err(error) => {
-                    if let Some(state) = pin_state_guard.as_deref_mut() {
-                        *state = ExecutorStatPinState::PermanentlyDisabled;
-                    }
-                    MaterializedArtifactInspection::Invalid(format!(
-                        "content-addressed executor entry is malformed: {error}"
-                    ))
-                }
+                Ok(Some(_)) => MaterializedArtifactInspection::Invalid(
+                    "content-addressed executor entry is not a directory".to_string(),
+                ),
+                Err(error) => MaterializedArtifactInspection::Invalid(format!(
+                    "content-addressed executor entry is malformed: {error}"
+                )),
             }
         }
         Err(error) => {
-            if let Some(state) = pin_state_guard.as_deref_mut() {
-                *state = ExecutorStatPinState::PermanentlyDisabled;
-            }
             return MaterializedArtifactInspection::Invalid(format!(
                 "failed to securely open content-addressed executor directory: {error}"
             ));
         }
     };
     if let Err(error) = validate_executor_cache_ancestors(layout, &blob_dir, bare) {
-        if let Some(state) = pin_state_guard.as_deref_mut() {
-            *state = ExecutorStatPinState::PermanentlyDisabled;
-        }
         return MaterializedArtifactInspection::Invalid(error.to_string());
     }
     let file = match blob_dir.open_regular(OsStr::new(bare), false) {
@@ -1403,9 +1195,6 @@ fn inspect_materialized_executor_with_pin_policy(
             )
         }
         Err(error) => {
-            if let Some(state) = pin_state_guard.as_deref_mut() {
-                *state = ExecutorStatPinState::PermanentlyDisabled;
-            }
             return MaterializedArtifactInspection::Invalid(format!(
                 "materialized executor is not a regular non-symlink file: {error}"
             ));
@@ -1429,30 +1218,10 @@ fn inspect_materialized_executor_with_pin_policy(
             || metadata.uid() != daemon_uid
             || actual_mode & 0o022 != 0
         {
-            if let Some(state) = pin_state_guard.as_deref_mut() {
-                *state = ExecutorStatPinState::PermanentlyDisabled;
-            }
             return MaterializedArtifactInspection::Invalid(format!(
                 "materialized executor descriptor is not a daemon-owned, non-group/other-writable regular file (uid={}, mode={actual_mode:#o})",
                 metadata.uid()
             ));
-        }
-        let observed = executor_file_identity(&metadata);
-        if stat_pin_fast_path_enabled
-            && pin_state_guard.as_deref().is_some_and(
-                |state| matches!(state, ExecutorStatPinState::Pinned(pin) if pin.identity == observed),
-            )
-        {
-            tracing::debug!(
-                executor_ref = bare,
-                device = observed.device,
-                inode = observed.inode,
-                "native executor materialized-file stat-pin hit"
-            );
-            return MaterializedArtifactInspection::Valid(VerifiedOpenedExecutor {
-                handle: Arc::new(file),
-                identity: observed,
-            });
         }
     }
     match verify_opened_executor_file(
@@ -1462,15 +1231,7 @@ fn inspect_materialized_executor_with_pin_policy(
         verified.key.mode,
         bare,
     ) {
-        Ok((opened, pin)) => {
-            if let Some(state) = pin_state_guard.as_deref_mut() {
-                if *state != ExecutorStatPinState::PermanentlyDisabled {
-                    *state =
-                        pin.map_or(ExecutorStatPinState::Unpinned, ExecutorStatPinState::Pinned);
-                }
-            }
-            MaterializedArtifactInspection::Valid(opened)
-        }
+        Ok(opened) => MaterializedArtifactInspection::Valid(opened),
         Err(detail) => MaterializedArtifactInspection::Invalid(detail),
     }
 }
@@ -1576,27 +1337,46 @@ fn quarantine_materialized_executor(
             executor_ref: executor_ref.to_string(),
             detail: format!("failed to address executor quarantine: {error}"),
         })?;
-    match lillux::rename_path_noreplace_durable(&source, &destination) {
-        Ok(()) => {}
-        Err(error) if error.namespace_committed() => {}
-        Err(error) => {
-            return Err(MaterializationError::MaterializationFailed {
-                executor_ref: executor_ref.to_string(),
-                detail: format!("failed to quarantine corrupt executor cache entry: {error}"),
-            })
-        }
-    }
-    let quarantined = match layout
+    let pinned_source = layout
         .executors
-        .open_child_directory(OsStr::new(&quarantine_name))
-    {
-        Ok(Some(directory)) => QuarantinedExecutorEntry::Directory {
+        .open_child_directory(OsStr::new(blob_hash))
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to pin corrupt executor cache directory: {error}"),
+        })?;
+    let quarantined = if let Some(directory) = pinned_source {
+        match layout.executors.rename_child_directory_noreplace(
+            OsStr::new(blob_hash),
+            OsStr::new(&quarantine_name),
+            &directory,
+        ) {
+            Ok(()) => {}
+            Err(error) if error.namespace_committed() => {}
+            Err(error) => {
+                return Err(MaterializationError::MaterializationFailed {
+                    executor_ref: executor_ref.to_string(),
+                    detail: format!("failed to quarantine corrupt executor cache entry: {error}"),
+                })
+            }
+        }
+        QuarantinedExecutorEntry::Directory {
             name: quarantine_name,
             directory,
-        },
-        Ok(None) | Err(_) => QuarantinedExecutorEntry::Other {
+        }
+    } else {
+        match lillux::rename_path_noreplace_durable(&source, &destination) {
+            Ok(()) => {}
+            Err(error) if error.namespace_committed() => {}
+            Err(error) => {
+                return Err(MaterializationError::MaterializationFailed {
+                    executor_ref: executor_ref.to_string(),
+                    detail: format!("failed to quarantine corrupt executor cache entry: {error}"),
+                })
+            }
+        }
+        QuarantinedExecutorEntry::Other {
             name: quarantine_name,
-        },
+        }
     };
     Ok(Some(quarantined))
 }
@@ -1675,7 +1455,7 @@ fn publish_verified_executor_blob(
             executor_ref: bare.to_string(),
             detail: "staged executor disappeared before verification".to_string(),
         })?;
-    let (verified_staged_file, pin) = verify_opened_executor_file(
+    let verified_staged_file = verify_opened_executor_file(
         staged_file,
         &verified.key.blob_hash,
         verified.key.blob_len,
@@ -1686,16 +1466,7 @@ fn publish_verified_executor_blob(
         executor_ref: bare.to_string(),
         detail: format!("staged executor verification failed: {detail}"),
     })?;
-    if let Err(error) = validate_executor_cache_ancestors(layout, &staging, bare) {
-        let pin_state = executor_pin_state(layout, verified, bare);
-        if let Some(pin_state) = pin_state {
-            *pin_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                ExecutorStatPinState::PermanentlyDisabled;
-        }
-        return Err(error);
-    }
+    validate_executor_cache_ancestors(layout, &staging, bare)?;
     staging
         .sync_tree()
         .map_err(|error| MaterializationError::MaterializationFailed {
@@ -1712,11 +1483,7 @@ fn publish_verified_executor_blob(
         // this primitive proves the same pinned staging-directory inode was
         // moved without replacement. No second target-path read is needed on
         // the won branch.
-        Ok(()) => {
-            let pin_state = executor_pin_state(layout, verified, bare);
-            remember_executor_stat_pin(pin_state.as_ref(), pin);
-            Ok(verified_staged_file)
-        }
+        Ok(()) => Ok(verified_staged_file),
         Err(error) => {
             if !error.namespace_committed() {
                 let _ = remove_staging_directory(&layout.executors, &staging_name, &staging);
@@ -7455,8 +7222,17 @@ mod tests {
         )
     }
 
+    static MATERIALIZER_TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn materializer_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        MATERIALIZER_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn materializer_rejects_duplicate_native_executor_instead_of_first_root_wins() {
+        let _guard = materializer_test_guard();
         let tmp = tempfile::tempdir().unwrap();
         let first = tmp.path().join("first");
         let second = tmp.path().join("second");
@@ -7486,6 +7262,7 @@ mod tests {
 
     #[test]
     fn materializer_repairs_corrupt_target_from_a_fully_verified_chain() {
+        let _guard = materializer_test_guard();
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let cache_root = tmp.path().join("state");
@@ -7523,6 +7300,7 @@ mod tests {
 
     #[test]
     fn verified_chain_cache_hit_skips_redundant_cas_blob_read_and_reuses_pinned_target() {
+        let _guard = materializer_test_guard();
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let cache_root = tmp.path().join("state");
@@ -7550,189 +7328,10 @@ mod tests {
         assert_eq!(std::fs::read(&second.path).unwrap(), fixture.bytes);
     }
 
-    #[test]
-    fn same_granule_executor_identity_is_never_pinned() {
-        let capture_seconds = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        let capture_seconds = i64::try_from(capture_seconds).unwrap();
-        let identity = ExecutorFileIdentity {
-            device: 1,
-            inode: 2,
-            size: 3,
-            modified_seconds: capture_seconds,
-            modified_nanoseconds: 0,
-            changed_seconds: capture_seconds,
-            changed_nanoseconds: 0,
-            mode: libc::S_IFREG | 0o755,
-            file_type: libc::S_IFREG,
-        };
-        assert!(reusable_executor_stat_pin(identity, SystemTime::now()).is_none());
-    }
-
-    #[test]
-    fn stat_pin_fast_path_requires_current_opt_in_and_verify_hits_forces_full_verification() {
-        let enabled = OsStr::new("1");
-        let disabled = OsStr::new("0");
-        let noncanonical = OsStr::new("true");
-
-        assert!(!executor_stat_pin_fast_path_enabled_for(None, None));
-        assert!(!executor_stat_pin_fast_path_enabled_for(
-            Some(disabled),
-            None
-        ));
-        assert!(!executor_stat_pin_fast_path_enabled_for(
-            Some(noncanonical),
-            None
-        ));
-        assert!(executor_stat_pin_fast_path_enabled_for(Some(enabled), None));
-        assert!(!executor_stat_pin_fast_path_enabled_for(
-            Some(enabled),
-            Some(enabled)
-        ));
-    }
-
     #[cfg(unix)]
     #[test]
-    fn enabled_stat_pin_skips_unchanged_hash_and_mismatch_falls_back_to_tamper_rejection() {
-        use std::io::Seek as _;
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let bundle = tmp.path().join("bundle");
-        let cache_root = tmp.path().join("state");
-        let bare = "pin-branch-executor";
-        let key = lillux::crypto::SigningKey::from_bytes(&[78u8; 32]);
-        let fixture = write_executable_materializer_fixture(&bundle, bare, &key);
-        let trust_store = materializer_trust_store(&fixture, &key);
-        let materialized = materialize_test_executor(
-            std::slice::from_ref(&bundle),
-            &format!("native:{bare}"),
-            &cache_root,
-            &trust_store,
-        )
-        .unwrap();
-
-        let bundle_roots = std::slice::from_ref(&bundle);
-        let generation = focused_test_generation_fingerprint(bundle_roots);
-        let trust_fingerprint = trust_store.fingerprint();
-        let probe = manifest_ref_probe(
-            bundle_roots,
-            &generation,
-            &trust_fingerprint,
-            &format!("native:{bare}"),
-            &host_triple(),
-            ryeos_engine::resolution::TrustClass::TrustedBundle,
-        )
-        .unwrap();
-        let (verified, _) = verify_native_executor_chain(&probe, bare, &trust_store, None).unwrap();
-        let layout = open_executor_cache_layout(&cache_root, bare).unwrap();
-        let original_identity =
-            executor_file_identity(&std::fs::metadata(&materialized.path).unwrap());
-        let pin_state = executor_pin_state(&layout, &verified, bare).unwrap();
-        let seed_original_pin = || {
-            *pin_state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                ExecutorStatPinState::Pinned(ExecutorStatPin {
-                    identity: original_identity,
-                    capture_granule_seconds: original_identity.changed_seconds.saturating_add(1),
-                });
-        };
-
-        seed_original_pin();
-        let pinned =
-            match inspect_materialized_executor_with_pin_policy(&layout, &verified, bare, true) {
-                MaterializedArtifactInspection::Valid(opened) => opened,
-                MaterializedArtifactInspection::Missing => {
-                    panic!("materialized executor disappeared before pin inspection")
-                }
-                MaterializedArtifactInspection::Invalid(detail) => {
-                    panic!("unchanged pinned executor was rejected: {detail}")
-                }
-            };
-        let mut pinned_handle = pinned.handle.try_clone().unwrap();
-        assert_eq!(
-            pinned_handle.stream_position().unwrap(),
-            0,
-            "stat-pin hit must return before the full-file read"
-        );
-        drop(pinned_handle);
-        drop(pinned);
-
-        seed_original_pin();
-        let fully_verified =
-            match inspect_materialized_executor_with_pin_policy(&layout, &verified, bare, false) {
-                MaterializedArtifactInspection::Valid(opened) => opened,
-                MaterializedArtifactInspection::Missing => {
-                    panic!("materialized executor disappeared before full verification")
-                }
-                MaterializedArtifactInspection::Invalid(detail) => {
-                    panic!("valid executor failed full verification: {detail}")
-                }
-            };
-        let mut fully_verified_handle = fully_verified.handle.try_clone().unwrap();
-        assert_eq!(
-            fully_verified_handle.stream_position().unwrap(),
-            u64::try_from(fixture.bytes.len()).unwrap(),
-            "disabled pin policy must consume the complete file hash"
-        );
-        drop(fully_verified_handle);
-        drop(fully_verified);
-
-        seed_original_pin();
-        let mut corrupt = fixture.bytes.clone();
-        corrupt[0] ^= 0xff;
-        let replacement = materialized.path.with_extension("tampered");
-        std::fs::write(&replacement, &corrupt).unwrap();
-        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::rename(&replacement, &materialized.path).unwrap();
-        let replacement_identity =
-            executor_file_identity(&std::fs::metadata(&materialized.path).unwrap());
-        assert_ne!(replacement_identity, original_identity);
-
-        match inspect_materialized_executor_with_pin_policy(&layout, &verified, bare, true) {
-            MaterializedArtifactInspection::Invalid(detail) => {
-                assert!(detail.contains("content-addressed check"));
-            }
-            MaterializedArtifactInspection::Missing => {
-                panic!("tampered replacement disappeared before inspection")
-            }
-            MaterializedArtifactInspection::Valid(_) => {
-                panic!("pin identity mismatch must fall back to hash and reject tampered bytes")
-            }
-        }
-    }
-
-    #[test]
-    fn bounded_pin_registry_saturation_permanently_disables_all_fast_paths() {
-        let registry = ExecutorStatPinRegistry {
-            state: Mutex::new(ExecutorStatPinRegistryState::default()),
-        };
-        let key = |index: usize| ExecutorPinKey {
-            cache_root: PathBuf::from("/test/executor-cache"),
-            blob_hash: format!("{index:064x}"),
-            bare: format!("executor-{index}"),
-        };
-        let first = registry.entry(key(0)).unwrap();
-        for index in 1..EXECUTOR_STAT_PIN_MAX_ENTRIES {
-            assert!(registry.entry(key(index)).is_some());
-        }
-        assert!(registry.entry(key(EXECUTOR_STAT_PIN_MAX_ENTRIES)).is_none());
-        assert_eq!(
-            *first.lock().unwrap(),
-            ExecutorStatPinState::PermanentlyDisabled
-        );
-        assert!(registry.entry(key(0)).is_none());
-        assert!(registry
-            .entry(key(EXECUTOR_STAT_PIN_MAX_ENTRIES + 1))
-            .is_none());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn weak_cache_directory_permissions_permanently_disable_entry_pin() {
+    fn weak_cache_directory_permissions_force_repair() {
+        let _guard = materializer_test_guard();
         use std::os::unix::fs::PermissionsExt as _;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -7759,23 +7358,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read(&repaired.path).unwrap(), fixture.bytes);
-        let layout = open_executor_cache_layout(&cache_root, "weak-cache-executor").unwrap();
-        let state = executor_stat_pin_registry()
-            .entry(ExecutorPinKey {
-                cache_root: layout.cache_root.clone(),
-                blob_hash: fixture.blob_hash,
-                bare: "weak-cache-executor".to_string(),
-            })
-            .unwrap();
-        assert_eq!(
-            *state.lock().unwrap(),
-            ExecutorStatPinState::PermanentlyDisabled
-        );
     }
 
     #[cfg(unix)]
     #[test]
     fn full_hash_detects_same_size_rewrite_with_restored_mtime() {
+        let _guard = materializer_test_guard();
         use std::os::unix::ffi::OsStrExt as _;
         use std::os::unix::fs::MetadataExt as _;
 
@@ -7845,6 +7433,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn materialized_descriptor_survives_path_substitution_without_inode_rebinding() {
+        let _guard = materializer_test_guard();
         use std::io::{Read as _, Seek as _};
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
@@ -7891,6 +7480,7 @@ mod tests {
 
     #[test]
     fn materializer_quarantines_bad_target_when_full_chain_repair_fails() {
+        let _guard = materializer_test_guard();
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bundle");
         let cache_root = tmp.path().join("state");
@@ -7922,8 +7512,15 @@ mod tests {
         )
         .expect_err("corrupt CAS bytes must prevent repair");
 
-        assert!(!materialized.path.exists());
         let executor_cache = cache_root.join("cache").join("executors");
+        let remaining_entries = std::fs::read_dir(&executor_cache)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert!(
+            !materialized.path.exists(),
+            "failed repair left the original target; cache entries: {remaining_entries:?}"
+        );
         assert!(std::fs::read_dir(executor_cache).unwrap().any(|entry| {
             entry
                 .unwrap()

@@ -10,9 +10,6 @@ const MAX_ENTRIES: usize = 128;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PENDING: usize = 128;
 const IDLE_TTL: Duration = Duration::from_secs(10 * 60);
-const OPT_IN_ENV: &str = "RYEOS_COMPOSE_CONTEXT_CACHE";
-const VERIFY_HITS_ENV: &str = "RYEOS_COMPOSE_CONTEXT_CACHE_VERIFY_HITS";
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CachedComposeProjection {
@@ -274,19 +271,6 @@ impl PendingFill {
 pub(super) fn cache() -> &'static ComposeProjectionCache {
     static CACHE: OnceLock<ComposeProjectionCache> = OnceLock::new();
     CACHE.get_or_init(ComposeProjectionCache::default)
-}
-
-/// Security-sensitive and deliberately default-off. Only the exact value `1`
-/// opts a node process into history semantic (a).
-pub(super) fn explicitly_enabled() -> bool {
-    matches!(std::env::var(OPT_IN_ENV).as_deref(), Ok("1"))
-}
-
-/// Diagnostic mode for the cache-equivalence gate. A hit still executes the
-/// child and compares its normalized projection with the cached projection;
-/// only digests are logged.
-pub(super) fn verify_hits_enabled() -> bool {
-    matches!(std::env::var(VERIFY_HITS_ENV).as_deref(), Ok("1"))
 }
 
 #[derive(Debug, Serialize)]
