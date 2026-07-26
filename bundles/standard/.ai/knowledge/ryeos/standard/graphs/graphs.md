@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:21Z:6570d34adcbc8ef11901a27945099c4f1bbf139f75fd1112fb570569b1b14347:RkirGEFYePnpSDx9X/bkC8Kc1JRfLVIpAblbCJAgQYf2w7X6uVuwrFz8ptNBHp7mr4sTIq4dW8sd00lGzLNPCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-26T23:07:55Z:637bc41da49d57a491defb0f30721d6dfb46185fec1b7d0eb988ff8934bb8298:Ky2jIdWsq/BlnvpsdODUMIrqOg7/0kalWh5CIvCKcqxCjaoqrrHEXQbNMigX5cIicXCBhYgCZQicKyUcmMzhDQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 tags: [reference, graphs, dag, state-machine]
 version: "1.0.0"
@@ -215,7 +215,29 @@ failures invalidate terminal authority and fail closed. Node-level resilience
 is the node `retry:` block, not a hook action. See `retry-and-hooks.md` for the
 full contract.
 
-## State Persistence
+## Execution and durability
+
+A graph is advanced by a single sequential walker, one node at a time. Each node
+produces exactly one outcome, and every outcome is committed through one fence.
+The observable guarantees an author can rely on:
+
+- **The checkpoint is written last.** For an advancing node the durable cursor is
+  written only after that node's events, state mutation, and receipt. A crash
+  anywhere before it leaves the previous checkpoint authoritative, so **the
+  current node re-runs on resume** — never a half-applied node. Events, receipts,
+  and advancing-step hooks are therefore at-least-once observability; only the
+  checkpoint advances resumable state.
+- **`cache_result` is fenced.** An entry becomes visible only after its advancing
+  checkpoint is durable, and never on a `return` node. Entries are
+  execution-local and never persist across runs or resumes.
+- **Long runs drive themselves.** `max_steps` is the hard total-step ceiling;
+  `segment_steps` is a soft per-segment budget. When a segment's budget is spent
+  without reaching a terminal node, the walker cuts a machine continuation — it
+  settles `continued` and a successor resumes from the last checkpoint, with no
+  external orchestration. A crash is simply an unplanned segment cut: same resume
+  path.
+
+### State persistence
 
 The last successfully written versioned checkpoint is the authoritative resume
 cursor. It records graph definition ref/hash, `expression_language:
@@ -224,10 +246,16 @@ errors. Resume requires that identity-bearing local checkpoint and the exact
 definition; event replay is not a state reconstruction fallback. An older
 schema or identity/language mismatch fails with
 `restart_required_after_expression_language_cutover` and requires a new run.
+Editing (and re-signing) a graph changes its hash, so a live run cannot be
+edited mid-flight and later resumed — start a new run instead.
 
 Receipts, runtime events, transcripts, and artifacts remain durable
 observability, but do not advance resumable state without a later successful
 checkpoint write.
+
+For the full execution-model contract — the single commit fence, its exact
+ordering, the cache fence, segment continuation, and cooperative control — see
+`../runtimes/graph-runtime.md`.
 
 ## Permissions
 
@@ -242,3 +270,8 @@ Graphs run as threads. You can:
 - Cancel: `ryeos commands submit <id> cancel`
 - Inspect state: `ryeos thread get <id>`
 - Resume interrupted graphs from their identity-bearing local checkpoint
+
+Cancel and kill are **cooperative**: they are honored at a node boundary and
+settle the thread as a distinct `cancelled` / `killed` terminal (not `failed`),
+never a hard signal landing mid-node. `kill` supersedes `cancel` if both arrive
+together.

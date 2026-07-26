@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:21Z:a396865061fb3c35d47f26b03313b31807be5bcccacdeda71663d0d699bcd3da:3throOyKWRlT/ui7yjc84qvzvIm5mbYZC2jexFZSkYarHJj15wCqXVlrDHdLDlWUNPnIMkvTQEVNabwBHgHkCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-26T23:07:56Z:e4dc03bedaf74ed58fb28e98cc3d48adbdc167fc0b11f7cb133d8bf228327b40:6qYqWisY3iV9mPC2XzOS/atlxOmmFPkCYwWcBj2kt4sCpP2FuKwWLLaRwGBqodvxqNC4w7TQYu8LLp4mo6LFAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]
@@ -148,6 +148,13 @@ continues the parent when all slots are terminal.
 3. When the child chain terminates, the daemon stores the child's terminal
    envelope on the waiter and drives the parent's resume successor, which folds
    the result and continues the parent graph.
+
+A follow node is one node-step split across two process lifetimes: the suspend
+writes a pending-follow checkpoint (pointing at the follow node, carrying no
+child identity) and emits no receipt or `graph_step_completed`; those are emitted
+only on resume once the child result is folded in. A failed handoff settles a
+terminal error, never `continued` with no child behind it. See
+`../runtimes/graph-runtime.md` for how this fits the commit fence.
 
 ## Authoring checklist
 
