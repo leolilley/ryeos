@@ -3233,6 +3233,19 @@ fn map_launch_planning_check_error(
     }
 }
 
+fn inventory_ref_is_authorized(
+    item_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+    effective_caps: &[String],
+) -> bool {
+    if item_ref.kind != "tool" {
+        return true;
+    }
+    let required = format!("ryeos.execute.{}.{}", item_ref.kind, item_ref.bare_id);
+    effective_caps
+        .iter()
+        .any(|granted| ryeos_runtime::cap_matches(granted, &required))
+}
+
 /// Run an already-created `created` thread row to completion: resolve, spawn its
 /// runtime subprocess, wait, and finalize.
 ///
@@ -3386,6 +3399,9 @@ async fn run_claimed_thread_row_inner(
         augmentation_audits,
         freshly_minted_accounting_scope,
     } = authority;
+    let post_publication_timer = launch_timings
+        .as_ref()
+        .map(|timings| timings.top_level("post_publication_launch_setup"));
     let accounting_scope = launch_metadata
         .as_ref()
         .and_then(|metadata| metadata.accounting_scope.clone());
@@ -3935,16 +3951,22 @@ async fn run_claimed_thread_row_inner(
         }
     }
 
-    // 6b. Build inventory the launching kind asked for. The engine
-    //     enumerates + parses every inventoried item once here so the
-    //     runtime is a pure consumer of `envelope.inventory`.
-    let inventory = ryeos_engine::inventory::build_inventory_for_launching_kind(
+    // 6b. Build the authorized inventory the launching kind asked for. Refuse
+    //     tools outside the already-sealed effective capability set before
+    //     their descriptors are read or parsed. The runtime remains a pure
+    //     consumer of `envelope.inventory` and keeps its defensive filter.
+    let inventory_timer = launch_timings
+        .as_ref()
+        .map(|timings| timings.nested("post_publication_launch_setup", "inventory_build"));
+    let inventory = ryeos_engine::inventory::build_inventory_for_launching_kind_filtered(
         launching_kind_schema,
         &engine.kinds,
         &engine_roots,
         &effective_request_snapshot.parser_dispatcher,
+        |item_ref| inventory_ref_is_authorized(item_ref, &effective_caps),
     )
     .map_err(|e| anyhow::anyhow!("inventory build failed: {e}"))?;
+    drop(inventory_timer);
 
     // 7. The exact native executor was verified and materialized before birth,
     //    and its content identity is now part of the admitted capsule. Never
@@ -4155,6 +4177,7 @@ async fn run_claimed_thread_row_inner(
             detail: "durable stop intent won after authoritative thread creation".to_string(),
         });
     }
+    drop(post_publication_timer);
     let spawn_handoff_timer = launch_timings
         .as_ref()
         .map(|timings| timings.top_level("spawn_scheduled_to_handoff"));
@@ -7105,6 +7128,33 @@ mod tests {
 
     fn caps(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn inventory_filter_uses_sealed_effective_tool_capabilities() {
+        let allowed =
+            ryeos_engine::canonical_ref::CanonicalRef::parse("tool:example/api/read").unwrap();
+        let sibling =
+            ryeos_engine::canonical_ref::CanonicalRef::parse("tool:example/api/write").unwrap();
+        let knowledge =
+            ryeos_engine::canonical_ref::CanonicalRef::parse("knowledge:example/context").unwrap();
+
+        assert!(inventory_ref_is_authorized(
+            &allowed,
+            &caps(&["ryeos.execute.tool.example/api/read"])
+        ));
+        assert!(!inventory_ref_is_authorized(
+            &sibling,
+            &caps(&["ryeos.execute.tool.example/api/read"])
+        ));
+        assert!(inventory_ref_is_authorized(
+            &sibling,
+            &caps(&["ryeos.execute.tool.example/api/*"])
+        ));
+        assert!(
+            inventory_ref_is_authorized(&knowledge, &[]),
+            "non-tool inventory semantics remain unchanged"
+        );
     }
 
     /// Test shim over the two-source [`apply_capability_policy`]. `child_execute_cap`

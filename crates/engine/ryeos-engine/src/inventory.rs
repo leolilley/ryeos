@@ -107,6 +107,28 @@ pub fn build_inventory_for_launching_kind(
     roots: &ResolutionRoots,
     parsers: &ParserDispatcher,
 ) -> Result<Inventory, EngineError> {
+    build_inventory_for_launching_kind_filtered(
+        launching_kind_schema,
+        kinds,
+        roots,
+        parsers,
+        |_| true,
+    )
+}
+
+/// Build an inventory while refusing excluded canonical refs before their
+/// source files are read or parsed.
+///
+/// The caller owns the filtering policy. This lets a launcher with an already
+/// sealed authorization context avoid preparing descriptors that context
+/// cannot expose, without moving capability policy into the engine.
+pub fn build_inventory_for_launching_kind_filtered(
+    launching_kind_schema: &KindSchema,
+    kinds: &KindRegistry,
+    roots: &ResolutionRoots,
+    parsers: &ParserDispatcher,
+    mut include: impl FnMut(&CanonicalRef) -> bool,
+) -> Result<Inventory, EngineError> {
     let mut out: Inventory = HashMap::new();
     for inventoried_kind in &launching_kind_schema.inventory_kinds {
         let target_schema =
@@ -119,8 +141,13 @@ pub fn build_inventory_for_launching_kind(
                      (typo? missing bundle?)"
                     ),
                 })?;
-        let descriptors =
-            build_inventory_for_kind(inventoried_kind, target_schema, roots, parsers)?;
+        let descriptors = build_inventory_for_kind_filtered(
+            inventoried_kind,
+            target_schema,
+            roots,
+            parsers,
+            &mut include,
+        )?;
         out.insert(inventoried_kind.clone(), descriptors);
     }
     Ok(out)
@@ -135,6 +162,18 @@ pub fn build_inventory_for_kind(
     roots: &ResolutionRoots,
     parsers: &ParserDispatcher,
 ) -> Result<Vec<ItemDescriptor>, EngineError> {
+    build_inventory_for_kind_filtered(inventoried_kind, target_schema, roots, parsers, &mut |_| {
+        true
+    })
+}
+
+fn build_inventory_for_kind_filtered(
+    inventoried_kind: &str,
+    target_schema: &KindSchema,
+    roots: &ResolutionRoots,
+    parsers: &ParserDispatcher,
+    include: &mut impl FnMut(&CanonicalRef) -> bool,
+) -> Result<Vec<ItemDescriptor>, EngineError> {
     let refs = enumerate_kind_refs(roots, target_schema, inventoried_kind);
     let mut out: Vec<ItemDescriptor> = Vec::with_capacity(refs.len());
     // Track which `item_id` first produced each flattened name so a
@@ -143,6 +182,9 @@ pub fn build_inventory_for_kind(
     // overwrite one tool with another.
     let mut seen_names: HashMap<String, String> = HashMap::with_capacity(refs.len());
     for ref_ in &refs {
+        if !include(ref_) {
+            continue;
+        }
         let descriptor =
             build_descriptor_for_ref(ref_, target_schema, roots, parsers).map_err(|e| {
                 EngineError::InventoryItemFailed {
