@@ -349,6 +349,12 @@ fn normalize_field_value(
         InvocationInputType::Json => Ok(value),
         InvocationInputType::Object => match value {
             Value::Object(_) => Ok(value),
+            Value::String(s) => serde_json::from_str::<Value>(&s)
+                .map_err(|_| format!("--{} must be a JSON object", flag_name(field)))
+                .and_then(|decoded| match decoded {
+                    Value::Object(_) => Ok(decoded),
+                    _ => Err(format!("--{} must be a JSON object", flag_name(field))),
+                }),
             other => Err(format!(
                 "--{} must be an object, got {}",
                 flag_name(field),
@@ -912,6 +918,44 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("invocation parameters must be an object"));
+    }
+
+    #[test]
+    fn command_contract_decodes_object_from_json_text() {
+        let command = test_command(vec!["tool".into(), "env-check".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "ref_bindings": "object?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let result = bind_argv_with_command_and_contract(
+            &["--ref-bindings".into(), "{}".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap();
+
+        assert_eq!(result["ref_bindings"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn command_contract_rejects_non_object_json_text_for_object() {
+        let command = test_command(vec!["tool".into(), "env-check".into()], Vec::new());
+        let contract = crate::InvocationInputContract::from_lightweight_schema_value(
+            &serde_json::json!({ "ref_bindings": "object?" }),
+        )
+        .unwrap()
+        .unwrap();
+
+        let error = bind_argv_with_command_and_contract(
+            &["--ref-bindings".into(), "[]".into()],
+            Some(&command),
+            Some(&contract),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("--ref-bindings must be a JSON object"));
     }
 
     #[test]
