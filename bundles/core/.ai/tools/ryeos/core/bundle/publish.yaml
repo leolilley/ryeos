@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-21T05:26:03Z:e5142db7feed30afb63ea534b17f08bf99783844d057e16feab8511b57dc36fa:EBQwM5egpYmfqPoK6aSOfzmyqk5Do/Oiwcq+8nB60bTDMVs7wWOUtKIk/BDIBXA8Pef5k104ID8Fjis0VqolAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-26T04:22:03Z:6b67d383860f4094c4e34f99846544d4fcc60f82ba151d052773e6f340b13935:wNERCSy2s/r3WrohuHoXSu7md4uxzU5gvautoPnym+hojlI1eW7bKuIfghBdmdbkJ+Mz7sFRF8VcG8rSX9yZAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96
 category: "ryeos/core/bundle"
 name: "publish"
 executor_id: "@subprocess"
@@ -30,7 +30,7 @@ config_schema:
       description: "Owner label for PUBLISHER_TRUST.toml. Defaults to local-dev."
     name:
       type: string
-      description: "Effective bundle id the manifest must carry (first bare-id segment of the bundle's item refs). Defaults to the source directory basename."
+      description: "Effective bundle id the manifest must carry (first bare-id segment of the bundle's item refs). Defaults to the name declared by .ai/manifest.source.yaml."
     skip_unsignable:
       type: boolean
       description: "Report and skip items that fail to sign instead of aborting. Produces a PARTIAL publish (partial: true, skipped_unsignable: [...]) and suppresses the trust doc."

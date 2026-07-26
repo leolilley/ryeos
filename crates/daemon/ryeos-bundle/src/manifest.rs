@@ -292,7 +292,7 @@ pub fn materialize_manifest(
     if source.name != expected_name {
         bail!(
             "manifest identity mismatch: source.name is '{}' but expected '{}' — \
-             update manifest.source.yaml name to match the directory",
+             manifest.source.yaml name must match the effective bundle identity",
             source.name,
             expected_name
         );
@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_name_must_match_bundle_directory() {
+    fn manifest_name_must_match_effective_bundle_identity() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("real-name");
         fs::create_dir_all(bundle.join(".ai")).unwrap();

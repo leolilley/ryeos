@@ -68,9 +68,9 @@ enum Cmd {
         owner: Option<String>,
 
         /// Effective bundle id the generated manifest must carry — the first
-        /// bare-id segment of the bundle's item refs. Defaults to the source
-        /// directory's basename. Runtime authority requires this to equal the
-        /// bundle id used in item refs.
+        /// bare-id segment of the bundle's item refs. Defaults to the identity
+        /// declared by `.ai/manifest.source.yaml`. Runtime authority requires
+        /// this to equal the bundle id used in item refs.
         #[arg(long)]
         name: Option<String>,
 
@@ -103,8 +103,8 @@ enum Cmd {
         bundle_source: Option<PathBuf>,
 
         /// Effective bundle id the manifest must carry — the first bare-id
-        /// segment of the bundle's item refs. Defaults to the source
-        /// directory's basename.
+        /// segment of the bundle's item refs. Defaults to the identity
+        /// declared by `.ai/manifest.source.yaml`.
         #[arg(long)]
         name: Option<String>,
     },

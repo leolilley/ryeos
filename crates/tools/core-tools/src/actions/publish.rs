@@ -54,8 +54,8 @@ pub struct PublishOptions {
     pub owner: String,
     /// Effective bundle id the generated manifest must carry — the first
     /// bare-id segment of the bundle's item refs (runtime authority requires
-    /// `manifest.name` to equal it). `None` falls back to the bundle source
-    /// directory's basename.
+    /// `manifest.name` to equal it). `None` uses the identity declared by
+    /// `.ai/manifest.source.yaml`.
     pub name: Option<String>,
     /// If `true`, items that fail to sign in Phase 3 are reported and skipped
     /// instead of aborting the publish — the run continues to manifest
@@ -113,14 +113,8 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
             live_root.display()
         )
     })?;
-    let effective_bundle_name = match opts.name.as_deref() {
-        Some(name) => name.to_string(),
-        None => canonical_live_root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-            .ok_or_else(|| anyhow::anyhow!("bundle_source path has no UTF-8 directory name"))?,
-    };
+    let declared_name = declared_manifest_name(&canonical_live_root)?;
+    let effective_bundle_name = opts.name.as_deref().unwrap_or(&declared_name).to_string();
     super::publisher_transaction::with_staged_bundle_generation(&live_root, |staging| {
         let registry_roots = super::publisher_transaction::roots_for_staged_generation(
             &live_root,
@@ -132,6 +126,25 @@ pub fn run_publish(opts: &PublishOptions) -> Result<PublishReport> {
         remap_publish_report_paths(&mut report, staging, &live_root);
         Ok(report)
     })
+}
+
+pub(super) fn declared_manifest_name(bundle_source: &Path) -> Result<String> {
+    let source_path = bundle_source
+        .join(ryeos_engine::AI_DIR)
+        .join("manifest.source.yaml");
+    let metadata = fs::symlink_metadata(&source_path)
+        .with_context(|| format!("inspect required manifest source {}", source_path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        bail!(
+            "required manifest source {} must be a regular non-symlink file",
+            source_path.display()
+        );
+    }
+    let raw = fs::read_to_string(&source_path)
+        .with_context(|| format!("read manifest source {}", source_path.display()))?;
+    let source: BundleManifestSource = serde_yaml::from_str(&raw)
+        .with_context(|| format!("parse manifest source {}", source_path.display()))?;
+    Ok(source.name)
 }
 
 fn run_publish_in_place(

@@ -16,6 +16,7 @@ mod resume;
 mod validation;
 mod walker;
 
+use std::collections::HashSet;
 use std::io::Read;
 
 use clap::Parser;
@@ -82,8 +83,14 @@ struct ResolvedLaunch {
 /// Reached only via the daemon-spawned `validate` execution input — the
 /// daemon trust-gates the graph (resolve → verify) before the runtime
 /// ever runs, so the runtime never analyzes untrusted content.
-fn validate_report(graph: &model::GraphDefinition) -> Value {
-    let report = validation::analyze_graph(graph);
+fn validate_report(graph: &model::GraphDefinition, managed_kinds: &HashSet<String>) -> Value {
+    let mut report = validation::analyze_graph(graph);
+    report
+        .errors
+        .extend(validation::validate_managed_child_kinds(
+            graph,
+            managed_kinds,
+        ));
     json!({
         "valid": report.errors.is_empty(),
         "graph_id": graph.graph_id,
@@ -92,6 +99,36 @@ fn validate_report(graph: &model::GraphDefinition) -> Value {
         "errors": report.errors,
         "warnings": report.warnings,
     })
+}
+
+fn admitted_managed_runtime_kinds(resolved: &ResolvedLaunch) -> anyhow::Result<HashSet<String>> {
+    use ryeos_engine::kind_registry::KindRegistry;
+    use ryeos_engine::resolution::TrustClass;
+    use ryeos_engine::runtime_registry::RuntimeRegistry;
+    use ryeos_engine::trust::TrustStore;
+
+    let trust = TrustStore::load_from_dir(&resolved.node_trusted_keys_dir)?;
+    let schema_roots = resolved
+        .bundle_roots
+        .iter()
+        .map(|root| {
+            root.join(ryeos_engine::AI_DIR)
+                .join(ryeos_engine::KIND_SCHEMAS_DIR)
+        })
+        .filter(|root| root.is_dir())
+        .collect::<Vec<_>>();
+    let kinds = KindRegistry::load_base(&schema_roots, &trust)?;
+    let tagged_roots = resolved
+        .bundle_roots
+        .iter()
+        .cloned()
+        .map(|root| (root, TrustClass::TrustedBundle))
+        .collect::<Vec<_>>();
+    let runtimes = RuntimeRegistry::build_from_bundles(&tagged_roots, &trust, &kinds)?;
+    Ok(runtimes
+        .all()
+        .map(|runtime| runtime.yaml.serves.clone())
+        .collect())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -189,7 +226,8 @@ fn main() -> anyhow::Result<()> {
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        let report = validate_report(&graph);
+        let managed_kinds = admitted_managed_runtime_kinds(&resolved)?;
+        let report = validate_report(&graph, &managed_kinds);
         let valid = report
             .get("valid")
             .and_then(Value::as_bool)
