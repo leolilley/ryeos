@@ -4556,7 +4556,7 @@ owner = "ryeos-dev"
         );
         assert_eq!(
             zero_priced_snapshot.matched_profile.as_deref(),
-            Some("free-fast-no-thinking")
+            Some("glm-4-7-flash-free")
         );
         assert_eq!(zero_priced_body["thinking"]["type"], "disabled");
 
