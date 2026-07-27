@@ -1182,10 +1182,23 @@ async fn second_request_tool_messages(mock: &MockProvider) -> Vec<(String, Strin
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
-                m.get("content").map(|c| c.to_string()).unwrap_or_default(),
+                m.get("content")
+                    .and_then(|content| content.as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        m.get("content")
+                            .map(ToString::to_string)
+                            .unwrap_or_default()
+                    }),
             )
         })
         .collect()
+}
+
+fn tool_message_failed(content: &str) -> bool {
+    let envelope: serde_json::Value = serde_json::from_str(content)
+        .unwrap_or_else(|e| panic!("tool message content must be a JSON envelope: {e}; {content}"));
+    envelope.get("error").is_some_and(|error| !error.is_null())
 }
 
 async fn run_sleepy_batch(
@@ -1277,7 +1290,7 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
     assert!(
         tool_messages
             .iter()
-            .all(|(_, content)| !content.contains("error")),
+            .all(|(_, content)| !tool_message_failed(content)),
         "batch tools must execute successfully; messages={tool_messages:?}"
     );
 
@@ -1334,7 +1347,7 @@ async fn e2e_tool_batch_at_width_one_is_strictly_serial() {
     assert!(
         tool_messages
             .iter()
-            .all(|(_, content)| !content.contains("error")),
+            .all(|(_, content)| !tool_message_failed(content)),
         "serial tools must execute successfully; messages={tool_messages:?}"
     );
 
@@ -1399,9 +1412,9 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
         "every batch member must settle once; messages={tool_messages:?}"
     );
     assert!(
-        !tool_messages[0].1.contains("error")
-            && tool_messages[1].1.contains("error")
-            && !tool_messages[2].1.contains("error"),
+        !tool_message_failed(&tool_messages[0].1)
+            && tool_message_failed(&tool_messages[1].1)
+            && !tool_message_failed(&tool_messages[2].1),
         "only the refused middle member may fail; messages={tool_messages:?}"
     );
 
