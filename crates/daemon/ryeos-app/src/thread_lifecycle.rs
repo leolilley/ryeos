@@ -6106,7 +6106,7 @@ impl PreparedItemPlan {
         let wrapper_source_identity = self.wrapper_source_identity.clone();
         let identity = ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executor_ref: resolved.executor_ref.clone(),
-            executor_item_content_hash: resolved.resolved_item.raw_content_digest.clone(),
+            executor_item_content_hash: resolved.resolved_item.content_hash.clone(),
             executor_item_signer_fingerprint: resolved
                 .resolved_item
                 .signature_header
@@ -6457,7 +6457,7 @@ fn relocate_direct_plan_json_paths(
 ) -> Result<()> {
     match value {
         Value::String(value) => {
-            relocate_direct_plan_path_text(label, value, admitted_text, effective_text)
+            relocate_direct_plan_string(label, value, admitted_text, effective_text)
         }
         Value::Array(values) => {
             for value in values {
@@ -7078,7 +7078,13 @@ mod tests {
         };
         spec.args[0] = serde_json::json!({
             "project_path": admitted,
-            "nested": [admitted.join("data.json")]
+            "nested": [
+                admitted.join("data.json"),
+                serde_json::json!({
+                    "project_path": admitted
+                })
+                .to_string()
+            ]
         })
         .to_string();
         spec.stdin_data = Some(
@@ -7100,6 +7106,8 @@ mod tests {
             argument["nested"][0],
             effective.join("data.json").display().to_string()
         );
+        let nested: Value = serde_json::from_str(argument["nested"][1].as_str().unwrap()).unwrap();
+        assert_eq!(nested["project_path"], effective.display().to_string());
         let stdin: Value = serde_json::from_str(spec.stdin_data.as_deref().unwrap()).unwrap();
         assert_eq!(stdin["project_path"], effective.display().to_string());
     }
