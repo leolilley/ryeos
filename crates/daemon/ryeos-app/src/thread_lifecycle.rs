@@ -5869,6 +5869,47 @@ impl RunningItem {
     }
 }
 
+fn normalize_plan_project_paths(value: &mut Value, project_root: &Path) {
+    match value {
+        Value::String(raw) => {
+            let Ok(relative) = Path::new(raw).strip_prefix(project_root) else {
+                return;
+            };
+            *value = json!({
+                "$ryeos_plan_path": "project_relative",
+                "relative": relative.to_string_lossy(),
+            });
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize_plan_project_paths(value, project_root);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                normalize_plan_project_paths(value, project_root);
+            }
+        }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn execution_plan_identity_hash(
+    plan: &ExecutionPlan,
+    project_context: &ProjectContext,
+) -> Result<String> {
+    let mut identity = serde_json::to_value(plan)?;
+    if let ProjectContext::LocalPath { path } = project_context {
+        // A pinned project may be admitted through its original path and
+        // recovered through a fresh CAS checkout. Both paths realize the same
+        // snapshot authority. Preserve every relative path and all other plan
+        // behavior while removing only that host-specific root spelling.
+        normalize_plan_project_paths(&mut identity, path);
+    }
+    let canonical = lillux::canonical_json(&identity)?;
+    Ok(lillux::sha256_hex(canonical.as_bytes()))
+}
+
 /// A verified, fully built item plan retained from callback credential minting
 /// through spawn. Its timeout comes from the exact plan the engine executes, so
 /// credential lifetime cannot drift from a later plan rebuild.
@@ -5893,8 +5934,8 @@ impl PreparedItemPlan {
         resolved: &ResolvedExecutionRequest,
         protocol: &ryeos_engine::protocols::VerifiedProtocol,
     ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
-        let canonical_plan = lillux::canonical_json(&serde_json::to_value(&self.plan)?)?;
-        let execution_plan_hash = lillux::sha256_hex(canonical_plan.as_bytes());
+        let execution_plan_hash =
+            execution_plan_identity_hash(&self.plan, &resolved.plan_context.project_context)?;
         let plan_runtime = self
             .plan
             .runtime_identity
@@ -6372,6 +6413,31 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plan_identity_normalizes_only_the_project_realization_root() {
+        fn identity(root: &Path, script: &str) -> String {
+            let mut plan = json!({
+                "cmd": "/usr/bin/python",
+                "args": [root.join(script), "--mode", "resume"],
+                "cwd": root,
+                "env": {
+                    "RYEOS_ITEM_PATH": root.join(".ai/tools/resume/resume_test.yaml"),
+                    "UNCHANGED": "/outside/project",
+                },
+            });
+            normalize_plan_project_paths(&mut plan, root);
+            let canonical = lillux::canonical_json(&plan).unwrap();
+            lillux::sha256_hex(canonical.as_bytes())
+        }
+
+        let admitted = identity(Path::new("/workspace/original"), "worker.py");
+        let recovered = identity(Path::new("/runtime/cas/checkout-123"), "worker.py");
+        let changed_program = identity(Path::new("/runtime/cas/checkout-456"), "other.py");
+
+        assert_eq!(admitted, recovered);
+        assert_ne!(admitted, changed_program);
+    }
 
     fn empty_test_engine() -> Arc<Engine> {
         Arc::new(Engine::new(
