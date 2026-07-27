@@ -569,6 +569,7 @@ composer: {composer}
             source_path: root.join("directive/test.directive.md"),
             source_space: crate::contracts::ItemSpace::Bundle,
             trust_class: TrustClass::TrustedBundle,
+            signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: String::new(),

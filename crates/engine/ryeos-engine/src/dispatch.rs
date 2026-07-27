@@ -450,10 +450,15 @@ fn isolation_plan_request(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
-            verified_command: spec
-                .verified_command
+            verified_command: ctx
+                .isolation_verified_command
                 .as_ref()
-                .map(|command| command.code() as &dyn crate::isolation::IsolationCommandAuthority),
+                .map(|command| command as &dyn crate::isolation::IsolationCommandAuthority)
+                .or_else(|| {
+                    spec.verified_command.as_ref().map(|command| {
+                        command.code() as &dyn crate::isolation::IsolationCommandAuthority
+                    })
+                }),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -478,10 +483,15 @@ fn isolation_plan_request_awaiting_attachment(
             bundle_roots: &ctx.isolation_bundle_roots,
             node_trusted_keys_dir: ctx.isolation_node_trusted_keys_dir.as_deref(),
             verified_code: &verified_code,
-            verified_command: spec
-                .verified_command
+            verified_command: ctx
+                .isolation_verified_command
                 .as_ref()
-                .map(|command| command.code() as &dyn crate::isolation::IsolationCommandAuthority),
+                .map(|command| command as &dyn crate::isolation::IsolationCommandAuthority)
+                .or_else(|| {
+                    spec.verified_command.as_ref().map(|command| {
+                        command.code() as &dyn crate::isolation::IsolationCommandAuthority
+                    })
+                }),
             item_ref,
             thread_id: &ctx.thread_id,
         },
@@ -622,6 +632,7 @@ mod tests {
             isolation_bundle_roots: Vec::new(),
             isolation_node_trusted_keys_dir: None,
             isolation_verified_code: Vec::new(),
+            isolation_verified_command: None,
             thread_id: "thread:test".into(),
             chain_root_id: "chain:test".into(),
             current_site_id: "site:test".into(),
@@ -651,6 +662,7 @@ mod tests {
             materialization_requirements: Vec::new(),
             cache_key: "test".into(),
             executor_chain: vec!["@test".into()],
+            executor_authorities: Vec::new(),
             runtime_identity: None,
             debug_raw: false,
         }

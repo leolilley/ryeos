@@ -276,6 +276,7 @@ mod tests {
                 ItemSpace::Project => TrustClass::TrustedProject,
                 ItemSpace::Bundle => TrustClass::TrustedBundle,
             },
+            signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: String::new(),

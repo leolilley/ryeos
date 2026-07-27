@@ -255,6 +255,7 @@ fn route_handler_fixed_scope_executes_handler_end_to_end() {
             source_path: verified.resolved.source_path.clone(),
             content_hash: verified.resolved.content_hash.clone(),
         }],
+        isolation_verified_command: None,
         thread_id: "thread:test".into(),
         chain_root_id: "chain:test".into(),
         current_site_id: "site:test".into(),

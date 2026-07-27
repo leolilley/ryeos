@@ -324,7 +324,7 @@ fn load_layer(
                 ),
             )
         })?;
-    let (contract_trust, _) =
+    let (contract_trust, verified_signer) =
         verify_item_signature_with_hash(&content_digest, &header, policy.trust_store).map_err(
             |error| {
                 invalid(
@@ -360,6 +360,9 @@ fn load_layer(
             canonical_id: canonical_id.to_owned(),
             content_digest,
             trust_class: trust_wire(trust_class),
+            signer_fingerprint: verified_signer
+                .ok_or_else(|| invalid(canonical_id, "signed launch config has no signer"))?
+                .0,
         },
     })
 }

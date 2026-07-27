@@ -105,6 +105,7 @@ fn walk(
             source_path: source_path.clone(),
             source_space: loaded.source_space,
             trust_class: loaded.trust_class,
+            signer_fingerprint: loaded.signer_fingerprint,
             alias_resolution: alias_hop,
             added_by: ResolutionStepName::ResolveExtendsChain,
             raw_content: loaded.raw_content,

@@ -2785,6 +2785,21 @@ mod tests {
 
         let sealed =
             ryeos_app::thread_lifecycle::SealedRootExecutionRequest::storage_test_fixture();
+        let signed_descriptor = |body: &str, seed: u8| {
+            let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
+            let document = lillux::signature::sign_content(body, &key, "#", None);
+            let header = lillux::signature::parse_signature_line(
+                document.lines().next().unwrap(),
+                "#",
+                None,
+            )
+            .unwrap();
+            (document, header.content_hash, header.signer_fingerprint)
+        };
+        let (runtime_document, runtime_hash, runtime_signer) =
+            signed_descriptor("runtime: fixture\n", 51);
+        let (protocol_document, protocol_hash, protocol_signer) =
+            signed_descriptor("protocol: fixture\n", 52);
         let mut metadata = RuntimeLaunchMetadata::default()
             .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
             .with_resume_context(ResumeContext {
@@ -2817,23 +2832,32 @@ mod tests {
             .with_admitted_artifact_identity(
                 ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
                     runtime_ref: sealed.runtime_ref().to_string(),
-                    runtime_content_hash: "a".repeat(64),
-                    runtime_signer_fingerprint: "fp:test-runtime".to_string(),
+                    runtime_content_hash: runtime_hash,
+                    runtime_signer_fingerprint: runtime_signer,
                     protocol_ref: "protocol:test/runtime".to_string(),
-                    protocol_content_hash: "b".repeat(64),
-                    protocol_signer_fingerprint: "fp:test-protocol".to_string(),
+                    protocol_content_hash: protocol_hash,
+                    protocol_signer_fingerprint: protocol_signer,
                     executor_ref: sealed.executor_ref().to_string(),
                     executor_content_hash: "c".repeat(64),
                     executor_bundle_manifest_hash: "d".repeat(64),
-                    executor_bundle_signer_fingerprint: "fp:test-executor-bundle".to_string(),
+                    executor_bundle_signer_fingerprint: "3".repeat(64),
                 },
             )
-            .with_admitted_prepared_launch(json!({
-                "runtime_data": {},
-                "required_secrets": [],
-                "runtime_facts": {},
-                "binding_records": {},
-            }))
+            .with_admitted_execution_closure(
+                ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                    prepared_runtime_launch: json!({
+                        "runtime_data": {},
+                        "required_secrets": [],
+                        "runtime_facts": {},
+                        "binding_records": {},
+                        "config_contributors": [],
+                        "financial_authority": null,
+                    }),
+                    runtime_descriptor_document: runtime_document,
+                    protocol_descriptor_document: protocol_document,
+                    executor_blob_hash: "c".repeat(64),
+                },
+            )
             .with_sealed_root_request(sealed);
         metadata.follow_parent_context = Some(PersistedParentExecutionContext {
             parent_thread_id: "P".to_string(),

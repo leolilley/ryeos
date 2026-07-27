@@ -11,9 +11,9 @@
 #![cfg(unix)]
 
 use lillux::{
-    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_memfd, spawn,
-    spawn_detached, supervised_launcher_status_pipe, validate_subprocess_limits,
-    OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
+    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
+    sealed_memfd, spawn, spawn_detached, supervised_launcher_status_pipe,
+    validate_subprocess_limits, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -286,6 +286,16 @@ fn sealed_memfd_is_rewound_cloexec_and_immutable() {
 
     let error = view.write_all(b"mutation").unwrap_err();
     assert_eq!(error.raw_os_error(), Some(libc::EPERM));
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn sealed_executable_memfd_is_owner_executable_and_not_permission_writable() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let file =
+        sealed_executable_memfd(c"lillux-executable-test", b"executable bytes").expect("memfd");
+    assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o500);
 }
 
 #[test]

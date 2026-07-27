@@ -340,7 +340,7 @@ pub fn verify_bundle_source_manifest_identity(
 struct ChainTerminal {
     root_source_path: PathBuf,
     chain: Vec<String>,
-    verified_chain: Vec<(String, ContractTrustClass)>,
+    verified_chain: Vec<crate::contracts::PlanTrustAuthority>,
     chain_content_hashes: Vec<String>,
     intermediates: Vec<ChainIntermediate>,
     runtime_identity: Option<PlanRuntimeIdentity>,
@@ -380,7 +380,7 @@ fn resolve_executor_chain(
     } = context;
     let mut current_id = starting_executor_id.to_owned();
     let mut visited: Vec<String> = Vec::new();
-    let mut verified_chain: Vec<(String, ContractTrustClass)> = Vec::new();
+    let mut verified_chain: Vec<crate::contracts::PlanTrustAuthority> = Vec::new();
     let mut chain_content_hashes: Vec<String> = Vec::new();
     let mut intermediates: Vec<ChainIntermediate> = Vec::new();
     let mut runtime_identity = None;
@@ -472,23 +472,40 @@ fn resolve_executor_chain(
         // is metadata, not proof of identity.
         let sig_header =
             crate::item_resolution::parse_signature_header(&content, &source_format.signature);
-        let trust_class = match &sig_header {
+        let (trust_class, signer_fingerprint) = match &sig_header {
             Some(header) => {
-                let (trust_class, _) = crate::trust::verify_item_signature(
+                let (trust_class, signer) = crate::trust::verify_item_signature(
                     &content,
                     header,
                     &source_format.signature,
                     trust_store,
                 )
                 .map_err(|error| crate::trust::patch_canonical_ref(error, &resolved_id))?;
-                trust_class
+                (trust_class, signer.map(|signer| signer.0))
             }
-            None => ContractTrustClass::Unsigned,
+            None => (ContractTrustClass::Unsigned, None),
         };
-        verified_chain.push((current_id.clone(), trust_class));
 
         let content_hash = crate::item_resolution::content_hash(&content);
         chain_content_hashes.push(content_hash.clone());
+        let plan_trust_class = match (trust_class, source_space) {
+            (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Bundle) => {
+                crate::resolution::TrustClass::TrustedBundle
+            }
+            (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Project) => {
+                crate::resolution::TrustClass::TrustedProject
+            }
+            (ContractTrustClass::Untrusted, _) => crate::resolution::TrustClass::UntrustedProject,
+            (ContractTrustClass::Unsigned, _) => crate::resolution::TrustClass::Unsigned,
+        };
+        verified_chain.push(crate::contracts::PlanTrustAuthority {
+            requested_id: current_id.clone(),
+            canonical_ref: resolved_id.clone(),
+            source_space,
+            trust_class: plan_trust_class,
+            signer_fingerprint,
+            content_hash: content_hash.clone(),
+        });
 
         if runtime_identity.is_none() {
             let bundle_identity = if source_space == crate::contracts::ItemSpace::Bundle {
@@ -872,8 +889,12 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     terminal.chain.insert(0, canonical_ref.clone());
 
     // Log chain trust status
-    for (id, trust) in &terminal.verified_chain {
-        tracing::debug!(executor_id = %id, trust = ?trust, "chain hop trust");
+    for authority in &terminal.verified_chain {
+        tracing::debug!(
+            executor_id = %authority.canonical_ref,
+            trust = ?authority.trust_class,
+            "chain hop trust"
+        );
     }
 
     // Step 3: Build plan environment
@@ -984,6 +1005,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         cache_key,
         thread_kind: Some(resolved.kind.clone()),
         executor_chain: terminal.chain,
+        executor_authorities: terminal.verified_chain,
         runtime_identity: terminal.runtime_identity,
         debug_raw: input
             .hints

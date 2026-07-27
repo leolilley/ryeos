@@ -388,6 +388,27 @@ fn validate_protocol_descriptor(
     Ok(())
 }
 
+/// Re-validate a protocol descriptor retained in an admitted execution
+/// closure without consulting the current protocol registry.
+pub fn validate_admitted_protocol_descriptor(
+    canonical_ref: &str,
+    descriptor: &ProtocolDescriptor,
+) -> Result<(), ProtocolError> {
+    let expected_ref = format!("protocol:{}/{}", descriptor.category, descriptor.name);
+    if expected_ref != canonical_ref {
+        return Err(ProtocolError::MalformedYaml {
+            path: PathBuf::from(format!("{}.yaml", descriptor.name)),
+            detail: format!(
+                "descriptor canonical ref {expected_ref} differs from admitted {canonical_ref}"
+            ),
+        });
+    }
+    validate_protocol_descriptor(
+        &PathBuf::from(format!("{}.yaml", descriptor.name)),
+        descriptor,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

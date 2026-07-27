@@ -6,7 +6,7 @@ use super::{
     ExecutionProjectAuthority, ExecutionRecoveryAuthority,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 6;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 7;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -16,6 +16,142 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(deserializer)
+}
+
+/// Exact, secret-free execution material retained at first admission.
+///
+/// Recovery may apply stricter current trust and isolation policy, but it
+/// must never rebuild these values from mutable runtime, protocol, executor,
+/// or kind registries.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "driver", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdmittedExecutionClosure {
+    ManagedRuntime {
+        prepared_runtime_launch: serde_json::Value,
+        runtime_descriptor_document: String,
+        protocol_descriptor_document: String,
+        executor_blob_hash: String,
+    },
+    DirectItemExecutor {
+        execution_plan: serde_json::Value,
+        protocol_descriptor_document: String,
+        command: AdmittedDirectCommandClosure,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        admitted_project_root: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdmittedDirectCommandClosure {
+    ContentAddressed { executable_blob_hash: String },
+    NodePolicy,
+}
+
+impl AdmittedExecutionClosure {
+    pub fn launch_driver(&self) -> ExecutionLaunchDriver {
+        match self {
+            Self::ManagedRuntime { .. } => ExecutionLaunchDriver::ManagedRuntime,
+            Self::DirectItemExecutor { .. } => ExecutionLaunchDriver::DirectItemExecutor,
+        }
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let require_object = |label: &str, value: &serde_json::Value| {
+            if value.is_object() {
+                Ok(())
+            } else {
+                anyhow::bail!("{label} must be an object")
+            }
+        };
+        match self {
+            Self::ManagedRuntime {
+                prepared_runtime_launch,
+                runtime_descriptor_document,
+                protocol_descriptor_document,
+                executor_blob_hash,
+            } => {
+                require_object("prepared runtime launch", prepared_runtime_launch)?;
+                validate_descriptor_document(
+                    "admitted runtime descriptor",
+                    runtime_descriptor_document,
+                )?;
+                validate_descriptor_document(
+                    "admitted protocol descriptor",
+                    protocol_descriptor_document,
+                )?;
+                super::thread_snapshot::validate_canonical_hash(
+                    "admitted managed executor blob hash",
+                    executor_blob_hash,
+                )?;
+            }
+            Self::DirectItemExecutor {
+                execution_plan,
+                protocol_descriptor_document,
+                command,
+                admitted_project_root,
+            } => {
+                require_object("admitted direct execution plan", execution_plan)?;
+                validate_descriptor_document(
+                    "admitted protocol descriptor",
+                    protocol_descriptor_document,
+                )?;
+                if let AdmittedDirectCommandClosure::ContentAddressed {
+                    executable_blob_hash,
+                } = command
+                {
+                    super::thread_snapshot::validate_canonical_hash(
+                        "admitted direct executable blob hash",
+                        executable_blob_hash,
+                    )?;
+                }
+                if let Some(root) = admitted_project_root {
+                    if root.components().count() < 2
+                        || !root.is_absolute()
+                        || root.components().enumerate().any(|(index, component)| {
+                            !matches!(
+                                (index, component),
+                                (0, std::path::Component::RootDir)
+                                    | (_, std::path::Component::Normal(_))
+                            )
+                        })
+                    {
+                        anyhow::bail!(
+                            "admitted direct project root must be absolute and normalized"
+                        );
+                    }
+                    if root.to_str().is_none() {
+                        anyhow::bail!("admitted direct project root must be valid UTF-8");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_descriptor_document(label: &str, document: &str) -> anyhow::Result<()> {
+    const MAX_ADMITTED_DESCRIPTOR_BYTES: usize = 256 * 1024;
+    if document.is_empty() || document.len() > MAX_ADMITTED_DESCRIPTOR_BYTES {
+        anyhow::bail!("{label} document must contain 1..={MAX_ADMITTED_DESCRIPTOR_BYTES} bytes");
+    }
+    if document.contains('\0') {
+        anyhow::bail!("{label} document contains NUL");
+    }
+    Ok(())
+}
+
+fn descriptor_document_identity(label: &str, document: &str) -> anyhow::Result<(String, String)> {
+    validate_descriptor_document(label, document)?;
+    let header =
+        lillux::signature::parse_signature_line(document.lines().next().unwrap_or(""), "#", None)
+            .ok_or_else(|| anyhow::anyhow!("{label} has no valid signature header"))?;
+    let body = lillux::signature::strip_signature_lines(document);
+    let observed = lillux::signature::content_hash(&body);
+    if observed != header.content_hash {
+        anyhow::bail!("{label} body contradicts its signature content hash");
+    }
+    Ok((observed, header.signer_fingerprint))
 }
 
 /// Immutable daemon-minted accounting scope sealed with an admitted launch.
@@ -69,11 +205,10 @@ pub enum DirectExecutableIdentity {
     CapturedContent {
         content_hash: String,
     },
-    /// The exact command spelling remains sealed in `execution_plan_hash`
-    /// after abstracting an authoritative project's relocatable realization
-    /// root, but executable authorization comes from the node's signed
-    /// isolation policy rather than a bundle/CAS content identity. This driver
-    /// is not eligible for autonomous restart recovery.
+    /// The exact command spelling remains sealed in `execution_plan_hash`, but
+    /// executable authorization comes from the node's signed isolation policy
+    /// rather than a bundle/CAS content identity. This driver is not eligible
+    /// for autonomous restart recovery.
     NodePolicy,
 }
 
@@ -145,6 +280,7 @@ impl AdmittedLaunchArtifactIdentity {
         let validate_hash = |label: &str, value: &str| {
             super::thread_snapshot::validate_canonical_hash(label, value)
         };
+        let validate_signer = |label: &str, value: &str| validate_hash(label, value);
         match self {
             Self::ManagedRuntime {
                 runtime_ref,
@@ -160,13 +296,17 @@ impl AdmittedLaunchArtifactIdentity {
             } => {
                 for (label, value) in [
                     ("runtime ref", runtime_ref),
-                    ("runtime signer", runtime_signer_fingerprint),
                     ("protocol ref", protocol_ref),
-                    ("protocol signer", protocol_signer_fingerprint),
                     ("executor ref", executor_ref),
-                    ("executor bundle signer", executor_bundle_signer_fingerprint),
                 ] {
                     validate_trimmed_control_free(label, value, false)?;
+                }
+                for (label, value) in [
+                    ("runtime signer", runtime_signer_fingerprint),
+                    ("protocol signer", protocol_signer_fingerprint),
+                    ("executor bundle signer", executor_bundle_signer_fingerprint),
+                ] {
+                    validate_signer(label, value)?;
                 }
                 for (label, value) in [
                     ("runtime content hash", runtime_content_hash),
@@ -195,7 +335,7 @@ impl AdmittedLaunchArtifactIdentity {
                 validate_trimmed_control_free("executor ref", executor_ref, false)?;
                 validate_hash("executor item content hash", executor_item_content_hash)?;
                 if let Some(signer) = executor_item_signer_fingerprint {
-                    validate_trimmed_control_free("executor item signer", signer, false)?;
+                    validate_signer("executor item signer", signer)?;
                 }
                 match wrapper_source_identity {
                     DirectWrapperSourceIdentity::Project => {}
@@ -207,20 +347,15 @@ impl AdmittedLaunchArtifactIdentity {
                             anyhow::bail!("bundle direct wrapper has no verified item signer");
                         }
                         validate_hash("wrapper source manifest hash", manifest_hash)?;
-                        validate_trimmed_control_free(
+                        validate_signer(
                             "wrapper source manifest signer",
                             manifest_signer_fingerprint,
-                            false,
                         )?;
                     }
                 }
                 validate_trimmed_control_free("protocol ref", protocol_ref, false)?;
                 validate_hash("protocol content hash", protocol_content_hash)?;
-                validate_trimmed_control_free(
-                    "protocol signer",
-                    protocol_signer_fingerprint,
-                    false,
-                )?;
+                validate_signer("protocol signer", protocol_signer_fingerprint)?;
                 validate_hash("execution plan hash", execution_plan_hash)?;
                 match executable_identity {
                     DirectExecutableIdentity::BundleExecutor {
@@ -230,10 +365,9 @@ impl AdmittedLaunchArtifactIdentity {
                     } => {
                         validate_hash("verified executable content hash", content_hash)?;
                         validate_hash("provider executor manifest hash", provider_manifest_hash)?;
-                        validate_trimmed_control_free(
+                        validate_signer(
                             "provider executor manifest signer",
                             provider_manifest_signer_fingerprint,
-                            false,
                         )?;
                     }
                     DirectExecutableIdentity::CapturedContent { content_hash } => {
@@ -268,22 +402,14 @@ impl AdmittedLaunchArtifactIdentity {
                         _ => {}
                     }
                     validate_hash("direct runtime content hash", &runtime.runtime_content_hash)?;
-                    validate_trimmed_control_free(
-                        "direct runtime signer",
-                        &runtime.runtime_signer_fingerprint,
-                        false,
-                    )?;
+                    validate_signer("direct runtime signer", &runtime.runtime_signer_fingerprint)?;
                     match (
                         &runtime.runtime_bundle_manifest_hash,
                         &runtime.runtime_bundle_signer_fingerprint,
                     ) {
                         (Some(hash), Some(signer)) => {
                             validate_hash("direct runtime bundle manifest hash", hash)?;
-                            validate_trimmed_control_free(
-                                "direct runtime bundle signer",
-                                signer,
-                                false,
-                            )?;
+                            validate_signer("direct runtime bundle signer", signer)?;
                         }
                         (None, None) => {}
                         _ => anyhow::bail!(
@@ -319,9 +445,9 @@ impl AdmittedLaunchArtifactIdentity {
 }
 
 /// Secret-free, content-addressed closure of the authority that crossed one
-/// managed execution's first-launch boundary. Recovery consumes the exact
-/// program payload; it never asks mutable project or bundle space to recreate
-/// an earlier admission.
+/// execution's first-launch boundary. Recovery consumes the exact program and
+/// execution closure; it never asks mutable project or bundle space to
+/// recreate an earlier admission.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmittedLaunchCapsule {
@@ -334,11 +460,8 @@ pub struct AdmittedLaunchCapsule {
     pub lifecycle_authority: ExecutionLifecycleAuthority,
     pub launch_driver: ExecutionLaunchDriver,
     pub artifact_identity: AdmittedLaunchArtifactIdentity,
-    /// Exact secret-free output of launch preparation. Managed recovery
-    /// consumes this CAS-rooted value rather than re-running mutable config,
-    /// binding resolution, augmentations, or launch-preparer handlers.
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub prepared_launch: Option<serde_json::Value>,
+    /// Complete exact execution closure selected at admission.
+    pub execution_closure: AdmittedExecutionClosure,
     /// Sealed accounting scope for launches whose runtime declares a
     /// financial authority. `None` states the launch performs no direct paid
     /// provider work.
@@ -450,6 +573,81 @@ impl AdmittedLaunchCapsule {
         self.project_authority.validate()?;
         self.lifecycle_authority.validate()?;
         self.artifact_identity.validate()?;
+        self.execution_closure.validate()?;
+        match (&self.artifact_identity, &self.execution_closure) {
+            (
+                AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                    runtime_content_hash,
+                    runtime_signer_fingerprint,
+                    protocol_content_hash,
+                    protocol_signer_fingerprint,
+                    ..
+                },
+                AdmittedExecutionClosure::ManagedRuntime {
+                    runtime_descriptor_document,
+                    protocol_descriptor_document,
+                    ..
+                },
+            ) => {
+                let runtime = descriptor_document_identity(
+                    "admitted runtime descriptor",
+                    runtime_descriptor_document,
+                )?;
+                let protocol = descriptor_document_identity(
+                    "admitted protocol descriptor",
+                    protocol_descriptor_document,
+                )?;
+                if runtime
+                    != (
+                        runtime_content_hash.clone(),
+                        runtime_signer_fingerprint.clone(),
+                    )
+                    || protocol
+                        != (
+                            protocol_content_hash.clone(),
+                            protocol_signer_fingerprint.clone(),
+                        )
+                {
+                    anyhow::bail!(
+                        "admitted managed descriptor documents contradict artifact identity"
+                    );
+                }
+            }
+            (
+                AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                    protocol_content_hash,
+                    protocol_signer_fingerprint,
+                    execution_plan_hash,
+                    ..
+                },
+                AdmittedExecutionClosure::DirectItemExecutor {
+                    execution_plan,
+                    protocol_descriptor_document,
+                    ..
+                },
+            ) => {
+                let protocol = descriptor_document_identity(
+                    "admitted protocol descriptor",
+                    protocol_descriptor_document,
+                )?;
+                if protocol
+                    != (
+                        protocol_content_hash.clone(),
+                        protocol_signer_fingerprint.clone(),
+                    )
+                {
+                    anyhow::bail!(
+                        "admitted direct protocol document contradicts artifact identity"
+                    );
+                }
+                let observed_plan_hash =
+                    lillux::sha256_hex(lillux::canonical_json(execution_plan)?.as_bytes());
+                if &observed_plan_hash != execution_plan_hash {
+                    anyhow::bail!("admitted direct execution plan contradicts artifact identity");
+                }
+            }
+            _ => anyhow::bail!("admitted execution closure and artifact drivers disagree"),
+        }
         if self.lifecycle_authority.recovery == ExecutionRecoveryAuthority::RestartRecoverable
             && matches!(
                 self.artifact_identity,
@@ -463,21 +661,64 @@ impl AdmittedLaunchCapsule {
                 "node-policy direct execution is not eligible for autonomous restart recovery"
             );
         }
+        if let (
+            AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                executor_content_hash,
+                ..
+            },
+            AdmittedExecutionClosure::ManagedRuntime {
+                executor_blob_hash, ..
+            },
+        ) = (&self.artifact_identity, &self.execution_closure)
+        {
+            if executor_content_hash != executor_blob_hash {
+                anyhow::bail!(
+                    "admitted managed executor blob hash contradicts executable identity"
+                );
+            }
+        }
+        if let (
+            AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                executable_identity,
+                ..
+            },
+            AdmittedExecutionClosure::DirectItemExecutor { command, .. },
+        ) = (&self.artifact_identity, &self.execution_closure)
+        {
+            let consistent = matches!(
+                (executable_identity, command),
+                (
+                    DirectExecutableIdentity::NodePolicy,
+                    AdmittedDirectCommandClosure::NodePolicy
+                ) | (
+                    DirectExecutableIdentity::BundleExecutor { .. }
+                        | DirectExecutableIdentity::CapturedContent { .. },
+                    AdmittedDirectCommandClosure::ContentAddressed { .. }
+                )
+            );
+            if !consistent {
+                anyhow::bail!("admitted direct command closure contradicts executable identity");
+            }
+            if let (
+                DirectExecutableIdentity::BundleExecutor { content_hash, .. }
+                | DirectExecutableIdentity::CapturedContent { content_hash },
+                AdmittedDirectCommandClosure::ContentAddressed {
+                    executable_blob_hash,
+                },
+            ) = (executable_identity, command)
+            {
+                if content_hash != executable_blob_hash {
+                    anyhow::bail!(
+                        "admitted direct executable blob hash contradicts executable identity"
+                    );
+                }
+            }
+        }
         if self.artifact_identity.launch_driver() != self.launch_driver {
             anyhow::bail!("admitted launch artifact identity contradicts launch driver");
         }
-        match (self.launch_driver, self.prepared_launch.as_ref()) {
-            (ExecutionLaunchDriver::ManagedRuntime, Some(value)) if value.is_object() => {}
-            (ExecutionLaunchDriver::ManagedRuntime, _) => {
-                anyhow::bail!("managed admitted launch capsule has no prepared launch object")
-            }
-            (ExecutionLaunchDriver::DirectItemExecutor, None) => {}
-            (ExecutionLaunchDriver::DirectItemExecutor, Some(_)) => anyhow::bail!(
-                "direct admitted launch capsule cannot carry managed prepared launch state"
-            ),
-            (ExecutionLaunchDriver::InProcessHandler, _) => anyhow::bail!(
-                "in-process handler launch drivers cannot carry admitted subprocess capsules"
-            ),
+        if self.execution_closure.launch_driver() != self.launch_driver {
+            anyhow::bail!("admitted execution closure contradicts launch driver");
         }
         if let Some(scope) = &self.accounting_scope {
             scope.validate()?;
@@ -530,7 +771,7 @@ impl AdmittedLaunchCapsule {
             && self.lifecycle_authority == other.lifecycle_authority
             && self.launch_driver == other.launch_driver
             && self.artifact_identity == other.artifact_identity
-            && self.prepared_launch == other.prepared_launch
+            && self.execution_closure == other.execution_closure
             && self.accounting_scope == other.accounting_scope
             && self.effective_caps == other.effective_caps
             && self.runtime_ref == other.runtime_ref
@@ -545,7 +786,25 @@ mod tests {
         ExecutionOwnershipAuthority, ExecutionProjectAuthority, ExecutionRecoveryAuthority,
     };
 
+    fn signed_descriptor(body: &str, seed: u8) -> (String, String, String) {
+        let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
+        let document = lillux::signature::sign_content(body, &key, "#", None);
+        let header =
+            lillux::signature::parse_signature_line(document.lines().next().unwrap(), "#", None)
+                .unwrap();
+        (document, header.content_hash, header.signer_fingerprint)
+    }
+
     fn direct_capsule(executable_identity: DirectExecutableIdentity) -> AdmittedLaunchCapsule {
+        let command = match &executable_identity {
+            DirectExecutableIdentity::BundleExecutor { content_hash, .. }
+            | DirectExecutableIdentity::CapturedContent { content_hash } => {
+                AdmittedDirectCommandClosure::ContentAddressed {
+                    executable_blob_hash: content_hash.clone(),
+                }
+            }
+            DirectExecutableIdentity::NodePolicy => AdmittedDirectCommandClosure::NodePolicy,
+        };
         let exact_program = serde_json::json!({
             "item_ref": "tool:test/run",
             "runtime_ref": "runtime:direct",
@@ -569,6 +828,11 @@ mod tests {
             "project_authority".to_string(),
             serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
         );
+        let (protocol_descriptor_document, protocol_content_hash, protocol_signer_fingerprint) =
+            signed_descriptor("protocol: direct\n", 31);
+        let execution_plan = serde_json::json!({"plan_id": "test"});
+        let execution_plan_hash =
+            lillux::sha256_hex(lillux::canonical_json(&execution_plan).unwrap().as_bytes());
         AdmittedLaunchCapsule {
             schema: ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
             kind: "admitted_launch_capsule".to_string(),
@@ -584,26 +848,31 @@ mod tests {
             artifact_identity: AdmittedLaunchArtifactIdentity::DirectItemExecutor {
                 executor_ref: "tool:test/executor".to_string(),
                 executor_item_content_hash: "a".repeat(64),
-                executor_item_signer_fingerprint: Some("fp:test".to_string()),
+                executor_item_signer_fingerprint: Some("2".repeat(64)),
                 wrapper_source_identity: DirectWrapperSourceIdentity::Bundle {
                     manifest_hash: "b".repeat(64),
-                    manifest_signer_fingerprint: "fp:bundle".to_string(),
+                    manifest_signer_fingerprint: "3".repeat(64),
                 },
                 protocol_ref: "protocol:test/direct".to_string(),
-                protocol_content_hash: "c".repeat(64),
-                protocol_signer_fingerprint: "fp:protocol".to_string(),
-                execution_plan_hash: "e".repeat(64),
+                protocol_content_hash,
+                protocol_signer_fingerprint,
+                execution_plan_hash,
                 executable_identity,
                 runtime_identity: DirectRuntimeIdentity {
                     runtime_ref: "tool:test/runtime".to_string(),
                     runtime_source_space: DirectRuntimeSourceSpace::Bundle,
                     runtime_content_hash: "f".repeat(64),
-                    runtime_signer_fingerprint: "fp:runtime".to_string(),
+                    runtime_signer_fingerprint: "4".repeat(64),
                     runtime_bundle_manifest_hash: Some("1".repeat(64)),
-                    runtime_bundle_signer_fingerprint: Some("fp:bundle".to_string()),
+                    runtime_bundle_signer_fingerprint: Some("3".repeat(64)),
                 },
             },
-            prepared_launch: None,
+            execution_closure: AdmittedExecutionClosure::DirectItemExecutor {
+                execution_plan,
+                protocol_descriptor_document,
+                command,
+                admitted_project_root: None,
+            },
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:direct".to_string(),
@@ -611,7 +880,7 @@ mod tests {
         }
     }
 
-    fn managed_capsule(prepared_launch: Option<serde_json::Value>) -> AdmittedLaunchCapsule {
+    fn managed_capsule(prepared_runtime_launch: serde_json::Value) -> AdmittedLaunchCapsule {
         let exact_program = serde_json::json!({
             "item_ref": "directive:test/run",
             "runtime_ref": "runtime:test/directive",
@@ -635,6 +904,10 @@ mod tests {
             "project_authority".to_string(),
             serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
         );
+        let (runtime_descriptor_document, runtime_content_hash, runtime_signer_fingerprint) =
+            signed_descriptor("runtime: managed\n", 32);
+        let (protocol_descriptor_document, protocol_content_hash, protocol_signer_fingerprint) =
+            signed_descriptor("protocol: managed\n", 33);
         AdmittedLaunchCapsule {
             schema: ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
             kind: "admitted_launch_capsule".to_string(),
@@ -649,17 +922,22 @@ mod tests {
             launch_driver: ExecutionLaunchDriver::ManagedRuntime,
             artifact_identity: AdmittedLaunchArtifactIdentity::ManagedRuntime {
                 runtime_ref: "runtime:test/directive".to_string(),
-                runtime_content_hash: "a".repeat(64),
-                runtime_signer_fingerprint: "fp:runtime".to_string(),
+                runtime_content_hash,
+                runtime_signer_fingerprint,
                 protocol_ref: "protocol:test/directive".to_string(),
-                protocol_content_hash: "b".repeat(64),
-                protocol_signer_fingerprint: "fp:protocol".to_string(),
+                protocol_content_hash,
+                protocol_signer_fingerprint,
                 executor_ref: "executor:test/subprocess".to_string(),
                 executor_content_hash: "c".repeat(64),
                 executor_bundle_manifest_hash: "d".repeat(64),
-                executor_bundle_signer_fingerprint: "fp:executor-bundle".to_string(),
+                executor_bundle_signer_fingerprint: "e".repeat(64),
             },
-            prepared_launch,
+            execution_closure: AdmittedExecutionClosure::ManagedRuntime {
+                prepared_runtime_launch,
+                runtime_descriptor_document,
+                protocol_descriptor_document,
+                executor_blob_hash: "c".repeat(64),
+            },
             accounting_scope: None,
             effective_caps: vec!["ryeos.read.project.live".to_string()],
             runtime_ref: "runtime:test/directive".to_string(),
@@ -741,7 +1019,7 @@ mod tests {
     }
 
     #[test]
-    fn current_decoder_requires_explicit_prepared_launch_field() {
+    fn current_decoder_requires_explicit_execution_closure_field() {
         let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         })
@@ -749,10 +1027,10 @@ mod tests {
         value
             .as_object_mut()
             .expect("capsule object")
-            .remove("prepared_launch");
+            .remove("execution_closure");
         let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
         assert!(
-            format!("{error:#}").contains("missing field `prepared_launch`"),
+            format!("{error:#}").contains("missing field `execution_closure`"),
             "unexpected error chain: {error:#}"
         );
     }
@@ -804,6 +1082,24 @@ mod tests {
     }
 
     #[test]
+    fn current_direct_closure_requires_explicit_project_root_authority() {
+        let mut value = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        })
+        .to_value();
+        value["execution_closure"]
+            .as_object_mut()
+            .unwrap()
+            .remove("admitted_project_root");
+
+        let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("admitted_project_root"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
     fn restart_recovery_rejects_a_node_policy_direct_executable() {
         let capsule = direct_capsule(DirectExecutableIdentity::NodePolicy);
         let error = capsule.validate().unwrap_err();
@@ -826,7 +1122,7 @@ mod tests {
         let mut capsule = direct_capsule(DirectExecutableIdentity::BundleExecutor {
             content_hash: "e".repeat(64),
             provider_manifest_hash: provider_manifest_hash.clone(),
-            provider_manifest_signer_fingerprint: "provider-signer".into(),
+            provider_manifest_signer_fingerprint: "5".repeat(64),
         });
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             wrapper_source_identity,
@@ -837,7 +1133,7 @@ mod tests {
         };
         *wrapper_source_identity = DirectWrapperSourceIdentity::Bundle {
             manifest_hash: wrapper_manifest_hash.clone(),
-            manifest_signer_fingerprint: "wrapper-signer".into(),
+            manifest_signer_fingerprint: "6".repeat(64),
         };
 
         capsule.validate().unwrap();
@@ -858,27 +1154,30 @@ mod tests {
     }
 
     #[test]
-    fn managed_recovery_requires_and_accepts_exact_prepared_launch_state() {
-        let capsule = managed_capsule(Some(serde_json::json!({
+    fn managed_recovery_requires_an_object_prepared_launch_state() {
+        let capsule = managed_capsule(serde_json::json!({
             "argv": ["ryeos-directive-runtime"],
             "environment_names": ["OPENROUTER_API_KEY"],
-        })));
+        }));
         capsule.validate().unwrap();
 
-        let error = managed_capsule(None).validate().unwrap_err();
-        assert!(error.to_string().contains("no prepared launch object"));
+        let error = managed_capsule(serde_json::Value::Null)
+            .validate()
+            .unwrap_err();
+        assert!(error.to_string().contains("must be an object"));
     }
 
     #[test]
-    fn direct_capsule_rejects_managed_prepared_launch_state() {
+    fn direct_capsule_rejects_a_managed_execution_closure() {
         let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
         });
-        capsule.prepared_launch = Some(serde_json::json!({"argv": ["unexpected"]}));
-        assert!(capsule
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("cannot carry managed prepared launch state"));
+        capsule.execution_closure =
+            managed_capsule(serde_json::json!({"argv": ["unexpected"]})).execution_closure;
+        let error = capsule.validate().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "admitted execution closure and artifact drivers disagree"
+        );
     }
 }

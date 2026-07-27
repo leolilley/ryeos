@@ -1369,6 +1369,143 @@ impl IsolationRuntime {
         })
     }
 
+    /// Bind an admitted content identity to bytes opened from content-addressed
+    /// storage.
+    ///
+    /// CAS blobs are deliberately non-executable. Read and hash the exact open
+    /// descriptor, then copy those bytes into a sealed executable memfd. The
+    /// returned authority therefore retains executable bytes without changing
+    /// global CAS permissions or reopening a mutable pathname.
+    pub fn bind_admitted_verified_command(
+        &self,
+        identity: IsolationVerifiedCode,
+        source: std::fs::File,
+    ) -> Result<IsolationDescriptorBoundCommand, EngineError> {
+        if !identity.source_path.is_absolute()
+            || identity
+                .source_path
+                .components()
+                .enumerate()
+                .any(|(index, component)| {
+                    !matches!(
+                        (index, component),
+                        (0, std::path::Component::RootDir) | (_, std::path::Component::Normal(_))
+                    )
+                })
+        {
+            return Err(refused(format!(
+                "admitted command source path must be absolute and normalized: {}",
+                identity.source_path.display()
+            )));
+        }
+        if identity.content_hash.len() != 64
+            || !identity
+                .content_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(refused(format!(
+                "admitted command has invalid SHA-256 digest `{}`",
+                identity.content_hash
+            )));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = source;
+            return Err(refused(
+                "admitted content-addressed commands require Linux executable memfd sealing"
+                    .to_string(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        let executable = {
+            use std::os::unix::fs::{FileExt as _, MetadataExt as _};
+
+            let before = source.metadata().map_err(|error| {
+                refused(format!(
+                    "admitted command source descriptor cannot be inspected: {error}"
+                ))
+            })?;
+            let daemon_uid = unsafe { libc::geteuid() };
+            if !before.file_type().is_file()
+                || before.uid() != daemon_uid
+                || before.mode() & 0o022 != 0
+            {
+                return Err(refused(format!(
+                    "admitted command source must be a daemon-owned regular file without group/other write bits (uid={}, mode={:#o})",
+                    before.uid(),
+                    before.mode() & 0o7777,
+                )));
+            }
+            let max_bytes = self.inspection.limits.verified_artifact_file_bytes;
+            if before.len() > max_bytes {
+                return Err(refused(format!(
+                    "admitted command source {} is {} bytes, exceeding configured per-file limit {max_bytes}",
+                    identity.source_path.display(),
+                    before.len(),
+                )));
+            }
+            let content_len = usize::try_from(before.len()).map_err(|_| {
+                refused(format!(
+                    "admitted command source {} is too large to capture on this platform",
+                    identity.source_path.display()
+                ))
+            })?;
+            let mut content = vec![0_u8; content_len];
+            let mut offset = 0_usize;
+            while offset < content.len() {
+                let read = source
+                    .read_at(&mut content[offset..], offset as u64)
+                    .map_err(|error| {
+                        refused(format!(
+                            "read admitted command source {}: {error}",
+                            identity.source_path.display()
+                        ))
+                    })?;
+                if read == 0 {
+                    return Err(refused(format!(
+                        "admitted command source {} ended before its declared size",
+                        identity.source_path.display()
+                    )));
+                }
+                offset += read;
+            }
+            let after = source.metadata().map_err(|error| {
+                refused(format!(
+                    "admitted command source descriptor cannot be reinspected: {error}"
+                ))
+            })?;
+            if descriptor_file_identity(&before) != descriptor_file_identity(&after) {
+                return Err(refused(format!(
+                    "admitted command source {} changed while its bytes were captured",
+                    identity.source_path.display()
+                )));
+            }
+            let observed_hash = lillux::cas::sha256_hex(&content);
+            if observed_hash != identity.content_hash {
+                return Err(refused(format!(
+                    "admitted command source {} failed its content check (expected {}, got {observed_hash})",
+                    identity.source_path.display(),
+                    identity.content_hash,
+                )));
+            }
+            lillux::sealed_executable_memfd(c"ryeos-admitted-command", &content)
+                .map_err(|error| refused(format!("seal admitted command executable: {error}")))?
+        };
+        let metadata = executable.metadata().map_err(|error| {
+            refused(format!(
+                "sealed admitted command cannot be inspected: {error}"
+            ))
+        })?;
+        let command = IsolationDescriptorBoundCommand::new(
+            identity,
+            executable,
+            descriptor_file_identity(&metadata),
+        );
+        validate_descriptor_bound_command(&command)?;
+        Ok(command)
+    }
+
     /// Apply this immutable policy snapshot to one executable request.
     pub fn apply(
         &self,
@@ -4855,6 +4992,56 @@ mod tests {
             .capture_verified_command(&command, Some(&project), Some(&live_access))
             .unwrap_err();
         assert!(error.to_string().contains("path binding changed"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn admitted_nonexecutable_cas_blob_becomes_a_hash_checked_sealed_command() {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let app_root = tempfile::tempdir().unwrap();
+        write_policy(app_root.path(), &IsolationPolicy::default_disabled());
+        let runtime = IsolationRuntime::load(app_root.path()).unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let source_path = source_dir.path().join("cas-blob");
+        let bytes = std::fs::read("/bin/echo").unwrap();
+        std::fs::write(&source_path, &bytes).unwrap();
+        std::fs::set_permissions(&source_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let identity = IsolationVerifiedCode {
+            source_path: source_path.clone(),
+            content_hash: lillux::cas::sha256_hex(&bytes),
+        };
+
+        let command = runtime
+            .bind_admitted_verified_command(
+                identity.clone(),
+                std::fs::File::open(&source_path).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(command.identity(), &identity);
+        assert_ne!(
+            command
+                .executable()
+                .metadata()
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        let seals = unsafe { libc::fcntl(command.executable().as_raw_fd(), libc::F_GET_SEALS) };
+        assert_ne!(seals, -1, "retained command must be a sealed memfd");
+
+        let mut wrong_identity = identity;
+        wrong_identity.content_hash = "0".repeat(64);
+        let error = runtime
+            .bind_admitted_verified_command(
+                wrong_identity,
+                std::fs::File::open(&source_path).unwrap(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("failed its content check"));
     }
 
     #[cfg(target_os = "linux")]

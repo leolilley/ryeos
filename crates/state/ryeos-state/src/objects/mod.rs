@@ -29,9 +29,10 @@ pub mod thread_event;
 pub mod thread_snapshot;
 
 pub use admitted_launch_capsule::{
-    AdmittedAccountingScope, AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule,
-    DirectExecutableIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
-    DirectWrapperSourceIdentity, ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+    AdmittedAccountingScope, AdmittedDirectCommandClosure, AdmittedExecutionClosure,
+    AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, DirectExecutableIdentity,
+    DirectRuntimeIdentity, DirectRuntimeSourceSpace, DirectWrapperSourceIdentity,
+    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{

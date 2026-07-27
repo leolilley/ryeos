@@ -17,7 +17,9 @@ pub use builder::{
     build_method_call_stdin, build_subprocess_spec, BuildError, BuildRequest, CallbackBindings,
 };
 pub use descriptor::{validate_method_runtime_protocol, ProtocolDescriptor};
-pub use registry::{ProtocolError, ProtocolRegistry, VerifiedProtocol};
+pub use registry::{
+    validate_admitted_protocol_descriptor, ProtocolError, ProtocolRegistry, VerifiedProtocol,
+};
 
 /// Protocol ABI version this engine supports.
 /// Distinct from handler and runtime ABI versions.
