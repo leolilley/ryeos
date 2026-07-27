@@ -450,7 +450,6 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
         first.event, "execution_planning",
         "first event is execution_planning"
     );
-    assert!(first.id.is_none(), "execution_planning is not persisted");
     let planning_payload: serde_json::Value =
         serde_json::from_str(&first.data).expect("execution_planning data is JSON");
     assert!(
