@@ -7183,7 +7183,9 @@ impl StateStore {
         let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
         if &capsule.artifact_identity != attempted {
             bail!(
-                "thread {thread_id} recovery artifact identity differs from its authoritative admitted capsule"
+                "thread {thread_id} recovery artifact identity differs from its authoritative \
+                 admitted capsule: admitted={:?}, attempted={attempted:?}",
+                capsule.artifact_identity
             );
         }
         Ok(())
