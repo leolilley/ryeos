@@ -1115,7 +1115,7 @@ fn write_path_text(expression: &Expr, output: &mut String) {
     }
 }
 
-pub(crate) fn json_string_bytes(value: &str) -> usize {
+pub fn json_string_bytes(value: &str) -> usize {
     value.chars().fold(2usize, |bytes, character| {
         bytes.saturating_add(match character {
             '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,

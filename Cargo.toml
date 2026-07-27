@@ -14,6 +14,7 @@ members = [
     "crates/runtimes/directive-core",
     "crates/runtimes/directive",
     "crates/engine/ryeos-accounting",
+    "crates/engine/ryeos-expression",
     "crates/engine/ryeos-engine",
     "crates/engine/ryeos-executor",
     "crates/runtimes/graph",
@@ -52,6 +53,7 @@ ryeos-bundle = { path = "crates/daemon/ryeos-bundle" }
 ryeos-cli = { path = "crates/bin/cli" }
 ryeos-client-base = { path = "crates/clients/base" }
 ryeos-directive-core = { path = "crates/runtimes/directive-core" }
+ryeos-expression = { path = "crates/engine/ryeos-expression" }
 ryeos-engine = { path = "crates/engine/ryeos-engine" }
 ryeos-executor = { path = "crates/engine/ryeos-executor" }
 ryeos-handler-protocol = { path = "crates/engine/ryeos-handler-protocol" }

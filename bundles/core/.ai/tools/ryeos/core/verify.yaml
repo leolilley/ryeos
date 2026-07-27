@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-22T02:33:47Z:b5dc9275eecf4aaecf1ff78c309bb9593ff6ab0fd5db4563d8e7ca2912ee8313:/AbDAKoMZ3TFsoWur0ma95z9WlRCQd40u/hsYk9l/wRaIs6B6LS2RgA15BPM8hqKiR99DDOx9Kw4fVrIG1lZCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:08Z:2c4b65b751b460d968db22a6f0942499239a8b2ffd89adf35cf31bbce50f4e59:qr2YksD6tDBwPL7599HgfveccL4kMXhZcHpgtsQSiX8WoEQs36WkjFZkEJ5C7kOqDT1mVl1uxccgqqILvMzsDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core"
 name: "verify"
 executor_id: "@subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "verify"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 60
 
 config_schema:

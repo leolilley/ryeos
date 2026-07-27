@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T23:12:22Z:7b684ac61b4f38b6b0b47cc15aaeda09020c4b77da972daaf74daf791d3b684e:QmTnTU8QLsEh2DErv8MWeUiiwXZj3JIY4TkXhU9IvFJSP2ysOGNG+2Jvb+bxDXB2jneVfH4e6Svdf65QwT1jAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:06Z:6d921e990976cbf2c885cfed7e576e0fa7509dcdb42c0e158325d4dd7fb64885:sbiluTEoBUsp6NxFP5wZSv7xScMVKP3Gel2Bp+DgYlOPaoyWgjbIAf5Zlwbkh+P8BfKSueMLzKvYI9CkaKbfAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "create-invite"
@@ -9,9 +9,9 @@ description: "Create a high-entropy one-time invite code for a realm."
 config:
   command: "python3"
   args:
-    - "{tool_dir}/lib/central_auth.py"
+    - "${tool_dir}/lib/central_auth.py"
     - "create-invite"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 15
 
 config_schema:

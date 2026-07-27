@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-15T07:49:21Z:2d0efce9cd91444af07d37f571458c716258ff65029b67f5ffb677cda98d5f12:aAvvAtt3rpITfCwJt2PASIoFcDPwWNxvY87iVBogYjxlFoTcElPh9EcTthi+B9FSvAnLkMPpiiffin5RlOvcDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T09:03:55Z:27ed684f5bacbe1f845220667cd0dc827ca4b1cfc1320d16197753143b5de796:TIzqidBv19XI1wd5s8QtNpMh6yAeEOLJqFT41ELRADrvENJjKmn5pWFQaVHQt0NdsSX2eeeBZdoAerJPiMYpDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [fundamentals, tools, execution, subprocess]
@@ -53,7 +53,7 @@ directive action → @subprocess → tool:ryeos/core/subprocess/execute → fork
 
 The subprocess executor:
 1. Receives the tool's `config.command` template
-2. Interpolates parameters (`{tool_dir}`, `{project_path}`, etc.)
+2. Evaluates runtime context expressions (`${tool_dir}`, `${project_path}`, etc.)
 3. Injects the params JSON on stdin
 4. Forks and execs the command
 5. Captures stdout as the result

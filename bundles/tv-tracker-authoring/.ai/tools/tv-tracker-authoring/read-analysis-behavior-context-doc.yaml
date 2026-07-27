@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-27T09:00:08Z:645a8008512279543e62ee6fe856fb356bdeec7c9011f3bde55fa33954b99a41:XnnEigXmy31NppRWWJSxZ5GOhk9qNepeJ85cH/HGy1xFNtRdjdZIO7EWqlAQy3OXSr0gUJyPwT9aSaYxpXvhDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "read-analysis-behavior-context-doc"
@@ -9,7 +10,7 @@ config:
   args:
     - "fetch"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 20
 
 config_schema:

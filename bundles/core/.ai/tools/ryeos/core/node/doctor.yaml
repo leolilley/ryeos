@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-21T05:02:10Z:8008df47f8a986ba2f6d223f332485c1107736ee63f683be4479652f91843084:hYQV2gHCIwsZK9hOhzP5I2C7oOD1A+TX+LGxWCdWjxCzZDtDPR2sU28BNpVBy8gjWetacvWAmffoiatzmobjDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:88fb8de29298ae117e960d6fe0a328580e94cf49282b13904a9d52d9a88f7d45:y+/ZEBoisuIPIAzIF0Qh+v/+MLcec9uaspI/uPPaJ0QK9OOGMgm6LeFdvXHHhTrO/xS7n8HDVPIdPVzaV+qXCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/node"
 name: "doctor"
 executor_id: "@subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "doctor"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 120
 
 config_schema:

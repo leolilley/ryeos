@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T23:56:20Z:8af7ace9b251baa57d37546fd3383f299ffdf6b5df8bcd71d41916f48f443971:EcbRiErVHJbj9IrMaBudgR2ne5jBheZasPJRhqSbU300Sr+XN+ZR3h6BHxJpf2S6mlUYknaj3SWKAKubjwjECw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:a45402925c9d0a2c0f6a7c3d06a27ea71cce4730f3977225e2a320a79dd56b51:lm/8wa1r5iR3BonPdJddZbVZVOuf90c+1O4pfr3UxXMekYRNWBbTZZO3kfoGUm8pQ8qrqPmi5HS87w4NgzzZBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "verify"
 executor_id: "@subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "bundle-verify"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 120
 
 config_schema:

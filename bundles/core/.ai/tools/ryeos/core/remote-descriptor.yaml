@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-24T04:51:58Z:ff33995b4c77e86a408387f66eb07803c81a491bfc3c3cbd9277882a055a31e4:XXZzhb6hk4+chp+C3RbTJCZFfTI6k9i1BNhoP7/AG3pxjGq2sROmTuvYXgiIKmeRFbJrHJC8/o6iY0QoBox8Ag==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:f7e66645ada4a96c16fb858e56fb67c28d4f17ae64a32cba5c2145bf6532b874:pkL4RyzY1mU2CoUxCPYhs/2O388SO6nL7QNe7rQEA709G9wngS7rQRXjJegNKZsTF8+R9hu7n2/PpPASkkQEAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
@@ -11,7 +11,7 @@ config:
   args:
     - "remote-descriptor"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 30
 
 config_schema:

@@ -1,6 +1,6 @@
 [package]
 name = "ryeos-runtime"
-version = "0.5.65"
+version = "0.5.66"
 edition = "2021"
 license.workspace = true
 description = "Shared runtime library for Rye OS Rust runtimes"
@@ -19,6 +19,7 @@ base64 = { workspace = true }
 lillux = { workspace = true }
 ryeos-accounting = { workspace = true }
 ryeos-engine = { workspace = true }
+ryeos-expression = { workspace = true }
 ryeos-state = { workspace = true }
 regex = { workspace = true }
 rmp-serde = { workspace = true }

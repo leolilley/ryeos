@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T11:36:37Z:e462f743d0fbb73a1d2ca5b4ff389712ba18852f8606bc211e879cdfdb30d85f:j+gD1QfXFnvUYRy4z7aiaQn8u/dUtfteM/QNe9OZjenQZh1R9qTEDu6pcIxQGe26pBaIilbXHl5clgwEOkgYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:2bddb0fe7f5092b88b999d402c11cd6b6ab96744d0a3d20b4268023a2dbffc8f:iK302gu3mveNvTIT2k211f4ymFWJjCd/u6zhwot380zIMajw988mNLIc1w95sdtlJBYOuTeyEEY23FkDKq8BCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -14,7 +14,7 @@ env_config:
     path_candidates: [python3]
   env:
     PYTHONUNBUFFERED: "1"
-    PROJECT_VENV_PYTHON: "{interpreter}"
+    PROJECT_VENV_PYTHON: "${interpreter}"
 
 verify_deps:
   enabled: true
@@ -30,7 +30,7 @@ config_resolve:
     mode: "deep_merge"
 
 config:
-  command: "{interpreter}"
+  command: "${interpreter}"
   args:
     - "-I"
     - "-u"
@@ -84,10 +84,10 @@ config:
           __spec__=None,
       )
       exec(compile(source, str(tool_path), "exec"), globals_dict)
-    - "{tool_path}"
-    - "{runtime_dir}/lib"
-    - "{project_path}"
-  input_data: "{params_json}"
+    - "${tool_path}"
+    - "${runtime_dir}/lib"
+    - "${project_path}"
+  input_data: "${params_json}"
   timeout_secs: 300
 
 config_schema:

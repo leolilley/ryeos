@@ -243,11 +243,8 @@ pub enum EngineError {
     #[error("bundle manifest at {path} is invalid for qualified binary resolution: {reason}")]
     QualifiedBinManifestInvalid { path: String, reason: String },
 
-    #[error("unknown template token: {{{token}}}")]
-    UnknownTemplateToken { token: String },
-
-    #[error("template requires {{{token}}} but no {token} available")]
-    TemplateMissingContext { token: String },
+    #[error("invalid rye-expr/1 runtime template: {reason}")]
+    RuntimeTemplateExpression { reason: String },
 
     #[error(
         "unknown runtime block `{key}` on kind `{kind}` at {source_path:?} \

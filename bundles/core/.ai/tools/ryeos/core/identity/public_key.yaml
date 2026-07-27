@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-24T04:51:58Z:e9b815d7eb47f9be8739d66d87cfaa0ce87d3eea2a0143f6e1fee584684a6df6:mcdrhOL6UK2eNDL7BX++kpzCPoteCjHF5+4dFaBLwaTGxXVLgwFwb2WIjh+yI0tUtmDEif5w+p0j7U1sk8eZCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:dab774536b4811b59240280fa708ee3cd92b654a359f401e5ba3bd67c7b42d21:Rq+c9ZEcUYDPRdMDkhNPTkQWrgNbLAsqxIT+qEXHHXgRT097Gf+qHUJMjlSUO+zndm4muqgf5045ZHwQUAkGBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/identity"
 name: "public_key"
 executor_id: "@subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "identity"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 30
 
 config_schema:

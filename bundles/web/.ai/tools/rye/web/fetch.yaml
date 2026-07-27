@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T00:32:34Z:3518a5eecee411d35b4b7636a207194b9607921beec0bda31aab5eef609baaa9:XrULY/HwhwJYm7qMdCHlWaiL8wot7UC1Sy4fYcx4vJzWtvIb8nLWsRwiZRsflAK+FNB+xWlI41xjvHajg5hZCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:08Z:60987f2c0b5228794c38c442a744d53874ad269004ea8b1367bfd8d0171676ed:nx1bzDRLkqJg43+wfIvBsMzWrfC9UNo/LO9JGehV/RZxcj6kHFqbjHJUu+ldr9w4ytT4W07eHp1b5L4Lg/DsAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/web"
 version: "1.0.0"
 tool_type: "subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "fetch"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 60
 
 config_schema:

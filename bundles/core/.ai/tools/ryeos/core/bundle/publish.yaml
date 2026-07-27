@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-26T04:39:42Z:6b67d383860f4094c4e34f99846544d4fcc60f82ba151d052773e6f340b13935:g6ftxqvfOJe6Y2+w9buJ9upRhDg/vAGyd4uFqV59hLP8RmC8T0dF6gji6aOJWVwLrDBs+q8KCgi/EQydJejZDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:06Z:14672fd2daff72c90a1fe431970ccd3277c15eed9f29f3d2557007ea18523438:7kMPtNbUzQO91YRN4qXkjVsrhr0NGas0yV8wMdjO+kx5dnqJAXAv9bE0PsrXki3xvYqtHCwPsV1Bl8Y2oAXfBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "publish"
 executor_id: "@subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "build"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 300
 
 config_schema:

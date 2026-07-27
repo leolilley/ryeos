@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-27T09:00:08Z:5d456615296078e1dcd44cc3f284b8e878d61ed94c1cea59281c70a7ad45d94f:Pt3NoMXYmv69/4MqNFaIBtjCXYSiZoteH7Cq80APYCPciLJovOkoihoB1O8dbRbGAJ/dEXjcXSRzh6jzq2HnBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "read-identity-context-doc"
@@ -9,7 +10,7 @@ config:
   args:
     - "fetch"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 20
 
 config_schema:

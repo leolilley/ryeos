@@ -18,7 +18,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 pub use error::{ErrorPhase, ExpressionError, SourceSpan};
-pub(crate) use evaluator::json_string_bytes;
+#[doc(hidden)]
+pub use evaluator::json_string_bytes;
 pub use limits::{CompilationLimits, EvaluationLimits};
 pub use references::{Reference, ReferenceSegment, ReferenceSet};
 pub use runtime_json::{RuntimeJsonArrayBudget, RuntimeJsonObjectBudget};
@@ -459,7 +460,8 @@ impl<'a> EvaluationSession<'a> {
     /// Check an integration-assembled result shape without charging fuel.
     /// Renderers use this before each container insertion so a combined limit
     /// cannot be exceeded while the aggregate is still being constructed.
-    pub(crate) fn check_result_shape(
+    #[doc(hidden)]
+    pub fn check_result_shape(
         &mut self,
         depth: usize,
         nodes: usize,

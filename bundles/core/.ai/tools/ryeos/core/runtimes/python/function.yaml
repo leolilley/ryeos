@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T12:08:28Z:dd4b319b17cbbcc616a7f629a5e58d34f944dabb01af40a9b62228e1a3f23a6a:g5KPLWrBc6Zlh9J35f/rbFy7Df0HnsPra+J9ZKIc6Qf1tgbdmRVhJW5dmSLoVNsLwiZQR5NtJslgE8nVExs2DQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:2270780ddf6bf91d1e7eeed3a2920a3a02022788a17d45de54c8fa4455553b94:78CLp6HQG6UxkhpnnfqUyZLSfTk3Ha0tk9BZrUh603OJKkjngLPWXUyny0Ux3odvaZsqFPzsCjh929lFdn4mCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -14,7 +14,7 @@ env_config:
     path_candidates: [python3]
   env:
     PYTHONUNBUFFERED: "1"
-    PROJECT_VENV_PYTHON: "{interpreter}"
+    PROJECT_VENV_PYTHON: "${interpreter}"
 
 verify_deps:
   enabled: true
@@ -30,7 +30,7 @@ config_resolve:
     mode: "deep_merge"
 
 config:
-  command: "{interpreter}"
+  command: "${interpreter}"
   args:
     - "-I"
     - "-u"
@@ -80,10 +80,10 @@ config:
       sys.stdout.flush()
       _payload=(json.dumps(r,default=str)if r is not None else json.dumps(dict()))+"\n"
       os.write(_saved_stdout,_payload.encode())
-    - "{tool_path}"
-    - "{runtime_dir}/lib"
-    - "{project_path}"
-  input_data: "{params_json}"
+    - "${tool_path}"
+    - "${runtime_dir}/lib"
+    - "${project_path}"
+  input_data: "${params_json}"
   timeout_secs: 300
 
 config_schema:

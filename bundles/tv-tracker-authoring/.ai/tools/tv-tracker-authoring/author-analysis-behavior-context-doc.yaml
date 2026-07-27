@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-27T09:00:08Z:b20895a3c915c822b4ffc02630f32b0d7d727cd1f4fb5d1893881f20e593d83d:I/ouhjQ3Ao39IpnwjaEUh9tn7qeGkR5uolQlCwkhMSG6rd3TkkF1OnEkvXI+dAaephimK6uC9WJ2/wLPtiVDCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "author-analysis-behavior-context-doc"
@@ -17,7 +18,7 @@ config:
   args:
     - "author-item"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 30
 
 config_schema:
