@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-04T03:59:54Z:8dc2bd1e73eb3f9683e045cef60f340b88efe130175a9c114203722fbe3edac0:3wgvmx1D3/QBnmrLgpQPPK1EkF+OfaOZfkfTtgd6rIhLMgYlNmQ3lXcTB3KTbQN60S4JPlL2baNTr4iGZjkiDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T09:03:55Z:aef684b68c611e82fb47d0f0d344bddfbc5e1eb1cfc363dcd7ce1594bf9a41be:tGGhFMqX86c6ncTk8geX+211xpPX1Mb4uG9pB29nazVyaILaFIp9LGpd/QjFgcS8xiH20/NCLRWB/cKti1OmDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [item-authoring, runtime-authority, manifest, capabilities, author_item]
@@ -197,7 +197,7 @@ description: "Author a signed project item via the daemon."
 config:
   command: "bin:core/ryeos-core-tools"
   args: ["author-item", "--stdin-json"]
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 30
 config_schema:
   type: object

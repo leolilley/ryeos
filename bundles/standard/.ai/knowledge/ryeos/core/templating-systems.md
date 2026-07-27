@@ -1,19 +1,20 @@
-<!-- ryeos:signed:2026-07-15T07:49:20Z:72792d79dea4aec177caccf4f812fec0a8bd809467d511ff08ecf4dc48f59c80:cqGfBarVlyZReXVucs/bdb2499wTyuoQjilYk2hOqSLIUQ4Fz50J8m1Lx4WBwGIO2VEtVa9IkdfRGeFc8jg4AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T09:31:02Z:664bd5306f377b762253e8cff2508756315a95665775831228ccee87be4d02d5:VRtgDetS/RiUCTqdJ2fI9WXztNzq9wuZMceuSTpV1XEE/7Ck5rs1roQV8lnRS19Jqw1pGulbQJlNmyneexWMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
 tags: [reference, templating, interpolation, substitution]
 version: "1.0.0"
 description: >
-  The five distinct interpolation/template systems in Rye OS — where each
-  runs, what syntax it uses, and what variables are available.
+  The interpolation/template surfaces in Rye OS — where each runs, which
+  use rye-expr/1, and what context each surface exposes.
 ---
 
 # Templating and Interpolation
 
-Rye OS has **five** distinct template/interpolation systems, each running
-in a different execution context. They are intentionally syntactically
-distinct to prevent collisions.
+Rye OS has four template/interpolation surfaces. Runtime subprocess fields and
+graph/directive bodies share the bounded `rye-expr/1` language, but expose
+different context roots. HTTP route captures and provider adapters retain
+narrow, surface-specific substitution contracts.
 
 ## Where Each System Runs
 
@@ -21,92 +22,89 @@ distinct to prevent collisions.
 ┌─────────────────────────────────────────────────────────────┐
 │  RUST DAEMON (ryeosd / ryeos-engine)                        │
 │                                                             │
-│  System 1: {token}         — tool config.command/args       │
-│  System 2: ${VAR} + {token} — env_config values             │
-│  System 3: ${path.X}       — HTTP route source_config       │
+│  Surface 1: rye-expr/1 ${expression}                       │
+│             — tool command/args/input/cwd/env               │
+│  Surface 2: ${path.X} — HTTP route source_config            │
 ├─────────────────────────────────────────────────────────────┤
 │                                 │ fork + exec               │
 │                                 ▼                           │
 │  RUST RUNTIME SUBPROCESS                                    │
 │  (ryeos-graph-runtime, ryeos-directive-runtime)             │
 │                                                             │
-│  System 4: rye-expr/1 ${expression} — runtime bodies       │
-│  System 5: {key} exact-match      — provider API templates │
+│  Surface 3: rye-expr/1 ${expression} — runtime bodies      │
+│  Surface 4: {key} exact-match — provider API templates     │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## System 1: Engine `{token}` Expansion
+## Surface 1: Runtime Subprocess Expressions
 
 **Runs in:** Rust daemon (`ryeosd`), during the `compile_with_handlers` pipeline.
-**Syntax:** `{token}` — simple brace-delimited replacement.
-**Unknown tokens:** Hard error at plan-build time.
+**Syntax:** `${expression}` using the same bounded `rye-expr/1` compiler and
+evaluator as graph/directive runtime bodies.
+**Unknown roots or invalid expressions:** Hard error at plan-build time.
 
-### Available Tokens
+### Available Context Roots
 
-| Token            | Value                                        |
-|------------------|----------------------------------------------|
-| `{tool_path}`    | Absolute path to the tool source file        |
-| `{tool_dir}`     | Parent directory of the tool source file     |
-| `{tool_parent}`  | Grandparent of the tool source file          |
-| `{project_path}` | Absolute path to the project root            |
-| `{params_json}`  | Full parameters as JSON string               |
-| `{interpreter}`  | Resolved Python binary (from env_config)     |
-| `{runtime_dir}`  | Current chain element's directory            |
+| Expression root      | Value                                        |
+|----------------------|----------------------------------------------|
+| `${tool_path}`       | Absolute path to the tool source file        |
+| `${tool_dir}`        | Parent directory of the tool source file     |
+| `${tool_parent}`     | Grandparent of the tool source file          |
+| `${project_path}`    | Absolute path to the project root            |
+| `${params_json}`     | Full parameters as JSON string               |
+| `${interpreter}`     | Resolved Python binary (from env config)     |
+| `${runtime_dir}`     | Current chain element's directory            |
 
 ### Where Used
 
 In tool YAML `config` blocks:
 ```yaml
 config:
-  command: "{interpreter}"
-  args: ["{tool_path}", "--project-path", "{project_path}"]
-  input_data: "{params_json}"
-  cwd: "{tool_dir}"
+  command: "${interpreter}"
+  args: ["${tool_path}", "--project-path", "${project_path}"]
+  input_data: "${params_json}"
+  cwd: "${tool_dir}"
 ```
 
+When `input_data` is exactly a direct `${params_json}` expression, the
+execution plan retains the parameter object as typed runtime stdin until the
+final spawn. RyeOS owns the top-level `project_path` binding and can relocate
+that binding during admitted recovery; project-root text anywhere else remains
+forbidden. Any surrounding literal text or expression changes make the stdin
+opaque, so RyeOS never parses or rewrites arbitrary program input.
+
 The Python runtimes no longer set `PYTHONPATH`; they derive
-bundle-local import roots from `{tool_path}` and prepend them to
+bundle-local import roots from `${tool_path}` and prepend them to
 `sys.path` inside the runtime launcher.
 
----
+The same expression pass renders `env_config.env` and
+`env_config.env_paths`. In those fields only, uppercase expression roots such
+as `${PATH}` request a host environment value. The name must be present in
+`RYEOS_TOOL_ENV_PASSTHROUGH`; reserved `RYEOS_*` and `RYEOSD_*` names are
+rejected. Vault-managed secrets continue to use `required_secrets`, not host
+environment passthrough.
 
-## System 2: Engine Env Value Two-Pass Expansion
-
-**Runs in:** Rust daemon, during `compile_with_handlers` — env values only.
-**Syntax:** Two passes — `${VAR}` first, then `{token}`.
-
-### Pass 1: `${VAR}` — Host Environment Passthrough
-Resolves `VAR` from the operator's environment. Only allowed for
-variables in the `RYEOS_TOOL_ENV_PASSTHROUGH` allowlist. Reserved
-`RYEOS_*` names are rejected.
-
-### Pass 2: `{token}` — Same as System 1
-After host-env expansion, the same `{token}` expansion runs.
-
-### Where Used
-
-`env_config.env` values and `env_config.env_paths` values:
 ```yaml
 env_config:
   env:
-    PATH: "${PATH}"                     # Pass 1: host env
-    PYTHONUNBUFFERED: "1"               # Literal (no expansion)
-    PROJECT_VENV_PYTHON: "{interpreter}" # Pass 2: engine token
+    PATH: "${PATH}"                         # allowlisted host value
+    PYTHONUNBUFFERED: "1"                   # literal
+    PROJECT_VENV_PYTHON: "${interpreter}"   # runtime context
   env_paths:
     PATH:
-      prepend: ["{runtime_dir}/bin"]
+      prepend: ["${runtime_dir}/bin"]
 ```
 
-### Design Note
-`${VAR}` (host env) and `{token}` (engine context) are intentionally
-syntactically distinct. A lone `$` without braces passes through
-(e.g., `"price: $5"`).
+Rendering is a single pass. `$${` emits a literal `${`, and ordinary braces are
+not template syntax. For example, an embedded Python f-string containing
+`{tool_path}` remains unchanged; `$${tool_path}` emits the literal text
+`${tool_path}`.
 
 ---
 
-## System 3: Route `source_config` Path Interpolation
+## Surface 2: Route `source_config` Path Interpolation
 
 **Runs in:** Rust daemon, during route table compilation and HTTP dispatch.
 **Syntax:** `${path.<name>}` — only `path.*` captures are supported.
@@ -135,7 +133,7 @@ is replaced with the actual thread ID from the URL.
 
 ---
 
-## System 4: Rust Graph/Directive Interpolation
+## Surface 3: Rust Graph/Directive Interpolation
 
 **Runs in:** Rust runtime subprocesses (`ryeos-graph-runtime`,
 `ryeos-directive-runtime`).
@@ -226,7 +224,7 @@ a second template.
 
 ---
 
-## System 5: Provider Template Substitution
+## Surface 4: Provider Template Substitution
 
 **Runs in:** Rust directive runtime, during LLM API call construction.
 **Syntax:** `{key}` — exact **whole-string** match only.
@@ -250,24 +248,26 @@ Missing placeholders become `null` with a warning log (not an error).
 
 ## Execution Order
 
-When all systems could apply to the same data, they run in this order:
+When multiple surfaces participate in one execution, they run in this order:
 
-1. **Daemon compile time:** System 2 (env `${VAR}`) → System 1 (`{token}`)
-2. **Route dispatch time:** System 3 (`${path.X}`)
-3. **Runtime subprocess:** System 4 (`rye-expr/1` `${expression}`)
-4. **Provider formatting:** System 5 (`{key}` exact-match)
+1. **Daemon compile time:** Surface 1 (`rye-expr/1` runtime subprocess fields)
+2. **Route dispatch time:** Surface 2 (`${path.X}`)
+3. **Runtime subprocess:** Surface 3 (`rye-expr/1` graph/directive bodies)
+4. **Provider formatting:** Surface 4 (`{key}` exact-match)
 
-Each system operates on different data at different stages, so there
-are no ordering conflicts within a single stage.
+Each template value is rendered once by the surface that owns it. Generated
+text is never reparsed as another template in the same surface.
 
 ## Collision Prevention
 
 The syntaxes are designed to be distinguishable:
 
-| Syntax         | System          | Context            |
-|----------------|-----------------|--------------------|
-| `{token}`      | System 1, 2     | Daemon config only |
-| `${VAR}`       | System 2        | Env values only    |
-| `${path.X}`    | System 3        | Route configs only |
-| `${expression}`  | System 4     | Runtime bodies     |
-| `{key}`        | System 5        | Provider templates |
+| Syntax            | Surface                       | Context                    |
+|-------------------|-------------------------------|----------------------------|
+| `${expression}`   | Runtime subprocess rye-expr/1 | Tool config and env fields |
+| `${path.X}`       | Route interpolation           | Route configs only         |
+| `${expression}`   | Runtime body rye-expr/1       | Graph/directive bodies     |
+| `{key}`           | Provider substitution         | Provider templates         |
+
+The two rye-expr/1 surfaces intentionally share syntax and semantics while
+offering only the roots authorized for their respective execution phase.

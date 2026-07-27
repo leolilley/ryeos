@@ -659,7 +659,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
 ///
 /// `deny_unknown_fields` is intentionally NOT set: the runtime compiler injects
 /// extra context (e.g. `project_path`) into the params before expanding
-/// `{params_json}` onto stdin. Unknown keys are ignored, and the daemon request
+/// `${params_json}` onto stdin. Unknown keys are ignored, and the daemon request
 /// is rebuilt from only the known fields below — so nothing extra is forwarded.
 #[derive(serde::Deserialize)]
 struct AuthorItemParams {

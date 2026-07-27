@@ -1,0 +1,11 @@
+[package]
+name = "ryeos-expression"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded rye-expr/1 compilation and evaluation"
+license.workspace = true
+
+[dependencies]
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

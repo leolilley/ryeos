@@ -1213,7 +1213,7 @@ mod tests {
                     .join("tools")
                     .join("custom")
                     .join("echo.yaml"),
-                "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"bin:echo-json\"\n  input_data: \"{params_json}\"\n",
+                "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"bin:echo-json\"\n  input_data: \"${params_json}\"\n",
             );
         }
 
@@ -1702,7 +1702,7 @@ else:
                 .join("tools")
                 .join("custom")
                 .join("echo.yaml"),
-            "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"cat\"\n  input_data: \"{params_json}\"\n",
+            "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"cat\"\n  input_data: \"${params_json}\"\n",
         );
 
         let err = try_offline_dispatch_for_test(
@@ -1732,7 +1732,7 @@ else:
                 .join("tools")
                 .join("custom")
                 .join("echo.yaml"),
-            "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"bin/{triple}/echo-json\"\n  input_data: \"{params_json}\"\n",
+            "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"bin/{triple}/echo-json\"\n  input_data: \"${params_json}\"\n",
         );
 
         let result = expect_json(

@@ -18,7 +18,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 pub use error::{ErrorPhase, ExpressionError, SourceSpan};
-pub(crate) use evaluator::json_string_bytes;
+#[doc(hidden)]
+pub use evaluator::json_string_bytes;
 pub use limits::{CompilationLimits, EvaluationLimits};
 pub use references::{Reference, ReferenceSegment, ReferenceSet};
 pub use runtime_json::{RuntimeJsonArrayBudget, RuntimeJsonObjectBudget};
@@ -73,6 +74,20 @@ impl CompiledExpression {
 
     pub fn references(&self) -> &ReferenceSet {
         &self.references
+    }
+
+    /// Return the root name when this expression is exactly a root reference,
+    /// allowing only semantically inert grouping.
+    pub fn direct_root_reference(&self) -> Option<&str> {
+        fn direct_root(expression: &Expr) -> Option<&str> {
+            match &expression.kind {
+                ExprKind::Variable(root) => Some(root),
+                ExprKind::Group(inner) => direct_root(inner),
+                _ => None,
+            }
+        }
+
+        direct_root(&self.root)
     }
 
     /// Return the result type when it follows entirely from expression shape.
@@ -209,6 +224,16 @@ impl CompiledTemplate {
 
     pub fn references(&self) -> &ReferenceSet {
         &self.references
+    }
+
+    /// Return the root name when the entire template is one direct root
+    /// expression. Literal text, member access, calls, and operators do not
+    /// qualify.
+    pub fn whole_direct_root_reference(&self) -> Option<&str> {
+        match self.parts.as_slice() {
+            [TemplatePart::Expression(expression)] => expression.direct_root_reference(),
+            _ => None,
+        }
     }
 }
 
@@ -459,7 +484,8 @@ impl<'a> EvaluationSession<'a> {
     /// Check an integration-assembled result shape without charging fuel.
     /// Renderers use this before each container insertion so a combined limit
     /// cannot be exceeded while the aggregate is still being constructed.
-    pub(crate) fn check_result_shape(
+    #[doc(hidden)]
+    pub fn check_result_shape(
         &mut self,
         depth: usize,
         nodes: usize,

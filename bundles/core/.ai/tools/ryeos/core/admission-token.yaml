@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-24T04:51:58Z:5448ebe928e5bf17972ba094a3cb0ad1cc35a34bf5d9d411ebc368d012173f54:i9YzZOCg83hrukCK8Yl7af03eHGtYk/dYtEOTdkDNFIEF9fROuMrJFRijkR0FF0sjttr+J1sCKhUuNZLqHNbDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:06Z:00e12d5e4efb4c299cd674a92b59bd76ee567fdfc675654730014e82bce948e7:5/g5MWgiZKoPXyPqLu242esMlzCndgiaxCxYeMNSLpv2veR6UVLHJ+fId/Y1Um12j+/+DIJChhPOaOXXxcsvAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
@@ -11,7 +11,7 @@ config:
   args:
     - "admission-token"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 30
 
 config_schema:

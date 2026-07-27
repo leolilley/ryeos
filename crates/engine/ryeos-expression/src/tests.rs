@@ -21,6 +21,23 @@ fn render(source: &str, context: &Value) -> Value {
 }
 
 #[test]
+fn direct_root_reference_is_structural() {
+    for source in ["${params_json}", "${ (params_json) }"] {
+        let compiled = compile_template(source, &CompilationLimits::default()).unwrap();
+        assert_eq!(compiled.whole_direct_root_reference(), Some("params_json"));
+    }
+    for source in [
+        "prefix ${params_json}",
+        "${params_json.value}",
+        "${string(params_json)}",
+        "${params_json ?? '{}'}",
+    ] {
+        let compiled = compile_template(source, &CompilationLimits::default()).unwrap();
+        assert_eq!(compiled.whole_direct_root_reference(), None);
+    }
+}
+
+#[test]
 fn arithmetic_precedence_unary_and_ternary_are_conventional() {
     let context = json!({});
     assert_eq!(evaluate_source("1 + 2 * 3", &context), json!(7));

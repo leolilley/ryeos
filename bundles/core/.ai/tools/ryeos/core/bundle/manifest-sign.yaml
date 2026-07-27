@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-26T04:39:41Z:5ddfb5b14dae1be174d0cc4b534b4b4fe6462d6b5ff5ade78321ab7d055649d7:4kCxfuc1sblEZLOIBcCTZJHqnApxHYJW4DIZ5mi6vLC4ZZAqRUcvgw7EvWL7sVw5dO+qlol8iC3H8CeX9F8CDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:06Z:6de7793f0194443d3fc0d4365097fe78ea1d2b754178737780da9518494fb9f5:asMWLCVLFPfuUV1Dobdh45U5jRnfxU/SsK69jovIjWnYy3V22wGiyo36TvsRTQyihe5qgQsLUMd3SImFMUYhBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "manifest-sign"
 executor_id: "@subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "manifest-sign"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 120
 
 config_schema:

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-07T05:18:56Z:3643b107764cbba71d84cb0fee55f6ef2a1b1710dcf87cea31e5be985fb10e13:d8mpcejG8hmFxN85EdqQSmBz0hMqdh6w5v1rxcOwR5PuUUlYlLsOLQnPVBqxw/ni/4Zfl+P0MjNBPimOf24DAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:dcc5075a1bd6a0e01bcff4e204fbeb1f412814c79072f76d62574e732baf6e0d:tI5SBn7L8S+ykQpDGt2Ez2AGEG/TcW0HNZYQuuiGMauhmBQKpf105tPSk/d042lL/SIQNxZBOo95iCcC1E7gDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/bundle"
 name: "sign"
 executor_id: "@subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "bundle-sign"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 300
 
 config_schema:

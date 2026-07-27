@@ -158,28 +158,30 @@ pub(super) fn expand_template(
     params_json: &str,
     project_path: &str,
 ) -> Result<String, CliError> {
-    let mut rest = template;
-    while let Some(start) = rest.find('{') {
-        if let Some(end) = rest[start + 1..].find('}') {
-            let token = &rest[start + 1..start + 1 + end];
-            if token != "params_json" && token != "project_path" && token != "triple" {
-                return Err(CliError::Local {
-                    detail: format!(
-                        "offline tool template references unsupported token {{{token}}}"
-                    ),
-                });
-            }
-            rest = &rest[start + 1 + end + 1..];
-        } else {
-            return Err(CliError::Local {
-                detail: "offline tool template contains an unterminated token".into(),
-            });
-        }
-    }
-
-    let mut out = template.replace("{params_json}", params_json);
-    out = out.replace("{project_path}", project_path);
-    Ok(out)
+    let compilation_limits = ryeos_runtime::CompilationLimits::default();
+    let compiled = ryeos_runtime::compile_template_for(
+        template,
+        "offline subprocess template",
+        &compilation_limits,
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("invalid rye-expr/1 offline subprocess template: {error}"),
+    })?;
+    let context = serde_json::json!({
+        "params_json": params_json,
+        "project_path": project_path,
+    });
+    let evaluation_limits = ryeos_runtime::EvaluationLimits::default();
+    let rendered = ryeos_runtime::render_template(&compiled, &context, &evaluation_limits)
+        .map_err(|error| CliError::Local {
+            detail: format!("render rye-expr/1 offline subprocess template: {error}"),
+        })?;
+    rendered
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| CliError::Local {
+            detail: "rye-expr/1 offline subprocess template must produce string".into(),
+        })
 }
 
 fn params_to_tail(params: &Value) -> Vec<String> {

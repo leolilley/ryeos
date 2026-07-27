@@ -10,7 +10,7 @@ pub mod compiled_template;
 pub mod daemon_rpc;
 pub mod envelope;
 pub mod events;
-pub mod expression;
+pub use ryeos_expression as expression;
 pub mod expression_condition;
 pub mod framing;
 pub mod hooks_eval;

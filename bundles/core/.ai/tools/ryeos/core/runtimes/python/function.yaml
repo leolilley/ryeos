@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T14:19:47Z:3fcd10f4aff5f2a811428af3e56981f46a3e12b45628d0d976a314d723cd4c25:tOSvtlqU/Egst6k2kSD3bMELWawLlq7ORC+c/i6BsWsQoAbD0c3chMhY079Y6d/uWDp7tMJkZn91mcL9pgStCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:2270780ddf6bf91d1e7eeed3a2920a3a02022788a17d45de54c8fa4455553b94:78CLp6HQG6UxkhpnnfqUyZLSfTk3Ha0tk9BZrUh603OJKkjngLPWXUyny0Ux3odvaZsqFPzsCjh929lFdn4mCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -14,7 +14,7 @@ env_config:
     path_candidates: [python3]
   env:
     PYTHONUNBUFFERED: "1"
-    PROJECT_VENV_PYTHON: "{interpreter}"
+    PROJECT_VENV_PYTHON: "${interpreter}"
 
 verify_deps:
   enabled: true
@@ -30,7 +30,7 @@ config_resolve:
     mode: "deep_merge"
 
 config:
-  command: "{interpreter}"
+  command: "${interpreter}"
   args:
     - "-I"
     - "-u"
@@ -60,9 +60,9 @@ config:
           if candidate.name=="tools" and candidate.parent.name==".ai":
               tools_root=candidate
               break
-      if tools_root is None:sys.exit("RyeOS Python runtime: tool is not under .ai/tools: "+str(tool_path))
+      if tools_root is None:sys.exit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
       rel=tool_path.relative_to(tools_root)
-      if len(rel.parts)<2:sys.exit("RyeOS Python runtime: invalid tool path under .ai/tools: "+str(tool_path))
+      if len(rel.parts)<2:sys.exit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
       bundle_tool_root=tools_root/rel.parts[0]
       tool_dir=tool_path.parent
       for path in reversed([tool_dir,bundle_tool_root,bundle_tool_root/"lib",runtime_lib]):prepend(path)
@@ -80,10 +80,10 @@ config:
       sys.stdout.flush()
       _payload=(json.dumps(r,default=str)if r is not None else json.dumps(dict()))+"\n"
       os.write(_saved_stdout,_payload.encode())
-    - "{tool_path}"
-    - "{runtime_dir}/lib"
-    - "{project_path}"
-  input_data: "{params_json}"
+    - "${tool_path}"
+    - "${runtime_dir}/lib"
+    - "${project_path}"
+  input_data: "${params_json}"
   timeout_secs: 300
 
 config_schema:

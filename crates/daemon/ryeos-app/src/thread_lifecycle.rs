@@ -6421,83 +6421,6 @@ fn validate_direct_plan_portability(
     relocate_admitted_direct_plan(&mut cloned, admitted_project_root, admitted_project_root)
 }
 
-fn relocate_direct_plan_path_text(
-    label: &str,
-    value: &mut String,
-    admitted_text: &str,
-    effective_text: &str,
-) -> Result<()> {
-    if value == admitted_text {
-        *value = effective_text.to_string();
-        return Ok(());
-    }
-
-    let prefix = format!("{}/", admitted_text.trim_end_matches('/'));
-    if value.starts_with(&prefix) {
-        let relative = &value[prefix.len()..];
-        if relative.is_empty()
-            || Path::new(relative)
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
-            bail!("admitted direct plan {label} escapes its project root");
-        }
-        *value = format!("{}/{}", effective_text.trim_end_matches('/'), relative);
-    } else if value.contains(admitted_text) {
-        bail!("admitted direct plan {label} embeds its project root in an untyped string");
-    }
-    Ok(())
-}
-
-fn relocate_direct_plan_json_paths(
-    label: &str,
-    value: &mut Value,
-    admitted_text: &str,
-    effective_text: &str,
-) -> Result<()> {
-    match value {
-        Value::String(value) => {
-            relocate_direct_plan_string(label, value, admitted_text, effective_text)
-        }
-        Value::Array(values) => {
-            for value in values {
-                relocate_direct_plan_json_paths(label, value, admitted_text, effective_text)?;
-            }
-            Ok(())
-        }
-        Value::Object(values) => {
-            for value in values.values_mut() {
-                relocate_direct_plan_json_paths(label, value, admitted_text, effective_text)?;
-            }
-            Ok(())
-        }
-        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
-    }
-}
-
-fn relocate_direct_plan_string(
-    label: &str,
-    value: &mut String,
-    admitted_text: &str,
-    effective_text: &str,
-) -> Result<()> {
-    if !value.contains(admitted_text) {
-        return Ok(());
-    }
-    if value == admitted_text
-        || value.starts_with(&format!("{}/", admitted_text.trim_end_matches('/')))
-    {
-        return relocate_direct_plan_path_text(label, value, admitted_text, effective_text);
-    }
-
-    let mut structured: Value = serde_json::from_str(value).map_err(|_| {
-        anyhow!("admitted direct plan {label} embeds its project root in an untyped string")
-    })?;
-    relocate_direct_plan_json_paths(label, &mut structured, admitted_text, effective_text)?;
-    *value = serde_json::to_string(&structured)?;
-    Ok(())
-}
-
 fn relocate_admitted_direct_plan(
     plan: &mut ExecutionPlan,
     admitted_project_root: Option<&Path>,
@@ -6545,6 +6468,27 @@ fn relocate_admitted_direct_plan(
     let effective_text = effective_root
         .to_str()
         .ok_or_else(|| anyhow!("effective direct plan project root is not valid UTF-8"))?;
+    let relocate_string = |label: &str, value: &mut String| -> Result<()> {
+        if value == admitted_text {
+            *value = effective_text.to_string();
+        } else {
+            let prefix = format!("{}/", admitted_text.trim_end_matches('/'));
+            if value.starts_with(&prefix) {
+                let relative = &value[prefix.len()..];
+                if relative.is_empty()
+                    || Path::new(relative)
+                        .components()
+                        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+                {
+                    bail!("admitted direct plan {label} escapes its project root");
+                }
+                *value = format!("{}/{}", effective_text.trim_end_matches('/'), relative);
+            } else if value.contains(admitted_text) {
+                bail!("admitted direct plan {label} embeds its project root in an untyped string");
+            }
+        }
+        Ok(())
+    };
     for node in &mut plan.nodes {
         let ryeos_engine::contracts::PlanNode::DispatchSubprocess {
             spec, tool_path, ..
@@ -6559,16 +6503,58 @@ fn relocate_admitted_direct_plan(
             relocate_path(cwd)?;
         }
         for arg in &mut spec.args {
-            relocate_direct_plan_string("argument", arg, admitted_text, effective_text)?;
+            relocate_string("argument", arg)?;
         }
         for value in spec.env.values_mut() {
-            relocate_direct_plan_string("environment value", value, admitted_text, effective_text)?;
+            relocate_string("environment value", value)?;
         }
-        if let Some(stdin) = &mut spec.stdin_data {
-            relocate_direct_plan_string("stdin", stdin, admitted_text, effective_text)?;
+        if let Some(stdin) = &mut spec.stdin {
+            match stdin {
+                ryeos_engine::contracts::PlanStdin::Opaque { data } => {
+                    if data.contains(admitted_text) {
+                        bail!("admitted direct plan opaque stdin embeds its project root");
+                    }
+                }
+                ryeos_engine::contracts::PlanStdin::RuntimeParameters {
+                    parameters,
+                    project_path,
+                } => {
+                    if project_path
+                        .as_deref()
+                        .is_some_and(|path| path != admitted_root)
+                    {
+                        bail!(
+                            "admitted direct plan runtime parameter project_path contradicts its project authority"
+                        );
+                    }
+                    if project_path.is_some() {
+                        *project_path = Some(effective_root.to_path_buf());
+                    }
+                    if json_value_contains_text(parameters, admitted_text) {
+                        bail!(
+                            "admitted direct plan runtime parameters embed its project root outside the project_path binding"
+                        );
+                    }
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn json_value_contains_text(value: &serde_json::Value, needle: &str) -> bool {
+    match value {
+        serde_json::Value::String(value) => value.contains(needle),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| json_value_contains_text(value, needle)),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .any(|(key, value)| key.contains(needle) || json_value_contains_text(value, needle)),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            false
+        }
+    }
 }
 
 pub fn prepare_item_plan(
@@ -6998,7 +6984,11 @@ mod tests {
                     "env": {
                         "RYEOS_PROJECT_FILE": project_root.join("data.json")
                     },
-                    "stdin_data": null
+                    "stdin": {
+                        "kind": "runtime_parameters",
+                        "parameters": {"message": "hello"},
+                        "project_path": project_root
+                    }
                 },
                 "tool_path": project_root.join(".ai/tools/test/run.yaml"),
                 "executor_chain": ["tool:test/runtime"]
@@ -7048,6 +7038,12 @@ mod tests {
             tool_path.as_deref(),
             Some(effective.join(".ai/tools/test/run.yaml").as_path())
         );
+        let Some(ryeos_engine::contracts::PlanStdin::RuntimeParameters { project_path, .. }) =
+            &spec.stdin
+        else {
+            panic!("fixture must carry runtime parameters");
+        };
+        assert_eq!(project_path.as_deref(), Some(effective));
     }
 
     #[test]
@@ -7068,48 +7064,47 @@ mod tests {
     }
 
     #[test]
-    fn admitted_direct_plan_relocates_project_paths_in_structured_json() {
+    fn admitted_direct_plan_rejects_project_root_outside_runtime_binding() {
         let admitted = Path::new("/tmp/admitted-project");
-        let effective = Path::new("/tmp/materialized-project");
         let mut plan = portable_direct_plan(admitted);
         let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = &mut plan.nodes[0]
         else {
             panic!("fixture must dispatch");
         };
-        spec.args[0] = serde_json::json!({
-            "project_path": admitted,
-            "nested": [
-                admitted.join("data.json"),
-                serde_json::json!({
-                    "project_path": admitted
-                })
+        let Some(ryeos_engine::contracts::PlanStdin::RuntimeParameters { parameters, .. }) =
+            &mut spec.stdin
+        else {
+            panic!("fixture must carry runtime parameters");
+        };
+        parameters["payload"] =
+            serde_json::Value::String(format!("read {}/data.json", admitted.display()));
+
+        let error = validate_direct_plan_portability(&plan, Some(admitted)).unwrap_err();
+        assert!(
+            error
                 .to_string()
-            ]
-        })
-        .to_string();
-        spec.stdin_data = Some(
-            serde_json::json!({
-                "project_path": admitted
-            })
-            .to_string(),
+                .contains("outside the project_path binding"),
+            "unexpected error: {error:#}"
         );
+    }
 
-        relocate_admitted_direct_plan(&mut plan, Some(admitted), Some(effective)).unwrap();
-
-        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = &plan.nodes[0]
+    #[test]
+    fn admitted_direct_plan_rejects_project_root_in_opaque_stdin() {
+        let admitted = Path::new("/tmp/admitted-project");
+        let mut plan = portable_direct_plan(admitted);
+        let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = &mut plan.nodes[0]
         else {
             panic!("fixture must dispatch");
         };
-        let argument: Value = serde_json::from_str(&spec.args[0]).unwrap();
-        assert_eq!(argument["project_path"], effective.display().to_string());
-        assert_eq!(
-            argument["nested"][0],
-            effective.join("data.json").display().to_string()
+        spec.stdin = Some(ryeos_engine::contracts::PlanStdin::Opaque {
+            data: format!("read {}/data.json", admitted.display()),
+        });
+
+        let error = validate_direct_plan_portability(&plan, Some(admitted)).unwrap_err();
+        assert!(
+            error.to_string().contains("opaque stdin"),
+            "unexpected error: {error:#}"
         );
-        let nested: Value = serde_json::from_str(argument["nested"][1].as_str().unwrap()).unwrap();
-        assert_eq!(nested["project_path"], effective.display().to_string());
-        let stdin: Value = serde_json::from_str(spec.stdin_data.as_deref().unwrap()).unwrap();
-        assert_eq!(stdin["project_path"], effective.display().to_string());
     }
 
     #[test]

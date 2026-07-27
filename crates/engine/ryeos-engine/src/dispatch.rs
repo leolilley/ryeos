@@ -150,13 +150,23 @@ fn spec_to_request(spec: &PlanSubprocessSpec) -> Result<lillux::SubprocessReques
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    let stdin_data = spec
+        .stdin
+        .as_ref()
+        .map(|stdin| {
+            stdin
+                .materialize()
+                .map_err(|reason| EngineError::InvalidPlanStdin { reason })
+        })
+        .transpose()?;
+
     Ok(lillux::SubprocessRequest {
         cmd: spec.cmd.clone(),
         argv0: None,
         args: spec.args.clone(),
         cwd: spec.cwd.as_ref().map(|p| p.to_string_lossy().to_string()),
         envs,
-        stdin_data: spec.stdin_data.clone(),
+        stdin_data,
         timeout: spec.timeout_secs as f64,
         limits: None,
         inherited_fds: Vec::new(),
@@ -680,7 +690,7 @@ mod tests {
                     cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -722,7 +732,7 @@ mod tests {
                     cwd: Some(tempdir()),
                     env,
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -772,7 +782,7 @@ mod tests {
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -803,7 +813,7 @@ mod tests {
                     cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -873,7 +883,7 @@ mod tests {
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -931,7 +941,7 @@ mod tests {
                     cwd: Some(dir),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -1020,7 +1030,7 @@ mod tests {
                     cwd: Some(dir),
                     env,
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -1052,7 +1062,7 @@ mod tests {
                     cwd: Some(tempdir()),
                     env: HashMap::new(),
                     env_sources: HashMap::new(),
-                    stdin_data: None,
+                    stdin: None,
                     timeout_secs: 300,
                     execution: Default::default(),
                 }),
@@ -1111,7 +1121,7 @@ mod tests {
             cwd: None,
             env,
             env_sources: HashMap::new(),
-            stdin_data: None,
+            stdin: None,
             timeout_secs: 60,
             execution: Default::default(),
         };

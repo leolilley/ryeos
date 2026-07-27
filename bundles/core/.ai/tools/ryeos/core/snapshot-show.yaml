@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T07:18:25Z:14be4dece23011f0538475b6bdc81c389a79a4703508ed1ca584db556a7bc534:11HTj5kkkCAXVAYaOo8F7qsDGmFeczUbFgDCQcw+1VARcX8Ll/eP0BZ0++M0TLktbMO9pQuUfCjq7g2nxybxAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:07Z:f7e4caf52892bc3865a150c4f4d68cc7edaf679fa66e77bb817055b945bf2cd7:/fxk36bnJM+aoYdvPhbPi17lAUtCezEsMGiNV3mViQFghyfpeqjzIkRmodtnhH2cZcwVDCGQutjRujJ6ebaOBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
 category: "ryeos/core"
@@ -12,7 +12,7 @@ config:
     - "snapshot"
     - "show"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 60
 
 config_schema:
