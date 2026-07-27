@@ -1143,17 +1143,19 @@ fn sleepy_batch_response() -> MockResponse {
     MockResponse::ToolCalls(vec![
         MockToolCallSpec {
             id: "c1".into(),
-            name: "sleep1".into(),
+            // Canonical project ref `tool:sleep1/sleep1` is flattened for
+            // the provider-facing inventory name.
+            name: "sleep1_sleep1".into(),
             arguments: "{}".into(),
         },
         MockToolCallSpec {
             id: "c2".into(),
-            name: "sleep2".into(),
+            name: "sleep2_sleep2".into(),
             arguments: "{}".into(),
         },
         MockToolCallSpec {
             id: "c3".into(),
-            name: "sleep3".into(),
+            name: "sleep3_sleep3".into(),
             arguments: "{}".into(),
         },
     ])
@@ -1361,7 +1363,7 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
         MockResponse::ToolCalls(vec![
             MockToolCallSpec {
                 id: "c1".into(),
-                name: "sleep1".into(),
+                name: "sleep1_sleep1".into(),
                 arguments: "{}".into(),
             },
             MockToolCallSpec {
@@ -1371,7 +1373,7 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
             },
             MockToolCallSpec {
                 id: "c3".into(),
-                name: "sleep3".into(),
+                name: "sleep3_sleep3".into(),
                 arguments: "{}".into(),
             },
         ]),
