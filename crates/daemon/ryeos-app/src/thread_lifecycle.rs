@@ -5491,6 +5491,8 @@ pub fn admit_verified_root_execution(
         usage_subject,
         usage_subject_asserted_by,
         None,
+        None,
+        0,
     )
 }
 
@@ -5510,6 +5512,8 @@ pub fn admit_verified_root_execution_with_timings(
     usage_subject: Option<UsageSubject>,
     usage_subject_asserted_by: Option<String>,
     launch_timings: Option<&crate::launch_stage_timings::LaunchStageTimings>,
+    resolution_cache: Option<&crate::resolution_cache::ResolutionCache>,
+    resolution_generation: u64,
 ) -> Result<RootExecutionAdmission> {
     admit_verified_root_execution_inner(
         engine,
@@ -5523,6 +5527,8 @@ pub fn admit_verified_root_execution_with_timings(
         usage_subject,
         usage_subject_asserted_by,
         launch_timings,
+        resolution_cache,
+        resolution_generation,
     )
 }
 
@@ -5539,6 +5545,8 @@ fn admit_verified_root_execution_inner(
     usage_subject: Option<UsageSubject>,
     usage_subject_asserted_by: Option<String>,
     launch_timings: Option<&crate::launch_stage_timings::LaunchStageTimings>,
+    resolution_cache: Option<&crate::resolution_cache::ResolutionCache>,
+    resolution_generation: u64,
 ) -> Result<RootExecutionAdmission> {
     project_binding.validate_for(engine, execution_plan_context)?;
     let non_project_context_mismatches =
@@ -5581,22 +5589,59 @@ fn admit_verified_root_execution_inner(
             .as_deref(),
         ProjectContext::None => None,
     };
-    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
-    let compose_timer = launch_timings
-        .map(|timings| timings.nested("preflight_admission", "root_admission_resolution_compose"));
-    let request_snapshot = engine
-        .effective_request_snapshot(project_root)
-        .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
-    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
-        &verified_subject.resolved.canonical_ref,
-        &engine.kinds,
-        &request_snapshot.parser_dispatcher,
-        &roots,
-        &request_snapshot.trust_store,
-        &engine.composers,
-    )
-    .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
-    drop(compose_timer);
+    // Admission-time resolution cache. The resolve/compose pipeline is a pure
+    // function of the generation (kinds / trust / composers / bundle roots plus
+    // the project parser snapshot) and the ref + project root — so those key
+    // it. A hit is served only after content revalidation proves no
+    // higher-precedence item appeared and no project dependency changed. The
+    // reverify above is NEVER cached; it runs on every launch.
+    let project_root_owned = project_root.map(Path::to_path_buf);
+    let cache_key = resolution_cache.map(|_| crate::resolution_cache::ResolutionCacheKey {
+        generation: resolution_generation,
+        canonical_ref: verified_subject.resolved.canonical_ref.to_string(),
+        project_root: project_root_owned.clone(),
+        plan_context_identity: String::new(),
+    });
+    let cached = match (resolution_cache, cache_key.as_ref()) {
+        (Some(cache), Some(key)) => {
+            let lookup_timer = launch_timings.map(|timings| {
+                timings.nested(
+                    "preflight_admission",
+                    "root_admission_resolution_cache_lookup",
+                )
+            });
+            let (output, _outcome) = cache.get(key);
+            drop(lookup_timer);
+            output
+        }
+        _ => None,
+    };
+    let resolution = if let Some(resolution) = cached {
+        resolution
+    } else {
+        let compose_timer = launch_timings.map(|timings| {
+            timings.nested("preflight_admission", "root_admission_resolution_compose")
+        });
+        let roots = engine.resolution_roots(project_root_owned.clone());
+        let request_snapshot = engine
+            .effective_request_snapshot(project_root)
+            .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
+        let (output, probed_absent) =
+            ryeos_engine::resolution::run_resolution_pipeline_with_probes(
+                &verified_subject.resolved.canonical_ref,
+                &engine.kinds,
+                &request_snapshot.parser_dispatcher,
+                &roots,
+                &request_snapshot.trust_store,
+                &engine.composers,
+            )
+            .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
+        drop(compose_timer);
+        if let (Some(cache), Some(key)) = (resolution_cache, cache_key) {
+            cache.insert(key, output.clone(), probed_absent);
+        }
+        output
+    };
     let history = ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
         &verified_subject,
         &resolution,

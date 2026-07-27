@@ -1393,3 +1393,92 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
 
     drop(mock);
 }
+
+
+// -- Admission resolution cache: transparent hits + recompute on edit --
+//
+// Exercises the wired cache through a real daemon: a second launch of the
+// same directive is served from the resolution cache, and a launch after the
+// directive's bytes change (re-signed) must recompute rather than serve the
+// stale entry. Both are asserted only by end-to-end success — the cache's
+// validation logic (changed dep, appearing shadow, generation identity) is
+// proven by the unit suite in ryeos_app::resolution_cache.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_resolution_cache_transparent_across_hit_and_edit() {
+    let mock = MockProvider::start(vec![
+        MockResponse::Text("launch one".into()),
+        MockResponse::Text("launch two".into()),
+        MockResponse::Text("launch three".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = {
+        let mock_url = mock_url.clone();
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            register_mock_provider_bundle(state_path, &mock_url, fixture)
+        }
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("routing");
+    let project_path = project.path().to_str().unwrap().to_string();
+
+    async fn launch_ok(h: &common::DaemonHarness, project_path: &str) {
+        let (status, body) = h
+            .post_execute(
+                "directive:test/cache_probe",
+                project_path,
+                serde_json::json!({"name": "World"}),
+            )
+            .await
+            .expect("post /execute");
+        assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+        assert_eq!(
+            body.get("result")
+                .and_then(|r| r.get("success"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "body={body:#}"
+        );
+    }
+
+    // v1, launched twice: launch 2 is served from the resolution cache.
+    plant_directive(
+        project.path(),
+        "test/cache_probe",
+        "Summarise the ratings briefing (v1).",
+        &["ryeos.execute.tool.*"],
+        &fixture.publisher,
+    )
+    .expect("plant directive v1");
+    launch_ok(&h, &project_path).await;
+    launch_ok(&h, &project_path).await;
+
+    // Edit the directive body → new signed bytes → new content digest. The
+    // cached entry's project positive dependency no longer matches, so the
+    // third launch must recompute rather than serve the stale resolution.
+    plant_directive(
+        project.path(),
+        "test/cache_probe",
+        "Summarise the ratings briefing (v2 - materially different body).",
+        &["ryeos.execute.tool.*"],
+        &fixture.publisher,
+    )
+    .expect("plant directive v2");
+    launch_ok(&h, &project_path).await;
+
+    drop(project);
+    drop(mock);
+}
