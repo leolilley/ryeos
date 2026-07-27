@@ -220,9 +220,8 @@ impl CheckpointWriter {
                 bytes.len()
             );
         }
-        lillux::atomic_write(&final_path, &bytes).with_context(|| {
-            format!("durable atomic checkpoint write {}", final_path.display())
-        })?;
+        lillux::atomic_write(&final_path, &bytes)
+            .with_context(|| format!("durable atomic checkpoint write {}", final_path.display()))?;
         Ok(())
     }
 

@@ -373,8 +373,7 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
     // task: a late cancel only finalizes later, it never cuts-then-continues.
     signal_hook::flag::register(signal_hook::consts::SIGUSR1, harness.interrupted_flag())
         .context("failed to register SIGUSR1 live-interrupt flag")?;
-    let budget =
-        budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd.display_usd_lossy());
+    let budget = budget::BudgetTracker::new(envelope.policy.hard_limits.spend_usd);
 
     let hooks = bootstrap_output.config.hooks.clone();
 

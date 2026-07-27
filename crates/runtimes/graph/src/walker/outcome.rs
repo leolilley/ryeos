@@ -47,7 +47,7 @@ impl GraphAccounting {
         let mut total = self.total.clone().unwrap_or_else(|| RuntimeCost {
             input_tokens: 0,
             output_tokens: 0,
-            total_usd: 0.0,
+            total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
         });
         total
@@ -62,7 +62,7 @@ impl GraphAccounting {
         let mut total = self.total.clone().unwrap_or_else(|| RuntimeCost {
             input_tokens: 0,
             output_tokens: 0,
-            total_usd: 0.0,
+            total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
         });
         total
@@ -685,7 +685,7 @@ mod history_tests {
             total: Some(RuntimeCost {
                 input_tokens: i64::MAX as u64,
                 output_tokens: 0,
-                total_usd: 0.0,
+                total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                 basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
             }),
             nodes: Vec::new(),
@@ -702,7 +702,7 @@ mod history_tests {
                 cost: RuntimeCost {
                     input_tokens: 1,
                     output_tokens: 0,
-                    total_usd: 0.0,
+                    total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                     basis: None,
                 },
             },
@@ -712,33 +712,6 @@ mod history_tests {
         assert!(budgets
             .failure()
             .is_some_and(|error| error.contains("settlement storage maximum")));
-    }
-
-    #[test]
-    fn accounting_rejects_negative_spend_without_admitting_the_record() {
-        let mut accounting = GraphAccounting::default();
-        let mut budgets = RunHistoryBudgets::default();
-
-        budgets.record_accounting(
-            &mut accounting,
-            NodeCostRecord {
-                node: "node".to_string(),
-                step: 1,
-                item_id: "directive:test/item".to_string(),
-                cost: RuntimeCost {
-                    input_tokens: 1,
-                    output_tokens: 1,
-                    total_usd: -0.01,
-                    basis: None,
-                },
-            },
-        );
-
-        assert!(accounting.total.is_none());
-        assert!(accounting.nodes.is_empty());
-        assert!(budgets
-            .failure()
-            .is_some_and(|error| error.contains("must be non-negative")));
     }
 
     #[test]
@@ -781,8 +754,8 @@ mod history_tests {
             cost: Some(RuntimeCost {
                 input_tokens: 1,
                 output_tokens: 1,
-                total_usd: -0.01,
-                basis: None,
+                total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
+                basis: Some("estimated".to_string()),
             }),
             fanout: None,
         };
@@ -790,6 +763,6 @@ mod history_tests {
         assert!(!budgets.accept_receipt(&receipt));
         assert!(budgets
             .failure()
-            .is_some_and(|error| error.contains("must be non-negative")));
+            .is_some_and(|error| error.contains("basis")));
     }
 }

@@ -3255,7 +3255,7 @@ mod tests {
                 "completed_turns": 1,
                 "input_tokens": 100,
                 "output_tokens": 10,
-                "spend_usd": 0.11,
+                "spend_usd": "0.11",
                 "spawns_used": 0,
                 "started_at": "2026-06-01T00:00:00Z",
                 "settled_at": "2026-06-01T00:01:00Z",

@@ -2947,7 +2947,12 @@ impl Runner {
     }
 
     fn continuation_hook_context(&self, live_context_tokens: u64, threshold_tokens: u64) -> Value {
-        let remaining_spend_usd = self.budget.remaining_spend_usd();
+        // One-way display floats: hook conditions compare numerically, and the
+        // event payload is observability, not settlement authority.
+        let remaining_spend_usd = self
+            .budget
+            .remaining_spend_usd()
+            .map(|remaining| remaining.display_usd_lossy());
         json!({
             "event": {
                 "name": "continuation",
@@ -2972,6 +2977,11 @@ impl Runner {
         usd: f64,
         elapsed_ms: u64,
     ) -> anyhow::Result<()> {
+        // Entry boundary: the provider adapter reports spend as a float; it is
+        // quantized into exact nanos exactly once, here, rounding up.
+        let usd = ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(usd)
+            .map_err(|error| anyhow::anyhow!("provider-reported spend is invalid: {error}"))?
+            .0;
         let (input_tokens, output_tokens) = usage
             .complete_token_counts()
             .ok_or_else(|| anyhow::anyhow!("provider token usage is incomplete"))?;
@@ -3463,6 +3473,10 @@ impl Runner {
         usd: f64,
         elapsed_ms: u64,
     ) -> anyhow::Result<()> {
+        // Entry boundary: quantize the provider-reported float once, rounding up.
+        let usd = ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(usd)
+            .map_err(|error| anyhow::anyhow!("provider-reported spend is invalid: {error}"))?
+            .0;
         let mut proposed_cost = self.budget.cost();
         proposed_cost
             .checked_accumulate(&provider_reported_spend_runtime_cost(usd))
@@ -3630,7 +3644,7 @@ impl Runner {
             thread_id = %self.thread_id,
             turns = self.harness.turns_used(),
             tokens = self.harness.tokens_used(),
-            spend = format!("${:.4}", self.harness.spend_used()),
+            spend = format!("${}", self.harness.spend_used().to_canonical_string()),
             depth = self.harness.depth(),
             "directive completed"
         );
@@ -3653,7 +3667,7 @@ impl Runner {
 /// determine the charge: `None` is cost incurred by this thread and `rollup`
 /// is cost aggregated from children. The accounting ledger independently
 /// records the charge source as `ChargeBasis::ProviderReported`.
-fn provider_reported_spend_runtime_cost(usd: f64) -> RuntimeCost {
+fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) -> RuntimeCost {
     RuntimeCost {
         input_tokens: 0,
         output_tokens: 0,
@@ -3753,11 +3767,11 @@ mod tests {
 
     #[test]
     fn provider_reported_spend_is_own_runtime_cost_not_a_rollup_basis() {
-        let cost = provider_reported_spend_runtime_cost(0.125);
+        let cost = provider_reported_spend_runtime_cost(usd("0.125"));
         cost.validate().unwrap();
         assert_eq!(cost.input_tokens, 0);
         assert_eq!(cost.output_tokens, 0);
-        assert_eq!(cost.total_usd, 0.125);
+        assert_eq!(cost.total_usd, usd("0.125"));
         assert_eq!(cost.basis, None);
     }
 
@@ -3833,7 +3847,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -3895,7 +3909,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -3953,7 +3967,7 @@ mod tests {
             system_prompt: Some("You are helpful".to_string()),
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4009,7 +4023,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4063,8 +4077,8 @@ mod tests {
             spend_authority: None,
             profiles: vec![],
         };
-        let mut budget = BudgetTracker::new(1.0);
-        budget.report(10, 5, 0.25).unwrap();
+        let mut budget = BudgetTracker::new(usd("1"));
+        budget.report(10, 5, usd("0.25")).unwrap();
         let runner = Runner::new(RunnerConfig {
             messages: vec![ProviderMessage {
                 role: "assistant".to_string(),
@@ -4245,7 +4259,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4312,7 +4326,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(100.0),
+            budget: BudgetTracker::new(usd("100")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4382,7 +4396,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(100.0),
+            budget: BudgetTracker::new(usd("100")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4438,7 +4452,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -5174,7 +5188,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: CallbackClient::from_inner(
                 mock as Arc<dyn RuntimeCallbackAPI>,
                 "T-test",

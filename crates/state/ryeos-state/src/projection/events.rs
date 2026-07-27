@@ -308,7 +308,9 @@ fn project_thread_usage_latest(
                 i64::from(usage.completed_turns),
                 u64_to_i64(usage.input_tokens, "input_tokens")?,
                 u64_to_i64(usage.output_tokens, "output_tokens")?,
-                usage.spend_usd,
+                // Projection REAL column is display-only (the exact figure
+                // lives in the signed snapshot); one-way lossy render.
+                usage.spend_usd.display_usd_lossy(),
                 i64::from(usage.spawns_used),
                 usage.started_at,
                 usage.settled_at,

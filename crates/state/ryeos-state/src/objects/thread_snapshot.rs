@@ -69,7 +69,10 @@ pub struct ThreadUsage {
     pub completed_turns: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub spend_usd: f64,
+    /// Exact fixed-point USD, serialized as a canonical decimal string. A
+    /// JSON number is rejected at decode — same contract as every other money
+    /// wire field.
+    pub spend_usd: ryeos_accounting::UsdNanos,
     pub spawns_used: u32,
     pub started_at: String,
     pub settled_at: String,
@@ -92,9 +95,7 @@ impl ThreadUsage {
         if settled_at < started_at {
             anyhow::bail!("thread usage settled_at must not precede started_at");
         }
-        if !self.spend_usd.is_finite() || self.spend_usd < 0.0 {
-            anyhow::bail!("thread usage spend_usd must be finite and non-negative");
-        }
+        // `spend_usd` is `UsdNanos`: finite and non-negative by construction.
         Ok(())
     }
 }
@@ -1331,7 +1332,7 @@ mod tests {
             completed_turns: 1,
             input_tokens: 2,
             output_tokens: 3,
-            spend_usd: 0.5,
+            spend_usd: ryeos_accounting::UsdNanos::parse_canonical("0.5").unwrap(),
             spawns_used: 0,
             started_at: "2026-04-21T12:00:00Z".to_string(),
             settled_at: "2026-04-21T12:00:01Z".to_string(),

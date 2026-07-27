@@ -6593,7 +6593,7 @@ mod tests {
     fn managed_envelope_is_native_success_with_outputs_and_cost() {
         let result = json!("directive_return");
         let outputs = json!({ "answer": 42 });
-        let raw_cost = json!({ "input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012 });
+        let raw_cost = json!({ "input_tokens": 120, "output_tokens": 45, "total_usd": "0.0012" });
         let env = managed_runtime_envelope(
             "T-child",
             "completed",

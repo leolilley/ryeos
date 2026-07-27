@@ -214,6 +214,26 @@ impl UsdNanos {
     pub fn display_usd_lossy(self) -> f64 {
         self.0 as f64 / NANOS_PER_USD as f64
     }
+
+    /// Quantize a lossy `f64` USD figure at an entry boundary.
+    ///
+    /// This is the ONE sanctioned `f64 → UsdNanos` conversion, for the
+    /// boundary where money arrives as a float: a provider adapter's parsed
+    /// JSON number. The float's exact value is rendered
+    /// as its shortest round-trip decimal and quantized through
+    /// [`Self::parse_reported_round_up`], so sub-nano residue rounds toward
+    /// positive infinity rather than truncating spend. Internal code must
+    /// never round-trip authority money through this — it exists to move a
+    /// figure INTO the exact domain exactly once.
+    pub fn quantize_reported_f64_round_up(usd: f64) -> Result<(Self, bool), MoneyError> {
+        if !usd.is_finite() {
+            return Err(MoneyError::NotCanonical(format!("{usd}")));
+        }
+        if usd < 0.0 {
+            return Err(MoneyError::Negative);
+        }
+        Self::parse_reported_round_up(&format!("{usd}"))
+    }
 }
 
 /// Split a non-negative decimal token with optional exponent into its

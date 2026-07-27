@@ -829,7 +829,9 @@ impl<'de> serde::Deserialize<'de> for RuntimeFinalizeParams {
 struct RuntimeFinalizeCost {
     input_tokens: u64,
     output_tokens: u64,
-    total_usd: f64,
+    /// Exact fixed-point USD (canonical decimal string on the callback wire);
+    /// a JSON number is rejected at decode, same as `RuntimeCost::total_usd`.
+    total_usd: ryeos_runtime::envelope::UsdNanos,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     basis: Option<String>,
 }
@@ -2354,7 +2356,7 @@ mod tests {
                     "outcome_code": "success",
                     "result": "4",
                     "error": null,
-                    "cost": {"input_tokens": 10, "output_tokens": 2, "total_usd": 0.01},
+                    "cost": {"input_tokens": 10, "output_tokens": 2, "total_usd": "0.01"},
                     "outputs": null,
                     "warnings": [],
                 }),
@@ -2425,12 +2427,14 @@ mod tests {
     #[test]
     fn runtime_finalize_cost_shape_is_strict() {
         for cost in [
-            json!({"input_tokens": 1, "total_usd": 0.01}),
-            json!({"input_tokens": -1, "output_tokens": 2, "total_usd": 0.01}),
+            json!({"input_tokens": 1, "total_usd": "0.01"}),
+            json!({"input_tokens": -1, "output_tokens": 2, "total_usd": "0.01"}),
+            // Lossy JSON-number money is itself a shape violation.
+            json!({"input_tokens": 1, "output_tokens": 2, "total_usd": 0.01}),
             json!({
                 "input_tokens": 1,
                 "output_tokens": 2,
-                "total_usd": 0.01,
+                "total_usd": "0.01",
                 "unexpected": true,
             }),
         ] {
@@ -2447,40 +2451,41 @@ mod tests {
 
     #[test]
     fn runtime_finalize_cost_rejects_invalid_values_and_storage_overflow() {
+        // Negative and non-finite money are unrepresentable in `UsdNanos`,
+        // so only basis and storage-range violations remain constructible.
+        let usd = |s: &str| ryeos_runtime::envelope::UsdNanos::parse_canonical(s).unwrap();
         for cost in [
             RuntimeFinalizeCost {
                 input_tokens: 1,
                 output_tokens: 2,
-                total_usd: -0.01,
-                basis: None,
-            },
-            RuntimeFinalizeCost {
-                input_tokens: 1,
-                output_tokens: 2,
-                total_usd: f64::INFINITY,
-                basis: None,
-            },
-            RuntimeFinalizeCost {
-                input_tokens: 1,
-                output_tokens: 2,
-                total_usd: 0.01,
+                total_usd: usd("0.01"),
                 basis: Some("estimate".to_string()),
             },
             RuntimeFinalizeCost {
                 input_tokens: i64::MAX as u64 + 1,
                 output_tokens: 2,
-                total_usd: 0.01,
+                total_usd: usd("0.01"),
                 basis: None,
             },
             RuntimeFinalizeCost {
                 input_tokens: 1,
                 output_tokens: i64::MAX as u64 + 1,
-                total_usd: 0.01,
+                total_usd: usd("0.01"),
                 basis: None,
             },
         ] {
             assert!(final_cost_from_runtime(&cost).is_err());
         }
+
+        // Lossy JSON-number money on the finalize wire is rejected at decode.
+        assert!(
+            serde_json::from_value::<RuntimeFinalizeCost>(serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": 0.01,
+            }))
+            .is_err()
+        );
     }
 
     // ── runtime.spawn_follow_child: auth + admission rejections ──────────
@@ -3677,7 +3682,7 @@ mod tests {
             "result": "directive_return",
             "outputs": { "recommendations": ["x"] },
             "warnings": ["w1"],
-            "cost": { "input_tokens": 5, "output_tokens": 1, "total_usd": 0.001 },
+            "cost": { "input_tokens": 5, "output_tokens": 1, "total_usd": "0.001" },
         });
         state
             .threads
@@ -3694,7 +3699,7 @@ mod tests {
                         turns: 0,
                         input_tokens: 5,
                         output_tokens: 1,
-                        spend: 0.001,
+                        spend: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.001").unwrap(),
                         provider: None,
                         basis: None,
                         metadata: None,
@@ -3778,7 +3783,7 @@ mod tests {
                     "error": null,
                     "outputs": { "recommendations": ["a", "b"] },
                     "warnings": ["w1"],
-                    "cost": { "input_tokens": 10, "output_tokens": 2, "total_usd": 0.01 },
+                    "cost": { "input_tokens": 10, "output_tokens": 2, "total_usd": "0.01" },
                 }),
             ),
             &state,

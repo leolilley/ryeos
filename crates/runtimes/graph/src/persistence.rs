@@ -235,7 +235,7 @@ mod tests {
             cost: Some(ryeos_runtime::envelope::RuntimeCost {
                 input_tokens: 100,
                 output_tokens: 20,
-                total_usd: 0.001,
+                total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.001").unwrap(),
                 basis: None,
             }),
             fanout: None,
