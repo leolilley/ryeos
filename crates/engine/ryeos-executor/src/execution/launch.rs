@@ -905,10 +905,30 @@ fn cached_or_verified_executor_chain(
     }
 }
 
+/// Cache namespace identity for a native executor binary.
+///
+/// The executor name is part of the key even when two executors have identical
+/// bytes. Otherwise materializing the second name would treat the first name's
+/// `<blob_hash>` directory as corrupt and quarantine the recovery artifact.
+fn executor_cache_entry_key(blob_hash: &str, bare: &str) -> String {
+    lillux::cas::sha256_hex(
+        format!("ryeos-native-executor-cache-v2\0{blob_hash}\0{bare}").as_bytes(),
+    )
+}
+
 /// Content-addressed cache target for a native executor binary.
 ///
-/// Returns `<cache_root>/cache/executors/<blob_hash>/<bare>`.
+/// Returns `<cache_root>/cache/executors/<tuple_hash>/<bare>`, where the tuple
+/// commits to both the verified blob hash and executor name.
 fn executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> PathBuf {
+    cache_root
+        .join("cache")
+        .join("executors")
+        .join(executor_cache_entry_key(blob_hash, bare))
+        .join(bare)
+}
+
+fn legacy_executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> PathBuf {
     cache_root
         .join("cache")
         .join("executors")
@@ -1159,16 +1179,14 @@ fn inspect_materialized_executor(
     verified: &VerifiedNativeExecutorChain,
     bare: &str,
 ) -> MaterializedArtifactInspection {
+    let entry_key = executor_cache_entry_key(&verified.key.blob_hash, bare);
     let blob_dir = match layout
         .executors
-        .open_child_directory(OsStr::new(&verified.key.blob_hash))
+        .open_child_directory(OsStr::new(&entry_key))
     {
         Ok(Some(directory)) => directory,
         Ok(None) => {
-            return match layout
-                .executors
-                .open_entry(OsStr::new(&verified.key.blob_hash), false)
-            {
+            return match layout.executors.open_entry(OsStr::new(&entry_key), false) {
                 Ok(None) => MaterializedArtifactInspection::Missing,
                 Ok(Some(_)) => MaterializedArtifactInspection::Invalid(
                     "content-addressed executor entry is not a directory".to_string(),
@@ -1286,16 +1304,34 @@ fn materialize_admitted_native_executor(
     }
 
     let layout = open_executor_cache_layout(cache_root, bare)?;
-    let blob_dir = layout
+    let preferred_key = executor_cache_entry_key(content_hash, bare);
+    let (blob_dir, path) = if let Some(directory) = layout
         .executors
-        .open_child_directory(OsStr::new(content_hash))
+        .open_child_directory(OsStr::new(&preferred_key))
         .map_err(|error| MaterializationError::MaterializationFailed {
             executor_ref: executor_ref.to_string(),
             detail: format!("failed to open admitted executor cache entry: {error}"),
-        })?
-        .ok_or_else(|| MaterializationError::BlobNotFound {
-            hash: content_hash.to_string(),
-        })?;
+        })? {
+        (
+            directory,
+            executor_cache_target(cache_root, content_hash, bare),
+        )
+    } else {
+        let directory = layout
+            .executors
+            .open_child_directory(OsStr::new(content_hash))
+            .map_err(|error| MaterializationError::MaterializationFailed {
+                executor_ref: executor_ref.to_string(),
+                detail: format!("failed to open legacy admitted executor cache entry: {error}"),
+            })?
+            .ok_or_else(|| MaterializationError::BlobNotFound {
+                hash: content_hash.to_string(),
+            })?;
+        (
+            directory,
+            legacy_executor_cache_target(cache_root, content_hash, bare),
+        )
+    };
     validate_executor_cache_ancestors(&layout, &blob_dir, bare)?;
     let file = blob_dir
         .open_regular(OsStr::new(bare), false)
@@ -1337,7 +1373,6 @@ fn materialize_admitted_native_executor(
             executor_ref: executor_ref.to_string(),
             detail: format!("admitted executor cache verification failed: {detail}"),
         })?;
-    let path = executor_cache_target(cache_root, content_hash, bare);
     Ok(MaterializedExecutor {
         path: path.clone(),
         content_hash: content_hash.to_string(),
@@ -1361,6 +1396,21 @@ fn materialize_admitted_native_executor(
                 file_type: opened.identity.file_type,
             },
         ),
+    })
+}
+
+fn ensure_admitted_executor_signer_trusted(
+    trust_store: &ryeos_engine::trust::TrustStore,
+    executor_ref: &str,
+    signer_fingerprint: &str,
+) -> Result<(), MaterializationError> {
+    if trust_store.is_trusted(signer_fingerprint) {
+        return Ok(());
+    }
+    Err(MaterializationError::ExecutorUntrusted {
+        executor_ref: executor_ref.to_string(),
+        trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+        fingerprint: Some(signer_fingerprint.to_string()),
     })
 }
 
@@ -1436,9 +1486,10 @@ fn quarantine_materialized_executor(
     blob_hash: &str,
     executor_ref: &str,
 ) -> Result<Option<QuarantinedExecutorEntry>, MaterializationError> {
+    let entry_key = executor_cache_entry_key(blob_hash, executor_ref);
     let source = layout
         .executors
-        .descriptor_child_path(OsStr::new(blob_hash))
+        .descriptor_child_path(OsStr::new(&entry_key))
         .map_err(|error| MaterializationError::MaterializationFailed {
             executor_ref: executor_ref.to_string(),
             detail: format!("failed to address corrupt executor cache entry: {error}"),
@@ -1467,14 +1518,14 @@ fn quarantine_materialized_executor(
         })?;
     let pinned_source = layout
         .executors
-        .open_child_directory(OsStr::new(blob_hash))
+        .open_child_directory(OsStr::new(&entry_key))
         .map_err(|error| MaterializationError::MaterializationFailed {
             executor_ref: executor_ref.to_string(),
             detail: format!("failed to pin corrupt executor cache directory: {error}"),
         })?;
     let quarantined = if let Some(directory) = pinned_source {
         match layout.executors.rename_child_directory_noreplace(
-            OsStr::new(blob_hash),
+            OsStr::new(&entry_key),
             OsStr::new(&quarantine_name),
             &directory,
         ) {
@@ -1604,7 +1655,7 @@ fn publish_verified_executor_blob(
 
     match layout.executors.rename_child_directory_noreplace(
         OsStr::new(&staging_name),
-        OsStr::new(&verified.key.blob_hash),
+        OsStr::new(&executor_cache_entry_key(&verified.key.blob_hash, bare)),
         &staging,
     ) {
         // The staged file was fully hashed through its open descriptor, and
@@ -2558,6 +2609,11 @@ async fn prepare_managed_launch_authority(
                     ),
                 });
             }
+            ensure_admitted_executor_signer_trusted(
+                &materialization_engine.node_trust_store,
+                &admitted_executor_ref,
+                &admitted_signer_fingerprint,
+            )?;
             materialize_admitted_native_executor(
                 &admitted_executor_ref,
                 &materialization_cache_root,
@@ -7461,7 +7517,7 @@ mod tests {
         let admitted_bytes = b"admitted executor bytes";
         let admitted_hash = write_admitted_executor_cache(tmp.path(), bare, admitted_bytes);
         std::fs::write(
-            executor_cache_target(tmp.path(), &admitted_hash, bare),
+            legacy_executor_cache_target(tmp.path(), &admitted_hash, bare),
             vec![b'x'; admitted_bytes.len()],
         )
         .unwrap();
@@ -7479,6 +7535,61 @@ mod tests {
             error.to_string().contains("content-address check"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn managed_recovery_requires_admitted_executor_signer_to_remain_trusted() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[76u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let empty = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
+        let error = ensure_admitted_executor_signer_trusted(
+            &empty,
+            "native:revoked-executor",
+            &fingerprint,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            MaterializationError::ExecutorUntrusted { .. }
+        ));
+
+        let trusted = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fingerprint.clone(),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        ensure_admitted_executor_signer_trusted(&trusted, "native:trusted-executor", &fingerprint)
+            .unwrap();
+    }
+
+    #[test]
+    fn materializer_keeps_distinct_names_with_identical_executor_bytes() {
+        let _guard = materializer_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let first_bundle = tmp.path().join("first-bundle");
+        let second_bundle = tmp.path().join("second-bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[75u8; 32]);
+        let first_fixture =
+            write_executable_materializer_fixture(&first_bundle, "first-executor", &key);
+        let second_fixture =
+            write_executable_materializer_fixture(&second_bundle, "second-executor", &key);
+        assert_eq!(first_fixture.blob_hash, second_fixture.blob_hash);
+        let trust_store = materializer_trust_store(&first_fixture, &key);
+        let roots = vec![first_bundle, second_bundle];
+
+        let first =
+            materialize_test_executor(&roots, "native:first-executor", &cache_root, &trust_store)
+                .unwrap();
+        let second =
+            materialize_test_executor(&roots, "native:second-executor", &cache_root, &trust_store)
+                .unwrap();
+
+        assert_ne!(first.path, second.path);
+        assert_eq!(std::fs::read(&first.path).unwrap(), first_fixture.bytes);
+        assert_eq!(std::fs::read(&second.path).unwrap(), second_fixture.bytes);
     }
 
     #[test]
