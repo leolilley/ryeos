@@ -1,3 +1,4 @@
+<!-- ryeos:signed:2026-07-27T01:32:30Z:ba8b560657d522792414780b2890c662d3a0fdfcaf100c1a4eb5e9760f5deaa4:zdHVVeZPgMDnSSbSuzMFvP11NsUE7pZN982DoDzATdd1g5rpzC1OtQYgG6sVMPXLNV8MG14leWYI4cTyz+zgAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [money, accounting, cost, usd, settlement, wire-contract]

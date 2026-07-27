@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-27T01:32:27Z:b3c27d2cf5fc8cd6444b7512d0fb40523167b47d45e0e7cc2c9266057e869700:55Q1C0pPJ/CAQdSLWBrGZMd/bP69cQbQFK3DuWyO9pe+ZxQqiDJbcf2hO6d53xuM4+7apibK4wmk/xaGYWupAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos-runtime/model-providers"
 family: chat_completions
 base_url: "https://api.deepseek.com"
