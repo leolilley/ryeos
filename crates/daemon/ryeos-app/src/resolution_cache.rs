@@ -437,7 +437,11 @@ mod tests {
         );
         assert_eq!(cache.get(&key()).1, LookupOutcome::Hit);
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(cache.get(&key()).1, LookupOutcome::Stale, "deleted dep is stale");
+        assert_eq!(
+            cache.get(&key()).1,
+            LookupOutcome::Stale,
+            "deleted dep is stale"
+        );
     }
 
     #[test]

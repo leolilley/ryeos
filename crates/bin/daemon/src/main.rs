@@ -714,7 +714,9 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 isolation,
                 state_store,
                 engine: engine.clone(),
-                resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+                resolution_cache: std::sync::Arc::new(
+                    ryeos_app::resolution_cache::ResolutionCache::new(128),
+                ),
                 engine_cache: ryeos_app::engine_cache::EngineCache::new(
                     ryeos_app::engine_cache::EngineCacheConfig::default(),
                 ),
@@ -2566,7 +2568,9 @@ async fn run_service_standalone(
         isolation,
         state_store,
         engine: engine.clone(),
-        resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+        resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(
+            128,
+        )),
         engine_cache: ryeos_app::engine_cache::EngineCache::new(
             ryeos_app::engine_cache::EngineCacheConfig::default(),
         ),

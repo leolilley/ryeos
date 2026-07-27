@@ -513,7 +513,10 @@ mod tests {
     fn quantize_reported_f64_rounds_up_and_rejects_non_money() {
         let q = UsdNanos::quantize_reported_f64_round_up;
         // Exact representable values pass through without rounding.
-        assert_eq!(q(0.25).unwrap(), (UsdNanos::from_nanos(250_000_000).unwrap(), false));
+        assert_eq!(
+            q(0.25).unwrap(),
+            (UsdNanos::from_nanos(250_000_000).unwrap(), false)
+        );
         assert_eq!(q(0.0).unwrap(), (UsdNanos::ZERO, false));
         assert_eq!(q(-0.0).unwrap(), (UsdNanos::ZERO, false));
         // Sub-nano float residue rounds toward positive infinity.
