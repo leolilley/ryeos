@@ -50,6 +50,32 @@ struct RenderedToolResult {
     truncated_reason_override: Option<&'static str>,
 }
 
+/// Whether one assistant message's tool-call batch carries the
+/// `directive_return` lifecycle signal. Lifecycle-bearing batches must run
+/// through the strict serial dispatch path; only plain batches are eligible
+/// for the bounded concurrent window.
+fn batch_is_lifecycle_bearing(calls: &[crate::directive::ToolCall]) -> bool {
+    calls.iter().any(|tc| tc.name == "directive_return")
+}
+
+/// The pure emission decision for one rendered tool result:
+/// `(body_is_inline, truncated, truncated_reason)`. Ordering of the checks is
+/// contract: the inline size cap dominates, then guard truncation, then an
+/// error-envelope override, then the clean case.
+fn result_emission_flags(rendered: &RenderedToolResult) -> (bool, bool, Option<&'static str>) {
+    let inline_capped =
+        rendered.content.len() > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
+    if inline_capped {
+        (false, true, Some("size_cap_exceeded"))
+    } else if rendered.result_guard_truncated {
+        (true, true, Some("result_guard"))
+    } else if let Some(reason) = rendered.truncated_reason_override {
+        (true, false, Some(reason))
+    } else {
+        (true, false, None)
+    }
+}
+
 pub enum State {
     CheckingLimits,
     CallingProvider,
@@ -2129,14 +2155,10 @@ impl Runner {
 
                             if has_tool_calls {
                                 if let Some(ref tool_calls) = msg.tool_calls {
-                                    // Lifecycle-bearing batches (any
-                                    // `directive_return`) keep the strict
-                                    // serial path; plain batches dispatch
-                                    // through the bounded concurrent window.
-                                    if tool_calls
-                                        .iter()
-                                        .any(|tc| tc.name == "directive_return")
-                                    {
+                                    // Lifecycle-bearing batches keep the
+                                    // strict serial path; plain batches
+                                    // dispatch through the bounded window.
+                                    if batch_is_lifecycle_bearing(tool_calls) {
                                         State::DispatchingTools {
                                             pending: tool_calls.clone(),
                                             index: 0,
@@ -3212,28 +3234,8 @@ impl Runner {
         call_id: String,
         rendered: RenderedToolResult,
     ) -> Result<(), String> {
-        let inline_capped = rendered.content.len()
-            > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
-        let body: Option<&str>;
-        let truncated: bool;
-        let truncated_reason: Option<&str>;
-        if inline_capped {
-            body = None;
-            truncated = true;
-            truncated_reason = Some("size_cap_exceeded");
-        } else if rendered.result_guard_truncated {
-            body = Some(&rendered.content);
-            truncated = true;
-            truncated_reason = Some("result_guard");
-        } else if let Some(reason) = rendered.truncated_reason_override {
-            body = Some(&rendered.content);
-            truncated = false;
-            truncated_reason = Some(reason);
-        } else {
-            body = Some(&rendered.content);
-            truncated = false;
-            truncated_reason = None;
-        }
+        let (inline_body, truncated, truncated_reason) = result_emission_flags(&rendered);
+        let body = inline_body.then_some(rendered.content.as_str());
         self.callback
             .emit_tool_result(
                 &call_id,
@@ -4085,6 +4087,84 @@ mod tests {
 
     fn usd(canonical: &str) -> ryeos_accounting::UsdNanos {
         ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
+    }
+
+    fn tool_call(name: &str) -> crate::directive::ToolCall {
+        crate::directive::ToolCall {
+            id: Some(format!("call-{name}")),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn lifecycle_bearing_batches_are_detected_anywhere_in_the_batch() {
+        assert!(!batch_is_lifecycle_bearing(&[]));
+        assert!(!batch_is_lifecycle_bearing(&[tool_call("a"), tool_call("b")]));
+        assert!(batch_is_lifecycle_bearing(&[tool_call("directive_return")]));
+        assert!(batch_is_lifecycle_bearing(&[
+            tool_call("a"),
+            tool_call("directive_return"),
+            tool_call("b"),
+        ]));
+    }
+
+    #[test]
+    fn result_emission_flags_precedence_matches_the_serial_contract() {
+        let clean = RenderedToolResult {
+            tool: "t".to_string(),
+            content: "ok".to_string(),
+            raw_size: 2,
+            result_guard_truncated: false,
+            duplicate_of: None,
+            truncated_reason_override: None,
+        };
+        assert_eq!(result_emission_flags(&clean), (true, false, None));
+
+        let error_envelope = RenderedToolResult {
+            truncated_reason_override: Some("error_envelope"),
+            ..clean_clone(&clean)
+        };
+        assert_eq!(
+            result_emission_flags(&error_envelope),
+            (true, false, Some("error_envelope"))
+        );
+
+        let guard_truncated = RenderedToolResult {
+            result_guard_truncated: true,
+            // Guard truncation dominates an override.
+            truncated_reason_override: Some("error_envelope"),
+            ..clean_clone(&clean)
+        };
+        assert_eq!(
+            result_emission_flags(&guard_truncated),
+            (true, true, Some("result_guard"))
+        );
+
+        let over_cap = RenderedToolResult {
+            content: "x".repeat(
+                ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES + 1,
+            ),
+            // The size cap dominates everything.
+            result_guard_truncated: true,
+            truncated_reason_override: Some("error_envelope"),
+            ..clean_clone(&clean)
+        };
+        assert_eq!(
+            result_emission_flags(&over_cap),
+            (false, true, Some("size_cap_exceeded"))
+        );
+    }
+
+    fn clean_clone(r: &RenderedToolResult) -> RenderedToolResult {
+        RenderedToolResult {
+            tool: r.tool.clone(),
+            content: r.content.clone(),
+            raw_size: r.raw_size,
+            result_guard_truncated: r.result_guard_truncated,
+            duplicate_of: r.duplicate_of.clone(),
+            truncated_reason_override: r.truncated_reason_override,
+        }
     }
 
     #[test]
