@@ -775,11 +775,36 @@ impl CallbackClient {
     /// from the directive body + inputs at launch, so it is not otherwise
     /// recoverable from events).
     pub async fn emit_stimulus(&self, content: &str) -> Result<()> {
-        self.append_runtime_event(
-            RuntimeEventType::CognitionIn,
-            serde_json::json!({ "content": content }),
-        )
-        .await
+        let payloads = crate::events::encode_cognition_in_payloads(content)?;
+        if payloads.len() == 1 {
+            return self
+                .append_runtime_event(RuntimeEventType::CognitionIn, payloads[0].clone())
+                .await;
+        }
+
+        let client = self.inner.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "callback emit_stimulus called without an inner UDS client \
+                 (socket missing); transcript-bearing event batch must not be silently dropped"
+            )
+        })?;
+        let event_type = RuntimeEventType::CognitionIn;
+        let storage_class = storage_class_for(event_type);
+        let events = payloads
+            .into_iter()
+            .map(|payload| {
+                serde_json::json!({
+                    "event_type": event_type.as_str(),
+                    "payload": payload,
+                    "storage_class": storage_class,
+                })
+            })
+            .collect();
+        client
+            .append_events(&self.thread_id, events)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        Ok(())
     }
 
     pub async fn emit_turn_start(&self, turn: u32) -> Result<()> {
@@ -1137,8 +1162,24 @@ mod tests {
         async fn append_events(
             &self,
             _thread_id: &str,
-            _events: Vec<Value>,
+            events: Vec<Value>,
         ) -> Result<Value, CallbackError> {
+            let mut recorded = self.events.lock().unwrap();
+            for event in events {
+                let event_type =
+                    event
+                        .get("event_type")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            CallbackError::Transport(anyhow::anyhow!(
+                                "recorded batch event has no event_type"
+                            ))
+                        })?;
+                let payload = event.get("payload").cloned().ok_or_else(|| {
+                    CallbackError::Transport(anyhow::anyhow!("recorded batch event has no payload"))
+                })?;
+                recorded.push((event_type.to_string(), payload));
+            }
             Ok(json!({}))
         }
         async fn replay_events(&self, _params: Value) -> Result<Value, CallbackError> {
@@ -1226,6 +1267,31 @@ mod tests {
             "tat-test",
         );
         (client, recorder)
+    }
+
+    #[tokio::test]
+    async fn emit_stimulus_atomically_chunks_large_transcript_input() {
+        let (callback, recorder) = make_recorder_client();
+        let content = "ARC evidence \"quoted\"\n".repeat(16_000);
+
+        callback.emit_stimulus(&content).await.unwrap();
+
+        let events = recorder.events.lock().unwrap();
+        assert!(events.len() > 1);
+        assert!(events
+            .iter()
+            .all(|(event_type, _)| event_type == "cognition_in"));
+        let mut assembler = crate::events::CognitionInAssembler::default();
+        let mut recovered = None;
+        for (_, payload) in events.iter() {
+            if let crate::events::CognitionInAssembly::Complete(content) =
+                assembler.push(payload).unwrap()
+            {
+                recovered = Some(content);
+            }
+        }
+        assembler.finish().unwrap();
+        assert_eq!(recovered.as_deref(), Some(content.as_str()));
     }
 
     // ── New emit_tool_result tests ───────────────────────────────────

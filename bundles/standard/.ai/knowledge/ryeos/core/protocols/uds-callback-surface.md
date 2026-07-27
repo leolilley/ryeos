@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-16T10:54:56Z:2728e996c06f802fb1335054bac5e1c0419303c7524e88829c5d0a4e19841e77:3Lj51TOYzoo+zyAC6L7WexsHHpmPttwesmPkLSwPjaguEQLUhpBXYIibtmTR6XtXWUHyBWEZLfjmh0NygQjkDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T21:22:55Z:ed5f00836eca59b5332a807a304d7cfce85db90eb8040764017b5ada41f5b150:c97tOqK2okP7Pwc8IuZzp8Q3c8wozp5yQjFqngTs8Um5QDofQLasU5aZZaNENvZTlg9JXx4VcEDySS1zKOgnBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
@@ -51,7 +51,7 @@ requests already past token validation still meet the locked lifecycle check.
 | `runtime.replay_events` | chain-read | Accepts `thread_id` or `chain_root_id`; both resolve to a chain root. |
 | `runtime.get_thread_events` | chain-read | Alias of the replay handler. |
 | `runtime.append_event` | exact-thread write | |
-| `runtime.append_events` | exact-thread write | Batch append. |
+| `runtime.append_events` | exact-thread write | Atomic ordered batch append. The directive runtime uses this for hash-bound multipart `cognition_in` stimuli that exceed one event's payload ceiling. |
 | `runtime.bundle_events_append` | exact-thread write | Handler receives the capability and enforces the bundle scope. |
 | `runtime.bundle_events_read_chain` | exact-thread | A *read* by name, but gated to the exact executing thread — not a chain-wide token — and bundle-scoped in the service. |
 | `runtime.bundle_events_scan` | exact-thread | Bundle-scoped in the service. |
@@ -93,6 +93,17 @@ conservative serialized page; bundle-event reads are capped at 16 records and
 8 MiB of serialized records. These service-level cursors and byte budgets
 prevent valid small requests from materializing unbounded event histories
 before response framing.
+
+One runtime event payload is capped at 256 KiB; one atomic append batch is
+capped at 64 events and 4 MiB of payloads. A rendered directive stimulus that
+does not fit one event is encoded as contiguous versioned `cognition_in`
+chunks carrying one SHA-256 content hash, chunk indexes, and the exact chunk
+count. The daemon admits the chunks only as one complete ordered batch.
+Directive resume reassembles and verifies the set as one stimulus; the UI
+reassembles the already-admitted set as one rendered/retry input. Storage
+chunking therefore never creates extra provider turns or retry inputs.
+Oversized, partial, reordered, interleaved, or hash-mismatched sets fail closed
+before provider execution.
 
 Runtime-vault list responses are independently capped at 64 KiB and return
 `{namespace, keys, next_cursor}`. Its cursor bounds service response

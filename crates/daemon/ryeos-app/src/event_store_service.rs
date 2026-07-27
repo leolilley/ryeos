@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
+use ryeos_runtime::{
+    CognitionInAssembler, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
+    MAX_RUNTIME_EVENT_PAYLOAD_BYTES,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -64,9 +68,6 @@ const DEFAULT_REPLAY_LIMIT: usize = 32;
 // trust-boundary limit before entering this service.
 const MAX_REPLAY_LIMIT: usize = 500;
 const MAX_REPLAY_SERIALIZED_BYTES: usize = 6 * 1024 * 1024;
-const MAX_RUNTIME_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
-const MAX_RUNTIME_EVENT_BATCH_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RUNTIME_EVENT_BATCH_ITEMS: usize = 64;
 
 fn default_replay_limit() -> usize {
     DEFAULT_REPLAY_LIMIT
@@ -99,38 +100,7 @@ impl EventStoreService {
         )
     )]
     pub fn append_batch(&self, params: &EventAppendBatchParams) -> Result<EventAppendBatchResult> {
-        if params.events.is_empty() {
-            bail!("event batch must not be empty");
-        }
-        if params.events.len() > MAX_RUNTIME_EVENT_BATCH_ITEMS {
-            bail!(
-                "event batch contains {} items (max {})",
-                params.events.len(),
-                MAX_RUNTIME_EVENT_BATCH_ITEMS
-            );
-        }
-        let mut batch_bytes = 0usize;
-        for event in &params.events {
-            let payload_bytes = serde_json::to_vec(&event.payload)?.len();
-            if payload_bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
-                bail!(
-                    "event '{}' payload is {} bytes (max {})",
-                    event.event_type,
-                    payload_bytes,
-                    MAX_RUNTIME_EVENT_PAYLOAD_BYTES
-                );
-            }
-            batch_bytes = batch_bytes
-                .checked_add(payload_bytes)
-                .ok_or_else(|| anyhow::anyhow!("event batch byte count overflow"))?;
-        }
-        if batch_bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
-            bail!(
-                "event batch payload is {} bytes (max {})",
-                batch_bytes,
-                MAX_RUNTIME_EVENT_BATCH_BYTES
-            );
-        }
+        validate_runtime_event_batch(&params.events)?;
         let thread = self
             .state_store
             .get_thread(&params.thread_id)?
@@ -233,6 +203,54 @@ impl EventStoreService {
     pub fn chain_head_thread(&self, chain_root_id: &str) -> Result<Option<String>> {
         self.state_store.chain_head_thread(chain_root_id)
     }
+}
+
+fn validate_runtime_event_batch(events: &[EventAppendItem]) -> Result<()> {
+    if events.is_empty() {
+        bail!("event batch must not be empty");
+    }
+    if events.len() > MAX_RUNTIME_EVENT_BATCH_ITEMS {
+        bail!(
+            "event batch contains {} items (max {})",
+            events.len(),
+            MAX_RUNTIME_EVENT_BATCH_ITEMS
+        );
+    }
+    let mut batch_bytes = 0usize;
+    let mut cognition_in_chunks = CognitionInAssembler::default();
+    for event in events {
+        let payload_bytes = serde_json::to_vec(&event.payload)?.len();
+        if payload_bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
+            bail!(
+                "event '{}' payload is {} bytes (max {})",
+                event.event_type,
+                payload_bytes,
+                MAX_RUNTIME_EVENT_PAYLOAD_BYTES
+            );
+        }
+        batch_bytes = batch_bytes
+            .checked_add(payload_bytes)
+            .ok_or_else(|| anyhow::anyhow!("event batch byte count overflow"))?;
+        if event.event_type == ryeos_state::event_types::COGNITION_IN
+            && (event.payload.get("content_chunk").is_some() || cognition_in_chunks.has_pending())
+        {
+            cognition_in_chunks.push(&event.payload)?;
+        } else if cognition_in_chunks.has_pending() {
+            bail!(
+                "chunked cognition_in batch was interrupted by event '{}'",
+                event.event_type
+            );
+        }
+    }
+    cognition_in_chunks.finish()?;
+    if batch_bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
+        bail!(
+            "event batch payload is {} bytes (max {})",
+            batch_bytes,
+            MAX_RUNTIME_EVENT_BATCH_BYTES
+        );
+    }
+    Ok(())
 }
 
 /// V5.5 D11: delegate to the typed `RuntimeEventType` enum.
@@ -343,5 +361,27 @@ mod tests {
         for et in ["token_delta", "stream_snapshot", "cognition_reasoning"] {
             assert!(is_ephemeral_allowed(et, &json!({})));
         }
+    }
+
+    #[test]
+    fn runtime_batch_requires_a_complete_atomic_cognition_input() {
+        let content = "ARC evidence\n".repeat(24_000);
+        let payloads = ryeos_runtime::encode_cognition_in_payloads(&content).unwrap();
+        assert!(payloads.len() > 1);
+        let events = payloads
+            .iter()
+            .cloned()
+            .map(|payload| EventAppendItem {
+                event_type: "cognition_in".to_string(),
+                storage_class: "indexed".to_string(),
+                payload,
+            })
+            .collect::<Vec<_>>();
+
+        validate_runtime_event_batch(&events).unwrap();
+        let error = validate_runtime_event_batch(&events[..events.len() - 1]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("chunked cognition_in ended after"));
     }
 }
