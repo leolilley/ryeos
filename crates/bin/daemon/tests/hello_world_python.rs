@@ -199,7 +199,11 @@ fn build_engine_against_bundle() -> Engine {
     let composers = ComposerRegistry::from_kinds(&kinds, &native_handlers)
         .expect("composer registry derives from live bundle kinds");
 
-    Engine::new(kinds, parser_dispatcher, vec![bundle_root])
+    Engine::new(kinds, parser_dispatcher, vec![bundle_root.clone()])
+        .with_registered_bundle_roots(vec![ryeos_engine::item_resolution::RegisteredBundleRoot {
+            name: "core".to_string(),
+            canonical_root: bundle_root,
+        }])
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)
         .with_composers(composers)

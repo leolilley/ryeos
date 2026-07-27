@@ -447,8 +447,25 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
 
     let first = events.first().expect("at least one event");
     assert_eq!(
-        first.event, "stream_started",
-        "first event is stream_started"
+        first.event, "execution_planning",
+        "first event is execution_planning"
+    );
+    assert!(first.id.is_none(), "execution_planning is not persisted");
+    let planning_payload: serde_json::Value =
+        serde_json::from_str(&first.data).expect("execution_planning data is JSON");
+    assert!(
+        planning_payload
+            .get("launch_id")
+            .and_then(|value| value.as_str())
+            .is_some_and(|launch_id| launch_id.starts_with("L-")),
+        "execution_planning carries an opaque launch id"
+    );
+    assert!(
+        events
+            .iter()
+            .skip(1)
+            .any(|event| event.event == "stream_started"),
+        "stream_started must follow execution_planning"
     );
 
     let terminal = events

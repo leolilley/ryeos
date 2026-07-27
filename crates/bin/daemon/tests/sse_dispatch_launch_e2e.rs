@@ -2,7 +2,7 @@
 //!
 //! Proves the one-call POST+stream chain works:
 //!   1. POST /execute/stream with a JSON body { item_ref, project_path, parameters }
-//!   2. Receive `stream_started` SSE event with the minted thread_id
+//!   2. Receive `execution_planning`, then `stream_started` with the minted thread_id
 //!   3. Receive lifecycle + LLM events as the directive runs
 //!   4. Receive a terminal `thread_completed` event and stream closes
 //!
@@ -326,7 +326,8 @@ fn plant_launch_project(project: &Path, publisher: &SigningKey) {
 }
 
 /// Full happy-path: POST /execute/stream → SSE
-/// `stream_started` → lifecycle/LLM events → terminal `thread_completed`.
+/// `execution_planning` → `stream_started` → lifecycle/LLM events → terminal
+/// `thread_completed`.
 ///
 /// `build_launch_task` calls `dispatch::dispatch` with
 /// `pre_minted_thread_id = Some(thread_id)`, so the SSE-minted id
@@ -382,22 +383,46 @@ async fn sse_dispatch_launch_e2e_round_trip() {
     let events = parse_sse_bytes(&bytes);
     assert!(!events.is_empty(), "no SSE events received");
 
-    // First event must be `stream_started` with NO id. The data field
-    // carries `{"thread_id": "T-..."}`.
+    // Planning is emitted before a thread exists, so it has no persisted id
+    // and carries only the opaque launch id.
     let first = &events[0];
     assert_eq!(
-        first.event, "stream_started",
-        "first event must be stream_started, got: {}",
+        first.event, "execution_planning",
+        "first event must be execution_planning, got: {}",
         first.event
     );
     assert!(
         first.id.is_none(),
-        "stream_started must have no id (would corrupt Last-Event-ID resume); got id={:?}",
+        "execution_planning must have no id; got id={:?}",
         first.id
     );
     let payload: serde_json::Value =
-        serde_json::from_str(&first.data).expect("stream_started data is JSON");
-    let thread_id = payload
+        serde_json::from_str(&first.data).expect("execution_planning data is JSON");
+    let launch_id = payload
+        .get("launch_id")
+        .and_then(|v| v.as_str())
+        .expect("execution_planning carries launch_id");
+    assert!(
+        launch_id.starts_with("L-"),
+        "launch id must start with L-: {launch_id}"
+    );
+    assert!(
+        payload.get("thread_id").is_none(),
+        "execution_planning must precede thread creation"
+    );
+
+    let stream_started = events
+        .iter()
+        .find(|event| event.event == "stream_started")
+        .expect("stream_started follows execution_planning");
+    assert!(
+        stream_started.id.is_none(),
+        "stream_started must have no id (would corrupt Last-Event-ID resume); got id={:?}",
+        stream_started.id
+    );
+    let stream_started_payload: serde_json::Value =
+        serde_json::from_str(&stream_started.data).expect("stream_started data is JSON");
+    let thread_id = stream_started_payload
         .get("thread_id")
         .and_then(|v| v.as_str())
         .expect("stream_started carries thread_id")
@@ -428,8 +453,7 @@ async fn sse_dispatch_launch_e2e_round_trip() {
         all_summary
     );
 
-    // Persisted events between stream_started and terminal must have
-    // monotonic numeric ids.
+    // Persisted events must have monotonic numeric ids.
     let mut prev: Option<i64> = None;
     for ev in &events {
         if let Some(ref id) = ev.id {
