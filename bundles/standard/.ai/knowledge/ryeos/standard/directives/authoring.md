@@ -35,6 +35,15 @@ Instructions for the runtime.
 - `limits`: runtime limits such as turn/token/spend budgets.
 - `inputs` / `outputs`: structured contract for callers and summaries.
 - `actions`: tool or service actions the runtime may call through callbacks.
+- `execution.tool_concurrency` (default 4, range 1..=16): how many tool calls
+  from ONE assistant message dispatch concurrently. Results always fold back
+  in call order — the provider transcript is identical to a serial run — while
+  the braid records the real shape (a batch's `tool_call_start` intents first,
+  then results; consumers pair by `call_id`, never adjacency). `1` is strict
+  serial dispatch. Batches carrying `directive_return` always run serially.
+  Each in-flight dispatch holds one dedicated daemon connection for the
+  child's whole duration, so raise the bound with the node's connection
+  budget and concurrent-directive count in mind.
 
 Keep directives focused: one job, clear inputs, explicit declared capabilities, and no hidden reliance on project-root provider configs unless trust policy allows it.
 
