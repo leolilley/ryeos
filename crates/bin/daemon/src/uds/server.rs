@@ -3277,18 +3277,23 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Cfollow", "Cfollow"))
+            .create_thread_for_test(&make_create_params("T-Cfollow", "T-Cfollow"))
             .unwrap();
-        state.threads.mark_running("Cfollow").unwrap();
-        arm_waiting_follow(&state, "wk-aux", "Cfollow");
+        state.threads.mark_running("T-Cfollow").unwrap();
+        arm_waiting_follow(&state, "wk-aux", "T-Cfollow");
 
         // Auxiliary run riding the child's chain: own thread id, child's chain root.
         state
             .threads
-            .create_thread_for_test(&make_create_params("Kaux", "Cfollow"))
+            .create_thread_for_test(&make_create_params("T-Kaux", "T-Cfollow"))
             .unwrap();
-        state.threads.mark_running("Kaux").unwrap();
-        finalize_child(&state, "Kaux", "completed", Some(json!({ "positions": 1 })));
+        state.threads.mark_running("T-Kaux").unwrap();
+        finalize_child(
+            &state,
+            "T-Kaux",
+            "completed",
+            Some(json!({ "positions": 1 })),
+        );
 
         let waiter = state
             .state_store
@@ -3314,7 +3319,12 @@ mod tests {
         );
 
         // The child's own terminal still settles the follow.
-        finalize_child(&state, "Cfollow", "completed", Some(json!({ "ok": true })));
+        finalize_child(
+            &state,
+            "T-Cfollow",
+            "completed",
+            Some(json!({ "ok": true })),
+        );
         let waiter = state
             .state_store
             .get_follow_waiter_by_key("wk-aux")
@@ -3327,7 +3337,7 @@ mod tests {
         );
         assert_eq!(
             waiter.children[0].terminal_thread_id.as_deref(),
-            Some("Cfollow"),
+            Some("T-Cfollow"),
             "the recorded terminal is the child, not the auxiliary"
         );
     }
