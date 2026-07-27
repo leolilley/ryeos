@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-26T23:07:56Z:e4dc03bedaf74ed58fb28e98cc3d48adbdc167fc0b11f7cb133d8bf228327b40:6qYqWisY3iV9mPC2XzOS/atlxOmmFPkCYwWcBj2kt4sCpP2FuKwWLLaRwGBqodvxqNC4w7TQYu8LLp4mo6LFAA==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-07-26T23:29:56Z:e4dc03bedaf74ed58fb28e98cc3d48adbdc167fc0b11f7cb133d8bf228327b40:Lgq9Fg8m2Wokk5/jXpXPoY/xieGsggN282ZTfI8d9kZ6X/YhbUJ9lxIqJ7RkMfvL25liorRPidHk4cSwaKKdAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/graphs
 tags: [graph, follow, authoring, lineage, budget]

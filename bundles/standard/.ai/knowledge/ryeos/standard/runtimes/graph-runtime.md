@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-26T23:07:55Z:e9cefe07cbdd4e2f4a6ebcc0b7735439ae2f0ef04f25207bf85dd38efbce1bd2:0CaQtCK9h130wJr4dBwaaaUrDdUnzuD3pzY7bEEkLiGPHGadjxQ56QdRhDTobpAb3173UTMvsJR11sc67A3eDg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-07-26T23:29:56Z:e9cefe07cbdd4e2f4a6ebcc0b7735439ae2f0ef04f25207bf85dd38efbce1bd2:cIpVrdmFHgu1D+ocltd7X+mS0i8iF6Tifa5x6XFN6lrPxBRxrPTJH727W0qzFb7QWymH4Uvox7yJyjgrWEhLDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/runtimes
 tags: [runtime, graph, dag, callbacks, execution-model, checkpoint, durability, continuation, fence]
