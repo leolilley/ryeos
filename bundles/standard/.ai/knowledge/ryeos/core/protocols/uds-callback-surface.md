@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-27T21:22:55Z:ed5f00836eca59b5332a807a304d7cfce85db90eb8040764017b5ada41f5b150:c97tOqK2okP7Pwc8IuZzp8Q3c8wozp5yQjFqngTs8Um5QDofQLasU5aZZaNENvZTlg9JXx4VcEDySS1zKOgnBQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-07-27T21:35:01Z:ed5f00836eca59b5332a807a304d7cfce85db90eb8040764017b5ada41f5b150:m5brE0PYVW02O0iwG4vusIVCYiGh4W0jQNPuE65I2mYSVWlnLufPALWqDy3pYRtmHehRdBA19ANB9h/ZpLxCAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core/protocols
 tags: [callbacks, auth, uds, runtime, tokens, capabilities, audit, boundary]
