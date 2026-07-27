@@ -465,6 +465,7 @@ mod tests {
                     source_path: PathBuf::from("/project/.ai/runtimes/ryeos/core/runtime.yaml"),
                     source_space: crate::contracts::ItemSpace::Project,
                     trust_class: TrustClass::Unsigned,
+                    signer_fingerprint: None,
                     alias_resolution: None,
                     added_by: crate::resolution::ResolutionStepName::PipelineInit,
                     raw_content: String::new(),

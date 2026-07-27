@@ -152,6 +152,11 @@ mod tests {
             source_path: std::path::PathBuf::from(format!("/tmp/{ref_str}")),
             source_space,
             trust_class: trust,
+            signer_fingerprint: matches!(
+                trust,
+                EngineTrustClass::TrustedBundle | EngineTrustClass::TrustedProject
+            )
+            .then(|| "fixture-signer".to_string()),
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: content.to_string(),

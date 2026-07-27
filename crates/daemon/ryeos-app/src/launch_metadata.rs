@@ -61,7 +61,7 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // Exact durable launch metadata contract. Changes to any embedded authority
 // shape require a new epoch so startup rejects the old store before nested
 // deserialization can reinterpret (or partially decode) that authority.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 13;
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 14;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -182,7 +182,7 @@ pub struct RuntimeLaunchMetadata {
     /// admitted capsule. Runtime SQLite carries an operational copy only;
     /// recovery reads the authoritative value from CAS.
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub admitted_prepared_launch: Option<serde_json::Value>,
+    pub admitted_execution_closure: Option<ryeos_state::objects::AdmittedExecutionClosure>,
 
     /// Validated parent execution seed used when a detached follow child is
     /// admitted later, after the live callback context is gone.
@@ -241,7 +241,7 @@ impl Default for RuntimeLaunchMetadata {
             admitted_project_authority: None,
             admitted_artifact_identity: None,
             admitted_launch_capsule_schema: None,
-            admitted_prepared_launch: None,
+            admitted_execution_closure: None,
             follow_parent_context: None,
             follow_launch_window: None,
             isolation: None,
@@ -728,10 +728,10 @@ impl RuntimeLaunchMetadata {
                 &self.admitted_launch_capsule_schema,
                 &attempt.admitted_launch_capsule_schema,
             )?,
-            admitted_prepared_launch: exact(
+            admitted_execution_closure: exact(
                 "admitted prepared launch",
-                &self.admitted_prepared_launch,
-                &attempt.admitted_prepared_launch,
+                &self.admitted_execution_closure,
+                &attempt.admitted_execution_closure,
             )?,
             follow_parent_context: exact(
                 "follow parent authority",
@@ -784,7 +784,7 @@ impl RuntimeLaunchMetadata {
                 || self.admitted_project_authority.is_some()
                 || self.admitted_artifact_identity.is_some()
                 || self.admitted_launch_capsule_schema.is_some()
-                || self.admitted_prepared_launch.is_some()
+                || self.admitted_execution_closure.is_some()
                 || self.follow_parent_context.is_some()
                 || self.follow_launch_window.is_some()
                 || self.isolation.is_some()
@@ -898,7 +898,7 @@ impl RuntimeLaunchMetadata {
             admitted_project_authority: None,
             admitted_artifact_identity: None,
             admitted_launch_capsule_schema: None,
-            admitted_prepared_launch: None,
+            admitted_execution_closure: None,
             follow_parent_context: None,
             follow_launch_window: None,
             isolation: None,
@@ -922,7 +922,7 @@ impl RuntimeLaunchMetadata {
             && self.admitted_project_authority.is_none()
             && self.admitted_artifact_identity.is_none()
             && self.admitted_launch_capsule_schema.is_none()
-            && self.admitted_prepared_launch.is_none()
+            && self.admitted_execution_closure.is_none()
             && self.follow_parent_context.is_none()
             && self.follow_launch_window.is_none()
             && self.isolation.is_none()
@@ -983,7 +983,9 @@ impl RuntimeLaunchMetadata {
             artifact_identity: self.admitted_artifact_identity.clone().ok_or_else(|| {
                 anyhow::anyhow!("sealed launch has no admitted artifact identity")
             })?,
-            prepared_launch: self.admitted_prepared_launch.clone(),
+            execution_closure: self.admitted_execution_closure.clone().ok_or_else(|| {
+                anyhow::anyhow!("sealed launch has no admitted execution closure")
+            })?,
             accounting_scope: self.accounting_scope.clone(),
             effective_caps,
             runtime_ref: sealed.runtime_ref().to_string(),
@@ -1047,8 +1049,11 @@ impl RuntimeLaunchMetadata {
         self
     }
 
-    pub fn with_admitted_prepared_launch(mut self, prepared: serde_json::Value) -> Self {
-        self.admitted_prepared_launch = Some(prepared);
+    pub fn with_admitted_execution_closure(
+        mut self,
+        closure: ryeos_state::objects::AdmittedExecutionClosure,
+    ) -> Self {
+        self.admitted_execution_closure = Some(closure);
         self
     }
 
@@ -1079,7 +1084,7 @@ impl RuntimeLaunchMetadata {
             admitted_project_authority: self.admitted_project_authority.clone(),
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
-            admitted_prepared_launch: self.admitted_prepared_launch.clone(),
+            admitted_execution_closure: self.admitted_execution_closure.clone(),
             follow_parent_context: None,
             follow_launch_window: None,
             // Isolation is compiled against one concrete spawn and verified
@@ -1097,11 +1102,11 @@ impl RuntimeLaunchMetadata {
     /// continuation successor.
     ///
     /// A continuation is another segment of the same managed execution, so its
-    /// cancellation and native-resume declarations remain authoritative. The
-    /// checkpoint directory and follow-child admission fields are owned by one
-    /// concrete thread, however, and must never be copied to a different thread
-    /// identity. Launch preparation allocates the successor's own checkpoint
-    /// directory before it attaches.
+    /// cancellation, native-resume, and exact admitted execution closure remain
+    /// authoritative. The checkpoint directory and follow-child admission
+    /// fields are owned by one concrete thread, however, and must never be
+    /// copied to a different thread identity. Launch preparation allocates the
+    /// successor's own checkpoint directory before it attaches.
     pub fn continuation_successor_seed(&self, resume_context: ResumeContext) -> Self {
         Self {
             launch_driver: self.launch_driver,
@@ -1113,6 +1118,7 @@ impl RuntimeLaunchMetadata {
             admitted_project_authority: self.admitted_project_authority.clone(),
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
+            admitted_execution_closure: self.admitted_execution_closure.clone(),
             // A continuation is another segment of the SAME execution and
             // retains the execution budget authority it was admitted under.
             // Dropping this would mint a fresh allowance per segment — the
@@ -1382,7 +1388,7 @@ mod tests {
             admitted_project_authority: None,
             admitted_artifact_identity: None,
             admitted_launch_capsule_schema: None,
-            admitted_prepared_launch: None,
+            admitted_execution_closure: None,
             follow_parent_context: None,
             follow_launch_window: None,
             isolation: None,
@@ -1429,12 +1435,18 @@ mod tests {
     }
 
     #[test]
-    fn continuation_successor_seed_preserves_policy_and_clears_thread_owned_state() {
+    fn continuation_successor_seed_preserves_admission_and_clears_thread_owned_state() {
         let native_resume = NativeResumeSpec {
             checkpoint_interval_secs: 17,
             max_auto_resume_attempts: 4,
         };
         let live_dir = tempfile::tempdir().unwrap();
+        let execution_closure = ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch: serde_json::json!({"runtime": "sealed"}),
+            runtime_descriptor_document: "# signature: sealed\nruntime\n".to_string(),
+            protocol_descriptor_document: "# signature: sealed\nprotocol\n".to_string(),
+            executor_blob_hash: "c".repeat(64),
+        };
         let source = RuntimeLaunchMetadata {
             cancellation_mode: Some(CancellationMode::Hard),
             native_resume: Some(native_resume.clone()),
@@ -1459,6 +1471,7 @@ mod tests {
                 execution_budget_id: "B-source".to_string(),
                 directive_budget_id: Some("D-source".to_string()),
             }),
+            admitted_execution_closure: Some(execution_closure.clone()),
             ..RuntimeLaunchMetadata::default()
         };
         let successor_resume = resume_context(ProjectContext::SnapshotHash {
@@ -1475,6 +1488,11 @@ mod tests {
         assert!(successor.sealed_root_request.is_none());
         assert!(successor.follow_parent_context.is_none());
         assert!(successor.follow_launch_window.is_none());
+        assert_eq!(
+            successor.admitted_execution_closure,
+            Some(execution_closure),
+            "continuation must carry the exact admitted execution closure forward"
+        );
         // No allowance reset: the successor retains the exact execution
         // budget authority it was admitted under.
         assert_eq!(

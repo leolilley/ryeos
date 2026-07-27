@@ -3,7 +3,7 @@
 //! Trust boundary: thread identity, launch generation, accounting scope, and
 //! the sealed financial authority are derived server-side — from the
 //! validated callback capability, the durable launch-owner claim, and the
-//! admitted launch metadata. The runtime supplies only intent coordinates,
+//! authoritative CAS launch capsule. The runtime supplies only intent coordinates,
 //! digests, verifier commitments, and typed accounting observations. The
 //! accounting ledger is the only balance/reservation authority; when it is
 //! unavailable every operation here fails closed.
@@ -49,8 +49,8 @@ fn require_scope(
     })
 }
 
-/// Load the sealed financial authority for this thread from admitted launch
-/// metadata. The typed prepared-launch shape is decoded strictly; the
+/// Load the sealed financial authority for this thread from the authoritative
+/// CAS launch capsule. The typed prepared-launch shape is decoded strictly; the
 /// authority payload is re-validated (digest recomputation) before use.
 struct SealedLaunchFinancialAuthority {
     authority: ProviderAccountingAuthority,
@@ -61,13 +61,20 @@ fn sealed_financial_authority(
     state: &AppState,
     thread_id: &str,
 ) -> Result<SealedLaunchFinancialAuthority> {
-    let metadata = state
+    let capsule = state
         .state_store
-        .get_launch_metadata(thread_id)?
-        .ok_or_else(|| anyhow!("thread {thread_id} has no launch metadata"))?;
-    let prepared_value = metadata
-        .admitted_prepared_launch
-        .ok_or_else(|| anyhow!("thread {thread_id} has no admitted prepared launch"))?;
+        .admitted_launch_capsule(thread_id)?
+        .ok_or_else(|| {
+            anyhow!("thread {thread_id} has no authoritative admitted launch capsule")
+        })?;
+    let closure = capsule.execution_closure;
+    let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+        prepared_runtime_launch: prepared_value,
+        ..
+    } = closure
+    else {
+        anyhow::bail!("thread {thread_id} does not carry a managed execution closure");
+    };
     let prepared: ryeos_executor::execution::launch_preparation::PreparedRuntimeLaunch =
         serde_json::from_value(prepared_value)
             .context("decode admitted prepared launch authority")?;

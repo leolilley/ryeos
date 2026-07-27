@@ -905,14 +905,26 @@ fn cached_or_verified_executor_chain(
     }
 }
 
+/// Cache namespace identity for a native executor binary.
+///
+/// The executor name is part of the key even when two executors have identical
+/// bytes. Otherwise materializing the second name would treat the first name's
+/// `<blob_hash>` directory as corrupt and quarantine the recovery artifact.
+fn executor_cache_entry_key(blob_hash: &str, bare: &str) -> String {
+    lillux::cas::sha256_hex(
+        format!("ryeos-native-executor-cache-v2\0{blob_hash}\0{bare}").as_bytes(),
+    )
+}
+
 /// Content-addressed cache target for a native executor binary.
 ///
-/// Returns `<cache_root>/cache/executors/<blob_hash>/<bare>`.
+/// Returns `<cache_root>/cache/executors/<tuple_hash>/<bare>`, where the tuple
+/// commits to both the verified blob hash and executor name.
 fn executor_cache_target(cache_root: &Path, blob_hash: &str, bare: &str) -> PathBuf {
     cache_root
         .join("cache")
         .join("executors")
-        .join(blob_hash)
+        .join(executor_cache_entry_key(blob_hash, bare))
         .join(bare)
 }
 
@@ -1159,16 +1171,14 @@ fn inspect_materialized_executor(
     verified: &VerifiedNativeExecutorChain,
     bare: &str,
 ) -> MaterializedArtifactInspection {
+    let entry_key = executor_cache_entry_key(&verified.key.blob_hash, bare);
     let blob_dir = match layout
         .executors
-        .open_child_directory(OsStr::new(&verified.key.blob_hash))
+        .open_child_directory(OsStr::new(&entry_key))
     {
         Ok(Some(directory)) => directory,
         Ok(None) => {
-            return match layout
-                .executors
-                .open_entry(OsStr::new(&verified.key.blob_hash), false)
-            {
+            return match layout.executors.open_entry(OsStr::new(&entry_key), false) {
                 Ok(None) => MaterializedArtifactInspection::Missing,
                 Ok(Some(_)) => MaterializedArtifactInspection::Invalid(
                     "content-addressed executor entry is not a directory".to_string(),
@@ -1234,6 +1244,223 @@ fn inspect_materialized_executor(
         Ok(opened) => MaterializedArtifactInspection::Valid(opened),
         Err(detail) => MaterializedArtifactInspection::Invalid(detail),
     }
+}
+
+/// Reopen the exact native executor already admitted into a managed launch
+/// capsule. The capsule's content hash is the authority: recovery must not
+/// resolve the executor name through a newer installed bundle generation.
+///
+/// The executor cache is populated only after full bundle-chain verification
+/// and is content-addressed by the admitted blob hash. We nevertheless reopen
+/// it through the descriptor-pinned hierarchy and hash every byte again before
+/// returning a launch handle.
+fn materialize_admitted_native_executor(
+    executor_ref: &str,
+    cas_root: &Path,
+    isolation: &ryeos_engine::isolation::IsolationRuntime,
+    content_hash: &str,
+    bundle_manifest_hash: &str,
+    bundle_signer_fingerprint: &str,
+) -> Result<MaterializedExecutor, MaterializationError> {
+    let bare = executor_ref.strip_prefix("native:").ok_or_else(|| {
+        MaterializationError::ExecutorUnavailable {
+            executor_ref: executor_ref.to_string(),
+            detail: "executor_ref is not a native executor".to_string(),
+        }
+    })?;
+    let mut components = Path::new(bare).components();
+    if bare.is_empty()
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(MaterializationError::ExecutorUnavailable {
+            executor_ref: executor_ref.to_string(),
+            detail: "native executor id must be one normal filename component".to_string(),
+        });
+    }
+    for (label, hash) in [
+        ("admitted executor content hash", content_hash),
+        (
+            "admitted executor bundle manifest hash",
+            bundle_manifest_hash,
+        ),
+    ] {
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(MaterializationError::Internal(format!(
+                "{label} is not a canonical SHA-256 hash"
+            )));
+        }
+    }
+
+    let cas_directory = lillux::PinnedDirectory::open(cas_root)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to open admitted executor CAS root: {error}"),
+        })?
+        .ok_or_else(|| MaterializationError::BlobNotFound {
+            hash: content_hash.to_string(),
+        })?;
+    let cas = lillux::CasStore::from_pinned_root(cas_directory);
+    let (blob, _) = cas
+        .open_blob(content_hash)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to open admitted executor blob: {error}"),
+        })?
+        .ok_or_else(|| MaterializationError::BlobNotFound {
+            hash: content_hash.to_string(),
+        })?;
+    let path = lillux::cas::shard_path(cas.root(), "blobs", content_hash, "");
+    let verified_command = isolation
+        .bind_admitted_verified_command(
+            ryeos_engine::isolation::IsolationVerifiedCode {
+                source_path: path.clone(),
+                content_hash: content_hash.to_string(),
+            },
+            blob,
+        )
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to bind admitted executor blob: {error}"),
+        })?;
+    Ok(MaterializedExecutor {
+        path,
+        content_hash: content_hash.to_string(),
+        bundle_manifest_hash: bundle_manifest_hash.to_string(),
+        bundle_signer_fingerprint: bundle_signer_fingerprint.to_string(),
+        verified_command,
+    })
+}
+
+fn stage_managed_executor_blob(
+    state: &AppState,
+    executor: &MaterializedExecutor,
+) -> Result<(String, super::PendingCasPublication), BuildAndLaunchError> {
+    #[cfg(not(unix))]
+    {
+        let _ = (state, executor);
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed executor admission requires Unix descriptor identity"
+        )));
+    }
+    #[cfg(unix)]
+    let bytes = {
+        use std::os::unix::fs::FileExt as _;
+
+        let descriptor = executor.verified_command.executable();
+        let before = descriptor.metadata().map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "inspect managed executor before CAS admission: {error}"
+            ))
+        })?;
+        let admitted = executor.verified_command.file_identity();
+        let admitted = ExecutorFileIdentity {
+            device: admitted.device,
+            inode: admitted.inode,
+            size: admitted.size,
+            modified_seconds: admitted.modified_seconds,
+            modified_nanoseconds: admitted.modified_nanoseconds,
+            changed_seconds: admitted.changed_seconds,
+            changed_nanoseconds: admitted.changed_nanoseconds,
+            mode: admitted.mode,
+            file_type: admitted.file_type,
+        };
+        if executor_file_identity(&before) != admitted {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed executor descriptor identity changed before CAS admission"
+            )));
+        }
+        let len = usize::try_from(before.len()).map_err(|_| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed executor is too large to admit on this platform"
+            ))
+        })?;
+        let mut bytes = vec![0_u8; len];
+        let mut offset = 0_usize;
+        while offset < bytes.len() {
+            let read = descriptor
+                .read_at(&mut bytes[offset..], offset as u64)
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "read managed executor for CAS admission: {error}"
+                    ))
+                })?;
+            if read == 0 {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed executor ended before its verified size"
+                )));
+            }
+            offset += read;
+        }
+        let after = descriptor.metadata().map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "reinspect managed executor after CAS admission read: {error}"
+            ))
+        })?;
+        if executor_file_identity(&before) != executor_file_identity(&after)
+            || lillux::sha256_hex(&bytes) != executor.content_hash
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed executor changed while entering the admitted CAS closure"
+            )));
+        }
+        bytes
+    };
+
+    let authority = super::pinned_state_authority(state).map_err(BuildAndLaunchError::Internal)?;
+    let guard = authority
+        .acquire_shared_guard()
+        .map_err(BuildAndLaunchError::Internal)?;
+    authority
+        .ensure_guard(&guard)
+        .map_err(BuildAndLaunchError::Internal)?;
+    let _permit = state.write_barrier.try_acquire().map_err(|error| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "cannot acquire managed executor CAS write permit: {error}"
+        ))
+    })?;
+    let cas = authority
+        .cas_store()
+        .map_err(BuildAndLaunchError::Internal)?;
+    let mut staged_roots = authority
+        .require_recovery()
+        .map_err(BuildAndLaunchError::Internal)?
+        .begin_staged_cas_roots_admitted(&guard, "managed-executor-admission")
+        .map_err(BuildAndLaunchError::Internal)?;
+    let hash = staged_roots
+        .store_blob_admitted(&guard, &cas, &bytes)
+        .map_err(BuildAndLaunchError::Internal)?;
+    if hash != executor.content_hash {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "managed executor CAS hash contradicts verified executable identity"
+        )));
+    }
+    Ok((
+        hash,
+        super::PendingCasPublication {
+            authority,
+            staged_roots: Some(staged_roots),
+        },
+    ))
+}
+
+fn ensure_admitted_executor_signer_trusted(
+    trust_store: &ryeos_engine::trust::TrustStore,
+    executor_ref: &str,
+    signer_fingerprint: &str,
+) -> Result<(), MaterializationError> {
+    if trust_store.is_trusted(signer_fingerprint) {
+        return Ok(());
+    }
+    Err(MaterializationError::ExecutorUntrusted {
+        executor_ref: executor_ref.to_string(),
+        trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+        fingerprint: Some(signer_fingerprint.to_string()),
+    })
 }
 
 enum QuarantinedExecutorEntry {
@@ -1308,9 +1535,10 @@ fn quarantine_materialized_executor(
     blob_hash: &str,
     executor_ref: &str,
 ) -> Result<Option<QuarantinedExecutorEntry>, MaterializationError> {
+    let entry_key = executor_cache_entry_key(blob_hash, executor_ref);
     let source = layout
         .executors
-        .descriptor_child_path(OsStr::new(blob_hash))
+        .descriptor_child_path(OsStr::new(&entry_key))
         .map_err(|error| MaterializationError::MaterializationFailed {
             executor_ref: executor_ref.to_string(),
             detail: format!("failed to address corrupt executor cache entry: {error}"),
@@ -1339,14 +1567,14 @@ fn quarantine_materialized_executor(
         })?;
     let pinned_source = layout
         .executors
-        .open_child_directory(OsStr::new(blob_hash))
+        .open_child_directory(OsStr::new(&entry_key))
         .map_err(|error| MaterializationError::MaterializationFailed {
             executor_ref: executor_ref.to_string(),
             detail: format!("failed to pin corrupt executor cache directory: {error}"),
         })?;
     let quarantined = if let Some(directory) = pinned_source {
         match layout.executors.rename_child_directory_noreplace(
-            OsStr::new(blob_hash),
+            OsStr::new(&entry_key),
             OsStr::new(&quarantine_name),
             &directory,
         ) {
@@ -1476,7 +1704,7 @@ fn publish_verified_executor_blob(
 
     match layout.executors.rename_child_directory_noreplace(
         OsStr::new(&staging_name),
-        OsStr::new(&verified.key.blob_hash),
+        OsStr::new(&executor_cache_entry_key(&verified.key.blob_hash, bare)),
         &staging,
     ) {
         // The staged file was fully hashed through its open descriptor, and
@@ -2104,11 +2332,13 @@ struct PreparedManagedLaunchAuthority {
     effective_vault: HashMap<String, String>,
     effective_caps: Vec<String>,
     selected_runtime: ryeos_engine::runtime_registry::VerifiedRuntime,
+    verified_protocol: ryeos_engine::protocols::VerifiedProtocol,
     materialized_executor: MaterializedExecutor,
     checkpoint_dir: Option<PathBuf>,
     is_resume: bool,
     launch_metadata: Option<ryeos_app::launch_metadata::RuntimeLaunchMetadata>,
     pending_project_snapshot: Option<super::CapturedProjectGeneration>,
+    pending_executor_blob: Option<super::PendingCasPublication>,
     augmentation_audits: Vec<crate::augmentations::LaunchAugmentationAudit>,
     /// True when this preparation minted the accounting scope (fresh
     /// admission) rather than copying a frozen one forward. Only a freshly
@@ -2274,6 +2504,94 @@ fn resolve_accounting_scope(
     ))
 }
 
+fn capture_managed_descriptor_document(
+    path: &Path,
+    expected_content_hash: &str,
+    expected_signer: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<String, BuildAndLaunchError> {
+    let document = std::fs::read_to_string(path).map_err(|error| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "read admitted descriptor {}: {error}",
+            path.display()
+        ))
+    })?;
+    let header =
+        lillux::signature::parse_signature_line(document.lines().next().unwrap_or(""), "#", None)
+            .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "admitted descriptor {} has no valid signature header",
+                path.display()
+            ))
+        })?;
+    let body = lillux::signature::strip_signature_lines(&document);
+    let observed_hash = lillux::signature::content_hash(&body);
+    if observed_hash != expected_content_hash
+        || header.content_hash != expected_content_hash
+        || header.signer_fingerprint != expected_signer
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted descriptor {} contradicts its verified identity",
+            path.display()
+        )));
+    }
+    let signer = trust_store.get(expected_signer).ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted descriptor signer is no longer trusted: {expected_signer}"
+        ))
+    })?;
+    if !lillux::signature::verify_signature(
+        expected_content_hash,
+        &header.signature_b64,
+        &signer.verifying_key,
+    ) {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted descriptor signature does not verify"
+        )));
+    }
+    Ok(document)
+}
+
+fn verify_admitted_signed_descriptor_document(
+    document: &str,
+    expected_content_hash: &str,
+    expected_signer: &str,
+    trust_store: &ryeos_engine::trust::TrustStore,
+) -> Result<String, BuildAndLaunchError> {
+    let header =
+        lillux::signature::parse_signature_line(document.lines().next().unwrap_or(""), "#", None)
+            .ok_or_else(|| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "admitted descriptor has no valid signature header"
+            ))
+        })?;
+    let body = lillux::signature::strip_signature_lines(document);
+    let observed_hash = lillux::signature::content_hash(&body);
+    if observed_hash != expected_content_hash
+        || header.content_hash != expected_content_hash
+        || header.signer_fingerprint != expected_signer
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted descriptor document contradicts its sealed identity"
+        )));
+    }
+    let signer = trust_store.get(expected_signer).ok_or_else(|| {
+        BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted descriptor signer is no longer trusted: {expected_signer}"
+        ))
+    })?;
+    if !lillux::signature::verify_signature(
+        expected_content_hash,
+        &header.signature_b64,
+        &signer.verifying_key,
+    ) {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted descriptor signature no longer verifies"
+        )));
+    }
+    Ok(body)
+}
+
 async fn prepare_managed_launch_authority(
     params: &BuildAndLaunchParams<'_>,
     thread_id: &str,
@@ -2292,11 +2610,60 @@ async fn prepare_managed_launch_authority(
                 .unwrap_or_else(|| root.ai_root.clone())
         })
         .collect();
-    let admitted_capsule = params
+    let persisted_admitted_capsule = params
         .state
         .state_store
         .admitted_launch_capsule(thread_id)
         .map_err(BuildAndLaunchError::Internal)?;
+    // A continuation can be prepared before its successor row exists. Its
+    // immutable execution authority comes from the predecessor's CAS capsule,
+    // never from the operational metadata seed. The seed is checked against
+    // that authority before descriptor validation or credential access.
+    let continuation_source = metadata_template
+        .and_then(|metadata| metadata.continuation_source_thread_id.as_deref())
+        .or(params.previous_thread_id);
+    let inherited_admitted_capsule = if persisted_admitted_capsule.is_none() {
+        continuation_source
+            .map(|source_thread_id| {
+                params
+                    .state
+                    .state_store
+                    .admitted_launch_capsule(source_thread_id)
+                    .map_err(BuildAndLaunchError::Internal)?
+                    .ok_or_else(|| {
+                        BuildAndLaunchError::Internal(anyhow::anyhow!(
+                            "continuation source {source_thread_id} has no authoritative admitted launch capsule"
+                        ))
+                    })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let authoritative_admitted_capsule = persisted_admitted_capsule
+        .as_ref()
+        .or(inherited_admitted_capsule.as_ref());
+    if let (Some(authoritative), Some(template)) =
+        (authoritative_admitted_capsule, metadata_template)
+    {
+        let template_capsule = template
+            .admitted_launch_capsule()
+            .map_err(BuildAndLaunchError::Internal)?
+            .ok_or_else(|| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "continuation metadata seed has no admitted launch capsule"
+                ))
+            })?;
+        if !authoritative
+            .same_continuation_admission(&template_capsule)
+            .map_err(BuildAndLaunchError::Internal)?
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "operational launch metadata differs from its authoritative CAS admission"
+            )));
+        }
+    }
+    let admitted_capsule = authoritative_admitted_capsule;
     let effective_request_snapshot = if admitted_capsule.is_none() {
         Some(
             engine
@@ -2337,26 +2704,154 @@ async fn prepare_managed_launch_authority(
         &params.resolved.resolved_item.kind,
     )?;
 
-    let selected_runtime = engine
-        .runtimes
-        .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
+    let (selected_runtime, verified_protocol, admitted_prepared_launch) = if let Some(capsule) =
+        admitted_capsule.as_ref()
+    {
+        let ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+            runtime_ref,
+            runtime_content_hash,
+            runtime_signer_fingerprint,
+            protocol_ref,
+            protocol_content_hash,
+            protocol_signer_fingerprint,
+            ..
+        } = &capsule.artifact_identity
+        else {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed recovery found a non-managed admitted artifact identity"
+            )));
+        };
+        let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch,
+            runtime_descriptor_document,
+            protocol_descriptor_document,
+            executor_blob_hash: _,
+        } = &capsule.execution_closure
+        else {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "managed recovery found a non-managed admitted execution closure"
+            )));
+        };
+        for (label, signer) in [
+            ("runtime", runtime_signer_fingerprint),
+            ("protocol", protocol_signer_fingerprint),
+        ] {
+            if !engine.node_trust_store.is_trusted(signer) {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "admitted managed {label} signer is no longer trusted: {signer}"
+                )));
+            }
+        }
+        let runtime_body = verify_admitted_signed_descriptor_document(
+            runtime_descriptor_document,
+            runtime_content_hash,
+            runtime_signer_fingerprint,
+            &engine.node_trust_store,
+        )?;
+        let runtime_yaml: ryeos_engine::runtime_registry::RuntimeYaml =
+            serde_yaml::from_str(&runtime_body).map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "decode admitted runtime descriptor: {error}"
+                ))
+            })?;
+        let canonical_runtime_ref = ryeos_engine::canonical_ref::CanonicalRef::parse(runtime_ref)
+            .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!("decode admitted runtime ref: {error}"))
+        })?;
+        ryeos_engine::runtime_registry::validate_admitted_runtime_descriptor(
+            &canonical_runtime_ref,
+            &runtime_yaml,
+        )
         .map_err(|error| {
-            BuildAndLaunchError::from(DispatchError::LaunchPreparationFailed {
-                code: "runtime_launch_contract_unavailable".to_owned(),
-                message: error.to_string(),
-                classification: "configuration".to_owned(),
-                binding: None,
-                details: Box::new(BTreeMap::new()),
-            })
-        })?
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "validate admitted runtime descriptor: {error}"
+            ))
+        })?;
+        let selected_runtime = ryeos_engine::runtime_registry::VerifiedRuntime {
+            canonical_ref: canonical_runtime_ref,
+            raw_content_digest: runtime_content_hash.clone(),
+            signer_fingerprint: runtime_signer_fingerprint.clone(),
+            yaml: runtime_yaml,
+            trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            bundle_root: PathBuf::new(),
+            descriptor_path: PathBuf::new(),
+        };
+        let protocol_body = verify_admitted_signed_descriptor_document(
+            protocol_descriptor_document,
+            protocol_content_hash,
+            protocol_signer_fingerprint,
+            &engine.node_trust_store,
+        )?;
+        let descriptor: ryeos_engine::protocols::ProtocolDescriptor =
+            serde_yaml::from_str(&protocol_body).map_err(|error| {
+                BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "decode admitted protocol descriptor: {error}"
+                ))
+            })?;
+        ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &descriptor)
+            .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "validate admitted protocol descriptor: {error}"
+            ))
+        })?;
+        let verified_protocol = ryeos_engine::protocols::VerifiedProtocol {
+            canonical_ref: protocol_ref.clone(),
+            raw_content_digest: protocol_content_hash.clone(),
+            signer_fingerprint: protocol_signer_fingerprint.clone(),
+            descriptor,
+            trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+            bundle_root: PathBuf::new(),
+            descriptor_path: PathBuf::new(),
+        };
+        crate::dispatch::validate_admitted_callback_runtime_protocol(
+            &verified_protocol,
+            &selected_runtime.canonical_ref,
+        )
+        .map_err(BuildAndLaunchError::from)?;
+        let prepared = serde_json::from_value::<super::launch_preparation::PreparedRuntimeLaunch>(
+            prepared_runtime_launch.clone(),
+        )
+        .map_err(|error| {
+            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "decode admitted prepared runtime launch: {error}"
+            ))
+        })?;
+        (selected_runtime, verified_protocol, Some(prepared))
+    } else {
+        let selected_runtime = engine
+            .runtimes
+            .resolve_for_launch(params.runtime_ref, &params.resolved.resolved_item.kind)
+            .map_err(|error| {
+                BuildAndLaunchError::from(DispatchError::LaunchPreparationFailed {
+                    code: "runtime_launch_contract_unavailable".to_owned(),
+                    message: error.to_string(),
+                    classification: "configuration".to_owned(),
+                    binding: None,
+                    details: Box::new(BTreeMap::new()),
+                })
+            })?
+            .clone();
+        let verified_protocol = crate::dispatch::require_callback_runtime_protocol(
+            engine,
+            &selected_runtime,
+            "managed",
+        )
+        .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?
         .clone();
+        (selected_runtime, verified_protocol, None)
+    };
     let runtime_binary =
         crate::dispatch::strip_binary_ref_prefix(&selected_runtime.yaml.binary_ref)
             .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
+    if selected_runtime.yaml.serves != params.resolved.resolved_item.kind {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "admitted runtime '{}' serves kind '{}', not launched kind '{}'",
+            selected_runtime.canonical_ref,
+            selected_runtime.yaml.serves,
+            params.resolved.resolved_item.kind,
+        )));
+    }
     let executor_ref = format!("native:{runtime_binary}");
-    let verified_protocol =
-        crate::dispatch::require_callback_runtime_protocol(engine, &selected_runtime, "managed")
-            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
     if selected_runtime.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
         || verified_protocol.trust_class != ryeos_engine::resolution::TrustClass::TrustedBundle
     {
@@ -2378,7 +2873,47 @@ async fn prepare_managed_launch_authority(
         .app_root
         .join(ryeos_engine::AI_DIR)
         .join("state");
+    let admitted_executor_cas_root = params
+        .state
+        .state_store
+        .cas_root()
+        .map_err(BuildAndLaunchError::Internal)?;
+    let materialization_isolation = Arc::clone(&params.state.isolation);
     let materialization_timings = params.launch_timings.clone();
+    let admitted_executor_identity = admitted_capsule
+        .as_ref()
+        .map(|capsule| match &capsule.artifact_identity {
+            ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                executor_ref,
+                executor_content_hash,
+                executor_bundle_manifest_hash,
+                executor_bundle_signer_fingerprint,
+                ..
+            } => {
+                let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                    executor_blob_hash,
+                    ..
+                } = &capsule.execution_closure
+                else {
+                    return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "managed recovery found a non-managed admitted execution closure"
+                    )));
+                };
+                Ok((
+                    executor_ref.clone(),
+                    executor_content_hash.clone(),
+                    executor_bundle_manifest_hash.clone(),
+                    executor_bundle_signer_fingerprint.clone(),
+                    executor_blob_hash.clone(),
+                ))
+            }
+            ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. } => {
+                Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed recovery found a non-managed admitted artifact identity"
+                )))
+            }
+        })
+        .transpose()?;
     let materialization_queue_timer = materialization_timings.as_ref().map(|timings| {
         timings.nested(
             "background_dispatch",
@@ -2393,14 +2928,51 @@ async fn prepare_managed_launch_authority(
                 "executor_materialization_blocking_work",
             )
         });
-        materialize_native_executor_for_engine(
-            &materialization_engine,
-            &materialization_bundle_roots,
-            &materialization_executor_ref,
-            &materialization_cache_root,
-            ryeos_engine::resolution::TrustClass::TrustedBundle,
-            materialization_timings.as_ref(),
-        )
+        if let Some((
+            admitted_executor_ref,
+            admitted_content_hash,
+            admitted_manifest_hash,
+            admitted_signer_fingerprint,
+            admitted_blob_hash,
+        )) = admitted_executor_identity
+        {
+            if admitted_executor_ref != materialization_executor_ref {
+                return Err(MaterializationError::ResolutionFailed {
+                    executor_ref: materialization_executor_ref,
+                    detail: format!(
+                        "installed executor ref differs from admitted managed executor {admitted_executor_ref}"
+                    ),
+                });
+            }
+            ensure_admitted_executor_signer_trusted(
+                &materialization_engine.node_trust_store,
+                &admitted_executor_ref,
+                &admitted_signer_fingerprint,
+            )?;
+            if admitted_blob_hash != admitted_content_hash {
+                return Err(MaterializationError::MaterializationFailed {
+                    executor_ref: admitted_executor_ref,
+                    detail: "admitted executor blob contradicts artifact identity".to_string(),
+                });
+            }
+            materialize_admitted_native_executor(
+                &admitted_executor_ref,
+                &admitted_executor_cas_root,
+                materialization_isolation.as_ref(),
+                &admitted_content_hash,
+                &admitted_manifest_hash,
+                &admitted_signer_fingerprint,
+            )
+        } else {
+            materialize_native_executor_for_engine(
+                &materialization_engine,
+                &materialization_bundle_roots,
+                &materialization_executor_ref,
+                &materialization_cache_root,
+                ryeos_engine::resolution::TrustClass::TrustedBundle,
+                materialization_timings.as_ref(),
+            )
+        }
     });
 
     let augmentation = async {
@@ -2472,24 +3044,8 @@ async fn prepare_managed_launch_authority(
     if let Some(timings) = params.launch_timings.as_ref() {
         timings.mark("runtime_prep_started");
     }
-    let prepared_launch = if let Some(capsule) = admitted_capsule.as_ref() {
-        if capsule.launch_driver != ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime {
-            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "managed recovery found a non-managed admitted launch capsule"
-            )));
-        }
-        serde_json::from_value::<super::launch_preparation::PreparedRuntimeLaunch>(
-            capsule.prepared_launch.clone().ok_or_else(|| {
-                BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "managed admitted launch capsule has no prepared launch authority"
-                ))
-            })?,
-        )
-        .map_err(|error| {
-            BuildAndLaunchError::Internal(anyhow::anyhow!(
-                "decode admitted prepared launch authority: {error}"
-            ))
-        })?
+    let prepared_launch = if let Some(prepared) = admitted_prepared_launch {
+        prepared
     } else {
         let runtime_preparation_timer = params
             .launch_timings
@@ -2526,6 +3082,13 @@ async fn prepare_managed_launch_authority(
         drop(runtime_preparation_timer);
         prepared?
     };
+    super::admitted_trust::validate_managed_current_trust(
+        engine,
+        Some(params.project_path),
+        &resolution,
+        &prepared_launch,
+    )
+    .map_err(BuildAndLaunchError::Internal)?;
     let composed_effective_caps = derive_effective_caps(&resolution.composed);
     ryeos_bundle::runtime_authority::reject_disallowed_composed_grants(&composed_effective_caps)
         .map_err(|error| BuildAndLaunchError::CapabilityRejected {
@@ -2575,7 +3138,7 @@ async fn prepare_managed_launch_authority(
     admitted_artifact_identity
         .validate()
         .map_err(BuildAndLaunchError::Internal)?;
-    if admitted_capsule.is_some() {
+    if persisted_admitted_capsule.is_some() {
         params
             .state
             .state_store
@@ -2590,6 +3153,23 @@ async fn prepare_managed_launch_authority(
             }
         }
     }
+    let (executor_blob_hash, pending_executor_blob) =
+        if let Some(capsule) = admitted_capsule.as_ref() {
+            let ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                executor_blob_hash,
+                ..
+            } = &capsule.execution_closure
+            else {
+                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed recovery found a non-managed admitted execution closure"
+                )));
+            };
+            (executor_blob_hash.clone(), None)
+        } else {
+            let (hash, publication) =
+                stage_managed_executor_blob(params.state, &materialized_executor)?;
+            (hash, Some(publication))
+        };
     // Credentials are read only after the installed runtime closure has been
     // matched to the authoritative capsule. A failed recovery attempt cannot
     // obtain secrets for substituted code.
@@ -2709,13 +3289,32 @@ async fn prepare_managed_launch_authority(
         metadata = metadata
             .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
             .with_admitted_artifact_identity(admitted_artifact_identity)
-            .with_admitted_prepared_launch(serde_json::to_value(&prepared_launch).map_err(
-                |error| {
-                    BuildAndLaunchError::Internal(anyhow::anyhow!(
-                        "serialize admitted prepared launch: {error}"
-                    ))
-                },
-            )?)
+            .with_admitted_execution_closure(if let Some(capsule) = admitted_capsule.as_ref() {
+                capsule.execution_closure.clone()
+            } else {
+                ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+                    prepared_runtime_launch: serde_json::to_value(&prepared_launch).map_err(
+                        |error| {
+                            BuildAndLaunchError::Internal(anyhow::anyhow!(
+                                "serialize admitted prepared launch: {error}"
+                            ))
+                        },
+                    )?,
+                    runtime_descriptor_document: capture_managed_descriptor_document(
+                        &selected_runtime.descriptor_path,
+                        &selected_runtime.raw_content_digest,
+                        &selected_runtime.signer_fingerprint,
+                        &engine.node_trust_store,
+                    )?,
+                    protocol_descriptor_document: capture_managed_descriptor_document(
+                        &verified_protocol.descriptor_path,
+                        &verified_protocol.raw_content_digest,
+                        &verified_protocol.signer_fingerprint,
+                        &engine.node_trust_store,
+                    )?,
+                    executor_blob_hash: executor_blob_hash.clone(),
+                }
+            })
             .with_resume_context(ryeos_app::launch_metadata::ResumeContext {
                 kind: params.resolved.kind.clone(),
                 item_ref: params.resolved.item_ref.clone(),
@@ -2772,11 +3371,13 @@ async fn prepare_managed_launch_authority(
         effective_vault,
         effective_caps,
         selected_runtime,
+        verified_protocol,
         materialized_executor,
         checkpoint_dir,
         is_resume,
         launch_metadata,
         pending_project_snapshot,
+        pending_executor_blob,
         augmentation_audits,
         freshly_minted_accounting_scope,
     })
@@ -2970,6 +3571,7 @@ pub async fn build_and_launch(
             .record_top_level_from_milestone("background_dispatch", "background_dispatch_entered");
     }
     drop(authority.pending_project_snapshot.take());
+    drop(authority.pending_executor_blob.take());
     run_claimed_thread_row_with_authority(
         params,
         thread,
@@ -3158,11 +3760,13 @@ async fn run_claimed_thread_row_inner(
         effective_vault,
         effective_caps,
         selected_runtime,
+        verified_protocol,
         materialized_executor: materialized_binary,
         checkpoint_dir,
         is_resume,
         launch_metadata,
         pending_project_snapshot,
+        pending_executor_blob,
         augmentation_audits,
         freshly_minted_accounting_scope,
     } = authority;
@@ -3197,6 +3801,7 @@ async fn run_claimed_thread_row_inner(
     // recompute launch authority and append a new audit, but never rewrite the
     // persisted identity that selected this row.
     drop(pending_project_snapshot);
+    drop(pending_executor_blob);
 
     // Record operational lineage the instant we commit to launching a child, so a
     // cancel/kill of the parent can cascade to it. Only a launch carrying a parent
@@ -3426,13 +4031,6 @@ async fn run_claimed_thread_row_inner(
                     resolved.resolved_item.kind
                 )
             })?;
-
-    // The exact verified runtime selected above owns this launch boundary.
-    // Its canonical kind selects the schema and signed subprocess protocol;
-    // managed runtimes must expose the exact callback/runtime wire contract.
-    let verified_protocol =
-        crate::dispatch::require_callback_runtime_protocol(engine, &selected_runtime, "managed")
-            .map_err(|error| BuildAndLaunchError::Internal(anyhow::anyhow!(error)))?;
 
     tracing::info!(
         item_ref = %resolved.item_ref,
@@ -4368,6 +4966,7 @@ impl PreparedOperatorSuccessorLaunch {
     pub fn with_persisted_birth_audit(mut self) -> Self {
         self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
+        drop(self.prepared.authority.pending_executor_blob.take());
         self
     }
 }
@@ -4380,6 +4979,7 @@ impl PreparedMachineSuccessorLaunch {
     pub fn with_persisted_birth_audit(mut self) -> Self {
         self.prepared.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.prepared.authority.pending_project_snapshot.take());
+        drop(self.prepared.authority.pending_executor_blob.take());
         self
     }
 }
@@ -4425,6 +5025,7 @@ impl PreparedFollowChildLaunch {
     pub fn with_persisted_birth_audit(mut self) -> Self {
         self.launch_audit = LaunchAuditDisposition::CommittedAtBirth;
         drop(self.authority.pending_project_snapshot.take());
+        drop(self.authority.pending_executor_blob.take());
         self
     }
 }
@@ -4718,35 +5319,11 @@ async fn prepare_successor_launch(
         metadata_template,
     )
     .await?;
-    let launch_metadata = if let Some(persisted) = metadata_template {
-        // The seed template deliberately carries no prepared-launch payload
-        // (it is thread-owned state), but the successor's OWN freshly sealed
-        // authority was just computed above — a ManagedRuntime capsule
-        // without it fails validation at birth. Fill the seed's empty slots
-        // from the fresh authority; never overwrite copied-forward values.
-        let mut merged = persisted.clone();
-        if let Some(fresh) = authority.launch_metadata.as_ref() {
-            if merged.admitted_prepared_launch.is_none() {
-                merged.admitted_prepared_launch = fresh.admitted_prepared_launch.clone();
-            }
-            if merged.admitted_artifact_identity.is_none() {
-                merged.admitted_artifact_identity = fresh.admitted_artifact_identity.clone();
-            }
-            if merged.admitted_launch_capsule_schema.is_none() {
-                merged.admitted_launch_capsule_schema = fresh.admitted_launch_capsule_schema;
-            }
-            if merged.accounting_scope.is_none() {
-                merged.accounting_scope = fresh.accounting_scope.clone();
-            }
-        }
-        merged
-    } else {
-        authority
-            .launch_metadata
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("successor authority produced no launch metadata"))?
-    };
+    let launch_metadata = authority
+        .launch_metadata
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("successor authority produced no launch metadata"))?;
     let prepared_resume = launch_metadata
         .resume_context
         .as_ref()
@@ -7228,6 +7805,172 @@ mod tests {
         MATERIALIZER_TEST_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_admitted_executor_blob(cas_root: &Path, bytes: &[u8]) -> String {
+        lillux::cas::CasStore::new(cas_root.to_path_buf())
+            .store_blob(bytes)
+            .unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_recovery_reopens_exact_admitted_executor_from_cas() {
+        let _guard = materializer_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = "admitted-recovery-executor";
+        let content_hash = write_admitted_executor_blob(tmp.path(), b"previous signed executor");
+        let manifest_hash = "b".repeat(64);
+        let isolation = ryeos_engine::isolation::IsolationRuntime::default();
+
+        let materialized = materialize_admitted_native_executor(
+            &format!("native:{bare}"),
+            tmp.path(),
+            &isolation,
+            &content_hash,
+            &manifest_hash,
+            "trusted-signer",
+        )
+        .unwrap();
+
+        assert_eq!(materialized.content_hash, content_hash);
+        assert_eq!(materialized.bundle_manifest_hash, manifest_hash);
+        assert_eq!(materialized.bundle_signer_fingerprint, "trusted-signer");
+        assert_eq!(
+            materialized.verified_command.identity().content_hash,
+            materialized.content_hash
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_recovery_rejects_admitted_executor_blob_with_wrong_bytes() {
+        let _guard = materializer_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = "tampered-recovery-executor";
+        let admitted_bytes = b"admitted executor bytes";
+        let admitted_hash = write_admitted_executor_blob(tmp.path(), admitted_bytes);
+        std::fs::write(
+            lillux::cas::shard_path(tmp.path(), "blobs", &admitted_hash, ""),
+            vec![b'x'; admitted_bytes.len()],
+        )
+        .unwrap();
+        let isolation = ryeos_engine::isolation::IsolationRuntime::default();
+
+        let error = materialize_admitted_native_executor(
+            &format!("native:{bare}"),
+            tmp.path(),
+            &isolation,
+            &admitted_hash,
+            &"c".repeat(64),
+            "trusted-signer",
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("failed its content check"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn managed_recovery_requires_admitted_executor_signer_to_remain_trusted() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[76u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let empty = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
+        let error = ensure_admitted_executor_signer_trusted(
+            &empty,
+            "native:revoked-executor",
+            &fingerprint,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            MaterializationError::ExecutorUntrusted { .. }
+        ));
+
+        let trusted = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fingerprint.clone(),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        ensure_admitted_executor_signer_trusted(&trusted, "native:trusted-executor", &fingerprint)
+            .unwrap();
+    }
+
+    #[test]
+    fn managed_recovery_verifies_the_exact_signed_descriptor_document() {
+        let key = lillux::crypto::SigningKey::from_bytes(&[77u8; 32]);
+        let fingerprint = lillux::signature::compute_fingerprint(&key.verifying_key());
+        let trust = ryeos_engine::trust::TrustStore::from_signers(vec![
+            ryeos_engine::trust::TrustedSigner {
+                fingerprint: fingerprint.clone(),
+                verifying_key: key.verifying_key(),
+                label: None,
+            },
+        ]);
+        let body = "kind: runtime\nserves: directive\n";
+        let document = lillux::signature::sign_content(body, &key, "#", None);
+        let content_hash = lillux::signature::content_hash(body);
+
+        assert_eq!(
+            verify_admitted_signed_descriptor_document(
+                &document,
+                &content_hash,
+                &fingerprint,
+                &trust,
+            )
+            .unwrap(),
+            body
+        );
+
+        let tampered = document.replace("directive", "graph");
+        assert!(verify_admitted_signed_descriptor_document(
+            &tampered,
+            &content_hash,
+            &fingerprint,
+            &trust,
+        )
+        .is_err());
+        let revoked = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
+        assert!(verify_admitted_signed_descriptor_document(
+            &document,
+            &content_hash,
+            &fingerprint,
+            &revoked,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn materializer_keeps_distinct_names_with_identical_executor_bytes() {
+        let _guard = materializer_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let first_bundle = tmp.path().join("first-bundle");
+        let second_bundle = tmp.path().join("second-bundle");
+        let cache_root = tmp.path().join("state");
+        let key = lillux::crypto::SigningKey::from_bytes(&[75u8; 32]);
+        let first_fixture =
+            write_executable_materializer_fixture(&first_bundle, "first-executor", &key);
+        let second_fixture =
+            write_executable_materializer_fixture(&second_bundle, "second-executor", &key);
+        assert_eq!(first_fixture.blob_hash, second_fixture.blob_hash);
+        let trust_store = materializer_trust_store(&first_fixture, &key);
+        let roots = vec![first_bundle, second_bundle];
+
+        let first =
+            materialize_test_executor(&roots, "native:first-executor", &cache_root, &trust_store)
+                .unwrap();
+        let second =
+            materialize_test_executor(&roots, "native:second-executor", &cache_root, &trust_store)
+                .unwrap();
+
+        assert_ne!(first.path, second.path);
+        assert_eq!(std::fs::read(&first.path).unwrap(), first_fixture.bytes);
+        assert_eq!(std::fs::read(&second.path).unwrap(), second_fixture.bytes);
     }
 
     #[test]

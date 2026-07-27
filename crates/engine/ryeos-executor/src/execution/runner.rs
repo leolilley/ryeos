@@ -20,7 +20,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use tokio::task;
 
@@ -1623,9 +1623,10 @@ fn ensure_restart_eligible_artifact(
 }
 
 fn admitted_root_launch_metadata(
+    state: &AppState,
     params: &ExecutionParams,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
-    prepared_plan: &thread_lifecycle::PreparedItemPlan,
+    prepared_plan: &mut thread_lifecycle::PreparedItemPlan,
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<ryeos_app::launch_metadata::RuntimeLaunchMetadata> {
     let runtime_ref = match &params.runtime_ref {
@@ -1674,11 +1675,8 @@ fn admitted_root_launch_metadata(
         executor_ref: Some(params.resolved.executor_ref.clone()),
         runtime_ref: Some(runtime_ref),
     };
-    let admitted_artifact_identity = prepared_plan.admitted_artifact_identity(
-        params.provenance.request_engine(),
-        &params.resolved,
-        protocol,
-    )?;
+    let admitted_artifact_identity =
+        prepared_plan.admitted_artifact_identity(&params.resolved, protocol)?;
     let direct_executable_identity = match &admitted_artifact_identity {
         ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executable_identity,
@@ -1691,13 +1689,225 @@ fn admitted_root_launch_metadata(
         &params.resolved.item_ref,
         direct_executable_identity,
     )?;
+    let cas_root = state.state_store.cas_root()?;
+    let cas_directory = lillux::PinnedDirectory::open(&cas_root)?
+        .ok_or_else(|| anyhow::anyhow!("state CAS root is unavailable"))?;
+    let cas = lillux::CasStore::from_pinned_root(cas_directory);
+    let admitted_project_root = match &params.resolved.plan_context.project_context {
+        ProjectContext::LocalPath { path } => Some(path.as_path()),
+        ProjectContext::None
+        | ProjectContext::SnapshotHash { .. }
+        | ProjectContext::ProjectRef { .. } => None,
+    };
+    let execution_closure = prepared_plan.admit_execution_closure(
+        &cas,
+        state.isolation.as_ref(),
+        protocol,
+        &params.provenance.request_engine().node_trust_store,
+        admitted_project_root,
+    )?;
     let metadata = ryeos_app::launch_metadata::RuntimeLaunchMetadata::default()
         .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor)
         .with_admitted_artifact_identity(admitted_artifact_identity)
+        .with_admitted_execution_closure(execution_closure)
         .with_resume_context(resume)
         .with_sealed_root_request(sealed);
     metadata.validate()?;
     Ok(metadata)
+}
+
+fn recovered_direct_protocol(
+    engine: &ryeos_engine::engine::Engine,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    item_kind: &str,
+) -> Result<ryeos_engine::protocols::VerifiedProtocol> {
+    let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+        wrapper_source_identity,
+        protocol_ref,
+        protocol_content_hash,
+        protocol_signer_fingerprint,
+        executable_identity,
+        runtime_identity,
+        ..
+    } = &capsule.artifact_identity
+    else {
+        bail!("direct recovery found a non-direct admitted artifact identity");
+    };
+    let ryeos_state::objects::AdmittedExecutionClosure::DirectItemExecutor {
+        protocol_descriptor_document,
+        ..
+    } = &capsule.execution_closure
+    else {
+        bail!("direct recovery found a non-direct admitted execution closure");
+    };
+    if !engine
+        .node_trust_store
+        .is_trusted(protocol_signer_fingerprint)
+    {
+        bail!(
+            "admitted direct protocol signer is no longer trusted: {protocol_signer_fingerprint}"
+        );
+    }
+    if let Some(bundle_signer) = runtime_identity
+        .runtime_bundle_signer_fingerprint
+        .as_deref()
+    {
+        if !engine.node_trust_store.is_trusted(bundle_signer) {
+            bail!("admitted direct runtime bundle signer is no longer trusted: {bundle_signer}");
+        }
+    }
+    if let ryeos_state::objects::DirectWrapperSourceIdentity::Bundle {
+        manifest_signer_fingerprint,
+        ..
+    } = wrapper_source_identity
+    {
+        if !engine
+            .node_trust_store
+            .is_trusted(manifest_signer_fingerprint)
+        {
+            bail!(
+                "admitted direct wrapper manifest signer is no longer trusted: {manifest_signer_fingerprint}"
+            );
+        }
+    }
+    if let ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
+        provider_manifest_signer_fingerprint,
+        ..
+    } = executable_identity
+    {
+        if !engine
+            .node_trust_store
+            .is_trusted(provider_manifest_signer_fingerprint)
+        {
+            bail!(
+                "admitted direct executable provider signer is no longer trusted: {provider_manifest_signer_fingerprint}"
+            );
+        }
+    }
+    let header = lillux::signature::parse_signature_line(
+        protocol_descriptor_document.lines().next().unwrap_or(""),
+        "#",
+        None,
+    )
+    .ok_or_else(|| anyhow::anyhow!("admitted direct protocol has no signature header"))?;
+    let protocol_body = lillux::signature::strip_signature_lines(protocol_descriptor_document);
+    let observed_hash = lillux::signature::content_hash(&protocol_body);
+    if observed_hash != *protocol_content_hash
+        || header.content_hash != *protocol_content_hash
+        || header.signer_fingerprint != *protocol_signer_fingerprint
+    {
+        bail!("admitted direct protocol document contradicts its sealed identity");
+    }
+    let protocol_signer = engine
+        .node_trust_store
+        .get(protocol_signer_fingerprint)
+        .ok_or_else(|| anyhow::anyhow!("admitted direct protocol signer was revoked"))?;
+    if !lillux::signature::verify_signature(
+        protocol_content_hash,
+        &header.signature_b64,
+        &protocol_signer.verifying_key,
+    ) {
+        bail!("admitted direct protocol signature no longer verifies");
+    }
+    let descriptor: ryeos_engine::protocols::ProtocolDescriptor =
+        serde_yaml::from_str(&protocol_body)
+            .context("decode admitted direct protocol descriptor")?;
+    ryeos_engine::protocols::validate_admitted_protocol_descriptor(protocol_ref, &descriptor)
+        .context("validate admitted direct protocol descriptor")?;
+    let protocol = ryeos_engine::protocols::VerifiedProtocol {
+        canonical_ref: protocol_ref.clone(),
+        raw_content_digest: protocol_content_hash.clone(),
+        signer_fingerprint: protocol_signer_fingerprint.clone(),
+        descriptor,
+        trust_class: ryeos_engine::resolution::TrustClass::TrustedBundle,
+        bundle_root: PathBuf::new(),
+        descriptor_path: PathBuf::new(),
+    };
+    crate::dispatch::validate_admitted_direct_protocol(&protocol, item_kind)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    Ok(protocol)
+}
+
+fn validate_recovered_direct_request_authority(
+    state: &AppState,
+    thread_id: &str,
+    params: &ExecutionParams,
+    capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+) -> Result<()> {
+    if capsule.launch_driver != ryeos_state::objects::ExecutionLaunchDriver::DirectItemExecutor
+        || params.lifecycle_authority != capsule.lifecycle_authority
+        || params.runtime_ref.as_deref() != Some(capsule.runtime_ref.as_str())
+    {
+        anyhow::bail!(
+            "direct recovery operational launch authority contradicts its admitted capsule"
+        );
+    }
+    let mut operational_caps = params.effective_caps.clone();
+    operational_caps.sort();
+    operational_caps.dedup();
+    if operational_caps != params.effective_caps || operational_caps != capsule.effective_caps {
+        anyhow::bail!(
+            "direct recovery operational capability ceiling contradicts its admitted capsule"
+        );
+    }
+    let authoritative =
+        ryeos_app::thread_lifecycle::SealedRootExecutionRequest::restore_from_admitted_capsule(
+            capsule,
+            params.provenance.request_engine(),
+            &ryeos_app::launch_metadata::daemon_thread_state_dir(&state.config.app_root, thread_id)
+                .join("launch-capsule"),
+            &params.provenance,
+        )
+        .context("restore authoritative direct request from CAS capsule")?;
+    let actual = &params.resolved;
+    if params.parameters != authoritative.parameters
+        || params.acting_principal != authoritative.requested_by.as_deref().unwrap_or_default()
+        || params.pre_minted_thread_id.is_some()
+        || params.parent_thread_id.is_some()
+        || actual.kind != authoritative.kind
+        || actual.item_ref != authoritative.item_ref
+        || actual.executor_ref != authoritative.executor_ref
+        || actual.launch_mode != authoritative.launch_mode
+        || actual.current_site_id != authoritative.current_site_id
+        || actual.origin_site_id != authoritative.origin_site_id
+        || actual.target_site_id != authoritative.target_site_id
+        || actual.requested_by != authoritative.requested_by
+        || actual.usage_subject != authoritative.usage_subject
+        || actual.usage_subject_asserted_by != authoritative.usage_subject_asserted_by
+        || actual.parameters != authoritative.parameters
+        || actual.ref_bindings != authoritative.ref_bindings
+        || actual.root_raw_content_digest != authoritative.root_raw_content_digest
+        || actual.resolved_item.canonical_ref != authoritative.resolved_item.canonical_ref
+        || actual.resolved_item.kind != authoritative.resolved_item.kind
+        || actual.resolved_item.source_space != authoritative.resolved_item.source_space
+        || actual.resolved_item.raw_content_digest != authoritative.resolved_item.raw_content_digest
+        || actual.resolved_item.content_hash != authoritative.resolved_item.content_hash
+        || actual.resolved_item.signature_header != authoritative.resolved_item.signature_header
+        || serde_json::to_value(&actual.resolved_item.metadata)?
+            != serde_json::to_value(&authoritative.resolved_item.metadata)?
+    {
+        anyhow::bail!(
+            "direct recovery request differs from the authoritative CAS capsule invocation"
+        );
+    }
+    let actual_admission = actual
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("direct recovery request has no exact root admission"))?;
+    let authoritative_admission = authoritative
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("authoritative direct request lost its root admission"))?;
+    authoritative_admission.ensure_matches_request(actual)?;
+    actual_admission.ensure_matches_request(&authoritative)?;
+    if serde_json::to_value(actual_admission.resolution_output())?
+        != serde_json::to_value(authoritative_admission.resolution_output())?
+    {
+        anyhow::bail!(
+            "direct recovery resolution differs from the authoritative CAS capsule program"
+        );
+    }
+    Ok(())
 }
 
 /// Admit an execution and wait for its current thread to settle.
@@ -1756,7 +1966,7 @@ pub async fn run_and_wait(
     let wait_isolation_live_access_authority =
         params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(
+    let mut prepared_plan = thread_lifecycle::prepare_item_plan(
         &engine,
         &params.resolved,
         state.isolation.as_ref(),
@@ -1764,10 +1974,14 @@ pub async fn run_and_wait(
         wait_isolation_live_access_authority.as_ref(),
     )?;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
+    let wait_cas_guard =
+        ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)
+            .context("acquire direct admission CAS mutation authority")?;
     let wait_launch_metadata = admitted_root_launch_metadata(
+        &state,
         &params,
         wait_project_authority.clone(),
-        &prepared_plan,
+        &mut prepared_plan,
         protocol,
     )?;
     let created = state
@@ -1785,6 +1999,7 @@ pub async fn run_and_wait(
         .inspect_err(|_e| {
             guard.cleanup();
         })?;
+    drop(wait_cas_guard);
     guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
@@ -1831,18 +2046,22 @@ pub async fn run_and_wait(
     }
     tracing::Span::current().record("thread_id", created.thread_id.as_str());
 
-    // A fresh root's PlanContext is sealed admission authority, not its mutable
-    // execution location. CAS may materialize a different workspace (including
-    // no-project scratch execution), but that path belongs to provenance only.
-    // Internal/recovery requests without a fresh admission retain the older
-    // path-substitution behavior until they rebuild their own authoritative
-    // context.
+    // The capsule retains the exact admission workspace in its serialized plan,
+    // while this in-memory plan must execute against the CAS materialization
+    // selected for this launch. Rebind only the typed/validated project paths
+    // after birth has rooted the original closure.
     if matches!(
         params.provenance.project_authority(),
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
-    ) && params.resolved.root_admission.is_none()
-        && effective_path != params.provenance.effective_path()
-    {
+    ) {
+        let admitted_project_root = match &params.resolved.plan_context.project_context {
+            ProjectContext::LocalPath { path } => Some(path.clone()),
+            ProjectContext::None
+            | ProjectContext::SnapshotHash { .. }
+            | ProjectContext::ProjectRef { .. } => None,
+        };
+        prepared_plan
+            .relocate_project_for_spawn(admitted_project_root.as_deref(), Some(&effective_path))?;
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
@@ -2415,7 +2634,7 @@ pub async fn run_detached(
     let bg_project_authority = params.provenance.project_authority().clone();
     let bg_isolation_live_access_authority = params.provenance.isolation_live_access_authority()?;
     let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(
+    let mut prepared_plan = thread_lifecycle::prepare_item_plan(
         &engine,
         &params.resolved,
         state.isolation.as_ref(),
@@ -2423,10 +2642,14 @@ pub async fn run_detached(
         bg_isolation_live_access_authority.as_ref(),
     )?;
     let protocol = resolved_terminator_protocol(&engine, &params.resolved)?;
+    let bg_cas_guard =
+        ryeos_state::CasMutationGuard::shared_from_cas_root(&state.state_store.cas_root()?)
+            .context("acquire detached direct admission CAS mutation authority")?;
     let bg_launch_metadata = admitted_root_launch_metadata(
+        &state,
         &params,
         bg_project_authority.clone(),
-        &prepared_plan,
+        &mut prepared_plan,
         protocol,
     )?;
     let created = state
@@ -2444,6 +2667,7 @@ pub async fn run_detached(
         .inspect_err(|_e| {
             guard.cleanup();
         })?;
+    drop(bg_cas_guard);
     guard.track_thread(&created.thread_id);
     if let Some(parent_thread_id) = params.parent_thread_id.as_deref() {
         let inherited_stop = match state.state_store.record_child_link(
@@ -2490,13 +2714,20 @@ pub async fn run_detached(
     }
     tracing::Span::current().record("thread_id", created.thread_id.as_str());
 
-    // Keep fresh admitted planning authority sealed; see `run_and_wait`.
+    // Keep the serialized admission plan sealed while rebinding this spawn's
+    // operational plan to the selected CAS materialization; see `run_and_wait`.
     if matches!(
         params.provenance.project_authority(),
         ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration { .. }
-    ) && params.resolved.root_admission.is_none()
-        && effective_path != params.provenance.effective_path()
-    {
+    ) {
+        let admitted_project_root = match &params.resolved.plan_context.project_context {
+            ProjectContext::LocalPath { path } => Some(path.clone()),
+            ProjectContext::None
+            | ProjectContext::SnapshotHash { .. }
+            | ProjectContext::ProjectRef { .. } => None,
+        };
+        prepared_plan
+            .relocate_project_for_spawn(admitted_project_root.as_deref(), Some(&effective_path))?;
         params.resolved.plan_context.project_context =
             ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: effective_path.clone(),
@@ -4014,48 +4245,79 @@ async fn run_existing_recovered_thread(
             guard.cleanup();
         })?;
     let engine = params.provenance.request_engine().clone();
-    let prepared_plan = thread_lifecycle::prepare_item_plan(
-        &engine,
-        &params.resolved,
+    let admitted_capsule = state
+        .state_store
+        .admitted_launch_capsule(&thread_id)
+        .inspect_err(|_| {
+            guard.fail_thread("admitted_execution_closure_unavailable");
+            guard.cleanup();
+        })?
+        .ok_or_else(|| {
+            guard.fail_thread("admitted_execution_closure_unavailable");
+            guard.cleanup();
+            ResumeError::Other(anyhow::anyhow!(
+                "direct recovery has no admitted launch capsule"
+            ))
+        })?;
+    validate_recovered_direct_request_authority(&state, &thread_id, &params, &admitted_capsule)
+        .inspect_err(|_| {
+            guard.fail_thread("admitted_program_authority_invalid");
+            guard.cleanup();
+        })?;
+    let cas_root = state.state_store.cas_root().map_err(ResumeError::Other)?;
+    let cas_directory = lillux::PinnedDirectory::open(&cas_root)
+        .map_err(ResumeError::Other)?
+        .ok_or_else(|| ResumeError::Other(anyhow::anyhow!("state CAS root is unavailable")))?;
+    let cas = lillux::CasStore::from_pinned_root(cas_directory);
+    let effective_project_root = match &params.resolved.plan_context.project_context {
+        ProjectContext::LocalPath { path } => Some(path.as_path()),
+        ProjectContext::None
+        | ProjectContext::SnapshotHash { .. }
+        | ProjectContext::ProjectRef { .. } => None,
+    };
+    let prepared_plan = thread_lifecycle::PreparedItemPlan::recover_from_execution_closure(
+        &admitted_capsule,
+        &cas,
         state.isolation.as_ref(),
-        params.lifecycle_authority,
-        bg_isolation_live_access_authority.as_ref(),
+        effective_project_root,
     )
     .inspect_err(|_| {
-        guard.fail_thread("plan_build_failed");
+        guard.fail_thread("admitted_execution_closure_invalid");
         guard.cleanup();
     })?;
     let launch_timeout_secs = prepared_plan.timeout_secs;
-    let protocol = resolved_terminator_protocol(&engine, &params.resolved).inspect_err(|_| {
-        guard.fail_thread("protocol_contract_failed");
+    let protocol = recovered_direct_protocol(
+        &engine,
+        &admitted_capsule,
+        &params.resolved.resolved_item.kind,
+    )
+    .inspect_err(|_| {
+        guard.fail_thread("admitted_protocol_closure_invalid");
         guard.cleanup();
     })?;
-    let attempted_artifact_identity = prepared_plan
-        .admitted_artifact_identity(&engine, &params.resolved, protocol)
-        .inspect_err(|_| {
-            guard.fail_thread("recovery_artifact_identity_failed");
+    let primary_resolution = params
+        .resolved
+        .root_admission
+        .as_ref()
+        .ok_or_else(|| {
+            guard.fail_thread("admitted_program_authority_unavailable");
             guard.cleanup();
-        })?;
-    if matches!(
-        attempted_artifact_identity,
-        ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-            executable_identity: ryeos_state::objects::DirectExecutableIdentity::NodePolicy,
-            ..
-        }
-    ) {
-        guard.fail_thread("node_policy_execution_is_not_restart_recoverable");
+            ResumeError::Other(anyhow::anyhow!(
+                "direct recovery has no exact admitted root resolution"
+            ))
+        })?
+        .resolution_output();
+    super::admitted_trust::validate_direct_current_trust(
+        &engine,
+        effective_project_root,
+        primary_resolution,
+        prepared_plan.execution_plan(),
+        &admitted_capsule,
+    )
+    .inspect_err(|_| {
+        guard.fail_thread("admitted_program_authority_revoked");
         guard.cleanup();
-        return Err(ResumeError::Other(anyhow::anyhow!(
-            "direct execution authorized by mutable node policy is not restart-recoverable"
-        )));
-    }
-    state
-        .state_store
-        .verify_admitted_artifact_identity(&thread_id, &attempted_artifact_identity)
-        .inspect_err(|_| {
-            guard.fail_thread("recovery_artifact_identity_mismatch");
-            guard.cleanup();
-        })?;
+    })?;
 
     // Read credentials only after the exact plan, protocol, executor, and
     // executable authority match the CAS-rooted admitted capsule. Secret
@@ -4127,7 +4389,7 @@ async fn run_existing_recovered_thread(
         isolation_daemon_socket_path,
     } = build_protocol_launch_env(
         &state,
-        protocol,
+        &protocol,
         &thread_id,
         &effective_path,
         &runtime_state_root,

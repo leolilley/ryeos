@@ -9,6 +9,16 @@ use super::{
     RuntimeEnvSource,
 };
 
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 // ── Plan context (resolve/verify/build_plan) ─────────────────────────
 
 /// Context for the planning phases: resolve, verify, build_plan.
@@ -45,6 +55,10 @@ pub struct EngineContext {
     pub isolation_bundle_roots: Vec<PathBuf>,
     pub isolation_node_trusted_keys_dir: Option<PathBuf>,
     pub isolation_verified_code: Vec<crate::isolation::IsolationVerifiedCode>,
+    /// Exact already-open command authority for an admitted direct plan.
+    /// When present it must match the plan's serialized verified-command
+    /// identity; dispatch never reopens that command by pathname.
+    pub isolation_verified_command: Option<crate::isolation::IsolationDescriptorBoundCommand>,
     pub thread_id: String,
     pub chain_root_id: String,
     pub current_site_id: String,
@@ -94,6 +108,21 @@ pub struct PlanRuntimeIdentity {
     pub runtime_signer_fingerprint: Option<String>,
     pub runtime_bundle_manifest_hash: Option<String>,
     pub runtime_bundle_signer_fingerprint: Option<String>,
+}
+
+/// Exact signed source authority for one executor-chain item that influenced
+/// a direct execution plan. Recovery uses this compact closure only for
+/// current signer revocation; it never re-resolves `canonical_ref`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanTrustAuthority {
+    pub requested_id: String,
+    pub canonical_ref: String,
+    pub source_space: crate::contracts::ItemSpace,
+    pub trust_class: crate::resolution::TrustClass,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub signer_fingerprint: Option<String>,
+    pub content_hash: String,
 }
 
 /// Signed executor-manifest identity of the installed bundle that supplied a
@@ -211,6 +240,9 @@ pub struct ExecutionPlan {
     /// Executor IDs traversed during chain resolution.
     #[serde(default)]
     pub executor_chain: Vec<String>,
+    /// Exact source authorities for every non-root executor-chain hop that
+    /// contributed to this plan.
+    pub executor_authorities: Vec<PlanTrustAuthority>,
     /// Verified identity of the first executor-chain hop (the runtime
     /// descriptor) selected by this exact plan build.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -251,5 +283,20 @@ mod tests {
             serde_json::to_value(node).unwrap(),
             serde_json::json!({ "node_type": "complete", "id": "done" })
         );
+    }
+
+    #[test]
+    fn plan_trust_authority_requires_explicit_nullable_signer() {
+        let mut wire = serde_json::json!({
+            "requested_id": "runtime:test/direct",
+            "canonical_ref": "runtime:test/direct",
+            "source_space": "bundle",
+            "trust_class": "unsigned",
+            "signer_fingerprint": null,
+            "content_hash": "a".repeat(64),
+        });
+        serde_json::from_value::<PlanTrustAuthority>(wire.clone()).unwrap();
+        wire.as_object_mut().unwrap().remove("signer_fingerprint");
+        assert!(serde_json::from_value::<PlanTrustAuthority>(wire).is_err());
     }
 }

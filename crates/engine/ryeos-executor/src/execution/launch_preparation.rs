@@ -15,9 +15,9 @@ use ryeos_engine::runtime_registry::{
     LaunchItemSpace, LaunchPreparationDecl, RuntimeFactKind, VerifiedRuntime,
 };
 use ryeos_handler_protocol::{
-    ItemSpaceWire, LaunchComposedViewWire, LaunchConfigSnapshotWire, LaunchDiagnosticScalarWire,
-    LaunchPrepareError, LaunchPrepareErrorClass, LaunchPrepareRequest, LaunchPrepareResponse,
-    LaunchPreparedItemWire, LaunchSecretOriginWire, TrustClassWire,
+    ItemSpaceWire, LaunchComposedViewWire, LaunchConfigContributorWire, LaunchConfigSnapshotWire,
+    LaunchDiagnosticScalarWire, LaunchPrepareError, LaunchPrepareErrorClass, LaunchPrepareRequest,
+    LaunchPrepareResponse, LaunchPreparedItemWire, LaunchSecretOriginWire, TrustClassWire,
 };
 use ryeos_runtime::authorizer::{canonical_cap, AuthorizationPolicy};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,11 @@ pub struct PreparedRuntimeLaunch {
     pub required_secrets: Vec<PreparedSecret>,
     pub runtime_facts: BTreeMap<String, Value>,
     pub binding_records: BTreeMap<String, RefBindingLaunchRecord>,
+    /// Exact signed configuration contributors that influenced launch
+    /// preparation. The prepared values remain sealed in `runtime_data`; this
+    /// list exists so recovery can apply current signer revocation without
+    /// reloading mutable config names.
+    pub config_contributors: Vec<LaunchConfigContributorWire>,
     /// Validated financial authority sealed with this launch, exactly as
     /// declared by the runtime launch contract. `None` for runtimes whose
     /// contract declares no direct paid provider work.
@@ -272,6 +277,7 @@ pub fn prepare_runtime_launch(
     };
 
     validate_result(contract, request.ref_bindings, &config_inputs, &mut result)?;
+    let config_contributors = collect_config_contributors(&config_inputs);
     let financial_authority = validate_financial_authority(contract, result.financial_authority)?;
     Ok(PreparedRuntimeLaunch {
         runtime_data: result.runtime_data,
@@ -285,8 +291,50 @@ pub fn prepare_runtime_launch(
             .collect(),
         runtime_facts: result.runtime_facts,
         binding_records,
+        config_contributors,
         financial_authority,
     })
+}
+
+fn collect_config_contributors(
+    inputs: &BTreeMap<String, LaunchConfigSnapshotWire>,
+) -> Vec<LaunchConfigContributorWire> {
+    let mut contributors = inputs
+        .values()
+        .flat_map(|snapshot| match snapshot {
+            LaunchConfigSnapshotWire::Item { contributors, .. } => {
+                contributors.iter().collect::<Vec<_>>()
+            }
+            LaunchConfigSnapshotWire::Catalog { entries } => entries
+                .values()
+                .flat_map(|entry| entry.contributors.iter())
+                .collect(),
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    contributors.sort_by(|left, right| {
+        (
+            &left.root_label,
+            &left.canonical_id,
+            &left.content_digest,
+            &left.signer_fingerprint,
+        )
+            .cmp(&(
+                &right.root_label,
+                &right.canonical_id,
+                &right.content_digest,
+                &right.signer_fingerprint,
+            ))
+    });
+    contributors.dedup_by(|left, right| {
+        left.root_label == right.root_label
+            && left.canonical_id == right.canonical_id
+            && left.content_digest == right.content_digest
+            && left.signer_fingerprint == right.signer_fingerprint
+            && left.space == right.space
+            && left.trust_class == right.trust_class
+    });
+    contributors
 }
 
 /// Validate the declared financial-authority result and seal it: strict
