@@ -5897,19 +5897,34 @@ fn normalize_plan_project_paths(value: &mut Value, project_root: &Path) {
 fn execution_plan_identity_hash(
     plan: &ExecutionPlan,
     project_context: &ProjectContext,
+    materialized_project_root: Option<&Path>,
 ) -> Result<String> {
-    let mut identity = serde_json::to_value(plan)?;
+    let plan_cwd = plan.nodes.first().and_then(|node| match node {
+        ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => spec.cwd.as_deref(),
+        ryeos_engine::contracts::PlanNode::Complete { .. } => None,
+    });
+    let mut roots = Vec::new();
     if let ProjectContext::LocalPath { path } = project_context {
+        roots.push(path.as_path());
+    }
+    if let Some(path) = materialized_project_root {
+        roots.push(path);
+    }
+    if let Some(path) = plan_cwd {
+        roots.push(path);
+    }
+    let mut identity = serde_json::to_value(plan)?;
+    for path in &roots {
         // A pinned project may be admitted through its original path and
         // recovered through a fresh CAS checkout. Both paths realize the same
         // snapshot authority. Preserve every relative path and all other plan
-        // behavior while removing only that host-specific root spelling.
+        // behavior while removing only host-specific root spellings.
         normalize_plan_project_paths(&mut identity, path);
     }
     let mut canonical = lillux::canonical_json(&identity)?;
-    if let ProjectContext::LocalPath { path } = project_context {
+    for path in roots {
         // Some handlers intentionally carry structured JSON as a plan string
-        // (for example `params_json`). Normalize the same root spelling inside
+        // (for example params_json). Normalize the same root spelling inside
         // those strings as well; otherwise a relocated CAS checkout still
         // produces a different identity for the same relative request.
         let root = path.to_string_lossy();
@@ -5942,8 +5957,11 @@ impl PreparedItemPlan {
         resolved: &ResolvedExecutionRequest,
         protocol: &ryeos_engine::protocols::VerifiedProtocol,
     ) -> Result<ryeos_state::objects::AdmittedLaunchArtifactIdentity> {
-        let execution_plan_hash =
-            execution_plan_identity_hash(&self.plan, &resolved.plan_context.project_context)?;
+        let execution_plan_hash = execution_plan_identity_hash(
+            &self.plan,
+            &resolved.plan_context.project_context,
+            resolved.resolved_item.materialized_project_root.as_deref(),
+        )?;
         let plan_runtime = self
             .plan
             .runtime_identity
