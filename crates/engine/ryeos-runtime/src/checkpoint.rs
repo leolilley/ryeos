@@ -39,17 +39,12 @@ const LATEST_FILE: &str = "latest.json";
 /// JSON shape contract rather than a second, whitespace-dependent allowance.
 pub const MAX_CHECKPOINT_FILE_BYTES: usize = 4 * 1024 * 1024;
 
-/// Runtime JSON limits with enough inspection fuel to visit every accepted
-/// node and byte once. Shape validation is not expression evaluation, so a
-/// checkpoint near the result ceiling must not fail merely because the normal
-/// expression-evaluation fuel budget is smaller.
+/// Runtime JSON limits for checkpoint shape inspection. Result validation has
+/// an allowance derived from the byte/node ceilings independently of
+/// expression-computation fuel, so a checkpoint near the result ceiling does
+/// not fail merely because the normal expression budget is smaller.
 pub fn checkpoint_shape_limits() -> EvaluationLimits {
-    let defaults = EvaluationLimits::default();
-    let fuel = defaults
-        .max_result_bytes
-        .saturating_add(defaults.max_result_nodes)
-        .saturating_add(1);
-    EvaluationLimits { fuel, ..defaults }
+    EvaluationLimits::default()
 }
 
 /// Validate a borrowed checkpoint or checkpoint-bound envelope without

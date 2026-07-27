@@ -492,7 +492,7 @@ impl<'a> EvaluationSession<'a> {
         let source: Arc<str> = Arc::from("<assembled JSON>");
         let mut evaluator = self.evaluator(source.clone(), Some(Arc::from(field)));
         let span = SourceSpan::new(0, source.len());
-        evaluator.spend_fuel(
+        evaluator.spend_result_validation_fuel(
             nodes.saturating_add(bytes),
             span,
             "validating assembled result value",

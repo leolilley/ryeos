@@ -4947,6 +4947,47 @@ config:
     assert_eq!(gc.2["status"], "error");
 }
 
+#[tokio::test]
+async fn action_result_shape_validation_is_not_expression_fuel_limited() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: evidence
+  nodes:
+    evidence:
+      action: {item_id: "tool:test/evidence", ref_bindings: {}}
+      assign:
+        evidence: "${result.evidence}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let graph = make_graph(yaml);
+    let evidence = "x".repeat(ryeos_runtime::EvaluationLimits::default().fuel * 3 / 5);
+    let action_result = json!({
+        "evidence": evidence,
+        "duplicate_evidence": evidence,
+    });
+    let (walker, recorder) = make_recording_walker(graph, vec![action_result], None);
+
+    let result = walker
+        .execute(json!({}), Some("gr-large-action-result".to_string()))
+        .await;
+
+    assert!(
+        result.success,
+        "bounded external action results must be shape-validated without spending expression fuel: {result:?}"
+    );
+    assert_eq!(recorder.dispatch_count(), 1);
+    assert_eq!(
+        result.state["evidence"].as_str().map(str::len),
+        Some(ryeos_runtime::EvaluationLimits::default().fuel * 3 / 5)
+    );
+}
+
 #[test]
 fn warning_buffer_bounds_oversized_diagnostics_and_resets_after_take() {
     let mut warnings = WarningBuffer::default();

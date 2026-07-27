@@ -53,7 +53,12 @@ impl RuntimeValue<'_> {
 
 pub(crate) struct Budget<'a> {
     pub(crate) limits: &'a EvaluationLimits,
+    /// Computational work performed by authored expressions.
     fuel_remaining: usize,
+    /// Bounded structural inspection of produced/runtime JSON. Keeping this
+    /// separate prevents a valid result walk from consuming the expression's
+    /// compute authority while the explicit byte/node ceilings still bound it.
+    result_validation_fuel_remaining: usize,
     allocation_bytes: usize,
     traversed_elements: usize,
 }
@@ -63,6 +68,10 @@ impl<'a> Budget<'a> {
         Self {
             limits,
             fuel_remaining: limits.fuel,
+            result_validation_fuel_remaining: limits
+                .max_result_bytes
+                .saturating_add(limits.max_result_nodes)
+                .saturating_add(1),
             allocation_bytes: 0,
             traversed_elements: 0,
         }
@@ -825,7 +834,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
         if *nodes > self.budget.limits.max_result_nodes {
             return Err(self.limit_error(span, "result exceeds JSON node limit"));
         }
-        self.spend_fuel(1, span, "validating result value")?;
+        self.spend_result_validation_fuel(1, span, "validating result value")?;
         match value {
             Value::Null => self.add_result_bytes(bytes, 4, span)?,
             Value::Bool(value) => self.add_result_bytes(bytes, if *value { 4 } else { 5 }, span)?,
@@ -843,7 +852,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
                     span,
                 )?;
                 for value in values {
-                    self.traverse_element(span)?;
+                    self.traverse_result_element(span)?;
                     self.inspect_result(value, depth + 1, nodes, bytes, span)?;
                 }
             }
@@ -854,7 +863,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
                     span,
                 )?;
                 for (key, value) in values {
-                    self.traverse_element(span)?;
+                    self.traverse_result_element(span)?;
                     self.check_scalar(key, span)?;
                     self.add_result_bytes(bytes, json_string_bytes(key).saturating_add(1), span)?;
                     self.inspect_result(value, depth + 1, nodes, bytes, span)?;
@@ -875,7 +884,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
         if self.budget.limits.max_result_nodes < 1 {
             return Err(self.limit_error(span, "result exceeds JSON node limit"));
         }
-        self.spend_fuel(1, span, "validating result value")?;
+        self.spend_result_validation_fuel(1, span, "validating result value")?;
         let mut nodes = 1;
         let mut bytes = 0;
         self.add_result_bytes(
@@ -884,7 +893,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
             span,
         )?;
         for value in values {
-            self.traverse_element(span)?;
+            self.traverse_result_element(span)?;
             self.inspect_result(value, 2, &mut nodes, &mut bytes, span)?;
         }
         Ok(())
@@ -900,7 +909,7 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
         if *total > self.budget.limits.max_result_bytes {
             return Err(self.limit_error(span, "result exceeds JSON byte limit"));
         }
-        self.spend_fuel(amount, span, "validating serialized result bytes")
+        self.spend_result_validation_fuel(amount, span, "validating serialized result bytes")
     }
 
     pub(crate) fn spend_fuel(
@@ -915,6 +924,22 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
             );
         }
         self.budget.fuel_remaining -= amount;
+        Ok(())
+    }
+
+    pub(crate) fn spend_result_validation_fuel(
+        &mut self,
+        amount: usize,
+        span: SourceSpan,
+        purpose: &str,
+    ) -> Result<(), ExpressionError> {
+        if self.budget.result_validation_fuel_remaining < amount {
+            return Err(self.limit_error(
+                span,
+                format!("result validation fuel exhausted while {purpose}"),
+            ));
+        }
+        self.budget.result_validation_fuel_remaining -= amount;
         Ok(())
     }
 
@@ -945,6 +970,14 @@ impl<'context, 'budget, 'limits> Evaluator<'context, 'budget, 'limits> {
             return Err(self.limit_error(span, "container traversal element limit exceeded"));
         }
         self.spend_fuel(1, span, "traversing container element")
+    }
+
+    fn traverse_result_element(&mut self, span: SourceSpan) -> Result<(), ExpressionError> {
+        self.budget.traversed_elements += 1;
+        if self.budget.traversed_elements > self.budget.limits.max_container_elements {
+            return Err(self.limit_error(span, "container traversal element limit exceeded"));
+        }
+        Ok(())
     }
 
     pub(crate) fn check_scalar(
