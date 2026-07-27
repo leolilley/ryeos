@@ -69,10 +69,11 @@ pub enum DirectExecutableIdentity {
     CapturedContent {
         content_hash: String,
     },
-    /// The exact command spelling remains sealed in `execution_plan_hash`, but
-    /// executable authorization comes from the node's signed isolation policy
-    /// rather than a bundle/CAS content identity. This driver is not eligible
-    /// for autonomous restart recovery.
+    /// The exact command spelling remains sealed in `execution_plan_hash`
+    /// after abstracting an authoritative project's relocatable realization
+    /// root, but executable authorization comes from the node's signed
+    /// isolation policy rather than a bundle/CAS content identity. This driver
+    /// is not eligible for autonomous restart recovery.
     NodePolicy,
 }
 

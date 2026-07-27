@@ -5933,25 +5933,33 @@ impl RunningItem {
     }
 }
 
-fn normalize_plan_project_paths(value: &mut Value, project_root: &Path) {
+fn normalize_plan_project_root(value: &mut Value, project_root: &Path) {
     match value {
         Value::String(raw) => {
-            let Ok(relative) = Path::new(raw).strip_prefix(project_root) else {
+            let root = project_root.to_string_lossy();
+            if root.is_empty() || !raw.contains(root.as_ref()) {
                 return;
-            };
+            }
+            let mut segments = Vec::new();
+            let mut parts = raw.split(root.as_ref()).peekable();
+            while let Some(part) = parts.next() {
+                segments.push(Value::String(part.to_string()));
+                if parts.peek().is_some() {
+                    segments.push(json!({ "$ryeos_plan_project_root": true }));
+                }
+            }
             *value = json!({
-                "$ryeos_plan_path": "project_relative",
-                "relative": relative.to_string_lossy(),
+                "$ryeos_plan_string": segments,
             });
         }
         Value::Array(values) => {
             for value in values {
-                normalize_plan_project_paths(value, project_root);
+                normalize_plan_project_root(value, project_root);
             }
         }
         Value::Object(object) => {
             for value in object.values_mut() {
-                normalize_plan_project_paths(value, project_root);
+                normalize_plan_project_root(value, project_root);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -5963,37 +5971,25 @@ fn execution_plan_identity_hash(
     project_context: &ProjectContext,
     materialized_project_root: Option<&Path>,
 ) -> Result<String> {
-    let plan_cwd = plan.nodes.first().and_then(|node| match node {
-        ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } => spec.cwd.as_deref(),
-        ryeos_engine::contracts::PlanNode::Complete { .. } => None,
-    });
     let mut roots = Vec::new();
     if let ProjectContext::LocalPath { path } = project_context {
         roots.push(path.as_path());
     }
     if let Some(path) = materialized_project_root {
-        roots.push(path);
-    }
-    if let Some(path) = plan_cwd {
-        roots.push(path);
+        if !roots.contains(&path) {
+            roots.push(path);
+        }
     }
     let mut identity = serde_json::to_value(plan)?;
-    for path in &roots {
+    for path in roots {
         // A pinned project may be admitted through its original path and
         // recovered through a fresh CAS checkout. Both paths realize the same
         // snapshot authority. Preserve every relative path and all other plan
-        // behavior while removing only host-specific root spellings.
-        normalize_plan_project_paths(&mut identity, path);
+        // behavior while structurally abstracting only authoritative
+        // project-root spellings, including roots embedded in params_json.
+        normalize_plan_project_root(&mut identity, path);
     }
-    let mut canonical = lillux::canonical_json(&identity)?;
-    for path in roots {
-        // Some handlers intentionally carry structured JSON as a plan string
-        // (for example params_json). Normalize the same root spelling inside
-        // those strings as well; otherwise a relocated CAS checkout still
-        // produces a different identity for the same relative request.
-        let root = path.to_string_lossy();
-        canonical = canonical.replace(root.as_ref(), "$RYEOS_PROJECT_ROOT");
-    }
+    let canonical = lillux::canonical_json(&identity)?;
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
@@ -6505,31 +6501,97 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_identity_normalizes_only_the_project_realization_root() {
-        fn identity(root: &Path, script: &str) -> String {
-            let mut plan = json!({
-                "cmd": "/usr/bin/python",
-                "args": [root.join(script), "--mode", "resume"],
-                "cwd": root,
-                "env": {
-                    "RYEOS_ITEM_PATH": root.join(".ai/tools/resume/resume_test.yaml"),
-                    "UNCHANGED": "/outside/project",
-                },
-                "stdin_data": format!("{{\"project_path\":\"{}\"}}", root.display()),
-            });
-            normalize_plan_project_paths(&mut plan, root);
-            let canonical = lillux::canonical_json(&plan)
-                .unwrap()
-                .replace(root.to_string_lossy().as_ref(), "$RYEOS_PROJECT_ROOT");
-            lillux::sha256_hex(canonical.as_bytes())
+    fn plan_identity_abstracts_only_authoritative_project_realizations() {
+        fn plan(root: &Path, script: &str, literal: &str) -> ExecutionPlan {
+            let mut env = std::collections::HashMap::new();
+            env.insert(
+                "RYEOS_ITEM_PATH".to_string(),
+                root.join(".ai/tools/resume/resume_test.yaml")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            env.insert("UNCHANGED".to_string(), "/outside/project".to_string());
+            ExecutionPlan {
+                plan_id: "plan:stable".to_string(),
+                root_executor_id: "@subprocess".to_string(),
+                root_ref: "tool:resume/resume_test".to_string(),
+                item_kind: "tool".to_string(),
+                nodes: vec![
+                    ryeos_engine::contracts::PlanNode::DispatchSubprocess {
+                        id: ryeos_engine::contracts::PlanNodeId("entry".to_string()),
+                        spec: Box::new(ryeos_engine::contracts::PlanSubprocessSpec {
+                            cmd: "/usr/bin/python".to_string(),
+                            verified_command: None,
+                            args: vec![
+                                root.join(script).to_string_lossy().into_owned(),
+                                literal.to_string(),
+                            ],
+                            cwd: Some(root.to_path_buf()),
+                            env,
+                            env_sources: std::collections::HashMap::new(),
+                            stdin_data: Some(format!(
+                                "{{\"project_path\":\"{}\"}}",
+                                root.display()
+                            )),
+                            timeout_secs: 60,
+                            execution: Default::default(),
+                        }),
+                        tool_path: Some(root.join(".ai/tools/resume/resume_test.yaml")),
+                        executor_chain: vec!["tool:resume_tool/runtime".to_string()],
+                    },
+                    ryeos_engine::contracts::PlanNode::Complete {
+                        id: ryeos_engine::contracts::PlanNodeId("complete".to_string()),
+                    },
+                ],
+                entrypoint: ryeos_engine::contracts::PlanNodeId("entry".to_string()),
+                capabilities: Default::default(),
+                materialization_requirements: Vec::new(),
+                cache_key: "stable".to_string(),
+                thread_kind: Some("tool".to_string()),
+                executor_chain: vec!["tool:resume_tool/runtime".to_string()],
+                runtime_identity: None,
+                debug_raw: false,
+            }
         }
 
-        let admitted = identity(Path::new("/workspace/original"), "worker.py");
-        let recovered = identity(Path::new("/runtime/cas/checkout-123"), "worker.py");
-        let changed_program = identity(Path::new("/runtime/cas/checkout-456"), "other.py");
+        fn identity(root: &Path, script: &str, literal: &str) -> String {
+            execution_plan_identity_hash(
+                &plan(root, script, literal),
+                &ProjectContext::LocalPath {
+                    path: root.to_path_buf(),
+                },
+                Some(root),
+            )
+            .unwrap()
+        }
+
+        let admitted = identity(
+            Path::new("/workspace/original"),
+            "worker.py",
+            "$ryeos_plan_project_root",
+        );
+        let recovered = identity(
+            Path::new("/runtime/cas/checkout-123"),
+            "worker.py",
+            "$ryeos_plan_project_root",
+        );
+        let changed_program = identity(
+            Path::new("/runtime/cas/checkout-456"),
+            "other.py",
+            "$ryeos_plan_project_root",
+        );
+        let changed_literal = identity(
+            Path::new("/runtime/cas/checkout-789"),
+            "worker.py",
+            "/runtime/cas/checkout-789",
+        );
 
         assert_eq!(admitted, recovered);
         assert_ne!(admitted, changed_program);
+        assert_ne!(
+            admitted, changed_literal,
+            "a literal marker-like value must not collide with an abstracted root"
+        );
     }
 
     fn empty_test_engine() -> Arc<Engine> {
