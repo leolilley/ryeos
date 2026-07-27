@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-27T22:47:55Z:a607f143b55e4c4ee6d1dfe5826ed003d20b539611a711939eede04f5aed1af1:iXomXDd/ot/af1s88pMCXp4Z2NhZjqAj64SZSfiHuQO6GEpvqhb+jecrmXGnRqsx3O6+6OB0dYIcMJUVPR+CAg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-07-27T22:59:50Z:6b8fa308628bc8bbac954b003532b65c6ecd05ada50b1a68e8ccc68410102c33:4P9oUVyz40xtgDV3SsqERZHoOrJFCwasqb6R5M3A9o4xLXQLCz2pz4pdRuaU0oGwEP/vCpudyW5w8VI5SCheDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.0.0"
+version: "1.0.1"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -63,10 +63,10 @@ closure; it never asks project or bundle space to recreate an earlier admission.
 ## Recovery re-validation
 
 `SealedRootExecutionRequest::restore_from_admitted_capsule`
-(`crates/daemon/ryeos-app/src/thread_lifecycle.rs`) does not trust the sealed
-blob blindly. It decodes the capsule's `sealed_invocation` and cross-checks it
-against the capsule's *independently rooted* fields, failing closed on any
-divergence:
+(`crates/daemon/ryeos-app/src/thread_lifecycle/sealed_request.rs`) does not
+trust the sealed blob blindly. It decodes the capsule's `sealed_invocation` and
+cross-checks it against the capsule's *independently rooted* fields, failing
+closed on any divergence:
 
 - sealed program value == `capsule.exact_program`
 - sealed program hash == `capsule.exact_program_hash`
@@ -77,19 +77,21 @@ divergence:
 A mismatch bails with *"admitted capsule invocation contradicts its rooted
 program authority."* Only a self-consistent capsule is restored, via
 `restore_for_reconstructed_provenance`. `recover_from_execution_closure`
-(the `PreparedItemPlan` side) additionally refuses a closure whose driver/artifact
-identity does not match the recovery it was asked for, and refuses `NodePolicy`
-direct commands.
+(the `PreparedItemPlan` side in
+`crates/daemon/ryeos-app/src/thread_lifecycle/direct_execution.rs`) additionally
+refuses a closure whose driver/artifact identity does not match the recovery it
+was asked for, and refuses `NodePolicy` direct commands.
 
 ## Relocation
 
 A recovered direct plan can be **relocated** for spawn (a different working
 materialization, e.g. a fresh project root) via `relocate_admitted_direct_plan` /
-`validate_direct_plan_portability` / `relocate_project_for_spawn`. Portability is
-validated before the move, and the **project authority is not permitted to change
-during recovery** — relocation moves *where* the sealed plan runs, never *what*
-authority it runs under. Runtime parameters carry typed stdin so a relocated
-launch feeds the same inputs across the boundary.
+`validate_direct_plan_portability` / `relocate_project_for_spawn`, colocated in
+`thread_lifecycle/direct_execution.rs`. Portability is validated before the
+move, and the **project authority is not permitted to change during recovery**
+— relocation moves *where* the sealed plan runs, never *what* authority it runs
+under. Runtime parameters carry typed stdin so a relocated launch feeds the
+same inputs across the boundary.
 
 ## Relationship to the resolution cache
 
