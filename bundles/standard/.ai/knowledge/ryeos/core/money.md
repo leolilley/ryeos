@@ -49,13 +49,13 @@ with plain equality — this is what lets checkpoint resume validate
 
 ## Entry boundary
 
-Floats reach settlement from exactly one door: the settle sites'
-`UsdNanos::quantize_reported_f64_round_up`. Two figures arrive there — spend a
-**provider adapter** reported as a parsed JSON number, and spend the runtime
-**derived from configured rates** in float math. Both cross into the exact
-domain once, at that boundary — the
-float's shortest round-trip decimal is quantized at nano precision, rounding
-toward positive infinity (sub-nano residue rounds up, never truncating spend).
+Floats exist in exactly one place: where a **provider adapter** reports spend
+as a parsed JSON number. That figure crosses into the exact domain once, where
+it is first read into a cost, via `UsdNanos::quantize_reported_f64_round_up` —
+the float's shortest round-trip decimal is quantized at nano precision,
+rounding toward positive infinity (sub-nano residue rounds up, never
+truncating spend). Rate-derived spend never touches a float at all: rate ×
+tokens runs in checked `i128` nanos via `rate_per_million_mul_units_round_up`.
 Provider-reported raw decimal *text* (including exponent forms like `2.25e-5`)
 goes through `parse_reported_round_up` under the route's signed final-charge
 scale contract. Internal code must never round-trip authority money through a

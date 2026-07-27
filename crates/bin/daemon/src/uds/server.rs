@@ -2431,6 +2431,8 @@ mod tests {
             json!({"input_tokens": -1, "output_tokens": 2, "total_usd": "0.01"}),
             // Lossy JSON-number money is itself a shape violation.
             json!({"input_tokens": 1, "output_tokens": 2, "total_usd": 0.01}),
+            // Signed money never decodes.
+            json!({"input_tokens": 1, "output_tokens": 2, "total_usd": "-0.01"}),
             json!({
                 "input_tokens": 1,
                 "output_tokens": 2,

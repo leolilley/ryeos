@@ -267,9 +267,11 @@ impl PricingSource {
     }
 }
 
-/// A computed turn cost plus its pricing provenance.
+/// A computed turn cost plus its pricing provenance. Money is exact from the
+/// moment it is derived: rate math runs in checked i128 nanos, and a
+/// provider-reported float is quantized here, at its entry.
 struct CostBreakdown {
-    usd: f64,
+    usd: ryeos_runtime::envelope::UsdNanos,
     source: PricingSource,
 }
 
@@ -1435,16 +1437,32 @@ impl Runner {
                                 valid_usage.and_then(|usage| usage.complete_token_counts());
                             let (input_tok, output_tok) = token_counts.unwrap_or((0, 0));
                             let cost = if settled_spend_only {
+                                // The spend-only settlement above already
+                                // quantized this exact figure successfully.
+                                let usd = resp
+                                    .usage
+                                    .as_ref()
+                                    .and_then(|usage| usage.reported_cost_usd)
+                                    .map(|reported| {
+                                        ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(reported)
+                                            .expect("spend-only settlement quantized this figure")
+                                            .0
+                                    })
+                                    .unwrap_or(ryeos_runtime::envelope::UsdNanos::ZERO);
                                 CostBreakdown {
-                                    usd: resp
-                                        .usage
-                                        .as_ref()
-                                        .and_then(|usage| usage.reported_cost_usd)
-                                        .unwrap_or(0.0),
+                                    usd,
                                     source: PricingSource::ProviderReported,
                                 }
                             } else {
-                                self.compute_cost_for_usage(valid_usage)
+                                match self.compute_cost_for_usage(valid_usage) {
+                                    Ok(cost) => cost,
+                                    Err(error) => {
+                                        state = State::Errored {
+                                            error: format!("turn pricing failed: {error:#}"),
+                                        };
+                                        continue;
+                                    }
+                                }
                             };
                             let usd = cost.usd;
                             // §2: an operator auditing spend must be able to tell
@@ -1784,16 +1802,20 @@ impl Runner {
                                             }
                                         }
                                     } else {
-                                        let cost = self.compute_cost_for_usage(Some(usage));
-                                        if let Err(settlement_error) = self
-                                            .settle_provider_usage(
-                                                turn,
-                                                usage,
-                                                cost.usd,
-                                                turn_start.elapsed().as_millis() as u64,
-                                            )
-                                            .await
+                                        let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
+                                            Ok(cost) => {
+                                                self.settle_provider_usage(
+                                                    turn,
+                                                    usage,
+                                                    cost.usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            }
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(settlement_error) = settled {
                                             detail.push_str(&format!(
                                                 "; accounting settlement also failed: \
                                                  {settlement_error:#}"
@@ -1951,16 +1973,20 @@ impl Runner {
                                 let mut detail = protocol_error.to_string();
                                 if let Some(usage) = protocol_error.usage.as_ref() {
                                     if usage.is_valid() {
-                                        let cost = self.compute_cost_for_usage(Some(usage));
-                                        if let Err(settlement_error) = self
-                                            .settle_provider_usage(
-                                                turn,
-                                                usage,
-                                                cost.usd,
-                                                turn_start.elapsed().as_millis() as u64,
-                                            )
-                                            .await
+                                        let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
+                                            Ok(cost) => {
+                                                self.settle_provider_usage(
+                                                    turn,
+                                                    usage,
+                                                    cost.usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            }
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(settlement_error) = settled {
                                             detail.push_str(&format!(
                                                 "; accounting settlement also failed: {settlement_error:#}"
                                             ));
@@ -2980,14 +3006,9 @@ impl Runner {
         &mut self,
         turn: u32,
         usage: &crate::provider_adapter::http::TokenUsage,
-        usd: f64,
+        usd: ryeos_runtime::envelope::UsdNanos,
         elapsed_ms: u64,
     ) -> anyhow::Result<()> {
-        // Entry boundary: the provider adapter reports spend as a float; it is
-        // quantized into exact nanos exactly once, here, rounding up.
-        let usd = ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(usd)
-            .map_err(|error| anyhow::anyhow!("provider-reported spend is invalid: {error}"))?
-            .0;
         let (input_tokens, output_tokens) = usage
             .complete_token_counts()
             .ok_or_else(|| anyhow::anyhow!("provider token usage is incomplete"))?;
@@ -3457,7 +3478,7 @@ impl Runner {
             return Ok(false);
         };
         if usage.is_valid() {
-            let cost = self.compute_cost_for_usage(Some(usage));
+            let cost = self.compute_cost_for_usage(Some(usage))?;
             self.settle_provider_usage(turn, usage, cost.usd, elapsed_ms)
                 .await?;
             return Ok(true);
@@ -3554,18 +3575,22 @@ impl Runner {
         }
     }
 
-    fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> CostBreakdown {
+    fn compute_cost(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> anyhow::Result<CostBreakdown> {
         let Some(ref pricing) = self.provider_config.pricing else {
-            return CostBreakdown {
-                usd: 0.0,
+            return Ok(CostBreakdown {
+                usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                 source: PricingSource::Unpriced,
-            };
+            });
         };
         if pricing.explicitly_free {
-            return CostBreakdown {
-                usd: 0.0,
+            return Ok(CostBreakdown {
+                usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                 source: PricingSource::ExplicitlyFree,
-            };
+            });
         }
         // Distinguish a per-model entry from the provider-default fallback so
         // the caller can flag the (otherwise silent) fallback exactly once.
@@ -3574,10 +3599,10 @@ impl Runner {
         } else {
             match (pricing.input_per_million, pricing.output_per_million) {
                 (Some(i), Some(o)) if i.is_zero() && o.is_zero() => {
-                    return CostBreakdown {
-                        usd: 0.0,
+                    return Ok(CostBreakdown {
+                        usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    }
+                    })
                 }
                 (Some(i), Some(o)) => (
                     ryeos_directive_core::ModelPricing {
@@ -3587,46 +3612,51 @@ impl Runner {
                     PricingSource::ProviderDefault,
                 ),
                 _ => {
-                    return CostBreakdown {
-                        usd: 0.0,
+                    return Ok(CostBreakdown {
+                        usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    }
+                    })
                 }
             }
         };
-        // Rate-derived spend is computed in floats and enters budget
-        // authority only through the settle sites' one sanctioned
-        // `quantize_reported_f64_round_up` entry boundary — the same door
-        // provider-reported spend uses.
+        // Rate-derived spend is exact from birth: rate × tokens in checked
+        // i128 nanos, rounded toward positive infinity, never float math.
         let input_cost =
-            (input_tokens as f64 / 1_000_000.0) * rates.input_per_million.display_usd_lossy();
+            ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(rates.input_per_million, input_tokens)
+                .map_err(|error| anyhow::anyhow!("input token pricing overflowed: {error}"))?;
         let output_cost =
-            (output_tokens as f64 / 1_000_000.0) * rates.output_per_million.display_usd_lossy();
-        CostBreakdown {
-            usd: input_cost + output_cost,
+            ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(rates.output_per_million, output_tokens)
+                .map_err(|error| anyhow::anyhow!("output token pricing overflowed: {error}"))?;
+        Ok(CostBreakdown {
+            usd: input_cost
+                .checked_add(output_cost)
+                .map_err(|error| anyhow::anyhow!("turn pricing overflowed: {error}"))?,
             source,
-        }
+        })
     }
 
     fn compute_cost_for_usage(
         &self,
         usage: Option<&crate::provider_adapter::http::TokenUsage>,
-    ) -> CostBreakdown {
+    ) -> anyhow::Result<CostBreakdown> {
         let (input_tokens, output_tokens) = usage
             .and_then(|usage| usage.complete_token_counts())
             .unwrap_or((0, 0));
         if let Some(reported) = usage.and_then(|usage| usage.reported_cost_usd) {
-            if reported.is_finite() && reported >= 0.0 {
-                return CostBreakdown {
-                    usd: reported,
-                    source: if reported == 0.0
+            // The provider float quantizes into nanos here, at its entry; a
+            // non-money figure (negative, non-finite) falls through to the
+            // rate-derived path, as before.
+            if let Ok((usd, _rounded)) = ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(reported) {
+                return Ok(CostBreakdown {
+                    usd,
+                    source: if usd.is_zero()
                         && usage.is_some_and(|usage| usage.is_byok == Some(true))
                     {
                         PricingSource::ByokUntracked
                     } else {
                         PricingSource::ProviderReported
                     },
-                };
+                });
             }
         }
         self.compute_cost(input_tokens, output_tokens)
@@ -3879,8 +3909,8 @@ mod tests {
         });
 
         // Model not in the (empty) per-model table → provider-default rates.
-        let cost = runner.compute_cost(1_000_000, 500_000);
-        assert!((cost.usd - 10.5).abs() < f64::EPSILON);
+        let cost = runner.compute_cost(1_000_000, 500_000).unwrap();
+        assert_eq!(cost.usd, usd("10.5"));
         assert_eq!(cost.source, PricingSource::ProviderDefault);
 
         let usage = crate::provider_adapter::http::TokenUsage {
@@ -3889,8 +3919,8 @@ mod tests {
             reported_cost_usd: Some(7.25),
             ..Default::default()
         };
-        let reported = runner.compute_cost_for_usage(Some(&usage));
-        assert_eq!(reported.usd, 7.25);
+        let reported = runner.compute_cost_for_usage(Some(&usage)).unwrap();
+        assert_eq!(reported.usd, usd("7.25"));
         assert_eq!(reported.source, PricingSource::ProviderReported);
     }
 
@@ -4357,18 +4387,14 @@ mod tests {
             terminal_source_path: "directive:test/fixture".to_string(),
         });
 
-        // 1M input + 1M output → 0.80 + 4.00 = 4.80
-        let cost = runner.compute_cost(1_000_000, 1_000_000);
-        assert!(
-            (cost.usd - 4.80).abs() < f64::EPSILON,
-            "expected $4.80 for per-model pricing, got ${}",
-            cost.usd
-        );
+        // 1M input + 1M output → 0.80 + 4.00 = 4.80, exact in nanos
+        let cost = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert_eq!(cost.usd, usd("4.8"));
         assert_eq!(cost.source, PricingSource::PerModel);
 
         runner.model_name = "missing-paid-model".to_string();
-        let missing = runner.compute_cost(1_000_000, 1_000_000);
-        assert_eq!(missing.usd, 0.0);
+        let missing = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert!(missing.usd.is_zero());
         assert_eq!(
             missing.source,
             PricingSource::Unpriced,
@@ -4428,12 +4454,8 @@ mod tests {
         });
 
         // Falls back to provider defaults: 1M input + 1M output → 1.0 + 5.0 = 6.0
-        let cost = runner.compute_cost(1_000_000, 1_000_000);
-        assert!(
-            (cost.usd - 6.0).abs() < f64::EPSILON,
-            "expected $6.00 for provider default pricing, got ${}",
-            cost.usd
-        );
+        let cost = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert_eq!(cost.usd, usd("6"));
         assert_eq!(cost.source, PricingSource::ProviderDefault);
     }
 
@@ -4485,8 +4507,8 @@ mod tests {
 
         // No pricing configured: nonzero tokens but $0 cost, flagged Unpriced so
         // the run loop can warn that spend is untracked (not free).
-        let cost = runner.compute_cost(1_000_000, 1_000_000);
-        assert_eq!(cost.usd, 0.0);
+        let cost = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert!(cost.usd.is_zero());
         assert_eq!(cost.source, PricingSource::Unpriced);
     }
 
