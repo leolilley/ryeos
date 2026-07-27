@@ -125,22 +125,41 @@ impl TemplateContext {
 }
 
 pub fn expand_template(template: &str, ctx: &TemplateContext) -> Result<String, EngineError> {
-    let mut result = template.to_string();
-    let mut start = 0;
-    while let Some(open) = result[start..].find('{') {
-        let abs_open = start + open;
-        let Some(close) = result[abs_open..].find('}') else {
+    let mut result = String::with_capacity(template.len());
+    let mut remaining = template;
+    while let Some(open) = remaining.find('{') {
+        result.push_str(&remaining[..open]);
+        remaining = &remaining[open..];
+
+        // Runtime templates commonly embed source languages whose literal
+        // braces may spell RyeOS token names (for example a Python f-string
+        // containing `{tool_path}`). Double braces are the explicit escape
+        // contract: `{{tool_path}}` emits literal `{tool_path}` without
+        // consulting the RyeOS template context.
+        if remaining.starts_with("{{") {
+            result.push('{');
+            remaining = &remaining[2..];
+            if let Some(close) = remaining.find("}}") {
+                result.push_str(&remaining[..close]);
+                result.push('}');
+                remaining = &remaining[close + 2..];
+            }
+            continue;
+        }
+
+        let Some(close) = remaining.find('}') else {
+            result.push_str(remaining);
+            remaining = "";
             break;
         };
-        let abs_close = abs_open + close;
-        let token = &result[abs_open + 1..abs_close];
+        let token = &remaining[1..close];
 
         // Empty braces are common literal syntax in embedded scripts
         // (for example Python's `'{}'` JSON fallback). They are not a
-        // RyeOS template reference, so leave them untouched and keep
-        // scanning after the closing brace.
+        // RyeOS template reference.
         if token.is_empty() {
-            start = abs_close + 1;
+            result.push_str("{}");
+            remaining = &remaining[close + 1..];
             continue;
         }
 
@@ -170,9 +189,10 @@ pub fn expand_template(template: &str, ctx: &TemplateContext) -> Result<String, 
                 }
             },
         };
-        result.replace_range(abs_open..abs_close + 1, &value);
-        start = abs_open + value.len();
+        result.push_str(&value);
+        remaining = &remaining[close + 1..];
     }
+    result.push_str(remaining);
     Ok(result)
 }
 
@@ -789,5 +809,13 @@ mod tests {
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
         let got = expand_template("print('{}') {tool_path}", &ctx).unwrap();
         assert_eq!(got, "print('{}') /tool.yaml");
+    }
+
+    #[test]
+    fn template_double_braces_escape_a_known_token() {
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let got =
+            expand_template("f'logical path: {{tool_path}}' {tool_path}", &ctx).unwrap();
+        assert_eq!(got, "f'logical path: {tool_path}' /tool.yaml");
     }
 }

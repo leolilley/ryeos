@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T11:36:37Z:e462f743d0fbb73a1d2ca5b4ff389712ba18852f8606bc211e879cdfdb30d85f:j+gD1QfXFnvUYRy4z7aiaQn8u/dUtfteM/QNe9OZjenQZh1R9qTEDu6pcIxQGe26pBaIilbXHl5clgwEOkgYBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T08:49:08Z:c4ee540ad3aa504d67cef0490c0bc8a1fdf513078a605610b2286b311a226d7f:/Tk4rnhfmYcI+QMNco+wMIGQRkstOBr9G/jIagZ1dAqbl3pSKnsWLUyCCi4SKwXn+PTyqpr3oMBbKxDwiopuDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -63,11 +63,11 @@ config:
               tools_root = candidate
               break
       if tools_root is None:
-          raise SystemExit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
+          raise SystemExit(f"RyeOS Python runtime: tool is not under .ai/tools: {{tool_path}}")
 
       rel = tool_path.relative_to(tools_root)
       if len(rel.parts) < 2:
-          raise SystemExit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
+          raise SystemExit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {{tool_path}}")
 
       bundle_tool_root = tools_root / rel.parts[0]
       tool_dir = tool_path.parent
