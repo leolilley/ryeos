@@ -235,9 +235,17 @@ fn bind_argv_with_command_and_contract_and_overlay(
         }
     }
 
+    let positional_detail = if command.sensitive_fields.is_empty() {
+        format!("{positionals:?}")
+    } else {
+        format!(
+            "[{} positional argument(s); sensitive values redacted]",
+            positionals.len()
+        )
+    };
     Err(format!(
-        "positional arguments {:?} do not match any positional form for alias {:?}",
-        positionals, command.tokens
+        "positional arguments {positional_detail} do not match any positional form for alias {:?}",
+        command.tokens
     ))
 }
 
@@ -1167,6 +1175,45 @@ mod tests {
         assert!(result.unwrap_err().contains("--params must be valid JSON"));
     }
 
+    #[test]
+    fn sensitive_command_form_errors_never_reproduce_argument_values() {
+        let mut command = test_command(
+            vec!["vault".into(), "set".into()],
+            vec![crate::CommandArgumentForm {
+                slots: vec![
+                    crate::CommandArgumentSlot {
+                        field: "name".into(),
+                        matcher: crate::CommandArgumentKind::String,
+                    },
+                    crate::CommandArgumentSlot {
+                        field: "value".into(),
+                        matcher: crate::CommandArgumentKind::String,
+                    },
+                ],
+            }],
+        );
+        command.sensitive_fields = vec!["value".into()];
+
+        for argv in [
+            vec![
+                "DEEPSEEK_API_KEY".into(),
+                "super-secret".into(),
+                "extra".into(),
+            ],
+            vec![
+                "--name".into(),
+                "DEEPSEEK_API_KEY".into(),
+                "--value".into(),
+                "super-secret".into(),
+                "extra".into(),
+            ],
+        ] {
+            let error = bind_argv_with_command(&argv, Some(&command)).unwrap_err();
+            assert!(error.contains("sensitive values redacted"));
+            assert!(!error.contains("super-secret"));
+        }
+    }
+
     fn test_command(
         tokens: Vec<String>,
         forms: Vec<crate::CommandArgumentForm>,
@@ -1179,6 +1226,7 @@ mod tests {
             help: None,
             arguments: Vec::new(),
             forms,
+            sensitive_fields: Vec::new(),
             defaults: Default::default(),
             parameter_binding: None,
             control_flags: Vec::new(),

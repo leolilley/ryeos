@@ -5491,6 +5491,8 @@ pub fn admit_verified_root_execution(
         usage_subject,
         usage_subject_asserted_by,
         None,
+        None,
+        0,
     )
 }
 
@@ -5510,6 +5512,8 @@ pub fn admit_verified_root_execution_with_timings(
     usage_subject: Option<UsageSubject>,
     usage_subject_asserted_by: Option<String>,
     launch_timings: Option<&crate::launch_stage_timings::LaunchStageTimings>,
+    resolution_cache: Option<&crate::resolution_cache::ResolutionCache>,
+    resolution_generation: u64,
 ) -> Result<RootExecutionAdmission> {
     admit_verified_root_execution_inner(
         engine,
@@ -5523,6 +5527,8 @@ pub fn admit_verified_root_execution_with_timings(
         usage_subject,
         usage_subject_asserted_by,
         launch_timings,
+        resolution_cache,
+        resolution_generation,
     )
 }
 
@@ -5539,6 +5545,8 @@ fn admit_verified_root_execution_inner(
     usage_subject: Option<UsageSubject>,
     usage_subject_asserted_by: Option<String>,
     launch_timings: Option<&crate::launch_stage_timings::LaunchStageTimings>,
+    resolution_cache: Option<&crate::resolution_cache::ResolutionCache>,
+    resolution_generation: u64,
 ) -> Result<RootExecutionAdmission> {
     project_binding.validate_for(engine, execution_plan_context)?;
     let non_project_context_mismatches =
@@ -5581,22 +5589,78 @@ fn admit_verified_root_execution_inner(
             .as_deref(),
         ProjectContext::None => None,
     };
-    let roots = engine.resolution_roots(project_root.map(Path::to_path_buf));
-    let compose_timer = launch_timings
-        .map(|timings| timings.nested("preflight_admission", "root_admission_resolution_compose"));
+    // Admission-time resolution cache. The resolve/compose pipeline's inputs at
+    // a fixed generation + project root are: kinds/composers/bundle-roots (the
+    // engine generation), the PROJECT parser overlay (`.ai/parsers/`), and the
+    // PROJECT trust keys (`.ai/trust-keys/`). The generation covers only the
+    // first — a project overlay or trust-key edit changes the parse and the
+    // effective trust class without any bundle change. `effective_request_snapshot`
+    // computes an identity for each of the three; folding all three into the key
+    // means such an edit is a MISS, never a stale serve. That snapshot ran
+    // unconditionally before the cache and is cheap relative to the
+    // parse/verify/compose it keys — so it stays unconditional, and only the
+    // pipeline is cached. The reverify above is NEVER cached.
+    let project_root_owned = project_root.map(Path::to_path_buf);
     let request_snapshot = engine
         .effective_request_snapshot(project_root)
         .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
-    let resolution = ryeos_engine::resolution::run_resolution_pipeline(
-        &verified_subject.resolved.canonical_ref,
-        &engine.kinds,
-        &request_snapshot.parser_dispatcher,
-        &roots,
-        &request_snapshot.trust_store,
-        &engine.composers,
-    )
-    .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
-    drop(compose_timer);
+    let cache_key = resolution_cache.map(|_| crate::resolution_cache::ResolutionCacheKey {
+        generation: resolution_generation,
+        canonical_ref: verified_subject.resolved.canonical_ref.to_string(),
+        project_root: project_root_owned.clone(),
+        // Unit-separated so no identity can inject a false match. Covers the
+        // engine/bundle generation (coherent with the resolving engine),
+        // the project parser overlay, and the effective trust store.
+        plan_context_identity: [
+            request_snapshot.request_engine_generation_identity.as_str(),
+            request_snapshot.registry_fingerprint.as_str(),
+            request_snapshot.effective_trust_identity.as_str(),
+        ]
+        .join("\u{1f}"),
+    });
+    let cached = match (resolution_cache, cache_key.as_ref()) {
+        (Some(cache), Some(key)) => {
+            let lookup_timer = launch_timings.map(|timings| {
+                timings.nested(
+                    "preflight_admission",
+                    "root_admission_resolution_cache_lookup",
+                )
+            });
+            let (output, outcome) = cache.get(key);
+            drop(lookup_timer);
+            tracing::debug!(
+                target: "ryeos::admission",
+                item = %verified_subject.resolved.canonical_ref,
+                cache_outcome = ?outcome,
+                "resolution cache lookup"
+            );
+            output
+        }
+        _ => None,
+    };
+    let resolution = if let Some(resolution) = cached {
+        resolution
+    } else {
+        let compose_timer = launch_timings.map(|timings| {
+            timings.nested("preflight_admission", "root_admission_resolution_compose")
+        });
+        let roots = engine.resolution_roots(project_root_owned.clone());
+        let (output, probed_absent) =
+            ryeos_engine::resolution::run_resolution_pipeline_with_probes(
+                &verified_subject.resolved.canonical_ref,
+                &engine.kinds,
+                &request_snapshot.parser_dispatcher,
+                &roots,
+                &request_snapshot.trust_store,
+                &engine.composers,
+            )
+            .map_err(|error| anyhow!("history-policy composition failed: {error}"))?;
+        drop(compose_timer);
+        if let (Some(cache), Some(key)) = (resolution_cache, cache_key) {
+            cache.insert(key, output.clone(), probed_absent);
+        }
+        output
+    };
     let history = ryeos_engine::history_policy::resolve_launch_policy_from_resolution(
         &verified_subject,
         &resolution,
@@ -6688,7 +6752,7 @@ mod tests {
     fn managed_envelope_is_native_success_with_outputs_and_cost() {
         let result = json!("directive_return");
         let outputs = json!({ "answer": 42 });
-        let raw_cost = json!({ "input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012 });
+        let raw_cost = json!({ "input_tokens": 120, "output_tokens": 45, "total_usd": "0.0012" });
         let env = managed_runtime_envelope(
             "T-child",
             "completed",

@@ -595,6 +595,7 @@ mod tests {
                 "preflight_blocking_queue_wait",
                 "preflight_blocking_work",
                 "root_admission_reverify",
+                "root_admission_resolution_cache_lookup",
                 "root_admission_resolution_compose",
                 "ref_binding_resolution",
                 "launch_augmentation",

@@ -856,6 +856,9 @@ struct PreflightCommandRecord {
     forms: Vec<PreflightCommandForm>,
     #[allow(dead_code)]
     #[serde(default)]
+    sensitive_fields: Vec<String>,
+    #[allow(dead_code)]
+    #[serde(default)]
     defaults: std::collections::BTreeMap<String, serde_json::Value>,
     #[allow(dead_code)]
     #[serde(default)]
@@ -1561,6 +1564,30 @@ mod tests {
         let record: PreflightCommandRecord =
             serde_json::from_value(value).expect("preflight command record parse");
         assert_eq!(record.control_flags.len(), 8, "expected 8 control flags");
+    }
+
+    /// Command preflight must recognize the same sensitive-field metadata as
+    /// the runtime command model, or valid vault commands break `ryeos init`.
+    #[test]
+    fn preflight_accepts_vault_sensitive_fields() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .find(|p| {
+                p.join("bundles/core/.ai/node/commands/vault-set.yaml")
+                    .is_file()
+            })
+            .expect("workspace root")
+            .join("bundles/core/.ai/node/commands/vault-set.yaml");
+        let raw = std::fs::read_to_string(&path).expect("read vault-set.yaml");
+        let body: String = raw
+            .lines()
+            .filter(|l| !l.starts_with("# ryeos:signed:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let value: serde_json::Value = serde_yaml::from_str(&body).expect("yaml parse");
+        let record: PreflightCommandRecord =
+            serde_json::from_value(value).expect("preflight command record parse");
+        assert_eq!(record.sensitive_fields, ["value"]);
     }
 
     struct BundleLayout {

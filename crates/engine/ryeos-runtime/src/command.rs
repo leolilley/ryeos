@@ -26,6 +26,10 @@ pub struct CommandDef {
     pub arguments: Vec<CommandArgumentDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forms: Vec<CommandArgumentForm>,
+    /// Argument fields whose values must never be reproduced in CLI display
+    /// labels. Binding and dispatch still receive the original values.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_fields: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub defaults: BTreeMap<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,6 +420,8 @@ pub enum CommandRegistryError {
         execute: String,
         detail: String,
     },
+    #[error("command '{name}' marks undeclared argument field '{field}' as sensitive")]
+    UndeclaredSensitiveField { name: String, field: String },
     #[error("no command matches tokens {tokens:?}")]
     NoMatch { tokens: Vec<String> },
 }
@@ -517,6 +523,23 @@ fn validate_command(
     }
     for alias in &record.aliases {
         validate_tokens(&record.name, &alias.tokens)?;
+    }
+    for field in &record.sensitive_fields {
+        let declared = record
+            .arguments
+            .iter()
+            .any(|argument| argument.name == *field)
+            || record
+                .forms
+                .iter()
+                .flat_map(|form| form.slots.iter())
+                .any(|slot| slot.field == *field);
+        if !declared {
+            return Err(CommandRegistryError::UndeclaredSensitiveField {
+                name: record.name.clone(),
+                field: field.clone(),
+            });
+        }
     }
     validate_registration_caps(record, policy)?;
     Ok(())
@@ -648,6 +671,7 @@ mod tests {
             help: None,
             arguments: Vec::new(),
             forms: Vec::new(),
+            sensitive_fields: Vec::new(),
             defaults: Default::default(),
             parameter_binding: None,
             control_flags: Vec::new(),
@@ -720,6 +744,18 @@ mod tests {
             .push("ryeos.register.command.root.execute".into());
 
         CommandRegistry::from_records(&[record], &policy()).unwrap();
+    }
+
+    #[test]
+    fn sensitive_fields_must_name_declared_arguments() {
+        let mut record = command("vault-set", &["vault", "set"]);
+        record.sensitive_fields.push("value".into());
+
+        let err = CommandRegistry::from_records(&[record], &policy()).unwrap_err();
+        assert!(matches!(
+            err,
+            CommandRegistryError::UndeclaredSensitiveField { field, .. } if field == "value"
+        ));
     }
 
     #[test]

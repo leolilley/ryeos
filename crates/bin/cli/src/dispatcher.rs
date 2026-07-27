@@ -311,8 +311,15 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         && resolved.project_path.is_some()
         && resolved.state_root.is_none()
         && want_stream;
+    let command_label = resolved.command_label.clone();
     if stream_live {
-        return post_to_daemon_streaming(&app_root, &body, &cli.rest, presenter).await;
+        return post_to_daemon_streaming(
+            &app_root,
+            &body,
+            std::slice::from_ref(&command_label),
+            presenter,
+        )
+        .await;
     }
 
     let route_path = if resolved.async_launch {
@@ -320,7 +327,6 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     } else {
         "/execute"
     };
-    let command_label = cli.rest.join(" ");
     let rendered_lines = presenter.loading(&command_label, route_path)?;
     let result = post_to_daemon(&app_root, route_path, &body).await?;
 
@@ -342,7 +348,12 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
         .await;
     }
 
-    print_result(result, &mut presenter, &cli.rest, rendered_lines)?;
+    print_result(
+        result,
+        &mut presenter,
+        std::slice::from_ref(&command_label),
+        rendered_lines,
+    )?;
     Ok(())
 }
 
@@ -594,6 +605,9 @@ struct CliResolvedExecute {
     /// `--state-root <path>`: runtime state-root override → request
     /// `state_root` (absolutized against the CLI's cwd).
     state_root: Option<PathBuf>,
+    /// Human-facing command text with descriptor-declared sensitive fields
+    /// replaced before it reaches any presenter.
+    command_label: String,
 }
 
 /// Outcome of stripping a command's declared control flags from its tail.
@@ -652,6 +666,7 @@ fn resolve_command_for_daemon_with_commands(
     let matched = registry.resolve(&tokens).map_err(|error| CliError::Local {
         detail: error.to_string(),
     })?;
+    let command_label = command_display_label(&tokens, &matched);
     let mut tail = tokens[matched.consumed..].to_vec();
     let direct_execute = matches!(
         matched.command.dispatch,
@@ -714,7 +729,79 @@ fn resolve_command_for_daemon_with_commands(
         call_method: control.call_method,
         call_args: control.call_args,
         state_root,
+        command_label,
     })
+}
+
+fn command_display_label(tokens: &[String], matched: &ryeos_runtime::MatchedCommand) -> String {
+    if matched.command.sensitive_fields.is_empty() {
+        return tokens.join(" ");
+    }
+
+    let sensitive = matched
+        .command
+        .sensitive_fields
+        .iter()
+        .map(|field| field.replace('-', "_"))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut tail = tokens[matched.consumed..].to_vec();
+    let mut supplied_fields = std::collections::BTreeSet::new();
+    let mut positional_indices = Vec::new();
+    let mut index = 0;
+    while index < tail.len() {
+        let token = tail[index].clone();
+        let Some(flag) = token.strip_prefix("--") else {
+            positional_indices.push(index);
+            index += 1;
+            continue;
+        };
+        if flag.is_empty() {
+            index += 1;
+            continue;
+        }
+        if let Some((name, _)) = flag.split_once('=') {
+            let field = name.replace('-', "_");
+            supplied_fields.insert(field.clone());
+            if sensitive.contains(&field) {
+                tail[index] = format!("--{name}=<redacted>");
+            }
+            index += 1;
+            continue;
+        }
+
+        let field = flag.replace('-', "_");
+        supplied_fields.insert(field.clone());
+        if index + 1 < tail.len() && !tail[index + 1].starts_with("--") {
+            if sensitive.contains(&field) {
+                tail[index + 1] = "<redacted>".to_string();
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+
+    if let Some(form) = matched.command.forms.iter().find(|form| {
+        form.slots
+            .iter()
+            .filter(|slot| !supplied_fields.contains(&slot.field.replace('-', "_")))
+            .count()
+            == positional_indices.len()
+    }) {
+        let positional_slots = form
+            .slots
+            .iter()
+            .filter(|slot| !supplied_fields.contains(&slot.field.replace('-', "_")));
+        for (slot, index) in positional_slots.zip(positional_indices) {
+            if sensitive.contains(&slot.field.replace('-', "_")) {
+                tail[index] = "<redacted>".to_string();
+            }
+        }
+    }
+
+    let mut display = tokens[..matched.consumed].to_vec();
+    display.extend(tail);
+    display.join(" ")
 }
 
 /// Strip a command's DECLARED control flags (`command.control_flags`) from the
@@ -1582,6 +1669,7 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
+            sensitive_fields: Vec::new(),
             defaults: Default::default(),
             parameter_binding: None,
             control_flags: Vec::new(),
@@ -1756,6 +1844,7 @@ mod tests {
                     matcher: ryeos_runtime::CommandArgumentKind::CanonicalRef,
                 }],
             }],
+            sensitive_fields: Vec::new(),
             defaults: Default::default(),
             parameter_binding: Some(ryeos_runtime::CommandParameterBinding {
                 mode: ryeos_runtime::CommandParameterBindingMode::TailObject,
@@ -2439,6 +2528,46 @@ mod tests {
             )
             .unwrap();
             assert_eq!(resolved.parameters["thread_id"], serde_json::json!("T-abc"));
+        }
+    }
+
+    #[test]
+    fn command_display_redacts_descriptor_declared_sensitive_values() {
+        let mut command = command(
+            &["vault", "set"],
+            vec![vec![
+                ("name", CommandArgumentKind::String),
+                ("value", CommandArgumentKind::String),
+            ]],
+            CommandProjectResolution::None,
+        );
+        command.sensitive_fields = vec!["value".into()];
+        let registry = CommandRegistry::from_records(
+            std::slice::from_ref(&command),
+            &ryeos_runtime::CommandRegistrationPolicy::default(),
+        )
+        .unwrap();
+
+        for (argv, expected) in [
+            (
+                s(&["vault", "set", "DEEPSEEK_API_KEY", "super-secret"]),
+                "vault set DEEPSEEK_API_KEY <redacted>",
+            ),
+            (
+                s(&[
+                    "vault",
+                    "set",
+                    "--name",
+                    "DEEPSEEK_API_KEY",
+                    "--value=super-secret",
+                ]),
+                "vault set --name DEEPSEEK_API_KEY --value=<redacted>",
+            ),
+        ] {
+            let matched = registry.resolve(&argv).unwrap();
+            let display = command_display_label(&argv, &matched);
+            assert_eq!(display, expected);
+            assert!(!display.contains("super-secret"));
         }
     }
 }

@@ -17,7 +17,7 @@ mod common;
 use std::path::Path;
 
 use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
-use common::mock_provider::{MockProvider, MockResponse};
+use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use common::DaemonHarness;
 use lillux::crypto::SigningKey;
 
@@ -1065,6 +1065,442 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
         mock.captured_headers().await.len(),
         requests_before_denial,
         "a denied reservation must never contact the provider"
+    );
+
+    drop(project);
+    drop(mock);
+}
+
+
+// -- Concurrent intra-turn tool dispatch (execution.tool_concurrency) --
+//
+// One assistant message carries THREE tool calls to three sleepy tools.
+// Each tool stamps `<idx>.start` / `<idx>.end` marker files (unix seconds,
+// fractional) into a test-owned directory, sleeping in between. Overlap is
+// proven from the markers, not wall-clock guesses: if the LATEST start
+// precedes the EARLIEST end, all three executions coexisted. The captured
+// second provider request proves the fold: tool-result messages appear in
+// CALL order (c1, c2, c3) even though completion order differs by sleep.
+
+fn plant_sleepy_marker_tool(
+    root: &Path,
+    name: &str,
+    index: u32,
+    sleep_secs: f64,
+    marker_dir: &Path,
+) -> anyhow::Result<()> {
+    let dir = root.join(".ai/tools");
+    std::fs::create_dir_all(&dir)?;
+    let body = format!(
+        r#"#!/usr/bin/env python3
+# ryeos-tool:
+#   category: ""
+#   version: "1.0.0"
+#   executor_id: "tool:ryeos/core/runtimes/python/script"
+#   description: "concurrency e2e marker tool {index}"
+
+import json
+import time
+
+MARKER_DIR = {marker_dir:?}
+INDEX = {index}
+
+with open(MARKER_DIR + "/" + str(INDEX) + ".start", "w") as f:
+    f.write(repr(time.time()))
+time.sleep({sleep_secs})
+with open(MARKER_DIR + "/" + str(INDEX) + ".end", "w") as f:
+    f.write(repr(time.time()))
+print(json.dumps({{"idx": INDEX}}))
+"#,
+        index = index,
+        sleep_secs = sleep_secs,
+        marker_dir = marker_dir.to_str().expect("utf-8 marker dir"),
+    );
+    std::fs::write(dir.join(format!("{name}.py")), body)?;
+    Ok(())
+}
+
+fn read_marker(marker_dir: &Path, index: u32, which: &str) -> f64 {
+    let path = marker_dir.join(format!("{index}.{which}"));
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("marker {} missing: {e}", path.display()))
+        .trim()
+        .parse::<f64>()
+        .expect("marker holds a float timestamp")
+}
+
+/// Plant a signed project execution config (`ryeos-runtime/execution`),
+/// deep-merged over the bundle defaults at directive boot.
+fn plant_execution_config(root: &Path, signer: &SigningKey, body: &str) -> anyhow::Result<()> {
+    let dir = root.join(".ai/config/ryeos-runtime");
+    std::fs::create_dir_all(&dir)?;
+    let signed = lillux::signature::sign_content(body, signer, "#", None);
+    std::fs::write(dir.join("execution.yaml"), signed)?;
+    Ok(())
+}
+
+fn sleepy_batch_response() -> MockResponse {
+    MockResponse::ToolCalls(vec![
+        MockToolCallSpec {
+            id: "c1".into(),
+            name: "sleep1".into(),
+            arguments: "{}".into(),
+        },
+        MockToolCallSpec {
+            id: "c2".into(),
+            name: "sleep2".into(),
+            arguments: "{}".into(),
+        },
+        MockToolCallSpec {
+            id: "c3".into(),
+            name: "sleep3".into(),
+            arguments: "{}".into(),
+        },
+    ])
+}
+
+/// The tool-role messages of the SECOND captured provider request, as
+/// `(tool_call_id, content)` in transcript order.
+async fn second_request_tool_messages(mock: &MockProvider) -> Vec<(String, String)> {
+    let bodies = mock.captured_bodies().await;
+    assert!(
+        bodies.len() >= 2,
+        "expected at least two provider requests (tool turn + final), got {}",
+        bodies.len()
+    );
+    bodies[1]
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .expect("second request carries messages")
+        .iter()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("tool"))
+        .map(|m| {
+            (
+                m.get("tool_call_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                m.get("content").map(|c| c.to_string()).unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+async fn run_sleepy_batch(
+    mock_url: &str,
+    marker_dir: &Path,
+    sleeps: [f64; 3],
+    execution_config: Option<&str>,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let mock_url = mock_url.to_string();
+    let plant =
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            register_mock_provider_bundle(state_path, &mock_url, fixture)
+        };
+    let (mut h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon with mock + standard bundle");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("plant routing");
+    for (i, sleep) in sleeps.iter().enumerate() {
+        plant_sleepy_marker_tool(
+            project.path(),
+            &format!("sleep{}", i + 1),
+            (i + 1) as u32,
+            *sleep,
+            marker_dir,
+        )
+        .expect("plant sleepy tool");
+    }
+    if let Some(body) = execution_config {
+        plant_execution_config(project.path(), &fixture.publisher, body)
+            .expect("plant execution config");
+    }
+    plant_directive(
+        project.path(),
+        "test/sleepy_batch",
+        "Call all three sleep tools, then summarise.",
+        &["ryeos.execute.tool.*"],
+        &fixture.publisher,
+    )
+    .expect("plant directive");
+
+    let post_fut = h.post_execute(
+        "directive:test/sleepy_batch",
+        project.path().to_str().unwrap(),
+        serde_json::json!({"name": "World"}),
+    );
+    let out = match tokio::time::timeout(std::time::Duration::from_secs(60), post_fut).await {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => panic!("post /execute failed: {e}"),
+        Err(_) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!("sleepy-batch POST timed out\n--- daemon stderr ---\n{stderr}");
+        }
+    };
+    drop(project);
+    out
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
+    let mock = MockProvider::start(vec![
+        sleepy_batch_response(),
+        MockResponse::Text("batch done".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let markers = tempfile::tempdir().expect("marker tempdir");
+
+    // Sleeps chosen so COMPLETION order (2, 3, 1) differs from CALL order,
+    // and so three-way overlap is provable: admission stagger is far below
+    // the shortest sleep.
+    let (status, body) = run_sleepy_batch(&mock_url, markers.path(), [1.6, 0.6, 1.1], None).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    let result = body.get("result").cloned().expect("result envelope");
+    assert_eq!(
+        result.get("success").and_then(|v| v.as_bool()),
+        Some(true),
+        "body={body:#}"
+    );
+
+    // Overlap: the latest start precedes the earliest end, so all three tool
+    // executions coexisted. Serial dispatch cannot produce this shape (each
+    // start would follow the previous end by construction).
+    let starts: Vec<f64> = (1..=3)
+        .map(|i| read_marker(markers.path(), i, "start"))
+        .collect();
+    let ends: Vec<f64> = (1..=3)
+        .map(|i| read_marker(markers.path(), i, "end"))
+        .collect();
+    let latest_start = starts.iter().cloned().fold(f64::MIN, f64::max);
+    let earliest_end = ends.iter().cloned().fold(f64::MAX, f64::min);
+    assert!(
+        latest_start < earliest_end,
+        "expected three-way overlap; starts={starts:?} ends={ends:?}"
+    );
+
+    // Fold order: transcript tool messages are in CALL order despite the
+    // completion order being (2, 3, 1).
+    let tool_messages = second_request_tool_messages(&mock).await;
+    let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["c1", "c2", "c3"], "messages={tool_messages:?}");
+
+    drop(mock);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_tool_batch_at_width_one_is_strictly_serial() {
+    let mock = MockProvider::start(vec![
+        sleepy_batch_response(),
+        MockResponse::Text("serial done".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let markers = tempfile::tempdir().expect("marker tempdir");
+
+    let (status, body) = run_sleepy_batch(
+        &mock_url,
+        markers.path(),
+        [0.8, 0.8, 0.8],
+        Some("tool_concurrency: 1\n"),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.get("result")
+            .and_then(|r| r.get("success"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "body={body:#}"
+    );
+
+    // Strict serial: every next call starts only after the previous ended.
+    for i in 1..3u32 {
+        let prev_end = read_marker(markers.path(), i, "end");
+        let next_start = read_marker(markers.path(), i + 1, "start");
+        assert!(
+            next_start >= prev_end,
+            "width 1 must serialize: call {} started at {next_start} before call {i} ended at {prev_end}",
+            i + 1
+        );
+    }
+    let tool_messages = second_request_tool_messages(&mock).await;
+    let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["c1", "c2", "c3"]);
+
+    drop(mock);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
+    // Call 2 targets a tool that does not exist: resolution fails, the call
+    // settles an error envelope IN SLOT 2, and the real calls on either side
+    // still execute — every call id yields exactly one result.
+    let mock = MockProvider::start(vec![
+        MockResponse::ToolCalls(vec![
+            MockToolCallSpec {
+                id: "c1".into(),
+                name: "sleep1".into(),
+                arguments: "{}".into(),
+            },
+            MockToolCallSpec {
+                id: "c2".into(),
+                name: "no_such_tool".into(),
+                arguments: "{}".into(),
+            },
+            MockToolCallSpec {
+                id: "c3".into(),
+                name: "sleep3".into(),
+                arguments: "{}".into(),
+            },
+        ]),
+        MockResponse::Text("mixed done".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+    let markers = tempfile::tempdir().expect("marker tempdir");
+
+    let (status, body) = run_sleepy_batch(&mock_url, markers.path(), [0.3, 0.0, 0.3], None).await;
+    assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+    assert_eq!(
+        body.get("result")
+            .and_then(|r| r.get("success"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "a refused batch member must not sink the run; body={body:#}"
+    );
+
+    // The real tools on both sides of the refusal executed.
+    let _ = read_marker(markers.path(), 1, "end");
+    let _ = read_marker(markers.path(), 3, "end");
+
+    let tool_messages = second_request_tool_messages(&mock).await;
+    let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(ids, ["c1", "c2", "c3"], "messages={tool_messages:?}");
+    assert!(
+        tool_messages[1].1.contains("error"),
+        "slot 2 must carry the resolve-failure envelope; messages={tool_messages:?}"
+    );
+
+    drop(mock);
+}
+
+
+// -- Admission resolution cache: transparent hits + recompute on edit --
+//
+// Exercises the wired cache through a real daemon: a second launch of the
+// same directive is served from the resolution cache, and a launch after the
+// directive's bytes change (re-signed) must recompute rather than serve the
+// stale entry. Both are asserted only by end-to-end success — the cache's
+// validation logic (changed dep, appearing shadow, generation identity) is
+// proven by the unit suite in ryeos_app::resolution_cache.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn e2e_resolution_cache_transparent_across_hit_and_edit() {
+    let mock = MockProvider::start(vec![
+        MockResponse::Text("launch one".into()),
+        MockResponse::Text("launch two".into()),
+        MockResponse::Text("launch three".into()),
+    ])
+    .await;
+    let mock_url = mock.base_url.clone();
+
+    let plant = {
+        let mock_url = mock_url.clone();
+        move |state_path: &Path, _user: &Path, fixture: &FastFixture| -> anyhow::Result<()> {
+            register_standard_bundle(state_path, fixture)?;
+            register_mock_provider_bundle(state_path, &mock_url, fixture)
+        }
+    };
+    let (h, fixture) = DaemonHarness::start_fast_with(plant, |cmd| {
+        cmd.env(
+            "RUST_LOG",
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "info,ryeos_directive_runtime=debug,ryeosd=debug".into()),
+        );
+    })
+    .await
+    .expect("start daemon");
+
+    let project = tempfile::tempdir().expect("project tempdir");
+    plant_model_routing(project.path(), &fixture.publisher).expect("routing");
+    let project_path = project.path().to_str().unwrap().to_string();
+
+    async fn launch_ok(h: &common::DaemonHarness, project_path: &str) {
+        let (status, body) = h
+            .post_execute(
+                "directive:test/cache_probe",
+                project_path,
+                serde_json::json!({"name": "World"}),
+            )
+            .await
+            .expect("post /execute");
+        assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
+        assert_eq!(
+            body.get("result")
+                .and_then(|r| r.get("success"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "body={body:#}"
+        );
+    }
+
+    // v1, launched twice: launch 2 is served from the resolution cache.
+    plant_directive(
+        project.path(),
+        "test/cache_probe",
+        "Summarise the ratings briefing. MARKER_ALPHA_ONE.",
+        &["ryeos.execute.tool.*"],
+        &fixture.publisher,
+    )
+    .expect("plant directive v1");
+    launch_ok(&h, &project_path).await;
+    launch_ok(&h, &project_path).await;
+
+    // Edit the directive body → new signed bytes → new content digest. The
+    // cached entry's project positive dependency no longer matches, so the
+    // third launch must recompute rather than serve the stale resolution.
+    plant_directive(
+        project.path(),
+        "test/cache_probe",
+        "Summarise the ratings briefing. MARKER_BETA_TWO.",
+        &["ryeos.execute.tool.*"],
+        &fixture.publisher,
+    )
+    .expect("plant directive v2");
+    launch_ok(&h, &project_path).await;
+
+    // The directive body flows into each provider request. Assert what the
+    // provider actually saw: a stale-serve on launch 3 would carry the v1
+    // marker, and a never-populated cache is caught indirectly by the same
+    // three-request shape. This is the assertion that makes the test catch a
+    // wrong-serve, not merely a crash.
+    let bodies = mock.captured_bodies().await;
+    assert_eq!(bodies.len(), 3, "three launches → three provider requests");
+    assert!(
+        bodies[0].to_string().contains("MARKER_ALPHA_ONE"),
+        "launch 1 saw v1"
+    );
+    assert!(
+        bodies[1].to_string().contains("MARKER_ALPHA_ONE"),
+        "launch 2 (cache hit) saw the same v1 body"
+    );
+    assert!(
+        bodies[2].to_string().contains("MARKER_BETA_TWO"),
+        "launch 3 must recompute after the edit and carry v2, not the stale v1"
+    );
+    assert!(
+        !bodies[2].to_string().contains("MARKER_ALPHA_ONE"),
+        "launch 3 must NOT serve the stale v1 resolution"
     );
 
     drop(project);

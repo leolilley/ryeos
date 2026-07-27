@@ -1326,6 +1326,7 @@ mod tests {
             isolation: std::sync::Arc::new(ryeos_engine::isolation::IsolationRuntime::default()),
             state_store,
             engine,
+            resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
             engine_cache: ryeos_app::engine_cache::EngineCache::new(
                 ryeos_app::engine_cache::EngineCacheConfig::default(),
             ),

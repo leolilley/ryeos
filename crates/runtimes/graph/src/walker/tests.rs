@@ -959,7 +959,7 @@ config:
         "status": "completed",
         "result": "directive_return",
         "outputs": {"recommendations": ["a", "b"]},
-        "cost": {"input_tokens": 100, "output_tokens": 20, "total_usd": 0.001},
+        "cost": {"input_tokens": 100, "output_tokens": 20, "total_usd": "0.001"},
         "warnings": []
     });
     let w = make_walker(graph, vec![envelope]);
@@ -1006,7 +1006,7 @@ config:
       node_type: return
 "#;
     let graph = make_graph(yaml);
-    let env = |i: u64, o: u64, usd: f64| {
+    let env = |i: u64, o: u64, usd: &str| {
         json!({
             "success": true,
             "status": "completed",
@@ -1016,14 +1016,17 @@ config:
             "warnings": []
         })
     };
-    let w = make_walker(graph, vec![env(10, 5, 0.001), env(30, 7, 0.002)]);
+    let w = make_walker(graph, vec![env(10, 5, "0.001"), env(30, 7, "0.002")]);
     let result = w.execute(json!({}), None).await;
 
     assert!(result.success, "got: {:?}", result.error);
     let cost = result.cost.expect("aggregate cost");
     assert_eq!(cost.input_tokens, 40);
     assert_eq!(cost.output_tokens, 12);
-    assert!((cost.total_usd - 0.003).abs() < 1e-9);
+    assert_eq!(
+        cost.total_usd,
+        ryeos_runtime::envelope::UsdNanos::parse_canonical("0.003").unwrap()
+    );
     assert_eq!(result.node_costs.len(), 2);
 }
 
@@ -1066,7 +1069,7 @@ config:
 
 // ── Phase C: failure-path / foreach / reset / cache cost accounting ──
 
-fn native_envelope(success: bool, outputs: Value, cost: Option<(u64, u64, f64)>) -> Value {
+fn native_envelope(success: bool, outputs: Value, cost: Option<(u64, u64, &str)>) -> Value {
     let mut env = json!({
         "success": success,
         "status": if success { "completed" } else { "failed" },
@@ -1098,7 +1101,7 @@ config:
     done:
       node_type: return
 "#;
-    let env = native_envelope(false, Value::Null, Some((80, 0, 0.0008)));
+    let env = native_envelope(false, Value::Null, Some((80, 0, "0.0008")));
     let w = make_walker(make_graph(yaml), vec![env]);
     let result = w.execute(json!({}), None).await;
 
@@ -1130,7 +1133,7 @@ config:
     let env = native_envelope(
         true,
         json!({"recommendations": ["a"]}),
-        Some((50, 10, 0.0005)),
+        Some((50, 10, "0.0005")),
     );
     let w = make_walker(make_graph(yaml), vec![env]);
     let result = w.execute(json!({}), None).await;
@@ -1158,7 +1161,7 @@ config:
     done:
       node_type: return
 "#;
-    let env = native_envelope(false, Value::Null, Some((30, 0, 0.0003)));
+    let env = native_envelope(false, Value::Null, Some((30, 0, "0.0003")));
     let w = make_walker(make_graph(yaml), vec![env]);
     let result = w.execute(json!({}), None).await;
 
@@ -1190,7 +1193,7 @@ config:
     done:
       node_type: return
 "#;
-    let env = native_envelope(true, json!({"ok": true}), Some((100, 20, 0.001)));
+    let env = native_envelope(true, json!({"ok": true}), Some((100, 20, "0.001")));
     let (w, recorder) = make_recording_walker(make_graph(yaml), vec![env], None);
     let result = w.execute(json!({}), None).await;
 
@@ -1222,8 +1225,8 @@ config:
 "#;
     // iter 1 succeeds (cost 10), iter 2 fails (cost 5) → aggregate 15.
     let results = vec![
-        native_envelope(true, json!({"ok": true}), Some((10, 0, 0.001))),
-        native_envelope(false, Value::Null, Some((5, 0, 0.0005))),
+        native_envelope(true, json!({"ok": true}), Some((10, 0, "0.001"))),
+        native_envelope(false, Value::Null, Some((5, 0, "0.0005"))),
     ];
     let w = make_walker(make_graph(yaml), results);
     let result = w
@@ -1263,8 +1266,8 @@ config:
       node_type: return
 "#;
     let results = vec![
-        native_envelope(true, json!({"ok": true}), Some((10, 0, 0.001))),
-        native_envelope(false, Value::Null, Some((5, 0, 0.0005))),
+        native_envelope(true, json!({"ok": true}), Some((10, 0, "0.001"))),
+        native_envelope(false, Value::Null, Some((5, 0, "0.0005"))),
     ];
     let w = make_walker(make_graph(yaml), results);
     let result = w
@@ -1293,8 +1296,8 @@ config:
       node_type: return
 "#;
     let results = vec![
-        native_envelope(true, json!({"ok": true}), Some((10, 0, 0.001))),
-        native_envelope(false, Value::Null, Some((5, 0, 0.0005))),
+        native_envelope(true, json!({"ok": true}), Some((10, 0, "0.001"))),
+        native_envelope(false, Value::Null, Some((5, 0, "0.0005"))),
     ];
     let w = make_walker(make_graph(yaml), results);
     let result = w
@@ -1316,7 +1319,7 @@ fn invalid_native_cost_envelope() -> Value {
         "cost": {
             "input_tokens": i64::MAX as u64 + 1,
             "output_tokens": 0,
-            "total_usd": 0.0
+            "total_usd": "0.0"
         }
     })
 }
@@ -1424,8 +1427,8 @@ config:
       node_type: return
 "#;
     let results = vec![
-        native_envelope(true, json!({"ok": true}), Some((100, 20, 0.001))),
-        native_envelope(true, json!({"ok": true}), Some((100, 20, 0.001))),
+        native_envelope(true, json!({"ok": true}), Some((100, 20, "0.001"))),
+        native_envelope(true, json!({"ok": true}), Some((100, 20, "0.001"))),
     ];
     let w = make_walker(make_graph(yaml), results);
     let r1 = w.execute(json!({}), None).await;
@@ -1462,7 +1465,7 @@ config:
     let env = native_envelope(
         true,
         json!({"recommendations": ["a", "b"]}),
-        Some((100, 20, 0.001)),
+        Some((100, 20, "0.001")),
     );
     let w1 = make_walker(make_graph(yaml), vec![env]);
     let r1 = w1.execute(json!({}), None).await;
@@ -1472,7 +1475,7 @@ config:
     let second = native_envelope(
         true,
         json!({"recommendations": ["c", "d"]}),
-        Some((100, 20, 0.001)),
+        Some((100, 20, "0.001")),
     );
     let w2 = make_walker(make_graph(yaml), vec![second]);
     let r2 = w2.execute(json!({}), None).await;
@@ -2988,7 +2991,7 @@ async fn graph_completed_hook_cost_is_accounted_and_attributed() {
         "cost": {
             "input_tokens": 4,
             "output_tokens": 6,
-            "total_usd": 0.25
+            "total_usd": "0.25"
         }
     });
     let (w, _rec) = make_recording_walker(graph, vec![hook_result], None);
@@ -3042,7 +3045,7 @@ async fn failed_hook_cost_is_retained_while_failure_remains_a_warning() {
         "cost": {
             "input_tokens": 7,
             "output_tokens": 2,
-            "total_usd": 0.5
+            "total_usd": "0.5"
         }
     });
     let (w, _rec) = make_recording_walker(graph, vec![fail], None);
@@ -3074,7 +3077,7 @@ async fn malformed_hook_cost_fails_terminal_accounting() {
         "cost": {
             "input_tokens": i64::MAX as u64 + 1,
             "output_tokens": 0,
-            "total_usd": 0.0
+            "total_usd": "0.0"
         }
     });
     let (walker, _recorder) = make_recording_walker(graph, vec![malformed], None);
@@ -3116,7 +3119,7 @@ config:
             "cost": {
                 "input_tokens": input_tokens,
                 "output_tokens": 0,
-                "total_usd": 0.0
+                "total_usd": "0.0"
             }
         })
     };
@@ -3166,7 +3169,7 @@ config:
             "cost": {
                 "input_tokens": input_tokens,
                 "output_tokens": 0,
-                "total_usd": 0.0
+                "total_usd": "0.0"
             }
         })
     };
@@ -3216,7 +3219,7 @@ config:
         "total": {
             "input_tokens": 2,
             "output_tokens": 3,
-            "total_usd": 0.1,
+            "total_usd": "0.1",
             "basis": "rollup"
         },
         "nodes": [],
@@ -3226,7 +3229,7 @@ config:
             "cost": {
                 "input_tokens": 2,
                 "output_tokens": 3,
-                "total_usd": 0.1
+                "total_usd": "0.1"
             }
         }]
     });
@@ -3589,7 +3592,7 @@ async fn follow_resume_success_accounts_cost() {
     let graph = make_graph(FOLLOW_YAML);
     let mut envelope = follow_terminal_envelope(RuntimeResultStatus::Completed, json!("child_ok"));
     envelope["outputs"] = json!({"x": 1});
-    envelope["cost"] = json!({"input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012});
+    envelope["cost"] = json!({"input_tokens": 120, "output_tokens": 45, "total_usd": "0.0012"});
     let params = follow_resume_params(&graph, Some(envelope));
     let (w, rec) = make_recording_walker(graph, vec![], None);
     let result = w.execute(params, Some("gr-resume".to_string())).await;
@@ -3616,7 +3619,7 @@ async fn follow_resume_failure_routes_on_error() {
         RuntimeResultStatus::Failed,
         json!({"error": "model refused"}),
     );
-    envelope["cost"] = json!({"input_tokens": 80, "output_tokens": 0, "total_usd": 0.0008});
+    envelope["cost"] = json!({"input_tokens": 80, "output_tokens": 0, "total_usd": "0.0008"});
     let params = follow_resume_params(&graph, Some(envelope));
     let (w, rec) = make_recording_walker(graph, vec![], None);
     let result = w.execute(params, Some("gr-resume".to_string())).await;
@@ -4150,7 +4153,7 @@ async fn follow_fanout_error_redirect_rolls_back_collected_candidate() {
                 "result": {"ok": 1},
                 "outputs": null,
                 "warnings": [],
-                "cost": {"input_tokens":3,"output_tokens":1,"total_usd":0.1},
+                "cost": {"input_tokens":3,"output_tokens":1,"total_usd": "0.1"},
             },
             {
                 "success": false,
@@ -4159,7 +4162,7 @@ async fn follow_fanout_error_redirect_rolls_back_collected_candidate() {
                 "result": {"error":"boom"},
                 "outputs": null,
                 "warnings": [],
-                "cost": {"input_tokens":4,"output_tokens":0,"total_usd":0.2},
+                "cost": {"input_tokens":4,"output_tokens":0,"total_usd": "0.2"},
             },
         ]
     });
@@ -4942,6 +4945,58 @@ config:
         .find(|(_, et, _, _)| et == "graph_completed")
         .unwrap();
     assert_eq!(gc.2["status"], "error");
+}
+
+#[tokio::test]
+async fn action_result_shape_validation_is_not_expression_fuel_limited() {
+    let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: evidence
+  nodes:
+    evidence:
+      action: {item_id: "tool:test/evidence", ref_bindings: {}}
+      assign:
+        evidence: "${result.evidence}"
+        duplicate_evidence: "${result.duplicate_evidence}"
+      next:
+        type: unconditional
+        to: forward
+    forward:
+      action:
+        item_id: "tool:test/forward"
+        ref_bindings: {}
+        params:
+          evidence: "${state.evidence}"
+          exploration: "${state.duplicate_evidence}"
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+    let graph = make_graph(yaml);
+    let evidence = "x".repeat(ryeos_runtime::EvaluationLimits::default().fuel * 3 / 5);
+    let action_result = json!({
+        "evidence": evidence,
+        "duplicate_evidence": evidence,
+    });
+    let (walker, recorder) = make_recording_walker(graph, vec![action_result, json!({})], None);
+
+    let result = walker
+        .execute(json!({}), Some("gr-large-action-result".to_string()))
+        .await;
+
+    assert!(
+        result.success,
+        "bounded external action results must be shape-validated without spending expression fuel: {result:?}"
+    );
+    assert_eq!(recorder.dispatch_count(), 2);
+    assert_eq!(
+        result.state["evidence"].as_str().map(str::len),
+        Some(ryeos_runtime::EvaluationLimits::default().fuel * 3 / 5)
+    );
 }
 
 #[test]

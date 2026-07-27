@@ -704,14 +704,31 @@ fn container_allocation_is_rejected_before_budget_commit() {
 }
 
 #[test]
-fn serialized_result_bytes_consume_fuel() {
+fn serialized_result_validation_does_not_consume_expression_fuel() {
     let context = json!({});
     let limits = EvaluationLimits {
         fuel: 4,
         ..EvaluationLimits::default()
     };
-    let error = evaluate(&expression("'x'"), &context, &limits).unwrap_err();
-    assert_eq!(error.phase(), ErrorPhase::Limit);
+    assert_eq!(
+        evaluate(&expression("'x'"), &context, &limits).unwrap(),
+        json!("x")
+    );
+}
+
+#[test]
+fn selected_value_materialization_does_not_consume_expression_fuel() {
+    let context = json!({"state": "x".repeat(32)});
+    let limits = EvaluationLimits {
+        // One AST node plus the five-byte root lookup. The selected value copy
+        // is bounded by materialization/allocation authority instead.
+        fuel: 6,
+        ..EvaluationLimits::default()
+    };
+    assert_eq!(
+        evaluate(&expression("state"), &context, &limits).unwrap(),
+        context["state"]
+    );
 }
 
 #[test]

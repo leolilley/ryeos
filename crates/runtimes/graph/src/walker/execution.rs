@@ -443,7 +443,7 @@ impl Walker {
                     cost,
                     child_thread_id,
                 } = success;
-                if let Err(error) = validate_runtime_value(&val, "graph action result") {
+                if let Err(error) = validate_runtime_shape(&val, "graph action result") {
                     return StepOutcome::IntegrityFailed(IntegrityFailedOutcome {
                         item_id: Some(dispatched_item_id.clone()),
                         error: format!(

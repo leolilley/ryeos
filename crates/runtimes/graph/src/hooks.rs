@@ -131,14 +131,17 @@ mod tests {
             "cost": {
                 "input_tokens": 3,
                 "output_tokens": 5,
-                "total_usd": 0.25
+                "total_usd": "0.25"
             }
         }))
         .unwrap();
         let cost = output.cost.unwrap();
         assert_eq!(cost.input_tokens, 3);
         assert_eq!(cost.output_tokens, 5);
-        assert_eq!(cost.total_usd, 0.25);
+        assert_eq!(
+            cost.total_usd,
+            ryeos_runtime::envelope::UsdNanos::parse_canonical("0.25").unwrap()
+        );
     }
 
     #[test]
@@ -152,7 +155,7 @@ mod tests {
             "cost": {
                 "input_tokens": 7,
                 "output_tokens": 11,
-                "total_usd": 0.5
+                "total_usd": "0.5"
             },
         });
         let output = normalize_hook_dispatch_result(env).unwrap();

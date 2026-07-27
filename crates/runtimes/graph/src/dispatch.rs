@@ -650,7 +650,7 @@ pub(crate) fn classify_follow_fanout_envelope(
     let mut aggregate_cost = RuntimeCost {
         input_tokens: 0,
         output_tokens: 0,
-        total_usd: 0.0,
+        total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
         basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
     };
     let mut classified = Vec::with_capacity(items.len());
@@ -1838,25 +1838,30 @@ mod tests {
             "status": "completed",
             "result": "directive_return",
             "outputs": {"x": 1},
-            "cost": {"input_tokens": 120, "output_tokens": 45, "total_usd": 0.0012},
+            "cost": {"input_tokens": 120, "output_tokens": 45, "total_usd": "0.0012"},
             "warnings": []
         });
         let success = expect_action_success(classify_envelope(envelope));
         let cost = success.cost.expect("cost should be parsed");
         assert_eq!(cost.input_tokens, 120);
         assert_eq!(cost.output_tokens, 45);
-        assert!((cost.total_usd - 0.0012).abs() < f64::EPSILON);
+        assert_eq!(
+            cost.total_usd,
+            ryeos_runtime::envelope::UsdNanos::parse_canonical("0.0012").unwrap()
+        );
     }
 
     #[test]
     fn classify_native_runtime_rejects_malformed_or_invalid_cost() {
         for cost in [
-            json!({"input_tokens": 1, "total_usd": 0.01}),
-            json!({"input_tokens": 1, "output_tokens": 2, "total_usd": -0.01}),
+            json!({"input_tokens": 1, "total_usd": "0.01"}),
+            // Lossy JSON-number money is rejected at decode.
+            json!({"input_tokens": 1, "output_tokens": 2, "total_usd": 0.01}),
+            json!({"input_tokens": 1, "output_tokens": 2, "total_usd": "-0.01"}),
             json!({
                 "input_tokens": 1,
                 "output_tokens": 2,
-                "total_usd": 0.01,
+                "total_usd": "0.01",
                 "basis": "estimated",
             }),
         ] {
@@ -1935,7 +1940,7 @@ mod tests {
             "status": "failed",
             "result": {"error": "model refused"},
             "outputs": null,
-            "cost": {"input_tokens": 80, "output_tokens": 0, "total_usd": 0.0008},
+            "cost": {"input_tokens": 80, "output_tokens": 0, "total_usd": "0.0008"},
             "warnings": []
         });
         let failure = expect_action_failure(classify_envelope(envelope));
@@ -2133,7 +2138,7 @@ mod tests {
             "cost": {
                 "input_tokens": i64::MAX as u64 + 1,
                 "output_tokens": 0,
-                "total_usd": 0.0
+                "total_usd": "0"
             }
         })));
 
@@ -2242,11 +2247,11 @@ mod tests {
         envelope["cost"] = json!({
             "input_tokens": 1,
             "output_tokens": 2,
-            "total_usd": -0.01,
+            "total_usd": "-0.01",
         });
 
         let error = classify_follow_envelope(envelope).unwrap_err();
-        assert!(error.contains("must be non-negative"), "{error}");
+        assert!(error.contains("not canonical"), "{error}");
     }
 
     #[test]

@@ -9,7 +9,7 @@
 pub use ryeos_engine::launch_envelope_types::{
     EnvelopeAccountingScope, EnvelopeCallback, EnvelopePolicy, EnvelopeRequest, EnvelopeRoots,
     HardLimits, ItemDescriptor, LaunchEnvelope, LaunchEnvelopeBuilder, RuntimeCost,
-    RuntimeCostError, RuntimeResult, RuntimeResultStatus, COST_BASIS_ROLLUP,
+    RuntimeCostError, RuntimeResult, RuntimeResultStatus, UsdNanos, COST_BASIS_ROLLUP,
 };
 
 #[derive(serde::Deserialize)]
@@ -373,7 +373,7 @@ mod tests {
                 "result": null,
                 "outputs": null,
                 "warnings": [],
-                "cost": {"input_tokens": 1, "total_usd": 0.01},
+                "cost": {"input_tokens": 1, "total_usd": "0.01"},
             }),
         ] {
             assert!(!envelope_succeeded(&malformed));

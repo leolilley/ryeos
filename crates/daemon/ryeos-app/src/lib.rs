@@ -41,6 +41,7 @@ pub mod projection_health;
 pub mod projection_repair;
 pub mod prospective_admission;
 pub mod recovery_execution_gate;
+pub mod resolution_cache;
 pub mod route_diagnostics;
 pub mod route_raw;
 pub mod runtime_db;

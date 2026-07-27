@@ -329,12 +329,7 @@ fn validate_managed_terminal_envelope(
 }
 
 fn validate_final_cost_for_settlement(cost: &ryeos_engine::contracts::FinalCost) -> Result<()> {
-    if !cost.spend.is_finite() {
-        bail!("final cost spend must be finite");
-    }
-    if cost.spend < 0.0 {
-        bail!("final cost spend must be non-negative");
-    }
+    // `spend` is `UsdNanos`: finite and non-negative by construction.
     if cost.input_tokens > i64::MAX as u64 {
         bail!("final cost input_tokens exceeds the settlement storage maximum");
     }
@@ -365,7 +360,7 @@ fn terminal_facets(
             "cost.output_tokens".to_string(),
             cost.output_tokens.to_string(),
         );
-        facets.insert("cost.spend".to_string(), cost.spend.to_string());
+        facets.insert("cost.spend".to_string(), cost.spend.to_canonical_string());
         if let Some(provider) = cost.provider.as_ref() {
             facets.insert("cost.provider".to_string(), provider.clone());
         }
@@ -410,7 +405,7 @@ fn follow_envelope_limit_reservation() -> Value {
     let maximum_cost = json!({
         "input_tokens": i64::MAX as u64,
         "output_tokens": i64::MAX as u64,
-        "total_usd": f64::MAX,
+        "total_usd": ryeos_engine::launch_envelope_types::UsdNanos::MAX.to_canonical_string(),
         "basis": ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP,
     });
     let maximum_thread_id = format!("T-{}", "x".repeat(126));
@@ -422,7 +417,7 @@ struct ValidatedFinalCost {
     completed_turns: u32,
     input_tokens: u64,
     output_tokens: u64,
-    spend_usd: f64,
+    spend_usd: ryeos_engine::launch_envelope_types::UsdNanos,
 }
 
 fn validate_final_cost(cost: &ryeos_engine::contracts::FinalCost) -> Result<ValidatedFinalCost> {
@@ -10084,22 +10079,16 @@ mod tests {
             turns: 0,
             input_tokens: 1,
             output_tokens: 2,
-            spend: 0.01,
+            spend: ryeos_engine::launch_envelope_types::UsdNanos::parse_canonical("0.01").unwrap(),
             provider: None,
             basis: None,
             metadata: None,
         };
         assert!(validate_final_cost_for_settlement(&valid).is_ok());
 
+        // Negative and non-finite spend are unrepresentable in `UsdNanos`;
+        // the numeric-wire rejection is proven by the FinalCost contract test.
         for invalid in [
-            ryeos_engine::contracts::FinalCost {
-                spend: -0.01,
-                ..valid.clone()
-            },
-            ryeos_engine::contracts::FinalCost {
-                spend: f64::NAN,
-                ..valid.clone()
-            },
             ryeos_engine::contracts::FinalCost {
                 input_tokens: i64::MAX as u64 + 1,
                 ..valid.clone()
@@ -10179,7 +10168,7 @@ mod tests {
             "cost": {
                 "input_tokens": 11,
                 "output_tokens": 7,
-                "total_usd": 0.03,
+                "total_usd": "0.03",
             },
         });
 

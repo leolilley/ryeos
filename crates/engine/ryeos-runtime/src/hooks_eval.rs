@@ -162,7 +162,7 @@ pub async fn run_hooks(
             let aggregate = aggregate_cost.get_or_insert_with(|| RuntimeCost {
                 input_tokens: 0,
                 output_tokens: 0,
-                total_usd: 0.0,
+                total_usd: crate::envelope::UsdNanos::ZERO,
                 basis: Some(COST_BASIS_ROLLUP.to_string()),
             });
             if let Err(error) = aggregate.checked_accumulate(&cost) {
@@ -421,7 +421,7 @@ mod tests {
                     cost: Some(RuntimeCost {
                         input_tokens: 2,
                         output_tokens: 3,
-                        total_usd: 0.25,
+                        total_usd: crate::envelope::UsdNanos::parse_canonical("0.25").unwrap(),
                         basis: None,
                     }),
                     failure: None,
@@ -440,7 +440,10 @@ mod tests {
         let cost = result.cost.unwrap();
         assert_eq!(cost.input_tokens, 4);
         assert_eq!(cost.output_tokens, 6);
-        assert_eq!(cost.total_usd, 0.5);
+        assert_eq!(
+            cost.total_usd,
+            crate::envelope::UsdNanos::parse_canonical("0.5").unwrap()
+        );
     }
 
     #[tokio::test]
@@ -533,7 +536,7 @@ mod tests {
             &json!({
                 "event": {
                     "messages": [{"role": "assistant", "content": "hi"}],
-                    "usage": {"input_tokens": 1, "output_tokens": 2, "total_usd": 0.0}
+                    "usage": {"input_tokens": 1, "output_tokens": 2, "total_usd": "0"}
                 }
             }),
             &hooks,
@@ -731,7 +734,7 @@ mod tests {
                     cost: Some(RuntimeCost {
                         input_tokens,
                         output_tokens: 0,
-                        total_usd: 0.0,
+                        total_usd: crate::envelope::UsdNanos::ZERO,
                         basis: None,
                     }),
                     failure: None,

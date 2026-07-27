@@ -2898,6 +2898,19 @@ pub struct ShadowedCandidate {
     pub path: PathBuf,
 }
 
+/// A candidate path probed and found ABSENT at a precedence at least as high
+/// as the resolution winner — i.e. a NEGATIVE dependency of the outcome. If
+/// any of these paths later becomes present, resolution would select a
+/// different (higher-precedence) winner. Recorded so a resolution cache can
+/// prove an outcome is still current (re-probe: still absent) without
+/// recomputing the pipeline. Absences strictly below the winner are omitted:
+/// they cannot change the winner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbedAbsence {
+    pub space: ItemSpace,
+    pub path: PathBuf,
+}
+
 /// Result of successful item resolution.
 #[derive(Debug, Clone)]
 pub struct ResolvedItem {
@@ -3077,7 +3090,10 @@ pub struct FinalCost {
     pub turns: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub spend: f64,
+    /// Exact fixed-point USD (canonical decimal string on the wire); a JSON
+    /// number is rejected at the contract boundary, matching
+    /// `RuntimeCost::total_usd`.
+    pub spend: ryeos_accounting::UsdNanos,
     #[serde(default)]
     pub provider: Option<String>,
     /// Mirrors `RuntimeCost::basis`: `None` = spend this thread itself
@@ -3101,7 +3117,7 @@ mod final_cost_tests {
             "turns": 1,
             "input_tokens": 2,
             "output_tokens": 3,
-            "spend": 0.01,
+            "spend": "0.01",
         });
         assert!(serde_json::from_value::<FinalCost>(valid.clone()).is_ok());
 
@@ -3110,6 +3126,10 @@ mod final_cost_tests {
             ("input_tokens", json!(-1)),
             ("output_tokens", json!(-1)),
             ("turns", json!(u64::from(u32::MAX) + 1)),
+            // Money must be the canonical decimal string, never a lossy
+            // JSON number and never signed.
+            ("spend", json!(0.01)),
+            ("spend", json!("-0.01")),
         ] {
             let mut invalid = valid.clone();
             invalid[field] = value;

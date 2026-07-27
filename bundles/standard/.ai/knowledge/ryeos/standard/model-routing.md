@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-24T07:09:33Z:b774fad294cabbb4a95e4172c1b78c7fb035af7d05f66f63cd4f93c0b1cd7e03:aTPZ9D0lxztmQRMxzJOXbMjGIuuGL9hTcb/6bLOZMsJ/YSXq9bhcPeGRik8XtjQVnxV5i71bIhrs0kwNPlwCAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T01:32:34Z:48320a322b593d61459cd5329c7d88aba43afce80467eb3bfbe157f1296b02d1:xP4i20KLYNLhZNcycsa9TITdg1wqDZ+UyCsXZHwznn+4FhrGHkdxFwt1xIEbGmFgh8v96SdKcLd0Vl80KCwdDw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 tags: [models, providers, routing, tiers, llm]
@@ -73,6 +73,10 @@ Direct Anthropic Messages API access. Uses `x-api-key` auth,
 Direct OpenAI Chat Completions access. Uses `Bearer` token auth,
 standard `chat/completions` endpoint.
 
+### DeepSeek (`config:ryeos-runtime/model-providers/deepseek`)
+Direct DeepSeek Chat Completions access. Uses `DEEPSEEK_API_KEY` Bearer auth
+with the current `deepseek-v4-pro` and `deepseek-v4-flash` model ids.
+
 ### Z.AI (`config:ryeos-runtime/model-providers/zai`)
 Direct Z.AI Chat Completions access through the general API endpoint. Uses
 `ZAI_API_KEY` Bearer auth and native GLM model ids such as `glm-5.2`.
@@ -134,6 +138,7 @@ Each provider reads its API key from an environment variable:
 |-------------|-----------------------|
 | Zen         | `ZEN_API_KEY`         |
 | Anthropic   | `ANTHROPIC_API_KEY`   |
+| DeepSeek    | `DEEPSEEK_API_KEY`    |
 | OpenAI      | `OPENAI_API_KEY`      |
 | OpenRouter  | `OPENROUTER_API_KEY`  |
 | Z.AI        | `ZAI_API_KEY`         |

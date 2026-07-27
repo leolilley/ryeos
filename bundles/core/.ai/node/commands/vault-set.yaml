@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-18T03:52:40Z:7faaa00fe93da271ad474242575987af02951bd5bff9b915282cdf0f6dfa6a82:coE2SMoWwjQew/mjiniZrs32/W4cPCXPDO4+MH6uvSzRHskiFlUByv83tauG+kF4VXnpsZcpSdRly1H34/ZvBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T01:32:16Z:b4db1c98a94e4e6ba17ec3aa4bd369e559cd5d949ce7d930c90e9ca36d1c77a7:4FQGLP+B3yN6ul5C4+nGjdW/Itx7f7VKASsdg7FuRo6GXaFMkS1y3+794Rg534JYJtJ/Rah527KKQX5xqdExDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - vault
 - set
@@ -7,6 +7,8 @@ forms:
 - slots:
   - field: name
   - field: value
+sensitive_fields:
+- value
 dispatch:
   kind: execute_ref
   execute: service:vault/set
