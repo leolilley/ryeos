@@ -215,7 +215,7 @@ fn render_compiled_runtime_template(
 
     let context = Value::Object(roots);
     let evaluation_limits = ryeos_expression::EvaluationLimits::default();
-    let rendered = ryeos_expression::render_template(&compiled, &context, &evaluation_limits)
+    let rendered = ryeos_expression::render_template(compiled, &context, &evaluation_limits)
         .map_err(|error| EngineError::RuntimeTemplateExpression {
             reason: error.to_string(),
         })?;
