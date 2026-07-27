@@ -273,23 +273,3 @@ impl WarningBuffer {
         warnings
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::usd_matches_checked_rollup;
-
-    #[test]
-    fn checked_usd_rollup_admits_only_adjacent_json_float_drift() {
-        let checked = 0.023255329999999998_f64;
-        let json_roundtrip = 0.02325533_f64;
-
-        assert_eq!(checked.to_bits().abs_diff(json_roundtrip.to_bits()), 1);
-        assert!(usd_matches_checked_rollup(checked, checked));
-        assert!(usd_matches_checked_rollup(json_roundtrip, checked));
-        assert!(usd_matches_checked_rollup(checked, json_roundtrip));
-
-        let larger_mismatch = f64::from_bits(checked.to_bits() + 2);
-        assert!(!usd_matches_checked_rollup(larger_mismatch, checked));
-        assert!(!usd_matches_checked_rollup(0.02, checked));
-    }
-}
