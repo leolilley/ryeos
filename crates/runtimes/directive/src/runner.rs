@@ -39,6 +39,17 @@ use request_context::{initial_messages, visible_provider_tools};
 const CONTINUATION_LOG_REASON: &str = "context_window";
 
 #[derive(Debug)]
+/// Rendered model-visible tool result plus SSE emission metadata. Shared by
+/// the serial and batch dispatch paths so their emitted shapes cannot diverge.
+struct RenderedToolResult {
+    tool: String,
+    content: String,
+    raw_size: u64,
+    result_guard_truncated: bool,
+    duplicate_of: Option<String>,
+    truncated_reason_override: Option<&'static str>,
+}
+
 pub enum State {
     CheckingLimits,
     CallingProvider,
@@ -54,6 +65,12 @@ pub enum State {
     DispatchingTools {
         pending: Vec<crate::directive::ToolCall>,
         index: usize,
+    },
+    /// One assistant message's plain tool-call batch (no `directive_return`),
+    /// dispatched concurrently through a bounded window and folded back in
+    /// call order. Lifecycle-bearing batches use `DispatchingTools`.
+    DispatchingToolBatch {
+        pending: Vec<crate::directive::ToolCall>,
     },
     ProcessingToolResult {
         call_id: String,
@@ -2112,9 +2129,22 @@ impl Runner {
 
                             if has_tool_calls {
                                 if let Some(ref tool_calls) = msg.tool_calls {
-                                    State::DispatchingTools {
-                                        pending: tool_calls.clone(),
-                                        index: 0,
+                                    // Lifecycle-bearing batches (any
+                                    // `directive_return`) keep the strict
+                                    // serial path; plain batches dispatch
+                                    // through the bounded concurrent window.
+                                    if tool_calls
+                                        .iter()
+                                        .any(|tc| tc.name == "directive_return")
+                                    {
+                                        State::DispatchingTools {
+                                            pending: tool_calls.clone(),
+                                            index: 0,
+                                        }
+                                    } else {
+                                        State::DispatchingToolBatch {
+                                            pending: tool_calls.clone(),
+                                        }
                                     }
                                 } else {
                                     State::CheckingContinuation
@@ -2212,17 +2242,7 @@ impl Runner {
                     pending,
                     index,
                 } => {
-                    /// Tracks tool result metadata for SSE emission.
-                    struct ToolResult {
-                        tool: String,
-                        content: String,
-                        raw_size: u64,
-                        result_guard_truncated: bool,
-                        duplicate_of: Option<String>,
-                        truncated_reason_override: Option<&'static str>,
-                    }
-
-                    let tool_result: ToolResult = match self.dispatcher.resolve(
+                    let tool_result: RenderedToolResult = match self.dispatcher.resolve(
                         &tool_name,
                         &raw_args,
                         Some(call_id.clone()),
@@ -2271,14 +2291,7 @@ impl Runner {
                                         )
                                         .await,
                                 );
-                                ToolResult {
-                                    tool: tool_name.clone(),
-                                    raw_size: body_str.len() as u64,
-                                    content: body_str,
-                                    result_guard_truncated: false,
-                                    duplicate_of: None,
-                                    truncated_reason_override: Some("error_envelope"),
-                                }
+                                Self::rendered_error_envelope(&tool_name, body_str)
                             } else {
                                 match self
                                     .callback
@@ -2305,32 +2318,7 @@ impl Runner {
                                     .await
                                 {
                                     Ok(response) => {
-                                        // Model-visible bytes are ONLY the leaf
-                                        // dispatcher's `result` — never the
-                                        // wrapping `thread` snapshot. Without
-                                        // this, the LLM saw the whole
-                                        // {thread, result} envelope and the
-                                        // child-thread metadata leaked into
-                                        // every tool-result message.
-                                        let raw_bytes = serde_json::to_vec(&response.result)
-                                            .unwrap_or_else(|e| {
-                                                tracing::warn!(
-                                                    "failed to serialize dispatch result: {e}"
-                                                );
-                                                Vec::new()
-                                            });
-                                        let raw_size = raw_bytes.len() as u64;
-                                        let guarded = self.result_guard.process_bytes(&raw_bytes);
-                                        let content =
-                                            String::from_utf8_lossy(&guarded.bytes).to_string();
-                                        ToolResult {
-                                            tool: tool_name.clone(),
-                                            content,
-                                            raw_size,
-                                            result_guard_truncated: guarded.truncated,
-                                            duplicate_of: guarded.duplicate_of,
-                                            truncated_reason_override: None,
-                                        }
+                                        self.rendered_success(&tool_name, &response.result)
                                     }
                                     Err(e) => {
                                         let body_str = serde_json::to_string(
@@ -2339,14 +2327,7 @@ impl Runner {
                                         .unwrap_or_else(|_| {
                                             "{\"error\":\"dispatch failed\"}".to_string()
                                         });
-                                        ToolResult {
-                                            tool: tool_name.clone(),
-                                            raw_size: body_str.len() as u64,
-                                            content: body_str,
-                                            result_guard_truncated: false,
-                                            duplicate_of: None,
-                                            truncated_reason_override: Some("error_envelope"),
-                                        }
+                                        Self::rendered_error_envelope(&tool_name, body_str)
                                     }
                                 }
                             }
@@ -2354,65 +2335,14 @@ impl Runner {
                         Err(e) => {
                             let body_str = serde_json::to_string(&json!({"error": e}))
                                 .unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string());
-                            ToolResult {
-                                tool: tool_name.clone(),
-                                raw_size: body_str.len() as u64,
-                                content: body_str,
-                                result_guard_truncated: false,
-                                duplicate_of: None,
-                                truncated_reason_override: Some("error_envelope"),
-                            }
+                            Self::rendered_error_envelope(&tool_name, body_str)
                         }
                     };
 
-                    // Determine inline body and truncation flags
-                    let inline_capped = tool_result.content.len()
-                        > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
-                    let body: Option<&str>;
-                    let truncated: bool;
-                    let truncated_reason: Option<&str>;
-                    if inline_capped {
-                        body = None;
-                        truncated = true;
-                        truncated_reason = Some("size_cap_exceeded");
-                    } else if tool_result.result_guard_truncated {
-                        body = Some(&tool_result.content);
-                        truncated = true;
-                        truncated_reason = Some("result_guard");
-                    } else if let Some(reason) = tool_result.truncated_reason_override {
-                        body = Some(&tool_result.content);
-                        truncated = false;
-                        truncated_reason = Some(reason);
-                    } else {
-                        body = Some(&tool_result.content);
-                        truncated = false;
-                        truncated_reason = None;
-                    }
-                    if let Err(e) = self
-                        .callback
-                        .emit_tool_result(
-                            &call_id,
-                            &tool_result.tool,
-                            body,
-                            truncated,
-                            truncated_reason,
-                            tool_result.raw_size,
-                            tool_result.duplicate_of.as_deref(),
-                        )
-                        .await
-                    {
-                        state = State::Errored {
-                            error: format!("resume-critical callback emit_tool_result failed: {e}"),
-                        };
+                    if let Err(error) = self.settle_tool_result(call_id, tool_result).await {
+                        state = State::Errored { error };
                         continue;
                     }
-                    self.messages.push(ProviderMessage {
-                        role: "tool".to_string(),
-                        content: Some(json!(tool_result.content)),
-                        tool_calls: None,
-                        tool_call_id: Some(call_id),
-                        reasoning_content: None,
-                    });
 
                     let next_index = index + 1;
                     if next_index < pending.len() {
@@ -2431,6 +2361,262 @@ impl Runner {
                             context: json!({"turn": turn}),
                             resume_to: Box::new(State::CheckingContinuation),
                         }
+                    }
+                }
+
+                State::DispatchingToolBatch { pending } => {
+                    if self.harness.is_cancelled() {
+                        state = State::Cancelled;
+                        continue;
+                    }
+
+                    // Phase A — serial, in call order. Braid dispatch intents,
+                    // resolution, spawn accounting, and risk policy keep their
+                    // serial ordering and their `&mut` access; only the daemon
+                    // dispatch awaits overlap in phase B.
+                    enum BatchWork {
+                        /// Admitted for concurrent dispatch; taken at spawn.
+                        Dispatch(Option<Box<ryeos_runtime::callback::DispatchActionRequest>>),
+                        /// Preflight refusal: an error-envelope body that never
+                        /// passes the result guard, exactly like the serial path.
+                        Immediate(String),
+                    }
+                    let mut prepared: Vec<(String, String, BatchWork)> =
+                        Vec::with_capacity(pending.len());
+                    let mut fatal: Option<String> = None;
+                    let mut admission_cancelled = false;
+                    for tc in &pending {
+                        if self.harness.is_cancelled() {
+                            admission_cancelled = true;
+                            break;
+                        }
+                        if let Err(e) = self
+                            .callback
+                            .emit_tool_dispatch(
+                                &tc.name,
+                                tc.id.as_deref(),
+                                self.harness.effective_caps(),
+                            )
+                            .await
+                        {
+                            fatal = Some(format!(
+                                "resume-critical callback emit_tool_dispatch failed: {e}"
+                            ));
+                            break;
+                        }
+                        let call_id = tc.id.clone().unwrap_or_default();
+                        let raw_args = tc.arguments.to_string();
+                        let work = match self.dispatcher.resolve(
+                            &tc.name,
+                            &raw_args,
+                            Some(call_id.clone()),
+                        ) {
+                            Ok(dispatch_result) => {
+                                match dispatch_result.dispatch_kind {
+                                    DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
+                                        self.harness.record_spawn();
+                                    }
+                                    DispatchKind::Tool => {}
+                                }
+                                let required_cap = format!(
+                                    "ryeos.execute.tool.{}",
+                                    dispatch_result.canonical_ref
+                                );
+                                let risk = self.harness.assess(&required_cap);
+                                if risk.blocked {
+                                    tracing::warn!(
+                                        tool = %dispatch_result.canonical_ref,
+                                        call_id = ?dispatch_result.call_id,
+                                        risk_level = %risk.level,
+                                        requires_ack = risk.requires_ack,
+                                        "tool call blocked by risk policy"
+                                    );
+                                    let body_str = serde_json::to_string(&json!({
+                                        "error": format!(
+                                            "blocked by risk policy: {}",
+                                            dispatch_result.canonical_ref
+                                        )
+                                    }))
+                                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
+                                    record_callback_warning(
+                                        &mut warnings,
+                                        "tool_call_result(blocked)",
+                                        self.callback
+                                            .append_runtime_event(
+                                                RuntimeEventType::ToolCallResult,
+                                                json!({
+                                                    "tool": dispatch_result.canonical_ref,
+                                                    "call_id": dispatch_result.call_id,
+                                                    "blocked": true,
+                                                    "level": risk.level,
+                                                    "requires_ack": risk.requires_ack,
+                                                }),
+                                            )
+                                            .await,
+                                    );
+                                    BatchWork::Immediate(body_str)
+                                } else {
+                                    BatchWork::Dispatch(Some(Box::new(
+                                        ryeos_runtime::callback::DispatchActionRequest {
+                                            thread_id: self.thread_id.clone(),
+                                            project_path: self
+                                                .callback
+                                                .project_path()
+                                                .to_string(),
+                                            action: ryeos_runtime::callback::ActionPayload {
+                                                operation_id: None,
+                                                item_id: dispatch_result.canonical_ref.clone(),
+                                                ref_bindings: std::collections::BTreeMap::new(),
+                                                params: dispatch_result.arguments.clone(),
+                                                thread: "inline".to_string(),
+                                                // Directive tool-calls dispatch
+                                                // `tool:` refs at their default
+                                                // method; no method selector.
+                                                call: None,
+                                                facets: None,
+                                                launch_window: None,
+                                            },
+                                            hook_dispatch: None,
+                                        },
+                                    )))
+                                }
+                            }
+                            Err(e) => {
+                                let body_str = serde_json::to_string(&json!({ "error": e }))
+                                    .unwrap_or_else(|_| {
+                                        "{\"error\":\"resolve failed\"}".to_string()
+                                    });
+                                BatchWork::Immediate(body_str)
+                            }
+                        };
+                        prepared.push((call_id, tc.name.clone(), work));
+                    }
+                    if let Some(error) = fatal {
+                        state = State::Errored { error };
+                        continue;
+                    }
+
+                    // Phase B — bounded concurrent dispatch. Each task owns a
+                    // callback clone and its sealed request; no task touches
+                    // runner state. Cancellation stops admission; in-flight
+                    // children are joined (they are daemon-managed threads
+                    // under this thread's lineage, so a cancelled parent
+                    // settlement cascades to them).
+                    let width = self.execution.tool_concurrency.clamp(1, 16) as usize;
+                    let dispatch_indices: Vec<usize> = prepared
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, (_, _, work))| {
+                            matches!(work, BatchWork::Dispatch(_)).then_some(index)
+                        })
+                        .collect();
+                    let mut outcomes: std::collections::BTreeMap<
+                        usize,
+                        Result<
+                            ryeos_runtime::callback_contract::CallbackDispatchResponse,
+                            String,
+                        >,
+                    > = std::collections::BTreeMap::new();
+                    {
+                        let mut join = tokio::task::JoinSet::new();
+                        let mut next = 0usize;
+                        loop {
+                            while !admission_cancelled
+                                && join.len() < width
+                                && next < dispatch_indices.len()
+                            {
+                                if self.harness.is_cancelled() {
+                                    admission_cancelled = true;
+                                    break;
+                                }
+                                let index = dispatch_indices[next];
+                                next += 1;
+                                let request = match &mut prepared[index].2 {
+                                    BatchWork::Dispatch(slot) => {
+                                        slot.take().expect("dispatch slot spawns once")
+                                    }
+                                    BatchWork::Immediate(_) => unreachable!(
+                                        "dispatch_indices selects only Dispatch work"
+                                    ),
+                                };
+                                let callback = self.callback.clone();
+                                join.spawn(async move {
+                                    let result = callback
+                                        .dispatch_action(*request)
+                                        .await
+                                        .map_err(|e| format!("{e:#}"));
+                                    (index, result)
+                                });
+                            }
+                            match join.join_next().await {
+                                Some(Ok((index, result))) => {
+                                    outcomes.insert(index, result);
+                                }
+                                Some(Err(join_error)) => {
+                                    fatal = Some(format!(
+                                        "tool dispatch task failed: {join_error}"
+                                    ));
+                                    break;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                    if let Some(error) = fatal {
+                        state = State::Errored { error };
+                        continue;
+                    }
+
+                    // Phase C — fold strictly by call order. The result guard,
+                    // result events, and transcript pushes run serially here,
+                    // so dedup/truncation decisions and the provider-visible
+                    // ordering are identical to a serial run. Under a
+                    // cancellation only calls that actually dispatched fold;
+                    // unadmitted calls are dropped exactly as the serial path
+                    // drops undispatched ones.
+                    for (index, (call_id, tool_name, work)) in
+                        prepared.into_iter().enumerate()
+                    {
+                        let rendered = match work {
+                            BatchWork::Immediate(body) => {
+                                Self::rendered_error_envelope(&tool_name, body)
+                            }
+                            BatchWork::Dispatch(_) => match outcomes.remove(&index) {
+                                Some(Ok(response)) => {
+                                    self.rendered_success(&tool_name, &response.result)
+                                }
+                                Some(Err(e)) => {
+                                    let body =
+                                        serde_json::to_string(&json!({ "error": e }))
+                                            .unwrap_or_else(|_| {
+                                                "{\"error\":\"dispatch failed\"}".to_string()
+                                            });
+                                    Self::rendered_error_envelope(&tool_name, body)
+                                }
+                                None => continue,
+                            },
+                        };
+                        if let Err(error) = self.settle_tool_result(call_id, rendered).await {
+                            fatal = Some(error);
+                            break;
+                        }
+                    }
+                    if let Some(error) = fatal {
+                        state = State::Errored { error };
+                        continue;
+                    }
+                    if admission_cancelled || self.harness.is_cancelled() {
+                        state = State::Cancelled;
+                        continue;
+                    }
+                    State::FiringHooks {
+                        occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                            definition_ref: self.definition_ref.clone(),
+                            definition_hash: self.definition_hash.clone(),
+                            turn,
+                        },
+                        context: json!({"turn": turn}),
+                        resume_to: Box::new(State::CheckingContinuation),
                     }
                 }
 
@@ -2974,6 +3160,100 @@ impl Runner {
                 }
             };
         }
+    }
+
+    /// Render a successful dispatch response into the model-visible result.
+    /// Applies the cross-result guard (truncation + duplicate collapse), so it
+    /// MUST be called in call order — the guard is ordering-sensitive state.
+    fn rendered_success(
+        &mut self,
+        tool_name: &str,
+        response_result: &Value,
+    ) -> RenderedToolResult {
+        // Model-visible bytes are ONLY the leaf dispatcher's `result` — never
+        // the wrapping `thread` snapshot. Without this, the LLM saw the whole
+        // {thread, result} envelope and the child-thread metadata leaked into
+        // every tool-result message.
+        let raw_bytes = serde_json::to_vec(response_result).unwrap_or_else(|e| {
+            tracing::warn!("failed to serialize dispatch result: {e}");
+            Vec::new()
+        });
+        let raw_size = raw_bytes.len() as u64;
+        let guarded = self.result_guard.process_bytes(&raw_bytes);
+        RenderedToolResult {
+            tool: tool_name.to_string(),
+            content: String::from_utf8_lossy(&guarded.bytes).to_string(),
+            raw_size,
+            result_guard_truncated: guarded.truncated,
+            duplicate_of: guarded.duplicate_of,
+            truncated_reason_override: None,
+        }
+    }
+
+    /// Render a preflight or dispatch failure as the standard error envelope
+    /// the model sees. Error envelopes never pass the result guard.
+    fn rendered_error_envelope(tool_name: &str, body: String) -> RenderedToolResult {
+        RenderedToolResult {
+            tool: tool_name.to_string(),
+            raw_size: body.len() as u64,
+            content: body,
+            result_guard_truncated: false,
+            duplicate_of: None,
+            truncated_reason_override: Some("error_envelope"),
+        }
+    }
+
+    /// Emit the result event and append the transcript message for one settled
+    /// tool call. Shared by the serial and batch paths so truncation flags,
+    /// event shape, and message shape cannot diverge. An emission failure is
+    /// resume-critical and returned as the run-fatal error string.
+    async fn settle_tool_result(
+        &mut self,
+        call_id: String,
+        rendered: RenderedToolResult,
+    ) -> Result<(), String> {
+        let inline_capped = rendered.content.len()
+            > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
+        let body: Option<&str>;
+        let truncated: bool;
+        let truncated_reason: Option<&str>;
+        if inline_capped {
+            body = None;
+            truncated = true;
+            truncated_reason = Some("size_cap_exceeded");
+        } else if rendered.result_guard_truncated {
+            body = Some(&rendered.content);
+            truncated = true;
+            truncated_reason = Some("result_guard");
+        } else if let Some(reason) = rendered.truncated_reason_override {
+            body = Some(&rendered.content);
+            truncated = false;
+            truncated_reason = Some(reason);
+        } else {
+            body = Some(&rendered.content);
+            truncated = false;
+            truncated_reason = None;
+        }
+        self.callback
+            .emit_tool_result(
+                &call_id,
+                &rendered.tool,
+                body,
+                truncated,
+                truncated_reason,
+                rendered.raw_size,
+                rendered.duplicate_of.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
+        self.messages.push(ProviderMessage {
+            role: "tool".to_string(),
+            content: Some(json!(rendered.content)),
+            tool_calls: None,
+            tool_call_id: Some(call_id),
+            reasoning_content: None,
+        });
+        Ok(())
     }
 
     fn continuation_hook_context(&self, live_context_tokens: u64, threshold_tokens: u64) -> Value {

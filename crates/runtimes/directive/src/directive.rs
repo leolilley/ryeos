@@ -316,6 +316,13 @@ pub struct ExecutionConfig {
     pub max_provider_stream_frame_bytes: u64,
     #[serde(default)]
     pub tool_preload: bool,
+    /// Maximum tool calls from ONE assistant message dispatched concurrently.
+    /// Independent calls run through a bounded window; results fold back in
+    /// call order, so the provider transcript is identical to a serial run
+    /// while the braid records real overlap. `1` is strict serial dispatch.
+    /// Batches carrying `directive_return` always run serially. Range 1..=16.
+    #[serde(default = "default_tool_concurrency")]
+    pub tool_concurrency: u32,
     #[serde(default)]
     pub retry_on_timeout: bool,
     /// Retry a stream that dies MID-READ (chunk timeout, reset, dropped
@@ -373,6 +380,10 @@ pub enum AccountingBudgetMode {
     Hard,
 }
 
+fn default_tool_concurrency() -> u32 {
+    4
+}
+
 fn default_retries() -> u32 {
     2
 }
@@ -418,6 +429,7 @@ impl Default for ExecutionConfig {
             max_stream_output_bytes_per_turn: default_max_stream_output_bytes_per_turn(),
             max_provider_stream_frame_bytes: default_max_provider_stream_frame_bytes(),
             tool_preload: false,
+            tool_concurrency: default_tool_concurrency(),
             retry_on_timeout: false,
             retry_mid_stream: default_retry_mid_stream(),
             accounting: AttemptAccountingConfig::default(),
@@ -427,6 +439,12 @@ impl Default for ExecutionConfig {
 
 impl ExecutionConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
+        if self.tool_concurrency == 0 || self.tool_concurrency > 16 {
+            anyhow::bail!(
+                "execution.tool_concurrency must be between 1 and 16, got {}",
+                self.tool_concurrency
+            );
+        }
         // `budget_mode: hard` is structurally valid configuration; whether the
         // route is ledger-eligible (Paid/ExplicitlyFree sealed authority) is a
         // launch fact and is enforced at runtime start, not here.
@@ -757,5 +775,41 @@ hooks:
         let error = serde_yaml::from_str::<ExecutionConfig>("max_output_tokens_per_turn: 10\n")
             .expect_err("removed key must not deserialize");
         assert!(error.to_string().contains("unknown field"));
+    }
+}
+
+#[cfg(test)]
+mod tool_concurrency_tests {
+    use super::ExecutionConfig;
+
+    #[test]
+    fn tool_concurrency_defaults_to_four_and_validates_range() {
+        let config = ExecutionConfig::default();
+        assert_eq!(config.tool_concurrency, 4);
+        config.validate().unwrap();
+
+        let serial = ExecutionConfig {
+            tool_concurrency: 1,
+            ..ExecutionConfig::default()
+        };
+        serial.validate().unwrap();
+        let max = ExecutionConfig {
+            tool_concurrency: 16,
+            ..ExecutionConfig::default()
+        };
+        max.validate().unwrap();
+
+        for invalid in [0_u32, 17, 1000] {
+            let config = ExecutionConfig {
+                tool_concurrency: invalid,
+                ..ExecutionConfig::default()
+            };
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains("tool_concurrency"), "{error}");
+        }
+
+        // Unauthored config decodes to the default through serde.
+        let decoded: ExecutionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(decoded.tool_concurrency, 4);
     }
 }
