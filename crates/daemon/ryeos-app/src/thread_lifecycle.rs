@@ -5611,12 +5611,12 @@ fn admit_verified_root_execution_inner(
         // Unit-separated so no identity can inject a false match. Covers the
         // engine/bundle generation (coherent with the resolving engine),
         // the project parser overlay, and the effective trust store.
-        plan_context_identity: format!(
-            "{}\u{{1f}}{}\u{{1f}}{}",
-            request_snapshot.request_engine_generation_identity,
-            request_snapshot.registry_fingerprint,
-            request_snapshot.effective_trust_identity,
-        ),
+        plan_context_identity: [
+            request_snapshot.request_engine_generation_identity.as_str(),
+            request_snapshot.registry_fingerprint.as_str(),
+            request_snapshot.effective_trust_identity.as_str(),
+        ]
+        .join("\u{1f}"),
     });
     let cached = match (resolution_cache, cache_key.as_ref()) {
         (Some(cache), Some(key)) => {
