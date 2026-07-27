@@ -796,10 +796,10 @@ fn remove_directory_contents(
 /// no-project workspaces whose `TempDirGuard`s own cleanup. The isolation's
 /// `cache/verified-code` generations are likewise protected by process-held
 /// lifetime locks and remove themselves when their runtime generation drops.
-/// `cache/executors` contains content-addressed native executors which admitted
-/// launch capsules may still authorize after the installed bundle generation
-/// changes. It is not rebuildable by name while those capsules remain
-/// authoritative, so only a capsule-aware executor-cache sweep may reclaim it.
+/// `cache/executors` is an operational acceleration only: restart-recoverable
+/// launches retain their exact executable bytes in capsule-reachable state
+/// CAS. Cache files may therefore be unlinked here; already-open descriptors
+/// remain valid and a later fresh lookup rebuilds a missing tuple.
 /// Materialized snapshots are owned by the executor and require its exact
 /// construction/lease protocol; the daemon maintenance coordinator invokes
 /// that lease-aware sweep separately. This generic state layer cannot infer
@@ -812,7 +812,7 @@ fn remove_rebuildable_cache_directory(
     for name in cache_directory.entry_names()? {
         if matches!(
             name.to_str(),
-            Some("executions" | "executors" | "verified-code" | "snapshots")
+            Some("executions" | "verified-code" | "snapshots")
         ) {
             continue;
         }
@@ -1319,6 +1319,7 @@ mod tests {
     #[test]
     fn deep_runtime_purge_removes_only_runtime_disposable_paths() {
         use std::fs;
+        use std::io::Read as _;
 
         let tmp = tempfile::tempdir().unwrap();
         let runtime_state_dir = tmp.path().join("state");
@@ -1349,6 +1350,7 @@ mod tests {
         fs::write(&trace_file, b"trace line\n").unwrap();
         fs::write(&thread_meta, b"meta").unwrap();
         fs::write(&thread_checkpoint, b"ckpt").unwrap();
+        let mut admitted_cache_descriptor = fs::File::open(&cache_file).unwrap();
 
         let mut result = GcResult::default();
         let params = GcParams {
@@ -1366,8 +1368,16 @@ mod tests {
             "deep purge must not remove chain refs without daemon-owned policy and liveness checks"
         );
         assert!(
-            cache_file.exists(),
-            "deep purge must retain executors referenced by admitted launch capsules"
+            !cache_file.exists(),
+            "deep purge should reclaim rebuildable native-executor cache entries"
+        );
+        let mut retained_bytes = Vec::new();
+        admitted_cache_descriptor
+            .read_to_end(&mut retained_bytes)
+            .unwrap();
+        assert_eq!(
+            retained_bytes, b"cache",
+            "an already-open executor descriptor must survive cache unlink"
         );
         assert!(
             execution_file.exists(),
@@ -1398,7 +1408,7 @@ mod tests {
             bundle_event_ref.exists(),
             "deep purge must preserve bundle/application event refs"
         );
-        assert_eq!(result.deleted_runtime_files, 1);
+        assert_eq!(result.deleted_runtime_files, 2);
         assert!(result.freed_bytes >= b"trace line\n".len() as u64);
     }
 

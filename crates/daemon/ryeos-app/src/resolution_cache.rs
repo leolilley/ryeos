@@ -276,6 +276,7 @@ mod tests {
                 ItemSpace::Project => TrustClass::TrustedProject,
                 ItemSpace::Bundle => TrustClass::TrustedBundle,
             },
+            signer_fingerprint: Some("fixture-signer".to_string()),
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: String::new(),
@@ -437,7 +438,11 @@ mod tests {
         );
         assert_eq!(cache.get(&key()).1, LookupOutcome::Hit);
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(cache.get(&key()).1, LookupOutcome::Stale, "deleted dep is stale");
+        assert_eq!(
+            cache.get(&key()).1,
+            LookupOutcome::Stale,
+            "deleted dep is stale"
+        );
     }
 
     #[test]

@@ -63,6 +63,7 @@ pub fn resolve_item_for_corpus(
         source_path: raw.source_path.clone(),
         source_space: raw.source_space,
         trust_class: raw.trust_class,
+        signer_fingerprint: raw.signer_fingerprint.clone(),
         alias_resolution: None,
         added_by: ResolutionStepName::PipelineInit,
         raw_content: raw.raw_content.clone(),

@@ -258,6 +258,10 @@ pub struct LaunchConfigContributorWire {
     pub canonical_id: String,
     pub content_digest: String,
     pub trust_class: TrustClassWire,
+    /// Signer declared by the signature envelope whose content hash was
+    /// verified for this exact contributor. Retained so recovery can apply
+    /// current trust-store revocation without re-resolving the config name.
+    pub signer_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

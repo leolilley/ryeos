@@ -1010,6 +1010,7 @@ mod tests {
                 source_path: item.resolved.source_path.clone(),
                 source_space: item.resolved.source_space,
                 trust_class: ResolutionTrustClass::TrustedBundle,
+                signer_fingerprint: item.signer.as_ref().map(|signer| signer.0.clone()),
                 alias_resolution: None,
                 added_by: ResolutionStepName::PipelineInit,
                 raw_content: changed_body,

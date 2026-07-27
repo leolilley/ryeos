@@ -185,6 +185,33 @@ pub(crate) fn require_callback_runtime_protocol<'a>(
     }
 }
 
+/// Validate the exact managed protocol retained by an admitted execution
+/// closure without consulting the current runtime/kind/protocol registries.
+pub(crate) fn validate_admitted_callback_runtime_protocol(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    runtime_ref: &ryeos_engine::canonical_ref::CanonicalRef,
+) -> Result<(), DispatchError> {
+    match subprocess_execution::classify_managed_protocol(protocol, &runtime_ref.kind)? {
+        subprocess_execution::ManagedProtocolRoute::CallbackRuntime => Ok(()),
+        subprocess_execution::ManagedProtocolRoute::FramedStreaming => {
+            Err(DispatchError::SchemaMisconfigured {
+                kind: runtime_ref.kind.clone(),
+                detail: format!(
+                    "admitted runtime '{}' protocol '{}' is callback-free framed streaming, not a managed callback runtime",
+                    runtime_ref, protocol.canonical_ref
+                ),
+            })
+        }
+    }
+}
+
+pub(crate) fn validate_admitted_direct_protocol(
+    protocol: &ryeos_engine::protocols::VerifiedProtocol,
+    item_kind: &str,
+) -> Result<(), DispatchError> {
+    subprocess_execution::validate_ordinary_protocol_contract(protocol, item_kind)
+}
+
 /// Resolve the signed method wire from the invoked kind's method-dispatch
 /// declaration. The runtime registry selects the binary; the kind schema owns
 /// the protocol used for this invocation surface.
@@ -6053,6 +6080,11 @@ requires:
             source_path: std::path::PathBuf::from(format!("/tmp/{ref_str}")),
             source_space,
             trust_class: trust,
+            signer_fingerprint: matches!(
+                trust,
+                EngineTrustClass::TrustedBundle | EngineTrustClass::TrustedProject
+            )
+            .then(|| "fixture-signer".to_string()),
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: content.to_string(),

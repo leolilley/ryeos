@@ -222,6 +222,7 @@ pub struct VerifiedRuntime {
     pub yaml: RuntimeYaml,
     pub trust_class: TrustClass,
     pub bundle_root: PathBuf,
+    pub descriptor_path: PathBuf,
 }
 
 /// Catalog of all `kind: runtime` items discovered at engine init.
@@ -501,6 +502,7 @@ fn load_and_verify_runtime_yaml(
         yaml,
         trust_class: root_trust,
         bundle_root: bundle_root.to_owned(),
+        descriptor_path: yaml_path.to_owned(),
     })
 }
 
@@ -557,6 +559,25 @@ pub(crate) fn validate_runtime_yaml(
     }
     validate_launch_contract(yaml_path, yaml)?;
     Ok(())
+}
+
+/// Re-validate a runtime descriptor retained in an admitted execution
+/// closure. The canonical ref supplies the original filename identity; no
+/// runtime registry lookup participates.
+pub fn validate_admitted_runtime_descriptor(
+    canonical_ref: &CanonicalRef,
+    yaml: &RuntimeYaml,
+) -> Result<(), EngineError> {
+    if canonical_ref.kind != "runtime" || canonical_ref.suffix.is_some() {
+        return Err(EngineError::RuntimeYamlInvalid {
+            path: PathBuf::from(&canonical_ref.bare_id),
+            reason: "admitted runtime ref must be an unsuffixed runtime ref".to_string(),
+        });
+    }
+    validate_runtime_yaml(
+        &PathBuf::from(format!("{}.yaml", canonical_ref.bare_id)),
+        yaml,
+    )
 }
 
 fn validate_runtime_binary_ref(yaml_path: &Path, binary_ref: &str) -> Result<(), EngineError> {
@@ -1081,6 +1102,7 @@ mod tests {
             yaml,
             trust_class: TrustClass::TrustedBundle,
             bundle_root: test_path(),
+            descriptor_path: test_path().join("runtime.yaml"),
         };
         let mut reg = RuntimeRegistry::default();
         reg.by_kind

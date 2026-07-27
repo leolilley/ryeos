@@ -38,6 +38,7 @@ pub(crate) struct LoadedItem {
     pub source_path: PathBuf,
     pub source_space: ItemSpace,
     pub trust_class: TrustClass,
+    pub signer_fingerprint: Option<String>,
     pub raw_content: String,
     pub source_content_digest: String,
     pub raw_content_digest: String,
@@ -70,6 +71,7 @@ impl LoadedItem {
             source_path: self.source_path,
             source_space: self.source_space,
             trust_class: self.trust_class,
+            signer_fingerprint: self.signer_fingerprint,
             alias_resolution,
             added_by,
             raw_content: self.raw_content,
@@ -162,6 +164,7 @@ impl<'a> ResolutionContext<'a> {
             source_path: root_loaded.source_path.clone(),
             source_space: root_loaded.source_space,
             trust_class: root_loaded.trust_class,
+            signer_fingerprint: root_loaded.signer_fingerprint.clone(),
             alias_resolution: None,
             added_by: ResolutionStepName::PipelineInit,
             raw_content: root_loaded.raw_content.clone(),
@@ -380,6 +383,7 @@ pub(crate) fn load_item_at(
         source_path: raw.source_path,
         source_space: raw.source_space,
         trust_class: raw.trust_class,
+        signer_fingerprint: raw.signer_fingerprint,
         raw_content: raw.raw_content,
         source_content_digest: raw.source_content_digest,
         raw_content_digest: raw.raw_content_digest,
@@ -402,6 +406,7 @@ pub(crate) struct RawLoadedItem {
     pub winner_ai_root: PathBuf,
     pub matched_ext: String,
     pub trust_class: TrustClass,
+    pub signer_fingerprint: Option<String>,
     /// Original file content (signature intact) — the parser's input.
     pub content: String,
     /// Signature-stripped bytes shipped to runtimes.
@@ -474,9 +479,9 @@ pub(crate) fn load_item_raw(
     // from signature-header presence or fingerprint membership alone.
     let sig_header =
         crate::item_resolution::parse_signature_header(&content, &source_format.signature);
-    let trust_class = match &sig_header {
+    let (trust_class, signer_fingerprint) = match &sig_header {
         Some(header) => {
-            let (contract_trust, _) = crate::trust::verify_item_signature(
+            let (contract_trust, signer) = crate::trust::verify_item_signature(
                 &content,
                 header,
                 &source_format.signature,
@@ -487,14 +492,15 @@ pub(crate) fn load_item_raw(
                 reason: e.to_string(),
             })?;
 
-            match (contract_trust, result.winner_space) {
+            let trust_class = match (contract_trust, result.winner_space) {
                 (ContractTrustClass::Trusted, ItemSpace::Bundle) => TrustClass::TrustedBundle,
                 (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedProject,
                 (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
                 (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
-            }
+            };
+            (trust_class, signer.map(|value| value.0))
         }
-        None => TrustClass::Unsigned,
+        None => (TrustClass::Unsigned, None),
     };
 
     let source_content_digest = crate::item_resolution::content_hash(&content);
@@ -519,6 +525,7 @@ pub(crate) fn load_item_raw(
         winner_ai_root: result.winner_ai_root,
         matched_ext: result.matched_ext,
         trust_class,
+        signer_fingerprint,
         content,
         raw_content,
         source_content_digest,

@@ -1177,6 +1177,31 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
                     &mut links.object_hashes,
                 )?;
             }
+            let execution_closure = value
+                .get("execution_closure")
+                .and_then(Value::as_object)
+                .ok_or_else(|| {
+                    "admitted_launch_capsule missing execution_closure object".to_string()
+                })?;
+            let command = execution_closure.get("command").and_then(Value::as_object);
+            if execution_closure.get("driver").and_then(Value::as_str) == Some("managed_runtime") {
+                push_required_hash(
+                    &Value::Object(execution_closure.clone()),
+                    "executor_blob_hash",
+                    &mut links.blob_hashes,
+                )?;
+            }
+            if command
+                .and_then(|command| command.get("authority"))
+                .and_then(Value::as_str)
+                == Some("content_addressed")
+            {
+                push_required_hash(
+                    &Value::Object(command.cloned().expect("checked direct command")),
+                    "executable_blob_hash",
+                    &mut links.blob_hashes,
+                )?;
+            }
         }
         "thread_event" => {
             push_optional_hash(value, "prev_chain_event_hash", &mut links.object_hashes)?;
@@ -1541,6 +1566,44 @@ mod tests {
         }))
         .unwrap();
         assert!(links.object_hashes.contains(&event_hash));
+    }
+
+    #[test]
+    fn admitted_direct_execution_closure_reaches_executable_blob() {
+        let executable_blob_hash = h("de");
+        let links = object_links(&json!({
+            "kind": "admitted_launch_capsule",
+            "project_authority": {"kind": "projectless", "environment": {"kind": "none"}},
+            "execution_closure": {
+                "driver": "direct_item_executor",
+                "execution_plan": {},
+                "protocol_descriptor_document": "# signed",
+                "command": {
+                    "authority": "content_addressed",
+                    "executable_blob_hash": executable_blob_hash
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(links.blob_hashes, vec![executable_blob_hash]);
+    }
+
+    #[test]
+    fn admitted_managed_execution_closure_reaches_executor_blob() {
+        let executor_blob_hash = h("ce");
+        let links = object_links(&json!({
+            "kind": "admitted_launch_capsule",
+            "project_authority": {"kind": "projectless", "environment": {"kind": "none"}},
+            "execution_closure": {
+                "driver": "managed_runtime",
+                "prepared_runtime_launch": {},
+                "runtime_descriptor_document": "# signed",
+                "protocol_descriptor_document": "# signed",
+                "executor_blob_hash": executor_blob_hash
+            }
+        }))
+        .unwrap();
+        assert_eq!(links.blob_hashes, vec![executor_blob_hash]);
     }
 
     #[test]

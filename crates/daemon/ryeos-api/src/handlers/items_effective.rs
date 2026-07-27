@@ -334,6 +334,7 @@ mod tests {
             resolved_ref: resolved_ref.to_string(),
             source_space: ryeos_engine::contracts::ItemSpace::Bundle,
             trust_class: TrustClass::TrustedBundle,
+            signer_fingerprint: Some("fixture-signer".to_string()),
             raw_content_digest: digest.to_string(),
         }
     }

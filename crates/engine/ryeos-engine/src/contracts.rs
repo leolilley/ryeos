@@ -17,7 +17,7 @@ mod runtime_decorations;
 pub use execution_plan::{
     EngineContext, ExecutionPlan, MaterializationRequirement, PlanBundleExecutorIdentity,
     PlanCapabilities, PlanContext, PlanNode, PlanNodeId, PlanRuntimeIdentity, PlanSubprocessSpec,
-    PlanVerifiedCommand,
+    PlanTrustAuthority, PlanVerifiedCommand,
 };
 pub use runtime_decorations::{
     CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,

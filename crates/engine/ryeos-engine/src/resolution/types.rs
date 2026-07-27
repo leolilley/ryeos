@@ -4,6 +4,16 @@ use std::path::PathBuf;
 
 use crate::contracts::ItemSpace;
 
+fn deserialize_required_nullable<'de, D, T>(
+    deserializer: D,
+) -> std::result::Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Trust classification for resolved items (for isolation profile enforcement and audit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -58,6 +68,11 @@ pub struct ResolvedAncestor {
     pub source_space: ItemSpace,
     /// Verified trust classification, kept distinct from source space.
     pub trust_class: TrustClass,
+    /// Fingerprint declared by the verified signature envelope. Required for
+    /// trusted items so recovery can apply current signer revocation without
+    /// re-resolving the item ref.
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub signer_fingerprint: Option<String>,
     /// If an alias was involved, the expansion chain.
     pub alias_resolution: Option<AliasHop>,
     /// Which resolution step produced this ancestor.
@@ -292,6 +307,11 @@ impl ResolutionOutput {
                 .iter()
                 .map(ResolutionDigestNode::from)
                 .collect(),
+            referenced_items: self
+                .referenced_items
+                .iter()
+                .map(ResolutionDigestNode::from)
+                .collect(),
             effective_trust_class: self.effective_trust_class,
             policy_facts: self.composed.policy_facts.clone(),
         }
@@ -310,6 +330,8 @@ pub struct ResolutionDigestNode {
     pub resolved_ref: String,
     pub source_space: ItemSpace,
     pub trust_class: TrustClass,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub signer_fingerprint: Option<String>,
     pub raw_content_digest: String,
 }
 
@@ -320,6 +342,7 @@ impl From<&ResolvedAncestor> for ResolutionDigestNode {
             resolved_ref: item.resolved_ref.clone(),
             source_space: item.source_space,
             trust_class: item.trust_class,
+            signer_fingerprint: item.signer_fingerprint.clone(),
             raw_content_digest: item.raw_content_digest.clone(),
         }
     }
@@ -338,6 +361,10 @@ pub struct AsLaunchedResolutionDigest {
     pub root: ResolutionDigestNode,
     /// Extends-chain ancestors (deepest first), refs + content digests.
     pub ancestors: Vec<ResolutionDigestNode>,
+    /// Lateral signed inputs whose verified bytes participated in the
+    /// resolution/composition. Retained so recovery can apply signer
+    /// revocation transitively without resolving their mutable refs.
+    pub referenced_items: Vec<ResolutionDigestNode>,
     /// Daemon-folded weakest-link trust class at launch.
     pub effective_trust_class: TrustClass,
     /// Composed daemon-policy facts (e.g. `effective_caps`) the launcher read.
@@ -371,6 +398,8 @@ pub struct ResolutionProvenanceNode {
     pub source_path: PathBuf,
     pub source_space: ItemSpace,
     pub trust_class: TrustClass,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub signer_fingerprint: Option<String>,
     pub alias_resolution: Option<AliasHop>,
     pub added_by: ResolutionStepName,
     pub source_content_digest: String,
@@ -385,6 +414,7 @@ impl From<&ResolvedAncestor> for ResolutionProvenanceNode {
             source_path: item.source_path.clone(),
             source_space: item.source_space,
             trust_class: item.trust_class,
+            signer_fingerprint: item.signer_fingerprint.clone(),
             alias_resolution: item.alias_resolution.clone(),
             added_by: item.added_by,
             source_content_digest: item.source_content_digest.clone(),
@@ -611,6 +641,11 @@ mod tests {
             source_path: PathBuf::from("/x"),
             source_space: ItemSpace::Bundle,
             trust_class: trust,
+            signer_fingerprint: matches!(
+                trust,
+                TrustClass::TrustedBundle | TrustClass::TrustedProject
+            )
+            .then(|| "fixture-signer".to_string()),
             alias_resolution: None,
             added_by: ResolutionStepName::ResolveExtendsChain,
             raw_content: String::new(),
@@ -695,8 +730,15 @@ mod tests {
         let wire = serde_json::to_value(&digest).unwrap();
         assert!(wire["root"].get("raw_content").is_none());
         assert_eq!(wire["root"]["source_space"], "bundle");
-        let back: AsLaunchedResolutionDigest = serde_json::from_value(wire).unwrap();
+        let back: AsLaunchedResolutionDigest = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(back, digest);
+
+        let mut missing_signer = wire;
+        missing_signer["root"]
+            .as_object_mut()
+            .unwrap()
+            .remove("signer_fingerprint");
+        assert!(serde_json::from_value::<AsLaunchedResolutionDigest>(missing_signer).is_err());
     }
 
     #[test]

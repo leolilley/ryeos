@@ -270,7 +270,12 @@ pub fn supervised_launcher_attachment_status_pipe(
 /// for the child exec that consumes the data.
 #[cfg(target_os = "linux")]
 pub fn sealed_memfd(name: &std::ffi::CStr, bytes: &[u8]) -> Result<Arc<std::fs::File>, String> {
-    sealed_memfd_with_flags(name, bytes, libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING)
+    sealed_memfd_with_flags(
+        name,
+        bytes,
+        libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
+        None,
+    )
 }
 
 /// Create a sealed anonymous file that the supported Linux kernel may execute.
@@ -287,6 +292,7 @@ pub fn sealed_executable_memfd(
         name,
         bytes,
         libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING | MFD_EXEC,
+        Some(0o500),
     )
 }
 
@@ -295,6 +301,7 @@ fn sealed_memfd_with_flags(
     name: &std::ffi::CStr,
     bytes: &[u8],
     flags: libc::c_uint,
+    mode: Option<libc::mode_t>,
 ) -> Result<Arc<std::fs::File>, String> {
     use std::io::{Seek as _, Write as _};
     use std::os::fd::{AsRawFd as _, FromRawFd as _};
@@ -322,6 +329,14 @@ fn sealed_memfd_with_flags(
 
     // SAFETY: memfd_create or F_DUPFD_CLOEXEC returned this uniquely owned fd.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+    if let Some(mode) = mode {
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } < 0 {
+            return Err(format!(
+                "restrict sealed executable memfd permissions: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+    }
     file.write_all(bytes)
         .map_err(|error| format!("write sealed memfd: {error}"))?;
     file.seek(std::io::SeekFrom::Start(0))
