@@ -415,9 +415,9 @@ pub(crate) fn timeline_entries_indented(
     // its own input for retry without mis-attributing across interleaved
     // chains. Prescanned before the render loop so a failed event finds its
     // stimulus regardless of iteration order.
-    let stimulus = stimulus_by_thread(&records);
+    let stimulus = stimulus_index(&records);
 
-    for record in records {
+    for (record_index, record) in records.into_iter().enumerate() {
         // This record's entry depth, and the running open-step depth. A step's
         // own header sits at the parent depth (compute `d` before incrementing);
         // a completed step drops back before its (rare) degraded line renders.
@@ -448,7 +448,7 @@ pub(crate) fn timeline_entries_indented(
             }
             // Execution milestones (lifecycle, usage, forks) read as an
             // execution, not as bare default-projection lines.
-            if let Some(entry) = execution_entry(&record, &stimulus) {
+            if let Some(entry) = execution_entry(&record, &stimulus.by_thread) {
                 flush_flow(&mut pending_flow, &mut entries, &mut sources);
                 push_entry(&mut entries, &mut sources, entry, Some(&record));
                 break 'record;
@@ -478,13 +478,10 @@ pub(crate) fn timeline_entries_indented(
             // can't drop it to raw JSON. The bare turn marker carries no content
             // and falls through to its boundary separator below.
             if feed_event_type(&record) == Some(FeedEventType::CognitionIn) {
-                if let Some(content) = record
-                    .raw
-                    .get("payload")
-                    .and_then(|payload| payload.get("content"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|content| !content.is_empty())
+                if let Some(content) = stimulus
+                    .by_record
+                    .get(&timeline_entry_key(&record.raw, record_index))
+                    .map(String::as_str)
                 {
                     flush_flow(&mut pending_flow, &mut entries, &mut sources);
                     push_entry(
@@ -1088,27 +1085,151 @@ fn retry_intent(
 /// marker) contributes — the safe, correlated source for retry input (thread
 /// records / launch metadata are deliberately NOT used: they can hold
 /// arbitrary sensitive parameters).
-fn stimulus_by_thread(records: &[ProjectedRecord]) -> std::collections::BTreeMap<String, String> {
-    let mut map = std::collections::BTreeMap::new();
-    for record in records {
+#[derive(Debug, Default)]
+struct StimulusIndex {
+    by_thread: std::collections::BTreeMap<String, String>,
+    by_record: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug)]
+struct UiPendingCognitionIn {
+    content_hash: String,
+    chunk_count: u64,
+    next_chunk_index: u64,
+    content: String,
+}
+
+#[derive(Debug, Default)]
+struct UiCognitionInAssembler {
+    pending: Option<UiPendingCognitionIn>,
+}
+
+enum UiCognitionInAssembly {
+    Marker,
+    Pending,
+    Complete(String),
+}
+
+impl UiCognitionInAssembler {
+    fn push(&mut self, payload: &Value) -> Result<UiCognitionInAssembly, ()> {
+        let Some(content_chunk) = payload.get("content_chunk") else {
+            if self.pending.is_some() {
+                return Err(());
+            }
+            return match payload.get("content").and_then(Value::as_str) {
+                Some(content) => Ok(UiCognitionInAssembly::Complete(content.to_string())),
+                None => Ok(UiCognitionInAssembly::Marker),
+            };
+        };
+        let content_chunk = content_chunk.as_str().ok_or(())?;
+        let schema_version = payload
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .ok_or(())?;
+        let content_hash = payload
+            .get("content_hash")
+            .and_then(Value::as_str)
+            .ok_or(())?;
+        let chunk_index = payload
+            .get("chunk_index")
+            .and_then(Value::as_u64)
+            .ok_or(())?;
+        let chunk_count = payload
+            .get("chunk_count")
+            .and_then(Value::as_u64)
+            .ok_or(())?;
+        if schema_version != 1
+            || content_hash.len() != 64
+            || !(2..=64).contains(&chunk_count)
+            || chunk_index >= chunk_count
+            || content_chunk.is_empty()
+        {
+            return Err(());
+        }
+        if chunk_index == 0 {
+            if self.pending.is_some() {
+                return Err(());
+            }
+            self.pending = Some(UiPendingCognitionIn {
+                content_hash: content_hash.to_string(),
+                chunk_count,
+                next_chunk_index: 0,
+                content: String::new(),
+            });
+        }
+        let pending = self.pending.as_mut().ok_or(())?;
+        if content_hash != pending.content_hash
+            || chunk_count != pending.chunk_count
+            || chunk_index != pending.next_chunk_index
+        {
+            return Err(());
+        }
+        pending.content.push_str(content_chunk);
+        if pending.content.len() > 4 * 1024 * 1024 {
+            return Err(());
+        }
+        pending.next_chunk_index += 1;
+        if pending.next_chunk_index == pending.chunk_count {
+            return Ok(UiCognitionInAssembly::Complete(
+                self.pending.take().ok_or(())?.content,
+            ));
+        }
+        Ok(UiCognitionInAssembly::Pending)
+    }
+}
+
+/// Assemble inline and multipart stimuli once for rendering and retry. A
+/// multipart stimulus is attributed only to its completing event, so the TUI
+/// renders one input line rather than one line per storage chunk.
+fn stimulus_index(records: &[ProjectedRecord]) -> StimulusIndex {
+    let mut index = StimulusIndex::default();
+    let mut assemblers = std::collections::BTreeMap::<String, UiCognitionInAssembler>::new();
+    for (record_index, record) in records.iter().enumerate() {
         if feed_event_type(record) != Some(FeedEventType::CognitionIn) {
             continue;
         }
-        let Some(thread_id) = record.raw.get("thread_id").and_then(Value::as_str) else {
+        let Some(payload) = record.raw.get("payload") else {
             continue;
         };
-        if let Some(content) = record
-            .raw
-            .get("payload")
-            .and_then(|payload| payload.get("content"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|content| !content.is_empty())
-        {
-            map.insert(thread_id.to_string(), content.to_string());
+        let Some(thread_id) = record.raw.get("thread_id").and_then(Value::as_str) else {
+            if let Some(content) = payload
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|content| !content.is_empty())
+            {
+                index.by_record.insert(
+                    timeline_entry_key(&record.raw, record_index),
+                    content.to_string(),
+                );
+            }
+            continue;
+        };
+        let assembler = assemblers.entry(thread_id.to_string()).or_default();
+        match assembler.push(payload) {
+            Ok(UiCognitionInAssembly::Complete(content)) => {
+                let content = content.trim();
+                if content.is_empty() {
+                    continue;
+                }
+                index
+                    .by_thread
+                    .insert(thread_id.to_string(), content.to_string());
+                index.by_record.insert(
+                    timeline_entry_key(&record.raw, record_index),
+                    content.to_string(),
+                );
+            }
+            Ok(UiCognitionInAssembly::Marker | UiCognitionInAssembly::Pending) => {}
+            Err(_) => {
+                // The execution runtime fails closed on a malformed transcript.
+                // The UI is a read model: omit the unusable retry/render input
+                // and let the raw event remain inspectable.
+                assemblers.remove(thread_id);
+            }
         }
     }
-    map
+    index
 }
 
 /// A compact settlement summary from a `thread_usage` payload (the serialized
@@ -2195,6 +2316,57 @@ mod tests {
             )),
             "a marker-only turn offers no retry"
         );
+    }
+
+    #[test]
+    fn chunked_cognition_in_renders_once_and_supplies_exact_retry_input() {
+        let content = "ARC evidence part one\nARC evidence part two\n";
+        let content_hash = "a".repeat(64);
+        let mut records = ["ARC evidence part one\n", "ARC evidence part two\n"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, content_chunk)| {
+                raw_record(json!({
+                    "event_type": "cognition_in",
+                    "thread_id": "T-1",
+                    "chain_root_id": "R-1",
+                    "chain_seq": index + 1,
+                    "payload": {
+                        "schema_version": 1,
+                        "content_hash": content_hash,
+                        "chunk_index": index,
+                        "chunk_count": 2,
+                        "content_chunk": content_chunk,
+                    },
+                }))
+            })
+            .collect::<Vec<_>>();
+        records.push(raw_record(json!({
+            "event_type": "thread_failed",
+            "thread_id": "T-1",
+            "chain_root_id": "R-1",
+            "chain_seq": records.len() + 1,
+            "payload": {}
+        })));
+
+        let entries = timeline_entries(records);
+        let rendered_inputs = entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    RyeOsTimelineEntryVm::Line { primary, .. } if primary == content.trim()
+                )
+            })
+            .count();
+        assert_eq!(rendered_inputs, 1);
+        assert!(entries.iter().any(|entry| matches!(
+            entry,
+            RyeOsTimelineEntryVm::Line {
+                secondary_intent: Some(RyeOsUiIntent::PrefillRetryTurn { input, .. }),
+                ..
+            } if input == content.trim()
+        )));
     }
 
     #[test]
