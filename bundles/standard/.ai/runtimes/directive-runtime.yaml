@@ -68,6 +68,7 @@ launch_contract:
     max_requirements: 4
     allowed_names:
       - ANTHROPIC_API_KEY
+      - DEEPSEEK_API_KEY
       - OPENAI_API_KEY
       - OPENROUTER_API_KEY
       - ZAI_API_KEY

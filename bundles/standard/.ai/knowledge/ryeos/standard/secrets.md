@@ -58,7 +58,7 @@ These names control the executor/daemon and can never be loaded as secrets
 
 | Class | Examples | Put it in |
 |---|---|---|
-| Tool/provider secrets | `ZEN_API_KEY`, `OPENROUTER_API_KEY`, `SUPABASE_*`, `OXYLABS_*` | vault (preferred), daemon/service env, or a project/operator `.env` |
+| Tool/provider secrets | `ZEN_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `SUPABASE_*`, `OXYLABS_*` | vault (preferred), daemon/service env, or a project/operator `.env` |
 | RyeOS client/control config | `RYEOSD_URL`, `RYE_CLIENT_KEY_PEM` | operator shell / client app config — **not** the tool-secret path |
 
 `RYEOSD_URL` and friends are not secrets; they configure how a *client* reaches

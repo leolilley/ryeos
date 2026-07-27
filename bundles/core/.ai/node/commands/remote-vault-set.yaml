@@ -11,6 +11,8 @@ forms:
 - slots:
   - field: name
   - field: value
+sensitive_fields:
+- value
 dispatch:
   kind: execute_ref
   execute: service:remote/vault-set

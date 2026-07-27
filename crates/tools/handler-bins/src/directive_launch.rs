@@ -18,6 +18,7 @@ use ryeos_handler_protocol::{
 
 const ALLOWED_SECRET_NAMES: &[&str] = &[
     "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "ZAI_API_KEY",
@@ -720,6 +721,36 @@ mod tests {
                     path.display()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn bundled_deepseek_provider_is_strict_and_hard_spend_capable() {
+        let path = repository_root()
+            .join("bundles/standard/.ai/config/ryeos-runtime/model-providers/deepseek.yaml");
+        let provider: ryeos_directive_core::ProviderConfig = serde_yaml::from_str(
+            &std::fs::read_to_string(&path).expect("read DeepSeek provider config"),
+        )
+        .expect("strictly parse DeepSeek provider config");
+
+        provider
+            .validate(" deepseek")
+            .expect("validate DeepSeek provider");
+        assert_eq!(provider.base_url, "https://api.deepseek.com");
+        assert_eq!(provider.auth.env_var.as_deref(), Some("DEEPSEEK_API_KEY"));
+
+        for model in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            let profile = provider
+                .matched_profile(model)
+                .unwrap_or_else(|| panic!("missing spend profile for {model}"));
+            assert!(
+                profile.spend_authority.is_some(),
+                "{model} must carry signed hard-spend authority"
+            );
+            let resolved = provider.resolve_for_model(model);
+            resolved
+                .validate(&format!(" deepseek profile {model}"))
+                .unwrap_or_else(|error| panic!("validate {model}: {error:#}"));
         }
     }
 }

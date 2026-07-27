@@ -85,6 +85,7 @@ The standard bundle ships signed provider configs for:
 - `anthropic` — direct Anthropic Messages API.
 - `openai` — direct OpenAI Chat Completions API.
 - `openrouter` — multi-provider OpenAI-compatible gateway.
+- `deepseek` — direct DeepSeek OpenAI-compatible Chat Completions API.
 - `zai` — direct Z.AI OpenAI-compatible Chat Completions API.
 - `local-openai` — local or offline OpenAI-compatible inference.
 
