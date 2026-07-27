@@ -237,6 +237,12 @@ jobs:
         # bundle refresh skipped so it isn't repeated).
         env:
           GATE_BUNDLE_TARGET_DIR: ${{ runner.temp }}/ryeos-bundle-target
+          # The follow-child admission future retains several complete sealed
+          # launch-authority maps across awaits. Libtest's default 2 MiB worker
+          # stack aborts while polling its deep rejection-path tests in debug
+          # builds; 8 MiB is the standard Rust thread-stack escape hatch and
+          # leaves the production state machine unchanged.
+          RUST_MIN_STACK: 8388608
         run: ./scripts/gate.sh --refresh-bundles
 
   bundle-refresh:
