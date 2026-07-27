@@ -1868,29 +1868,33 @@ impl Runner {
                                         let (input_tokens, output_tokens) = usage
                                             .complete_token_counts()
                                             .expect("valid provider usage has complete token counts");
-                                        let cost = self.compute_cost_for_usage(Some(usage));
-                                        if matches!(
-                                            cost.source,
-                                            PricingSource::Unpriced
-                                                | PricingSource::ByokUntracked
-                                        )
-                                            && (input_tokens != 0 || output_tokens != 0)
+                                        let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
-                                            warnings.push(format!(
-                                                "cost untracked for failed provider attempt on turn \
-                                                 {turn}: model `{}` has no usable price",
-                                                self.model_name
-                                            ));
-                                        }
-                                        if let Err(settlement_error) = self
-                                            .settle_provider_usage(
-                                                turn,
-                                                usage,
-                                                cost.usd,
-                                                turn_start.elapsed().as_millis() as u64,
-                                            )
-                                            .await
-                                        {
+                                            Ok(cost) => {
+                                                if matches!(
+                                                    cost.source,
+                                                    PricingSource::Unpriced
+                                                        | PricingSource::ByokUntracked
+                                                )
+                                                    && (input_tokens != 0 || output_tokens != 0)
+                                                {
+                                                    warnings.push(format!(
+                                                        "cost untracked for failed provider attempt on turn \
+                                                         {turn}: model `{}` has no usable price",
+                                                        self.model_name
+                                                    ));
+                                                }
+                                                self.settle_provider_usage(
+                                                    turn,
+                                                    usage,
+                                                    cost.usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            }
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(settlement_error) = settled {
                                             detail.push_str(&format!(
                                                 "; accounting settlement also failed: \
                                                  {settlement_error:#}"
