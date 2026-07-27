@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-27T09:31:02Z:664bd5306f377b762253e8cff2508756315a95665775831228ccee87be4d02d5:VRtgDetS/RiUCTqdJ2fI9WXztNzq9wuZMceuSTpV1XEE/7Ck5rs1roQV8lnRS19Jqw1pGulbQJlNmyneexWMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T23:40:19Z:59c364588166774104f39759d08b4ee8120b8fd6034800fc8126f309555d321c:+tn7ix5fqcUpS8ydghDQNCo10Yr/GweIRj4N8RVZrDK5CZq9xUNHdUVXS+5wRKWqvuXMU3uNsE4noL0aEa9KAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -68,6 +68,22 @@ config:
   cwd: "${tool_dir}"
 ```
 
+String entries in `args` are rye-expr/1 templates. Program source or other
+bytes that must not enter the expression compiler use the explicit literal
+shape:
+
+```yaml
+args:
+  - "-c"
+  - literal: |
+      print(f"program-owned braces: {value}")
+  - "${tool_path}"
+```
+
+`literal` values are copied into argv byte-for-byte. The mapping accepts no
+other fields, and a non-string/non-literal argument is rejected rather than
+ignored.
+
 When `input_data` is exactly a direct `${params_json}` expression, the
 execution plan retains the parameter object as typed runtime stdin until the
 final spawn. RyeOS owns the top-level `project_path` binding and can relocate
@@ -97,10 +113,13 @@ env_config:
       prepend: ["${runtime_dir}/bin"]
 ```
 
-Rendering is a single pass. `$${` emits a literal `${`, and ordinary braces are
-not template syntax. For example, an embedded Python f-string containing
-`{tool_path}` remains unchanged; `$${tool_path}` emits the literal text
-`${tool_path}`.
+Rendering is a single pass. `$${` emits a literal `${`. A bare single-brace
+name matching an available runtime root is rejected as removed interpolation,
+so stale `{tool_path}` cannot silently become a literal command argument.
+Unrelated brace grammars such as `bin/{triple}/...`, empty braces, and JSON
+objects remain literal. Embedded programs should use their own bound variables
+rather than spelling a bare runtime-root placeholder in source.
+`$${tool_path}` emits the literal text `${tool_path}`.
 
 ---
 

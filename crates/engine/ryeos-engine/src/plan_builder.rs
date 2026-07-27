@@ -2116,6 +2116,7 @@ env_config:
 config:
   command: "${interpreter}"
   args:
+    - literal: "print(f'{tool_path}')"
     - "${tool_path}"
     - "--project-path"
     - "${project_path}"
@@ -2223,19 +2224,20 @@ category: ryeos/core/subprocess\n";
         );
 
         // Args should have tool_path and --project-path expanded
-        assert_eq!(dispatch.args.len(), 3);
-        // args[0] = ${tool_path} → root tool source path
+        assert_eq!(dispatch.args.len(), 4);
+        assert_eq!(dispatch.args[0], "print(f'{tool_path}')");
+        // args[1] = ${tool_path} → root tool source path
         assert!(
-            dispatch.args[0].contains("my_tool"),
-            "args[0] should contain my_tool, got: {:?}",
-            dispatch.args[0],
+            dispatch.args[1].contains("my_tool"),
+            "args[1] should contain my_tool, got: {:?}",
+            dispatch.args[1],
         );
-        assert_eq!(dispatch.args[1], "--project-path");
-        // args[2] = ${project_path} → project root
+        assert_eq!(dispatch.args[2], "--project-path");
+        // args[3] = ${project_path} → project root
         assert!(
-            dispatch.args[2].contains("rye_plan_test"),
-            "args[2] should be project path, got: {:?}",
-            dispatch.args[2],
+            dispatch.args[3].contains("rye_plan_test"),
+            "args[3] should be project path, got: {:?}",
+            dispatch.args[3],
         );
 
         // Runtime parameter stdin remains typed and includes the authoritative

@@ -167,6 +167,13 @@ pub(super) fn expand_template(
     .map_err(|error| CliError::Local {
         detail: format!("invalid rye-expr/1 offline subprocess template: {error}"),
     })?;
+    ryeos_runtime::reject_removed_single_brace_interpolation(
+        &compiled,
+        ["params_json", "project_path"],
+    )
+    .map_err(|error| CliError::Local {
+        detail: format!("invalid rye-expr/1 offline subprocess template: {error}"),
+    })?;
     let context = serde_json::json!({
         "params_json": params_json,
         "project_path": project_path,
