@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use crate::contracts::{ExecutionDecorations, PlanSubprocessSpec, RuntimeEnvSource};
+use crate::contracts::{ExecutionDecorations, PlanStdin, PlanSubprocessSpec, RuntimeEnvSource};
 use crate::error::EngineError;
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -144,16 +144,29 @@ fn render_runtime_template(
     ctx: &TemplateContext,
     host_env: Option<&HostEnvBindings>,
 ) -> Result<String, EngineError> {
+    let compiled = compile_runtime_template(source)?;
+    render_compiled_runtime_template(&compiled, ctx, host_env)
+}
+
+fn compile_runtime_template(
+    source: &str,
+) -> Result<ryeos_expression::CompiledTemplate, EngineError> {
     let compilation_limits = ryeos_expression::CompilationLimits::default();
-    let compiled = ryeos_expression::compile_template_for(
+    ryeos_expression::compile_template_for(
         source,
         "runtime subprocess template",
         &compilation_limits,
     )
     .map_err(|error| EngineError::RuntimeTemplateExpression {
         reason: error.to_string(),
-    })?;
+    })
+}
 
+fn render_compiled_runtime_template(
+    compiled: &ryeos_expression::CompiledTemplate,
+    ctx: &TemplateContext,
+    host_env: Option<&HostEnvBindings>,
+) -> Result<String, EngineError> {
     let mut roots = Map::new();
     for (name, value) in &ctx.extra {
         roots.insert(name.clone(), Value::String(value.clone()));
@@ -215,6 +228,31 @@ fn render_runtime_template(
                 json_type_name(&rendered)
             ),
         })
+}
+
+fn compile_stdin_template(
+    template: &str,
+    ctx: &TemplateContext,
+    parameters: &Value,
+    project_root: Option<&Path>,
+) -> Result<PlanStdin, EngineError> {
+    let compiled = compile_runtime_template(template)?;
+    if compiled.whole_direct_root_reference() == Some("params_json") {
+        let mut parameters = parameters.clone();
+        let project_path = match (parameters.as_object_mut(), project_root) {
+            (Some(object), Some(project_root)) => {
+                object.remove("project_path");
+                Some(project_root.to_path_buf())
+            }
+            _ => None,
+        };
+        return Ok(PlanStdin::RuntimeParameters {
+            parameters,
+            project_path,
+        });
+    }
+    let data = render_compiled_runtime_template(&compiled, ctx, None)?;
+    Ok(PlanStdin::Opaque { data })
 }
 
 fn is_host_env_root(root: &str) -> bool {
@@ -468,8 +506,10 @@ pub fn compile_with_handlers(
     // validation hint). This ensures subprocess tools can locate project
     // items without a separate --project CLI arg.
     if let (Some(pp), Some(obj)) = (project_root, ctx.params.as_object_mut()) {
-        obj.entry("project_path")
-            .or_insert_with(|| Value::String(pp.to_string_lossy().into_owned()));
+        obj.insert(
+            "project_path".to_owned(),
+            Value::String(pp.to_string_lossy().into_owned()),
+        );
     }
 
     ctx.template_ctx.params_json = params.to_string();
@@ -600,6 +640,7 @@ pub fn compile_with_handlers(
         env,
         env_sources,
         spec_overrides,
+        params: runtime_params,
         host_env: ctx_host_env,
         ..
     } = ctx;
@@ -647,10 +688,12 @@ pub fn compile_with_handlers(
         .collect();
     let args = args?;
 
-    let stdin_data = spec_overrides
+    let stdin = spec_overrides
         .stdin_data
         .as_deref()
-        .map(|t| expand_template(t, &template_ctx))
+        .map(|template| {
+            compile_stdin_template(template, &template_ctx, &runtime_params, project_root)
+        })
         .transpose()?;
 
     let timeout_secs = spec_overrides.timeout_secs.unwrap_or(300);
@@ -675,7 +718,7 @@ pub fn compile_with_handlers(
             .or_else(|| project_root.map(|p| p.to_path_buf())),
         env: expanded_env,
         env_sources: expanded_env_sources,
-        stdin_data,
+        stdin,
         timeout_secs,
         execution: spec_overrides.execution,
     })
@@ -684,6 +727,7 @@ pub fn compile_with_handlers(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn env_value_expands_allowed_host_env_passthrough() {
@@ -789,5 +833,36 @@ mod tests {
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
         let got = expand_template("$${tool_path} ${tool_path}", &ctx).unwrap();
         assert_eq!(got, "${tool_path} /tool.yaml");
+    }
+
+    #[test]
+    fn direct_params_json_stdin_remains_typed() {
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.params_json = r#"{"message":"hello"}"#.to_owned();
+        let parameters = json!({"message": "hello"});
+
+        let stdin = compile_stdin_template("${ (params_json) }", &ctx, &parameters, None).unwrap();
+        let PlanStdin::RuntimeParameters {
+            parameters: actual,
+            project_path,
+        } = stdin
+        else {
+            panic!("direct params_json must remain structured");
+        };
+        assert_eq!(actual, parameters);
+        assert_eq!(project_path, None);
+    }
+
+    #[test]
+    fn embedded_params_json_stdin_is_opaque() {
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.params_json = r#"{"message":"hello"}"#.to_owned();
+
+        let stdin =
+            compile_stdin_template("payload=${params_json}", &ctx, &json!({}), None).unwrap();
+        let PlanStdin::Opaque { data } = stdin else {
+            panic!("embedded params_json must remain opaque");
+        };
+        assert_eq!(data, r#"payload={"message":"hello"}"#);
     }
 }

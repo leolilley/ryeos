@@ -235,7 +235,7 @@ fn launch_metadata_from_spec_carries_cancellation_mode() {
         cwd: None,
         env: HashMap::new(),
         env_sources: HashMap::new(),
-        stdin_data: None,
+        stdin: None,
         timeout_secs: 60,
         execution: ExecutionDecorations {
             native_async: Some(NativeAsyncSpec {

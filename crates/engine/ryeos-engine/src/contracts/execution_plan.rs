@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::{
     EffectivePrincipal, ExecutionDecorations, ExecutionHints, LaunchMode, ProjectContext,
@@ -159,6 +160,48 @@ impl PlanVerifiedCommand {
     }
 }
 
+/// Typed stdin carried by a subprocess plan.
+///
+/// Runtime parameters remain structured until the final spawn so runtime-owned
+/// path bindings can be relocated without treating arbitrary program input as
+/// a path-bearing format. Opaque input is never parsed or rewritten.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PlanStdin {
+    Opaque {
+        data: String,
+    },
+    RuntimeParameters {
+        parameters: Value,
+        project_path: Option<PathBuf>,
+    },
+}
+
+impl PlanStdin {
+    pub fn materialize(&self) -> Result<String, String> {
+        match self {
+            Self::Opaque { data } => Ok(data.clone()),
+            Self::RuntimeParameters {
+                parameters,
+                project_path,
+            } => {
+                let mut materialized = parameters.clone();
+                if let Some(project_path) = project_path {
+                    let object = materialized.as_object_mut().ok_or_else(|| {
+                        "runtime parameter project_path binding requires object parameters"
+                            .to_owned()
+                    })?;
+                    object.insert(
+                        "project_path".to_owned(),
+                        Value::String(project_path.to_string_lossy().into_owned()),
+                    );
+                }
+                Ok(materialized.to_string())
+            }
+        }
+    }
+}
+
 /// Normalized subprocess specification — the single source of truth for
 /// what to spawn. Compiled from the executor chain's runtime config by
 /// the plan builder. The dispatch layer just runs this struct.
@@ -178,7 +221,7 @@ pub struct PlanSubprocessSpec {
     /// final subprocess env policy without guessing from key names.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env_sources: HashMap<String, RuntimeEnvSource>,
-    pub stdin_data: Option<String>,
+    pub stdin: Option<PlanStdin>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
     /// Per-tool execution policy populated by `DecorateSpec`-phase
@@ -265,7 +308,7 @@ mod tests {
             "cmd": "/bin/true",
             "verified_command": null,
             "cwd": null,
-            "stdin_data": null
+            "stdin": null
         }))
         .unwrap();
         assert!(spec.args.is_empty());
@@ -282,6 +325,26 @@ mod tests {
         assert_eq!(
             serde_json::to_value(node).unwrap(),
             serde_json::json!({ "node_type": "complete", "id": "done" })
+        );
+    }
+
+    #[test]
+    fn runtime_parameter_stdin_materializes_authoritative_project_path() {
+        let stdin = PlanStdin::RuntimeParameters {
+            parameters: serde_json::json!({
+                "message": "hello",
+                "project_path": "/caller-controlled"
+            }),
+            project_path: Some(PathBuf::from("/trusted/project")),
+        };
+        let materialized: Value =
+            serde_json::from_str(&stdin.materialize().unwrap()).expect("valid parameter JSON");
+        assert_eq!(
+            materialized,
+            serde_json::json!({
+                "message": "hello",
+                "project_path": "/trusted/project"
+            })
         );
     }
 

@@ -246,6 +246,9 @@ pub enum EngineError {
     #[error("invalid rye-expr/1 runtime template: {reason}")]
     RuntimeTemplateExpression { reason: String },
 
+    #[error("invalid typed subprocess stdin: {reason}")]
+    InvalidPlanStdin { reason: String },
+
     #[error(
         "unknown runtime block `{key}` on kind `{kind}` at {source_path:?} \
              (no handler registered and not in the kind schema's `runtime.ignored_keys`)"

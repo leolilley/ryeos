@@ -1816,7 +1816,7 @@ config:
             &["runtime".into()],
             &ignored(),
             &registry,
-            &json!({"message": "hello"}),
+            &json!({"message": "hello", "project_path": "/caller-controlled"}),
             &HashMap::new(),
             &HostEnvBindings::default(),
             Some(&project),
@@ -1834,10 +1834,15 @@ config:
             spec.args,
             vec!["/project/.ai/tools/echo.py", "--project-path", "/project"]
         );
-        assert_eq!(
-            spec.stdin_data,
-            Some(r#"{"message":"hello","project_path":"/project"}"#.to_string())
-        );
+        let crate::contracts::PlanStdin::RuntimeParameters {
+            parameters,
+            project_path,
+        } = spec.stdin.expect("runtime parameters stdin")
+        else {
+            panic!("expected typed runtime parameters stdin");
+        };
+        assert_eq!(parameters, json!({"message": "hello"}));
+        assert_eq!(project_path.as_deref(), Some(project.as_path()));
         assert_eq!(spec.timeout_secs, 60);
         assert_eq!(spec.env.get("PYTHONUNBUFFERED").unwrap(), "1");
     }
@@ -2233,16 +2238,23 @@ category: ryeos/core/subprocess\n";
             dispatch.args[2],
         );
 
-        // stdin_data should have the params JSON plus the injected project path.
-        let stdin: serde_json::Value =
-            serde_json::from_str(dispatch.stdin_data.as_deref().unwrap()).unwrap();
+        // Runtime parameter stdin remains typed and includes the authoritative
+        // injected project path.
+        let crate::contracts::PlanStdin::RuntimeParameters {
+            parameters: stdin,
+            project_path,
+        } = dispatch.stdin.as_ref().expect("runtime parameters stdin")
+        else {
+            panic!("expected typed runtime parameters stdin");
+        };
         assert_eq!(stdin["message"], "hello");
         assert!(
-            stdin["project_path"]
-                .as_str()
+            project_path
+                .as_ref()
                 .unwrap()
+                .to_string_lossy()
                 .contains("rye_plan_test"),
-            "project_path should be injected, got: {stdin:?}"
+            "project_path should be typed, got: {project_path:?}"
         );
 
         // timeout_secs from the runtime config

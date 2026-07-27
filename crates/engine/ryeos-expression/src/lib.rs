@@ -76,6 +76,20 @@ impl CompiledExpression {
         &self.references
     }
 
+    /// Return the root name when this expression is exactly a root reference,
+    /// allowing only semantically inert grouping.
+    pub fn direct_root_reference(&self) -> Option<&str> {
+        fn direct_root(expression: &Expr) -> Option<&str> {
+            match &expression.kind {
+                ExprKind::Variable(root) => Some(root),
+                ExprKind::Group(inner) => direct_root(inner),
+                _ => None,
+            }
+        }
+
+        direct_root(&self.root)
+    }
+
     /// Return the result type when it follows entirely from expression shape.
     /// `None` means runtime data can affect the type; it is not a permissive
     /// coercion signal.
@@ -210,6 +224,16 @@ impl CompiledTemplate {
 
     pub fn references(&self) -> &ReferenceSet {
         &self.references
+    }
+
+    /// Return the root name when the entire template is one direct root
+    /// expression. Literal text, member access, calls, and operators do not
+    /// qualify.
+    pub fn whole_direct_root_reference(&self) -> Option<&str> {
+        match self.parts.as_slice() {
+            [TemplatePart::Expression(expression)] => expression.direct_root_reference(),
+            _ => None,
+        }
     }
 }
 

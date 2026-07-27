@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-27T09:03:55Z:6cc9605bffb1a595da9b387839309c8921ad635d3a46e92ae31c1c87d56f9a12:AbukfpUVNkKUtggUyREsw1XjvxyelozkyhQmp1NpTISwdZ8KSNZhXFAi2E55r+hgtCM0RgTKpN2PTbYoOp6pCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T09:31:02Z:664bd5306f377b762253e8cff2508756315a95665775831228ccee87be4d02d5:VRtgDetS/RiUCTqdJ2fI9WXztNzq9wuZMceuSTpV1XEE/7Ck5rs1roQV8lnRS19Jqw1pGulbQJlNmyneexWMAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 
 ---
 category: ryeos/core
@@ -67,6 +67,13 @@ config:
   input_data: "${params_json}"
   cwd: "${tool_dir}"
 ```
+
+When `input_data` is exactly a direct `${params_json}` expression, the
+execution plan retains the parameter object as typed runtime stdin until the
+final spawn. RyeOS owns the top-level `project_path` binding and can relocate
+that binding during admitted recovery; project-root text anywhere else remains
+forbidden. Any surrounding literal text or expression changes make the stdin
+opaque, so RyeOS never parses or rewrites arbitrary program input.
 
 The Python runtimes no longer set `PYTHONPATH`; they derive
 bundle-local import roots from `${tool_path}` and prepend them to
