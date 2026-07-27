@@ -68,7 +68,7 @@ pub enum MockResponse {
     ToolCalls(Vec<MockToolCallSpec>),
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MockToolCallSpec {
     pub id: String,
     pub name: String,
