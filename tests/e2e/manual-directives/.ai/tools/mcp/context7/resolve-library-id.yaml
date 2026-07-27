@@ -1,4 +1,4 @@
-# ryeos:signed:2026-04-09T00:59:52Z:d8010b2764f235011098438f540c982f5f26b912f30e6a1e3ee0eefa35ad017f:pqoZDlKO8cnFsf3JLP_htTGcdeqt7kkZx7GWrqRUpMutmxprbKLCt7BusNJiwKpIGQa2qSKlWaAsnJo5MenDDA:4b987fd4e40303ac
+# ryeos:signed:2026-07-27T23:40:19Z:31491a97e1e0ab19356715ed41a93ae5ce7904ca8ed6ebceea52d83ca4299782:KnqRkTiFP0gk1Zq9umd5SwlWeGQbkGnGCIqsQDoa7ryaT6k2w0aVsaeoiK9dNdRuDkJcYLxbvWqepSelcjSSBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tool_type: mcp
 executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
@@ -49,7 +49,7 @@ description: 'Resolves a package/product name to a Context7-compatible library I
   what you need after 3 calls, use the best result you have.'
 config:
   server: mcp/servers/context7
-  server_config_path: '{project_path}/.ai/tools/mcp/servers/context7.yaml'
+  server_config_path: '${project_path}/.ai/tools/mcp/servers/context7.yaml'
   tool_name: resolve-library-id
 input_schema:
   type: object

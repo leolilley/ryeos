@@ -563,19 +563,24 @@ fn exec_tool(
     })?;
 
     // Build args
-    let args = config
+    let authored_args: Vec<ryeos_engine::runtime::RuntimeArgument> = config
         .get("args")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| {
-                    v.as_str()
-                        .map(|s| expand_template(s, &params_json, project_path))
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|error| CliError::Local {
+            detail: format!("offline tool `{tool_ref_str}` has invalid config.args: {error}"),
+        })?
         .unwrap_or_default();
+    let args = authored_args
+        .into_iter()
+        .map(|argument| match argument {
+            ryeos_engine::runtime::RuntimeArgument::Template(template) => {
+                expand_template(&template, &params_json, project_path)
+            }
+            ryeos_engine::runtime::RuntimeArgument::Literal(literal) => Ok(literal.literal),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let stdin_data = config
         .get("input_data")
@@ -1746,6 +1751,91 @@ else:
         );
 
         assert_eq!(result["name"], "leo");
+    }
+
+    #[test]
+    fn offline_tool_rejects_removed_runtime_interpolation() {
+        let fixture = Fixture::new();
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("tools")
+                .join("custom")
+                .join("echo.yaml"),
+            "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"bin:echo-json\"\n  input_data: \"{params_json}\"\n",
+        );
+
+        let error = try_offline_dispatch_for_test(
+            &["custom".to_string(), "leo".to_string()],
+            &fixture.system,
+            ".",
+        )
+        .unwrap_err();
+        match error {
+            CliError::Local { detail } => {
+                assert!(detail.contains("removed"), "{detail}");
+                assert!(detail.contains("${params_json}"), "{detail}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offline_tool_rejects_invalid_runtime_argument_shape() {
+        let fixture = Fixture::new();
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("tools")
+                .join("custom")
+                .join("echo.yaml"),
+            "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"bin:echo-json\"\n  args:\n    - template: \"${project_path}\"\n  input_data: \"${params_json}\"\n",
+        );
+
+        let error = try_offline_dispatch_for_test(
+            &["custom".to_string(), "leo".to_string()],
+            &fixture.system,
+            ".",
+        )
+        .unwrap_err();
+        match error {
+            CliError::Local { detail } => {
+                assert!(detail.contains("invalid config.args"), "{detail}");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn offline_tool_preserves_literal_runtime_argument() {
+        let fixture = Fixture::new();
+        fixture.write_bin(
+            "capture-arg",
+            b"#!/bin/sh\nprintf '{\"arg\":\"%s\"}\\n' \"$1\"\n",
+        );
+        fixture.write_signed(
+            &fixture
+                .bundle
+                .join(ryeos_engine::AI_DIR)
+                .join("tools")
+                .join("custom")
+                .join("echo.yaml"),
+            "category: custom\nname: echo\nexecutor_id: \"@subprocess\"\nconfig:\n  command: \"bin:capture-arg\"\n  args:\n    - literal: \"print(f'{tool_path}')\"\n",
+        );
+
+        let result = expect_json(
+            try_offline_dispatch_for_test(
+                &["custom".to_string(), "leo".to_string()],
+                &fixture.system,
+                ".",
+            )
+            .unwrap()
+            .expect("handled offline"),
+        );
+
+        assert_eq!(result["arg"], "print(f'{tool_path}')");
     }
 
     #[test]

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-04-09T00:59:52Z:4f0e7664fb9ea6163761d3fff1015c1d9551ed3c6b32a3c7115bf8d710dc9bba:cG3ppxvDZ5jfBtZs5R-TkFKy9sa_T3agiWkXZ_s0NjAIXD5ZhjXw5saCztRcLeDpXhCickdaUhFYbpmnj5EzDA:4b987fd4e40303ac
+# ryeos:signed:2026-07-27T23:40:19Z:0cf887a49cdeb4e94df029c4de3fc3e15d66ed8d6487f88b959811f84c35f58e:ZlvAShX/wut3Q17rFF8ANhGC5IEO319P1OWYKyX/y76I6NdW8Rcwj0QgIPq/IcBKVa2eyDGbjm+jHmKN8pFFCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tool_type: mcp
 executor_id: rye/core/runtimes/mcp/http
 category: mcp/context7
@@ -16,7 +16,7 @@ description: 'Retrieves and queries up-to-date documentation and code examples f
   what you need after 3 calls, use the best information you have.'
 config:
   server: mcp/servers/context7
-  server_config_path: '{project_path}/.ai/tools/mcp/servers/context7.yaml'
+  server_config_path: '${project_path}/.ai/tools/mcp/servers/context7.yaml'
   tool_name: query-docs
 input_schema:
   type: object

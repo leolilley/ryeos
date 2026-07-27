@@ -16,6 +16,8 @@
 pub mod config_schema;
 pub mod handlers;
 
+pub use handlers::runtime_config::{LiteralRuntimeArgument, RuntimeArgument};
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -144,22 +146,42 @@ fn render_runtime_template(
     ctx: &TemplateContext,
     host_env: Option<&HostEnvBindings>,
 ) -> Result<String, EngineError> {
-    let compiled = compile_runtime_template(source)?;
+    let compiled = compile_runtime_template(source, ctx)?;
     render_compiled_runtime_template(&compiled, ctx, host_env)
 }
 
 fn compile_runtime_template(
     source: &str,
+    ctx: &TemplateContext,
 ) -> Result<ryeos_expression::CompiledTemplate, EngineError> {
     let compilation_limits = ryeos_expression::CompilationLimits::default();
-    ryeos_expression::compile_template_for(
+    let compiled = ryeos_expression::compile_template_for(
         source,
         "runtime subprocess template",
         &compilation_limits,
     )
     .map_err(|error| EngineError::RuntimeTemplateExpression {
         reason: error.to_string(),
-    })
+    })?;
+    let fixed_roots = [
+        "tool_path",
+        "tool_dir",
+        "tool_parent",
+        "project_path",
+        "params_json",
+        "interpreter",
+        "runtime_dir",
+    ];
+    ryeos_expression::reject_removed_single_brace_interpolation(
+        &compiled,
+        fixed_roots
+            .into_iter()
+            .chain(ctx.extra.keys().map(String::as_str)),
+    )
+    .map_err(|error| EngineError::RuntimeTemplateExpression {
+        reason: error.to_string(),
+    })?;
+    Ok(compiled)
 }
 
 fn render_compiled_runtime_template(
@@ -236,7 +258,7 @@ fn compile_stdin_template(
     parameters: &Value,
     project_root: Option<&Path>,
 ) -> Result<PlanStdin, EngineError> {
-    let compiled = compile_runtime_template(template)?;
+    let compiled = compile_runtime_template(template, ctx)?;
     if compiled.whole_direct_root_reference() == Some("params_json") {
         let mut parameters = parameters.clone();
         let project_path = match (parameters.as_object_mut(), project_root) {
@@ -253,6 +275,16 @@ fn compile_stdin_template(
     }
     let data = render_compiled_runtime_template(&compiled, ctx, None)?;
     Ok(PlanStdin::Opaque { data })
+}
+
+fn render_runtime_argument(
+    argument: RuntimeArgument,
+    ctx: &TemplateContext,
+) -> Result<String, EngineError> {
+    match argument {
+        RuntimeArgument::Template(template) => expand_template(&template, ctx),
+        RuntimeArgument::Literal(literal) => Ok(literal.literal),
+    }
 }
 
 fn is_host_env_root(root: &str) -> bool {
@@ -280,7 +312,7 @@ fn json_type_name(value: &Value) -> &'static str {
 #[derive(Debug, Default, Clone)]
 pub struct SpecOverrides {
     pub command: Option<String>,
-    pub args: Option<Vec<String>>,
+    pub args: Option<Vec<RuntimeArgument>>,
     pub stdin_data: Option<String>,
     pub timeout_secs: Option<u64>,
     pub cwd: Option<PathBuf>,
@@ -681,10 +713,10 @@ pub fn compile_with_handlers(
         (cmd_expanded, None)
     };
 
-    let args_template = spec_overrides.args.unwrap_or_default();
-    let args: Result<Vec<String>, EngineError> = args_template
-        .iter()
-        .map(|a| expand_template(a, &template_ctx))
+    let authored_args = spec_overrides.args.unwrap_or_default();
+    let args: Result<Vec<String>, EngineError> = authored_args
+        .into_iter()
+        .map(|argument| render_runtime_argument(argument, &template_ctx))
         .collect();
     let args = args?;
 
@@ -826,6 +858,43 @@ mod tests {
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
         let got = expand_template("print('{}') ${tool_path}", &ctx).unwrap();
         assert_eq!(got, "print('{}') /tool.yaml");
+    }
+
+    #[test]
+    fn template_rejects_removed_runtime_root_interpolation() {
+        let mut ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        ctx.extra
+            .insert("custom_runtime_root".into(), "/runtime".into());
+
+        for source in [
+            "{tool_path}",
+            "prefix/{project_path}",
+            "{custom_runtime_root}/bin",
+        ] {
+            let error = expand_template(source, &ctx).unwrap_err();
+            assert!(
+                error.to_string().contains("removed") && error.to_string().contains("rye-expr/1"),
+                "unexpected error for {source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn template_leaves_unrelated_brace_grammars_literal() {
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let got = expand_template("bin/{triple}/tool", &ctx).unwrap();
+        assert_eq!(got, "bin/{triple}/tool");
+    }
+
+    #[test]
+    fn literal_runtime_argument_bypasses_expression_compilation() {
+        let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
+        let source = "print(f'{tool_path} ${not_a_rye_expression')";
+        let argument = RuntimeArgument::Literal(LiteralRuntimeArgument {
+            literal: source.into(),
+        });
+
+        assert_eq!(render_runtime_argument(argument, &ctx).unwrap(), source);
     }
 
     #[test]

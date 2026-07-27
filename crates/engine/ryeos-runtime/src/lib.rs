@@ -53,11 +53,11 @@ pub use events::{
 };
 pub use expression::{
     compile_and_render, compile_condition_for, compile_expression, compile_expression_for,
-    compile_template, compile_template_for, evaluate, evaluate_bool, render_template,
-    CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,
-    EvaluationLimits, EvaluationSession, ExpressionError, ExpressionValueType, Reference,
-    ReferenceSegment, ReferenceSet, RuntimeJsonArrayBudget, RuntimeJsonObjectBudget, SourceSpan,
-    TemplatePart,
+    compile_template, compile_template_for, evaluate, evaluate_bool,
+    reject_removed_single_brace_interpolation, render_template, CompilationLimits,
+    CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext, EvaluationLimits,
+    EvaluationSession, ExpressionError, ExpressionValueType, Reference, ReferenceSegment,
+    ReferenceSet, RuntimeJsonArrayBudget, RuntimeJsonObjectBudget, SourceSpan, TemplatePart,
 };
 pub use expression_condition::ExpressionCondition;
 pub use framing::{recv_frame, send_frame};

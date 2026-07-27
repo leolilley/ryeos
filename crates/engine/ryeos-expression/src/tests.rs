@@ -435,6 +435,58 @@ fn template_compiler_rejects_removed_input_shorthand_in_literal_text() {
 }
 
 #[test]
+fn removed_single_brace_interpolation_rejection_is_an_explicit_surface_policy() {
+    for source in [
+        "{runtime_root}",
+        "prefix/{tool_path}",
+        "{_private_context}/suffix",
+    ] {
+        let compiled = compile_template(source, &CompilationLimits::default()).unwrap();
+        let error = reject_removed_single_brace_interpolation(
+            &compiled,
+            ["runtime_root", "tool_path", "_private_context"],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.phase(), ErrorPhase::Parse);
+        assert!(
+            error.to_string().contains("removed `"),
+            "unexpected error for {source}: {error}"
+        );
+        assert!(
+            error.to_string().contains("not valid in rye-expr/1"),
+            "unexpected error for {source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn single_braces_that_are_not_removed_references_remain_literal_data() {
+    let context = json!({"tool_path": "/tool"});
+
+    for source in [
+        "{}",
+        r#"{"name":"value"}"#,
+        r#"${"{tool_path}"}"#,
+        "$${tool_path}",
+    ] {
+        let compiled = compile_template(source, &CompilationLimits::default()).unwrap();
+        reject_removed_single_brace_interpolation(&compiled, ["tool_path"]).unwrap();
+    }
+    let compiled = compile_template("bin/{triple}/tool", &CompilationLimits::default()).unwrap();
+    reject_removed_single_brace_interpolation(&compiled, ["tool_path"]).unwrap();
+    assert_eq!(
+        render("{directive_name}", &context),
+        json!("{directive_name}")
+    );
+    assert_eq!(
+        render(r#"${"{tool_path}"}"#, &context),
+        json!("{tool_path}")
+    );
+    assert_eq!(render("$${tool_path}", &context), json!("${tool_path}"));
+}
+
+#[test]
 fn lexer_enforces_json_numbers_and_unicode_escapes() {
     let context = json!({});
     assert_eq!(evaluate_source(r#""\uD83D\uDE00""#, &context), json!("😀"));

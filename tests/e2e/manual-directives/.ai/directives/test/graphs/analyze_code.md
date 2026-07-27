@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-03-11T08:29:37Z:99bf1a3c40c20310248470011d9d0fa27e422525b6ccc4c5b3651392adbb859a:sVAv2wow9LzZLZ3DUxtZvhcvbGqauGO-9jDFVQQWzZEQfuwfPTogl1WRLDgHGjlbtppqVSUevn1SQz2byqYFDg==:4b987fd4e40303ac -->
+<!-- ryeos:signed:2026-07-27T23:40:19Z:3a27f86806e60938a4bc6c7dbab116fd68e31a7922c90eb01b464d6027b2a974:0pXrBdM353398hbPbzwv4AWwu/b6JR/WbaERq4E89UCcqwrJMMxAI8rgQ1Xfh8aowYGrB9fS9u/zOdUScpWxBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 <!-- -->
 
 # Analyze Code
@@ -48,7 +48,7 @@ Analyzes a code snippet — identifies the language, counts functions, writes a 
     - The number of function/method definitions (def, async def, function, etc.)
     - A 2-3 sentence summary of what the code does
 
-    Write the result as a JSON object to `{project_path}/${inputs.output_path}` with keys: `language`, `function_count`, `summary`.
+    Write the result as a JSON object to the project-relative path `${inputs.output_path}` with keys: `language`, `function_count`, `summary`.
   </step>
 
   <step name="return_result">
