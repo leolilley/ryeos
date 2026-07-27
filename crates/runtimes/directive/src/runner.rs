@@ -2960,7 +2960,13 @@ impl Runner {
                 "live_context_tokens": live_context_tokens,
                 "threshold_tokens": threshold_tokens,
                 "messages": self.messages.clone(),
-                "usage": self.budget.cost(),
+                // Hook conditions compare numerically: usage money is the
+                // one-way display float, matching `budget_remaining` below.
+                "usage": {
+                    "input_tokens": self.budget.cost().input_tokens,
+                    "output_tokens": self.budget.cost().output_tokens,
+                    "total_usd": self.budget.cost().total_usd.display_usd_lossy(),
+                },
                 "budget_remaining": {
                     "spend_usd": remaining_spend_usd,
                     "spend_unlimited": remaining_spend_usd.is_none(),
@@ -3588,8 +3594,10 @@ impl Runner {
                 }
             }
         };
-        // Settled reporting derives one-way presentation dollars from the
-        // fixed-point rates; this value never feeds budget authority.
+        // Rate-derived spend is computed in floats and enters budget
+        // authority only through the settle sites' one sanctioned
+        // `quantize_reported_f64_round_up` entry boundary — the same door
+        // provider-reported spend uses.
         let input_cost =
             (input_tokens as f64 / 1_000_000.0) * rates.input_per_million.display_usd_lossy();
         let output_cost =

@@ -709,6 +709,11 @@ mod history_tests {
         );
 
         assert!(accounting.nodes.is_empty());
+        // The pre-existing total is untouched by the rejected record.
+        assert_eq!(
+            accounting.total.as_ref().map(|total| total.input_tokens),
+            Some(i64::MAX as u64)
+        );
         assert!(budgets
             .failure()
             .is_some_and(|error| error.contains("settlement storage maximum")));

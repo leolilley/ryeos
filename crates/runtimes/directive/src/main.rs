@@ -405,6 +405,22 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 warnings: Vec::new(),
             });
         }
+        // A usage event that exists but fails to decode must fail the resume
+        // closed, exactly like its absence: reseeding is impossible either
+        // way, and proceeding would silently restart spend from zero.
+        if resume_state.thread_usage.is_none() {
+            return Ok(RuntimeResult {
+                success: false,
+                status: RuntimeResultStatus::Failed,
+                thread_id: envelope.thread_id.clone(),
+                result: Some(json!(
+                    "resume prerequisites unmet: prior thread_usage event failed to decode; budget cannot be reseeded"
+                )),
+                outputs: json!({}),
+                cost: None,
+                warnings: Vec::new(),
+            });
+        }
 
         if let Err(e) = callback
             .append_runtime_event(

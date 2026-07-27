@@ -405,7 +405,7 @@ fn follow_envelope_limit_reservation() -> Value {
     let maximum_cost = json!({
         "input_tokens": i64::MAX as u64,
         "output_tokens": i64::MAX as u64,
-        "total_usd": f64::MAX,
+        "total_usd": ryeos_engine::launch_envelope_types::UsdNanos::MAX.to_canonical_string(),
         "basis": ryeos_engine::launch_envelope_types::COST_BASIS_ROLLUP,
     });
     let maximum_thread_id = format!("T-{}", "x".repeat(126));

@@ -31,9 +31,12 @@ cycle — a follow splice copying a checkpoint through `serde_json::Value`
 cannot perturb a cost — so **exact `==` is the correct comparison everywhere**,
 with no epsilon and no tolerance.
 
-Canonical strings carry no sign, exponent, padding zero, or trailing
-fractional zeros, and at most nine fractional digits. More than nine digits is
-rejected, never silently rounded (`MoneyError::ExcessScale`).
+Canonical strings carry no sign, exponent, or padding zero, and at most nine
+fractional digits. More than nine digits is rejected, never silently rounded
+(`MoneyError::ExcessScale`). Rendering is minimal (no trailing fractional
+zeros); decode also accepts trailing zeros within the nine-digit scale
+(`"0.50"`, `"0.0"`) — they are exact, and comparisons are on parsed nanos, not
+bytes.
 
 ## Arithmetic
 
@@ -46,9 +49,11 @@ with plain equality — this is what lets checkpoint resume validate
 
 ## Entry boundary
 
-Floats exist in exactly one place: where a **provider adapter** reports spend
-as a parsed JSON number. That figure crosses into the exact domain once, at
-the settlement site, via `UsdNanos::quantize_reported_f64_round_up` — the
+Floats reach settlement from exactly one door: the settle sites'
+`UsdNanos::quantize_reported_f64_round_up`. Two figures arrive there — spend a
+**provider adapter** reported as a parsed JSON number, and spend the runtime
+**derived from configured rates** in float math. Both cross into the exact
+domain once, at that boundary — the
 float's shortest round-trip decimal is quantized at nano precision, rounding
 toward positive infinity (sub-nano residue rounds up, never truncating spend).
 Provider-reported raw decimal *text* (including exponent forms like `2.25e-5`)

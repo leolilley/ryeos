@@ -16,7 +16,9 @@ use super::validate_object_kind;
 /// current project authority contract and admitted launch capsule root.
 /// Schema identifiers are immutable CAS wire identities; older shapes are not
 /// accepted through a compatibility reader.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
+/// v7: embedded `ThreadUsage.spend_usd` is exact fixed-point money as a
+/// canonical decimal string; JSON-number money does not decode.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1327,7 +1329,7 @@ mod tests {
     }
 
     #[test]
-    fn thread_usage_requires_canonical_chronology_and_finite_nonnegative_spend() {
+    fn thread_usage_requires_canonical_chronology_and_string_money() {
         let mut usage = ThreadUsage {
             completed_turns: 1,
             input_tokens: 2,
@@ -1345,11 +1347,12 @@ mod tests {
         assert!(usage.validate().is_ok());
         usage.settled_at = "2026-04-21T11:59:59Z".to_string();
         assert!(usage.validate().is_err());
-        usage.settled_at = "2026-04-21T12:00:01Z".to_string();
-        usage.spend_usd = f64::INFINITY;
-        assert!(usage.validate().is_err());
-        usage.spend_usd = -0.01;
-        assert!(usage.validate().is_err());
+
+        // Non-finite and negative spend are unrepresentable in `UsdNanos`;
+        // the boundary moved to decode: JSON-number money is rejected.
+        let mut numeric_spend = serde_json::to_value(&usage).unwrap();
+        numeric_spend["spend_usd"] = serde_json::json!(0.5);
+        assert!(serde_json::from_value::<ThreadUsage>(numeric_spend).is_err());
     }
 
     #[test]
