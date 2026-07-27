@@ -1458,7 +1458,7 @@ async fn e2e_resolution_cache_transparent_across_hit_and_edit() {
     plant_directive(
         project.path(),
         "test/cache_probe",
-        "Summarise the ratings briefing (v1).",
+        "Summarise the ratings briefing. MARKER_ALPHA_ONE.",
         &["ryeos.execute.tool.*"],
         &fixture.publisher,
     )
@@ -1472,12 +1472,36 @@ async fn e2e_resolution_cache_transparent_across_hit_and_edit() {
     plant_directive(
         project.path(),
         "test/cache_probe",
-        "Summarise the ratings briefing (v2 - materially different body).",
+        "Summarise the ratings briefing. MARKER_BETA_TWO.",
         &["ryeos.execute.tool.*"],
         &fixture.publisher,
     )
     .expect("plant directive v2");
     launch_ok(&h, &project_path).await;
+
+    // The directive body flows into each provider request. Assert what the
+    // provider actually saw: a stale-serve on launch 3 would carry the v1
+    // marker, and a never-populated cache is caught indirectly by the same
+    // three-request shape. This is the assertion that makes the test catch a
+    // wrong-serve, not merely a crash.
+    let bodies = mock.captured_bodies().await;
+    assert_eq!(bodies.len(), 3, "three launches → three provider requests");
+    assert!(
+        bodies[0].to_string().contains("MARKER_ALPHA_ONE"),
+        "launch 1 saw v1"
+    );
+    assert!(
+        bodies[1].to_string().contains("MARKER_ALPHA_ONE"),
+        "launch 2 (cache hit) saw the same v1 body"
+    );
+    assert!(
+        bodies[2].to_string().contains("MARKER_BETA_TWO"),
+        "launch 3 must recompute after the edit and carry v2, not the stale v1"
+    );
+    assert!(
+        !bodies[2].to_string().contains("MARKER_ALPHA_ONE"),
+        "launch 3 must NOT serve the stale v1 resolution"
+    );
 
     drop(project);
     drop(mock);

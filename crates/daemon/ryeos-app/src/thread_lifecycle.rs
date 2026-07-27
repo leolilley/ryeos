@@ -5589,18 +5589,34 @@ fn admit_verified_root_execution_inner(
             .as_deref(),
         ProjectContext::None => None,
     };
-    // Admission-time resolution cache. The resolve/compose pipeline is a pure
-    // function of the generation (kinds / trust / composers / bundle roots plus
-    // the project parser snapshot) and the ref + project root — so those key
-    // it. A hit is served only after content revalidation proves no
-    // higher-precedence item appeared and no project dependency changed. The
-    // reverify above is NEVER cached; it runs on every launch.
+    // Admission-time resolution cache. The resolve/compose pipeline's inputs at
+    // a fixed generation + project root are: kinds/composers/bundle-roots (the
+    // engine generation), the PROJECT parser overlay (`.ai/parsers/`), and the
+    // PROJECT trust keys (`.ai/trust-keys/`). The generation covers only the
+    // first — a project overlay or trust-key edit changes the parse and the
+    // effective trust class without any bundle change. `effective_request_snapshot`
+    // computes an identity for each of the three; folding all three into the key
+    // means such an edit is a MISS, never a stale serve. That snapshot ran
+    // unconditionally before the cache and is cheap relative to the
+    // parse/verify/compose it keys — so it stays unconditional, and only the
+    // pipeline is cached. The reverify above is NEVER cached.
     let project_root_owned = project_root.map(Path::to_path_buf);
+    let request_snapshot = engine
+        .effective_request_snapshot(project_root)
+        .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
     let cache_key = resolution_cache.map(|_| crate::resolution_cache::ResolutionCacheKey {
         generation: resolution_generation,
         canonical_ref: verified_subject.resolved.canonical_ref.to_string(),
         project_root: project_root_owned.clone(),
-        plan_context_identity: String::new(),
+        // Unit-separated so no identity can inject a false match. Covers the
+        // engine/bundle generation (coherent with the resolving engine),
+        // the project parser overlay, and the effective trust store.
+        plan_context_identity: format!(
+            "{}\u{{1f}}{}\u{{1f}}{}",
+            request_snapshot.request_engine_generation_identity,
+            request_snapshot.registry_fingerprint,
+            request_snapshot.effective_trust_identity,
+        ),
     });
     let cached = match (resolution_cache, cache_key.as_ref()) {
         (Some(cache), Some(key)) => {
@@ -5610,8 +5626,14 @@ fn admit_verified_root_execution_inner(
                     "root_admission_resolution_cache_lookup",
                 )
             });
-            let (output, _outcome) = cache.get(key);
+            let (output, outcome) = cache.get(key);
             drop(lookup_timer);
+            tracing::debug!(
+                target: "ryeos::admission",
+                item = %verified_subject.resolved.canonical_ref,
+                cache_outcome = ?outcome,
+                "resolution cache lookup"
+            );
             output
         }
         _ => None,
@@ -5623,9 +5645,6 @@ fn admit_verified_root_execution_inner(
             timings.nested("preflight_admission", "root_admission_resolution_compose")
         });
         let roots = engine.resolution_roots(project_root_owned.clone());
-        let request_snapshot = engine
-            .effective_request_snapshot(project_root)
-            .map_err(|error| anyhow!("history-policy parser resolution failed: {error}"))?;
         let (output, probed_absent) =
             ryeos_engine::resolution::run_resolution_pipeline_with_probes(
                 &verified_subject.resolved.canonical_ref,

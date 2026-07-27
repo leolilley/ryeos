@@ -36,7 +36,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use ryeos_engine::contracts::{ItemSpace, ProbedAbsence};
-use ryeos_engine::resolution::{ResolutionOutput, ResolvedAncestor};
+use ryeos_engine::resolution::ResolutionOutput;
 
 /// Identity of one admission's resolution inputs. A hit requires an exact key
 /// match AND passing content-derived revalidation.
@@ -50,8 +50,12 @@ pub struct ResolutionCacheKey {
     /// Project-root identity that steers project-space resolution. `None` for
     /// projectless (bundle-only) resolution.
     pub project_root: Option<PathBuf>,
-    /// Any remaining plan-context fields that steer resolution, pre-rendered by
-    /// the caller to a stable identity string (empty when none apply).
+    /// Identity of the remaining resolution inputs the generation and project
+    /// root do NOT capture, pre-rendered by the caller to one stable string:
+    /// the engine/bundle generation identity, the PROJECT parser-overlay
+    /// fingerprint (`.ai/parsers/`), and the effective trust identity
+    /// (`.ai/trust-keys/`). An edit to any of these changes this string, so a
+    /// stale resolution misses rather than being served.
     pub plan_context_identity: String,
 }
 
@@ -102,20 +106,28 @@ impl ResolutionCache {
     /// entry is evicted and reported as [`LookupOutcome::Stale`] so the caller
     /// recomputes and re-inserts.
     pub fn get(&self, key: &ResolutionCacheKey) -> (Option<ResolutionOutput>, LookupOutcome) {
-        let mut guard = self.inner.lock().expect("resolution cache mutex poisoned");
-        let fresh = match guard.slots.get(key) {
-            Some(entry) => revalidate(&entry.output, &entry.probed_absent),
-            None => return (None, LookupOutcome::Miss),
+        // Snapshot the small revalidation inputs (paths + digests) under the
+        // lock, then do the filesystem I/O UNLOCKED so concurrent lookups do
+        // not serialize behind disk. Re-lock only to clone the (large) output
+        // on a confirmed-fresh entry or to evict a stale one.
+        let inputs = {
+            let guard = self.inner.lock().expect("resolution cache mutex poisoned");
+            match guard.slots.get(key) {
+                Some(entry) => revalidation_inputs(&entry.output, &entry.probed_absent),
+                None => return (None, LookupOutcome::Miss),
+            }
         };
-        if fresh {
-            let output = guard
-                .slots
-                .get(key)
-                .expect("entry present under the same lock")
-                .output
-                .clone();
-            (Some(output), LookupOutcome::Hit)
+        if revalidate(&inputs) {
+            let guard = self.inner.lock().expect("resolution cache mutex poisoned");
+            match guard.slots.get(key) {
+                // A concurrent insert may have replaced the entry between the
+                // snapshot and now; its output is at least as fresh, so serving
+                // it is sound.
+                Some(entry) => (Some(entry.output.clone()), LookupOutcome::Hit),
+                None => (None, LookupOutcome::Miss),
+            }
         } else {
+            let mut guard = self.inner.lock().expect("resolution cache mutex poisoned");
             guard.slots.remove(key);
             (None, LookupOutcome::Stale)
         }
@@ -158,46 +170,66 @@ impl ResolutionCache {
     }
 }
 
-/// The positive dependencies of a resolution output: the root plus every
-/// ancestor and referenced item, each carrying a source path + whole-file
-/// digest.
-fn positive_dependencies(output: &ResolutionOutput) -> impl Iterator<Item = &ResolvedAncestor> {
-    std::iter::once(&output.root)
-        .chain(output.ancestors.iter())
-        .chain(output.referenced_items.iter())
+/// The project-space revalidation inputs of a cached entry — small enough to
+/// clone out from under the cache lock so the disk I/O runs unlocked. Bundle
+/// dependencies are omitted: they are immutable within the generation (in the
+/// key), so they are never re-read.
+struct RevalidationInputs {
+    /// `(source_path, whole-file digest)` for each project-space positive dep.
+    positives: Vec<(PathBuf, String)>,
+    /// Recorded project-space absences that must still be absent.
+    absences: Vec<PathBuf>,
 }
 
-/// Prove a cached resolution is still current, from content only.
-///
-/// Bundle-space dependencies are trusted (immutable within the generation,
-/// which is in the key). Project-space positive dependencies must still hash to
-/// their recorded whole-file digest, and project-space absences must still be
-/// absent. Any deviation — a changed, removed, or unreadable positive, or an
-/// appeared absence — fails closed.
-fn revalidate(output: &ResolutionOutput, probed_absent: &[ProbedAbsence]) -> bool {
-    for dependency in positive_dependencies(output) {
-        if dependency.source_space != ItemSpace::Project {
-            continue;
-        }
-        match std::fs::read_to_string(&dependency.source_path) {
-            Ok(content)
-                if lillux::signature::content_hash(&content)
-                    == dependency.source_content_digest => {}
+fn revalidation_inputs(
+    output: &ResolutionOutput,
+    probed_absent: &[ProbedAbsence],
+) -> RevalidationInputs {
+    let positives = std::iter::once(&output.root)
+        .chain(output.ancestors.iter())
+        .chain(output.referenced_items.iter())
+        .filter(|dependency| dependency.source_space == ItemSpace::Project)
+        .map(|dependency| {
+            (
+                dependency.source_path.clone(),
+                dependency.source_content_digest.clone(),
+            )
+        })
+        .collect();
+    let absences = probed_absent
+        .iter()
+        .filter(|absence| absence.space == ItemSpace::Project)
+        .map(|absence| absence.path.clone())
+        .collect();
+    RevalidationInputs {
+        positives,
+        absences,
+    }
+}
+
+/// Prove a cached resolution is still current, from content only. Runs UNLOCKED
+/// on the snapshotted inputs. Project positives must still hash to their
+/// recorded whole-file digest; project absences must still be absent. Any
+/// deviation — a changed, removed, or unreadable positive, or an appeared
+/// shadow — fails closed.
+fn revalidate(inputs: &RevalidationInputs) -> bool {
+    for (source_path, digest) in &inputs.positives {
+        match std::fs::read_to_string(source_path) {
+            Ok(content) if &lillux::signature::content_hash(&content) == digest => {}
             _ => return false,
         }
     }
-    for absence in probed_absent {
-        if absence.space != ItemSpace::Project {
-            continue;
-        }
-        // Match the resolver's own probe: a regular file at the path is an item
-        // that would now shadow the cached winner. A directory or dangling
-        // symlink is not an item and does not invalidate.
-        let appeared = std::fs::metadata(&absence.path)
-            .map(|metadata| metadata.is_file())
-            .unwrap_or(false);
-        if appeared {
-            return false;
+    for path in &inputs.absences {
+        // Match the resolver's own probe. A regular file at the path is an
+        // item that would now shadow the cached winner → stale. A directory or
+        // dangling symlink is not an item. A non-NotFound error (e.g. EACCES)
+        // is where a fresh resolve would hard-fail, so fail closed rather than
+        // read it as "still absent".
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => return false,
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false,
         }
     }
     true
@@ -368,11 +400,13 @@ mod tests {
     }
 
     #[test]
-    fn eviction_bounds_the_cache_at_capacity() {
+    fn eviction_drops_the_oldest_and_keeps_the_newest() {
         let cache = ResolutionCache::new(2);
+        let mut keys = Vec::new();
         for i in 0..3 {
             let mut k = key();
             k.canonical_ref = format!("tool:x{i}");
+            keys.push(k.clone());
             cache.insert(
                 k,
                 output_with_root(ancestor(
@@ -384,5 +418,72 @@ mod tests {
             );
         }
         assert_eq!(cache.len(), 2, "capacity bound holds");
+        // The two most-recently-inserted survive; the oldest was evicted.
+        assert_eq!(cache.get(&keys[0]).1, LookupOutcome::Miss, "oldest evicted");
+        assert_eq!(cache.get(&keys[1]).1, LookupOutcome::Hit, "newer kept");
+        assert_eq!(cache.get(&keys[2]).1, LookupOutcome::Hit, "newest kept");
+    }
+
+    #[test]
+    fn deleted_project_positive_invalidates() {
+        let dir = tempdir();
+        let path = dir.join("gone.py");
+        let digest = write(&path, "# here");
+        let cache = ResolutionCache::new(8);
+        cache.insert(
+            key(),
+            output_with_root(ancestor(ItemSpace::Project, path.clone(), digest)),
+            Vec::new(),
+        );
+        assert_eq!(cache.get(&key()).1, LookupOutcome::Hit);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(cache.get(&key()).1, LookupOutcome::Stale, "deleted dep is stale");
+    }
+
+    #[test]
+    fn mixed_project_and_bundle_chain_revalidates_only_the_project_dep() {
+        let dir = tempdir();
+        let project_dep = dir.join("proj.py");
+        let project_digest = write(&project_dep, "# v1");
+        let cache = ResolutionCache::new(8);
+        // root = project item; one bundle ancestor whose path does not exist.
+        let mut output = output_with_root(ancestor(
+            ItemSpace::Project,
+            project_dep.clone(),
+            project_digest,
+        ));
+        output.ancestors.push(ancestor(
+            ItemSpace::Bundle,
+            PathBuf::from("/nonexistent/bundle/parent.py"),
+            "bundle-digest".into(),
+        ));
+        cache.insert(key(), output, Vec::new());
+        // Bundle ancestor is never re-read (would fail); project dep unchanged → hit.
+        assert_eq!(cache.get(&key()).1, LookupOutcome::Hit);
+        // Change only the project dep → stale, proving the project dep IS checked.
+        write(&project_dep, "# v2");
+        assert_eq!(cache.get(&key()).1, LookupOutcome::Stale);
+    }
+
+    #[test]
+    fn a_directory_at_a_probed_absent_path_does_not_invalidate() {
+        let dir = tempdir();
+        let bundle_item = dir.join("b.py");
+        let bundle_digest = write(&bundle_item, "# bundle");
+        let slot = dir.join("slot"); // will become a directory, not an item file
+        let cache = ResolutionCache::new(8);
+        cache.insert(
+            key(),
+            output_with_root(ancestor(ItemSpace::Bundle, bundle_item, bundle_digest)),
+            vec![ProbedAbsence {
+                space: ItemSpace::Project,
+                path: slot.clone(),
+            }],
+        );
+        assert_eq!(cache.get(&key()).1, LookupOutcome::Hit);
+        // A directory is not a resolvable item — the resolver probes is_file(),
+        // so this must NOT invalidate.
+        std::fs::create_dir(&slot).unwrap();
+        assert_eq!(cache.get(&key()).1, LookupOutcome::Hit);
     }
 }
