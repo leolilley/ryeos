@@ -7,16 +7,6 @@ use ryeos_runtime::{EvaluationLimits, RuntimeJsonArrayBudget};
 
 use super::outcome::GraphAccounting;
 
-/// A follow continuation copies the checkpoint through `serde_json::Value` so
-/// it can splice in the child's terminal envelope. That decode/encode cycle
-/// can move a finite JSON number to the immediately adjacent `f64` even though
-/// its decimal value has not changed at the supported wire precision. Keep the
-/// accounting check fail-closed while admitting exactly that representation
-/// drift; larger monetary differences remain contradictory.
-fn usd_matches_checked_rollup(checkpoint: f64, checked: f64) -> bool {
-    checkpoint == checked || checkpoint.to_bits().abs_diff(checked.to_bits()) == 1
-}
-
 /// Validate checkpoint-owned snapshots before a resume value reaches the
 /// walker. The closed accounting/error types remain private to graph execution;
 /// this boundary rejects corrupt history instead of silently under-reporting a
@@ -74,7 +64,7 @@ pub(crate) fn validate_checkpoint_snapshots(
     let mut expected_total = RuntimeCost {
         input_tokens: 0,
         output_tokens: 0,
-        total_usd: 0.0,
+        total_usd: ryeos_runtime::envelope::UsdNanos::ZERO,
         basis: Some(COST_BASIS_ROLLUP.to_string()),
     };
     let mut previous_accounting_step = None;
@@ -180,7 +170,7 @@ pub(crate) fn validate_checkpoint_snapshots(
             }
             if total.input_tokens != expected_total.input_tokens
                 || total.output_tokens != expected_total.output_tokens
-                || !usd_matches_checked_rollup(total.total_usd, expected_total.total_usd)
+                || total.total_usd != expected_total.total_usd
             {
                 anyhow::bail!(
                     "invalid checkpoint accounting: total does not match checked node/hook rollup"
@@ -212,26 +202,6 @@ pub(crate) fn validate_checkpoint_snapshots(
         previous_error_step = Some(error.step);
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::usd_matches_checked_rollup;
-
-    #[test]
-    fn checked_usd_rollup_admits_only_adjacent_json_float_drift() {
-        let checked = 0.023255329999999998_f64;
-        let json_roundtrip = 0.02325533_f64;
-
-        assert_eq!(checked.to_bits().abs_diff(json_roundtrip.to_bits()), 1);
-        assert!(usd_matches_checked_rollup(checked, checked));
-        assert!(usd_matches_checked_rollup(json_roundtrip, checked));
-        assert!(usd_matches_checked_rollup(checked, json_roundtrip));
-
-        let larger_mismatch = f64::from_bits(checked.to_bits() + 2);
-        assert!(!usd_matches_checked_rollup(larger_mismatch, checked));
-        assert!(!usd_matches_checked_rollup(0.02, checked));
-    }
 }
 
 /// Callback and hook drift is diagnostic output, but it is still runtime-owned

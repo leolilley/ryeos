@@ -1350,10 +1350,11 @@ mod tests {
 
     #[test]
     fn cost_rollup_rejects_invalid_values_without_mutating_the_prefix() {
+        let usd = |s: &str| ryeos_runtime::envelope::UsdNanos::parse_canonical(s).unwrap();
         let mut total = Some(RuntimeCost {
             input_tokens: i64::MAX as u64,
             output_tokens: 4,
-            total_usd: 0.25,
+            total_usd: usd("0.25"),
             basis: Some(ryeos_runtime::envelope::COST_BASIS_ROLLUP.to_string()),
         });
 
@@ -1362,7 +1363,7 @@ mod tests {
             Some(RuntimeCost {
                 input_tokens: 1,
                 output_tokens: 1,
-                total_usd: 0.5,
+                total_usd: usd("0.5"),
                 basis: None,
             }),
         )
@@ -1371,20 +1372,25 @@ mod tests {
         let total = total.expect("valid prefix remains available");
         assert_eq!(total.input_tokens, i64::MAX as u64);
         assert_eq!(total.output_tokens, 4);
-        assert_eq!(total.total_usd, 0.25);
+        assert_eq!(total.total_usd, usd("0.25"));
 
+        // Negative money is unrepresentable in `UsdNanos`; an invalid basis is
+        // the remaining constructible validation failure on an empty rollup.
         let mut empty = None;
-        let negative = add_cost(
+        let invalid_basis = add_cost(
             &mut empty,
             Some(RuntimeCost {
                 input_tokens: 1,
                 output_tokens: 1,
-                total_usd: -0.5,
-                basis: None,
+                total_usd: usd("0.5"),
+                basis: Some("estimated".to_string()),
             }),
         )
         .unwrap_err();
-        assert_eq!(negative, RuntimeCostError::NegativeTotalUsd);
+        assert_eq!(
+            invalid_basis,
+            RuntimeCostError::InvalidBasis("estimated".to_string())
+        );
         assert!(empty.is_none());
     }
 

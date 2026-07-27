@@ -45,6 +45,23 @@ pub fn run_resolution_pipeline(
     trust_store: &TrustStore,
     composers: &ComposerRegistry,
 ) -> Result<ResolutionOutput, ResolutionError> {
+    run_resolution_pipeline_with_probes(item, kinds, parsers, roots, trust_store, composers)
+        .map(|(output, _probes)| output)
+}
+
+/// As [`run_resolution_pipeline`], but also returns the negative dependencies
+/// (paths probed absent at a precedence >= each item's winner) accumulated
+/// across the whole resolution. The admission-side resolution cache uses these
+/// to prove a cached outcome is still current without recomputing; ordinary
+/// callers use [`run_resolution_pipeline`] and discard them.
+pub fn run_resolution_pipeline_with_probes(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    composers: &ComposerRegistry,
+) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
     let kind_schema = kinds
         .get(&item.kind)
         .ok_or_else(|| ResolutionError::KindNotExecutable {
@@ -111,6 +128,7 @@ pub fn run_effective_item_pipeline(
         trust_store,
         composers,
     )
+    .map(|(output, _probes)| output)
 }
 
 // The tail is one resolution environment (registries + roots + trust);
@@ -127,7 +145,7 @@ fn run_item_pipeline_inner(
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
     composers: &ComposerRegistry,
-) -> Result<ResolutionOutput, ResolutionError> {
+) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
     // Reject duplicate `resolve_extends_chain` declarations per kind —
     // the step's state (`visiting_extends`, `done_extends`,
     // `ordered_refs`) lives on `ResolutionContext`, not per-invocation,
@@ -198,5 +216,5 @@ fn run_item_pipeline_inner(
     // Composition runs inside `into_output` while the parser
     // dispatcher's parsed values are still in scope. The envelope
     // never carries those values — only the composed view does.
-    ctx.into_output(composers, &item.kind, include_references_in_trust)
+    ctx.into_output_with_probes(composers, &item.kind, include_references_in_trust)
 }

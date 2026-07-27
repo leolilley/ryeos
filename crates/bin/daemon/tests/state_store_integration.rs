@@ -2232,7 +2232,7 @@ mod integration_tests {
                 turns: 3,
                 input_tokens: 1500,
                 output_tokens: 500,
-                spend: 0.05,
+                spend: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.05").unwrap(),
                 provider: None,
                 basis: None,
                 metadata: None,

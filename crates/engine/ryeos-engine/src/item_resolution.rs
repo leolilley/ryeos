@@ -9,7 +9,9 @@
 use std::path::PathBuf;
 
 use crate::canonical_ref::CanonicalRef;
-use crate::contracts::{ItemSpace, ShadowedCandidate, SignatureEnvelope, SignatureHeader};
+use crate::contracts::{
+    ItemSpace, ProbedAbsence, ShadowedCandidate, SignatureEnvelope, SignatureHeader,
+};
 use crate::error::EngineError;
 use crate::kind_registry::KindSchema;
 
@@ -100,6 +102,10 @@ pub struct ResolutionResult {
     /// rules without re-deriving it by walking parent components.
     pub winner_ai_root: PathBuf,
     pub shadowed: Vec<ShadowedCandidate>,
+    /// Paths probed and found absent at a precedence at least as high as the
+    /// winner (negative dependencies of this resolution). Empty when the
+    /// winner is the first, highest-precedence candidate probed.
+    pub probed_absent: Vec<ProbedAbsence>,
 }
 
 /// Resolve a canonical ref to a concrete file path, space, and clash info.
@@ -132,6 +138,7 @@ pub fn resolve_item_full(
     }
     let mut winner: Option<(PathBuf, ItemSpace, String, String, PathBuf)> = None;
     let mut shadowed = Vec::new();
+    let mut probed_absent = Vec::new();
     let mut searched_spaces = Vec::new();
 
     for root in &roots.ordered {
@@ -172,6 +179,15 @@ pub fn resolve_item_full(
                     });
                 }
                 break; // Only match one extension per root (first ext wins)
+            } else if winner.is_none() {
+                // Absent at a precedence >= the (not-yet-found) winner: a
+                // negative dependency. If this exact path (or an earlier
+                // sibling) appears, it becomes the new winner. Absences after
+                // the winner is found cannot change the winner, so skip them.
+                probed_absent.push(ProbedAbsence {
+                    space: root.space,
+                    path,
+                });
             }
         }
     }
@@ -193,6 +209,7 @@ pub fn resolve_item_full(
                 matched_ext: ext,
                 winner_ai_root: ai_root,
                 shadowed,
+                probed_absent,
             })
         }
         None => Err(EngineError::ItemNotFound {
@@ -548,6 +565,65 @@ mod tests {
         let (path, space, _) = resolve_item(&roots, &schema, &ref_).unwrap();
         assert_eq!(space, ItemSpace::Project);
         assert!(path.starts_with(&project_root));
+    }
+
+    #[test]
+    fn probed_absent_records_higher_precedence_misses() {
+        // The case that justifies negative-dependency recording: a bundle
+        // winner while the project slot is empty. If the project slot later
+        // fills, the winner flips — so the probed-and-absent project path is a
+        // dependency of the current outcome.
+        let project_root = tempdir();
+        let bundle_root = tempdir();
+        let schema = make_kind_schema("tools", vec![(".py", "python/tool-header")]);
+
+        write_item(&bundle_root, "tools", "my_tool", ".py", "# bundle");
+        let roots =
+            ResolutionRoots::from_flat(Some(project_root.clone()), vec![bundle_root.clone()]);
+        let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Bundle);
+        assert_eq!(result.probed_absent.len(), 1, "{:?}", result.probed_absent);
+        assert_eq!(result.probed_absent[0].space, ItemSpace::Project);
+        assert_eq!(
+            result.probed_absent[0].path,
+            project_root.join("tools").join("my_tool.py")
+        );
+
+        // The shadowing item appears in the project → the winner flips and no
+        // higher-precedence absence remains (project is the first root probed).
+        write_item(&project_root, "tools", "my_tool", ".py", "# project");
+        let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
+        assert_eq!(result.winner_space, ItemSpace::Project);
+        assert!(
+            result.probed_absent.is_empty(),
+            "{:?}",
+            result.probed_absent
+        );
+    }
+
+    #[test]
+    fn probed_absent_records_earlier_extension_miss_at_winner_root() {
+        // Within the winner's own root, an earlier extension probed-and-absent
+        // is a negative dependency: "first ext wins", so if the earlier
+        // extension appears it becomes the new winner.
+        let project_root = tempdir();
+        let schema = make_kind_schema(
+            "tools",
+            vec![(".py", "python/tool-header"), (".yaml", "yaml")],
+        );
+        write_item(&project_root, "tools", "my_tool", ".yaml", "# yaml");
+        let roots = ResolutionRoots::from_flat(Some(project_root.clone()), vec![]);
+        let ref_ = CanonicalRef::parse("tool:my_tool").unwrap();
+
+        let result = resolve_item_full(&roots, &schema, &ref_).unwrap();
+        assert_eq!(result.matched_ext, ".yaml");
+        assert_eq!(result.probed_absent.len(), 1, "{:?}", result.probed_absent);
+        assert_eq!(
+            result.probed_absent[0].path,
+            project_root.join("tools").join("my_tool.py")
+        );
     }
 
     #[test]

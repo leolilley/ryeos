@@ -19,6 +19,11 @@ use serde_json::Value;
 // shape.
 pub use crate::inventory::ItemDescriptor;
 
+// Money on the cost wire is exact fixed-point USD nanos, serialized as a
+// canonical decimal string. Re-exported so every crate consuming the launch
+// contract names the one money type without a direct accounting dependency.
+pub use ryeos_accounting::UsdNanos;
+
 /// Envelope shipped from daemon to runtime over stdin.
 ///
 /// `EnvelopeTarget` has been deleted: the daemon used to embed a second
@@ -454,10 +459,8 @@ pub const COST_BASIS_ROLLUP: &str = "rollup";
 /// unknown aggregation basis.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeCostError {
-    #[error("runtime cost total_usd must be finite")]
-    NonFiniteTotalUsd,
-    #[error("runtime cost total_usd must be non-negative")]
-    NegativeTotalUsd,
+    #[error("runtime cost total_usd overflows the fixed-point money range")]
+    TotalUsdOverflow,
     #[error("runtime cost input token count overflow")]
     InputTokensOverflow,
     #[error("runtime cost output token count overflow")]
@@ -475,7 +478,11 @@ pub enum RuntimeCostError {
 pub struct RuntimeCost {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub total_usd: f64,
+    /// Exact fixed-point USD (canonical decimal string on the wire). A JSON
+    /// number here is rejected at decode: lossy float money is what allowed
+    /// representation drift between independently serialized copies of the
+    /// same cost, so the type forbids it rather than tolerating it.
+    pub total_usd: UsdNanos,
     /// How this figure relates to the thread: `None` = incurred by the
     /// thread's own provider calls; [`COST_BASIS_ROLLUP`] = aggregated
     /// from children it dispatched.
@@ -488,13 +495,9 @@ impl RuntimeCost {
     /// or SQLite-backed settlement. Token counters use `u64` in memory, but the
     /// durable projection is signed-integer SQLite; the accepted wire domain is
     /// therefore capped at `i64::MAX` at this earliest shared boundary.
+    /// `total_usd` needs no range check: `UsdNanos` is finite and non-negative
+    /// by construction.
     pub fn validate(&self) -> Result<(), RuntimeCostError> {
-        if !self.total_usd.is_finite() {
-            return Err(RuntimeCostError::NonFiniteTotalUsd);
-        }
-        if self.total_usd < 0.0 {
-            return Err(RuntimeCostError::NegativeTotalUsd);
-        }
         if self.input_tokens > i64::MAX as u64 {
             return Err(RuntimeCostError::InputTokensOutOfRange);
         }
@@ -526,13 +529,13 @@ impl RuntimeCost {
         if output_tokens > i64::MAX as u64 {
             return Err(RuntimeCostError::OutputTokensOutOfRange);
         }
-        let total_usd = self.total_usd + cost.total_usd;
-        if !total_usd.is_finite() {
-            return Err(RuntimeCostError::NonFiniteTotalUsd);
-        }
-        if total_usd < 0.0 {
-            return Err(RuntimeCostError::NegativeTotalUsd);
-        }
+        // Exact integer-nano addition: the rollup total is deterministic
+        // regardless of accumulation order, so an independently recomputed
+        // rollup can be compared with plain equality.
+        let total_usd = self
+            .total_usd
+            .checked_add(cost.total_usd)
+            .map_err(|_| RuntimeCostError::TotalUsdOverflow)?;
 
         self.input_tokens = input_tokens;
         self.output_tokens = output_tokens;
@@ -624,7 +627,7 @@ mod tests {
             cost: Some(RuntimeCost {
                 input_tokens: 100,
                 output_tokens: 50,
-                total_usd: 0.01,
+                total_usd: usd("0.01"),
                 basis: None,
             }),
             warnings: Vec::new(),
@@ -701,30 +704,37 @@ mod tests {
     #[test]
     fn runtime_result_rejects_invalid_cost_before_finalization() {
         for cost in [
-            serde_json::json!({
-                "input_tokens": 1,
-                "total_usd": 0.01,
-            }),
-            serde_json::json!({
-                "input_tokens": 1,
-                "output_tokens": 2,
-                "total_usd": -0.01,
-            }),
+            // Lossy JSON-number money is rejected at decode: only the
+            // canonical decimal string form is a valid wire cost.
             serde_json::json!({
                 "input_tokens": 1,
                 "output_tokens": 2,
                 "total_usd": 0.01,
+            }),
+            serde_json::json!({
+                "input_tokens": 1,
+                "total_usd": "0.01",
+            }),
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": "-0.01",
+            }),
+            serde_json::json!({
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_usd": "0.01",
                 "basis": "estimated",
             }),
             serde_json::json!({
                 "input_tokens": i64::MAX as u64 + 1,
                 "output_tokens": 2,
-                "total_usd": 0.01,
+                "total_usd": "0.01",
             }),
             serde_json::json!({
                 "input_tokens": 1,
                 "output_tokens": i64::MAX as u64 + 1,
-                "total_usd": 0.01,
+                "total_usd": "0.01",
             }),
         ] {
             let value = serde_json::json!({
@@ -751,7 +761,13 @@ cost:
   total_usd: .nan
 "#;
         let error = serde_yaml::from_str::<RuntimeResult>(non_finite).unwrap_err();
-        assert!(error.to_string().contains("must be finite"));
+        // Money is a canonical decimal string; a non-finite float cannot even
+        // type as a USD amount, let alone validate.
+        assert!(error.to_string().contains("canonical decimal string"));
+    }
+
+    fn usd(s: &str) -> UsdNanos {
+        UsdNanos::parse_canonical(s).unwrap()
     }
 
     #[test]
@@ -759,14 +775,14 @@ cost:
         let mut total = RuntimeCost {
             input_tokens: i64::MAX as u64,
             output_tokens: 7,
-            total_usd: 1.5,
+            total_usd: usd("1.5"),
             basis: Some(COST_BASIS_ROLLUP.to_string()),
         };
         let error = total
             .checked_accumulate(&RuntimeCost {
                 input_tokens: 1,
                 output_tokens: 3,
-                total_usd: 0.5,
+                total_usd: usd("0.5"),
                 basis: None,
             })
             .unwrap_err();
@@ -774,7 +790,7 @@ cost:
         assert_eq!(error, RuntimeCostError::InputTokensOutOfRange);
         assert_eq!(total.input_tokens, i64::MAX as u64);
         assert_eq!(total.output_tokens, 7);
-        assert_eq!(total.total_usd, 1.5);
+        assert_eq!(total.total_usd, usd("1.5"));
     }
 
     #[test]

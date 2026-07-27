@@ -15,6 +15,7 @@ use crate::callback_token::{CallbackCapabilityStore, ThreadAuthStore};
 use crate::command_service::CommandService;
 use crate::config::Config;
 use crate::engine_cache::EngineCache;
+use crate::resolution_cache::ResolutionCache;
 use crate::event_store_service::EventStoreService;
 use crate::event_stream::ThreadEventHub;
 use crate::extension_state::ExtensionState;
@@ -54,6 +55,10 @@ pub struct AppState {
     /// snapshot_hash)`. `LiveFs` requests bypass this cache and
     /// use `engine` directly.
     pub engine_cache: EngineCache,
+    /// Admission-time resolution cache: memoizes the resolve/compose pipeline
+    /// keyed by `(system_install_generation, ref, project_root)`, serving a hit
+    /// only after content revalidation. See [`crate::resolution_cache`].
+    pub resolution_cache: Arc<ResolutionCache>,
     pub identity: Arc<NodeIdentity>,
     pub threads: Arc<ThreadLifecycleService>,
     /// Operator live-input staging for *running* directive threads. The

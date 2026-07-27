@@ -32,7 +32,7 @@ pub struct Harness {
     start: Instant,
     turns_used: u32,
     tokens_used: u64,
-    spend_used: f64,
+    spend_used: ryeos_runtime::envelope::UsdNanos,
     spawns_used: u32,
     /// Total live interrupts honored this run. Monotonic — NOT refunded — so it
     /// bounds a runaway interrupt loop (each interrupt refunds its turn, so the
@@ -58,7 +58,7 @@ impl Harness {
             start: Instant::now(),
             turns_used: 0,
             tokens_used: 0,
-            spend_used: 0.0,
+            spend_used: ryeos_runtime::envelope::UsdNanos::ZERO,
             spawns_used: 0,
             interrupts_used: 0,
             depth,
@@ -107,13 +107,11 @@ impl Harness {
             ));
         }
 
-        if !self.limits.spend_usd.is_zero()
-            && self.spend_used >= self.limits.spend_usd.display_usd_lossy()
-        {
+        if !self.limits.spend_usd.is_zero() && self.spend_used >= self.limits.spend_usd {
             return Err(format!(
-                "spend limit exceeded: ${:.4} >= ${:.4}",
-                self.spend_used,
-                self.limits.spend_usd.display_usd_lossy()
+                "spend limit exceeded: ${} >= ${}",
+                self.spend_used.to_canonical_string(),
+                self.limits.spend_usd.to_canonical_string()
             ));
         }
 
@@ -158,13 +156,11 @@ impl Harness {
                 self.tokens_used, self.limits.tokens
             ));
         }
-        if !self.limits.spend_usd.is_zero()
-            && self.spend_used >= self.limits.spend_usd.display_usd_lossy()
-        {
+        if !self.limits.spend_usd.is_zero() && self.spend_used >= self.limits.spend_usd {
             return Err(format!(
-                "spend limit exceeded before retry: ${:.4} >= ${:.4}",
-                self.spend_used,
-                self.limits.spend_usd.display_usd_lossy()
+                "spend limit exceeded before retry: ${} >= ${}",
+                self.spend_used.to_canonical_string(),
+                self.limits.spend_usd.to_canonical_string()
             ));
         }
         if self.limits.duration_seconds > 0 {
@@ -227,7 +223,10 @@ impl Harness {
         Ok(())
     }
 
-    pub fn record_spend(&mut self, usd: f64) -> Result<(), RuntimeCostError> {
+    pub fn record_spend(
+        &mut self,
+        usd: ryeos_runtime::envelope::UsdNanos,
+    ) -> Result<(), RuntimeCostError> {
         let mut accumulated = RuntimeCost {
             input_tokens: 0,
             output_tokens: 0,
@@ -248,7 +247,13 @@ impl Harness {
         self.spawns_used += 1;
     }
 
-    pub fn reseed(&mut self, turns: u32, tokens: u64, spend: f64, spawns: u32) {
+    pub fn reseed(
+        &mut self,
+        turns: u32,
+        tokens: u64,
+        spend: ryeos_runtime::envelope::UsdNanos,
+        spawns: u32,
+    ) {
         self.turns_used = turns;
         self.tokens_used = tokens;
         self.spend_used = spend;
@@ -263,7 +268,7 @@ impl Harness {
         self.tokens_used
     }
 
-    pub fn spend_used(&self) -> f64 {
+    pub fn spend_used(&self) -> ryeos_runtime::envelope::UsdNanos {
         self.spend_used
     }
 
@@ -271,8 +276,8 @@ impl Harness {
         (self.limits.tokens > 0).then_some(self.limits.tokens)
     }
 
-    pub fn spend_limit_usd(&self) -> Option<f64> {
-        (!self.limits.spend_usd.is_zero()).then_some(self.limits.spend_usd.display_usd_lossy())
+    pub fn spend_limit_usd(&self) -> Option<ryeos_runtime::envelope::UsdNanos> {
+        (!self.limits.spend_usd.is_zero()).then_some(self.limits.spend_usd)
     }
 
     pub fn has_finite_accounting_budget(&self) -> bool {
@@ -551,10 +556,15 @@ mod tests {
         harness.record_turn();
         harness.record_turn();
         harness.record_tokens(100, 50).unwrap();
-        harness.record_spend(0.05).unwrap();
+        harness
+            .record_spend(ryeos_runtime::envelope::UsdNanos::parse_canonical("0.05").unwrap())
+            .unwrap();
         assert_eq!(harness.turns_used(), 2);
         assert_eq!(harness.tokens_used(), 150);
-        assert!((harness.spend_used() - 0.05).abs() < f64::EPSILON);
+        assert_eq!(
+            harness.spend_used(),
+            ryeos_runtime::envelope::UsdNanos::parse_canonical("0.05").unwrap()
+        );
     }
 
     #[test]

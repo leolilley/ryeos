@@ -38,6 +38,44 @@ use request_context::{initial_messages, visible_provider_tools};
 /// enum.
 const CONTINUATION_LOG_REASON: &str = "context_window";
 
+/// Rendered model-visible tool result plus SSE emission metadata. Shared by
+/// the serial and batch dispatch paths so their emitted shapes cannot diverge.
+#[derive(Debug)]
+struct RenderedToolResult {
+    tool: String,
+    content: String,
+    raw_size: u64,
+    result_guard_truncated: bool,
+    duplicate_of: Option<String>,
+    truncated_reason_override: Option<&'static str>,
+}
+
+/// Whether one assistant message's tool-call batch carries the
+/// `directive_return` lifecycle signal. Lifecycle-bearing batches must run
+/// through the strict serial dispatch path; only plain batches are eligible
+/// for the bounded concurrent window.
+fn batch_is_lifecycle_bearing(calls: &[crate::directive::ToolCall]) -> bool {
+    calls.iter().any(|tc| tc.name == "directive_return")
+}
+
+/// The pure emission decision for one rendered tool result:
+/// `(body_is_inline, truncated, truncated_reason)`. Ordering of the checks is
+/// contract: the inline size cap dominates, then guard truncation, then an
+/// error-envelope override, then the clean case.
+fn result_emission_flags(rendered: &RenderedToolResult) -> (bool, bool, Option<&'static str>) {
+    let inline_capped =
+        rendered.content.len() > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
+    if inline_capped {
+        (false, true, Some("size_cap_exceeded"))
+    } else if rendered.result_guard_truncated {
+        (true, true, Some("result_guard"))
+    } else if let Some(reason) = rendered.truncated_reason_override {
+        (true, false, Some(reason))
+    } else {
+        (true, false, None)
+    }
+}
+
 #[derive(Debug)]
 pub enum State {
     CheckingLimits,
@@ -54,6 +92,12 @@ pub enum State {
     DispatchingTools {
         pending: Vec<crate::directive::ToolCall>,
         index: usize,
+    },
+    /// One assistant message's plain tool-call batch (no `directive_return`),
+    /// dispatched concurrently through a bounded window and folded back in
+    /// call order. Lifecycle-bearing batches use `DispatchingTools`.
+    DispatchingToolBatch {
+        pending: Vec<crate::directive::ToolCall>,
     },
     ProcessingToolResult {
         call_id: String,
@@ -267,9 +311,11 @@ impl PricingSource {
     }
 }
 
-/// A computed turn cost plus its pricing provenance.
+/// A computed turn cost plus its pricing provenance. Money is exact from the
+/// moment it is derived: rate math runs in checked i128 nanos, and a
+/// provider-reported float is quantized here, at its entry.
 struct CostBreakdown {
-    usd: f64,
+    usd: ryeos_runtime::envelope::UsdNanos,
     source: PricingSource,
 }
 
@@ -1435,16 +1481,32 @@ impl Runner {
                                 valid_usage.and_then(|usage| usage.complete_token_counts());
                             let (input_tok, output_tok) = token_counts.unwrap_or((0, 0));
                             let cost = if settled_spend_only {
+                                // The spend-only settlement above already
+                                // quantized this exact figure successfully.
+                                let usd = resp
+                                    .usage
+                                    .as_ref()
+                                    .and_then(|usage| usage.reported_cost_usd)
+                                    .map(|reported| {
+                                        ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(reported)
+                                            .expect("spend-only settlement quantized this figure")
+                                            .0
+                                    })
+                                    .unwrap_or(ryeos_runtime::envelope::UsdNanos::ZERO);
                                 CostBreakdown {
-                                    usd: resp
-                                        .usage
-                                        .as_ref()
-                                        .and_then(|usage| usage.reported_cost_usd)
-                                        .unwrap_or(0.0),
+                                    usd,
                                     source: PricingSource::ProviderReported,
                                 }
                             } else {
-                                self.compute_cost_for_usage(valid_usage)
+                                match self.compute_cost_for_usage(valid_usage) {
+                                    Ok(cost) => cost,
+                                    Err(error) => {
+                                        state = State::Errored {
+                                            error: format!("turn pricing failed: {error:#}"),
+                                        };
+                                        continue;
+                                    }
+                                }
                             };
                             let usd = cost.usd;
                             // §2: an operator auditing spend must be able to tell
@@ -1784,16 +1846,20 @@ impl Runner {
                                             }
                                         }
                                     } else {
-                                        let cost = self.compute_cost_for_usage(Some(usage));
-                                        if let Err(settlement_error) = self
-                                            .settle_provider_usage(
-                                                turn,
-                                                usage,
-                                                cost.usd,
-                                                turn_start.elapsed().as_millis() as u64,
-                                            )
-                                            .await
+                                        let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
+                                            Ok(cost) => {
+                                                self.settle_provider_usage(
+                                                    turn,
+                                                    usage,
+                                                    cost.usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            }
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(settlement_error) = settled {
                                             detail.push_str(&format!(
                                                 "; accounting settlement also failed: \
                                                  {settlement_error:#}"
@@ -1846,29 +1912,33 @@ impl Runner {
                                         let (input_tokens, output_tokens) = usage
                                             .complete_token_counts()
                                             .expect("valid provider usage has complete token counts");
-                                        let cost = self.compute_cost_for_usage(Some(usage));
-                                        if matches!(
-                                            cost.source,
-                                            PricingSource::Unpriced
-                                                | PricingSource::ByokUntracked
-                                        )
-                                            && (input_tokens != 0 || output_tokens != 0)
+                                        let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
-                                            warnings.push(format!(
-                                                "cost untracked for failed provider attempt on turn \
-                                                 {turn}: model `{}` has no usable price",
-                                                self.model_name
-                                            ));
-                                        }
-                                        if let Err(settlement_error) = self
-                                            .settle_provider_usage(
-                                                turn,
-                                                usage,
-                                                cost.usd,
-                                                turn_start.elapsed().as_millis() as u64,
-                                            )
-                                            .await
-                                        {
+                                            Ok(cost) => {
+                                                if matches!(
+                                                    cost.source,
+                                                    PricingSource::Unpriced
+                                                        | PricingSource::ByokUntracked
+                                                )
+                                                    && (input_tokens != 0 || output_tokens != 0)
+                                                {
+                                                    warnings.push(format!(
+                                                        "cost untracked for failed provider attempt on turn \
+                                                         {turn}: model `{}` has no usable price",
+                                                        self.model_name
+                                                    ));
+                                                }
+                                                self.settle_provider_usage(
+                                                    turn,
+                                                    usage,
+                                                    cost.usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            }
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(settlement_error) = settled {
                                             detail.push_str(&format!(
                                                 "; accounting settlement also failed: \
                                                  {settlement_error:#}"
@@ -1951,16 +2021,20 @@ impl Runner {
                                 let mut detail = protocol_error.to_string();
                                 if let Some(usage) = protocol_error.usage.as_ref() {
                                     if usage.is_valid() {
-                                        let cost = self.compute_cost_for_usage(Some(usage));
-                                        if let Err(settlement_error) = self
-                                            .settle_provider_usage(
-                                                turn,
-                                                usage,
-                                                cost.usd,
-                                                turn_start.elapsed().as_millis() as u64,
-                                            )
-                                            .await
+                                        let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
+                                            Ok(cost) => {
+                                                self.settle_provider_usage(
+                                                    turn,
+                                                    usage,
+                                                    cost.usd,
+                                                    turn_start.elapsed().as_millis() as u64,
+                                                )
+                                                .await
+                                            }
+                                            Err(error) => Err(error),
+                                        };
+                                        if let Err(settlement_error) = settled {
                                             detail.push_str(&format!(
                                                 "; accounting settlement also failed: {settlement_error:#}"
                                             ));
@@ -2082,9 +2156,18 @@ impl Runner {
 
                             if has_tool_calls {
                                 if let Some(ref tool_calls) = msg.tool_calls {
-                                    State::DispatchingTools {
-                                        pending: tool_calls.clone(),
-                                        index: 0,
+                                    // Lifecycle-bearing batches keep the
+                                    // strict serial path; plain batches
+                                    // dispatch through the bounded window.
+                                    if batch_is_lifecycle_bearing(tool_calls) {
+                                        State::DispatchingTools {
+                                            pending: tool_calls.clone(),
+                                            index: 0,
+                                        }
+                                    } else {
+                                        State::DispatchingToolBatch {
+                                            pending: tool_calls.clone(),
+                                        }
                                     }
                                 } else {
                                     State::CheckingContinuation
@@ -2182,207 +2265,31 @@ impl Runner {
                     pending,
                     index,
                 } => {
-                    /// Tracks tool result metadata for SSE emission.
-                    struct ToolResult {
-                        tool: String,
-                        content: String,
-                        raw_size: u64,
-                        result_guard_truncated: bool,
-                        duplicate_of: Option<String>,
-                        truncated_reason_override: Option<&'static str>,
-                    }
-
-                    let tool_result: ToolResult = match self.dispatcher.resolve(
-                        &tool_name,
-                        &raw_args,
-                        Some(call_id.clone()),
-                    ) {
-                        Ok(dispatch_result) => {
-                            // Record spawn for child executions (directive/graph)
-                            match dispatch_result.dispatch_kind {
-                                DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
-                                    self.harness.record_spawn();
-                                }
-                                DispatchKind::Tool => {}
-                            }
-
-                            // Risk assessment before dispatch
-                            let required_cap =
-                                format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
-                            let risk = self.harness.assess(&required_cap);
-                            if risk.blocked {
-                                tracing::warn!(
-                                    tool = %dispatch_result.canonical_ref,
-                                    call_id = ?dispatch_result.call_id,
-                                    risk_level = %risk.level,
-                                    requires_ack = risk.requires_ack,
-                                    "tool call blocked by risk policy"
-                                );
-                                let body_str = serde_json::to_string(&json!({"error": format!("blocked by risk policy: {}", dispatch_result.canonical_ref)}))
-                                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
-                                // Risk-policy block surfaces as a
-                                // `tool_call_result` with a `blocked`
-                                // status payload so the daemon's
-                                // event-store validator (which has no
-                                // `risk_blocked` name) accepts it.
-                                record_callback_warning(
-                                    &mut warnings,
-                                    "tool_call_result(blocked)",
-                                    self.callback
-                                        .append_runtime_event(
-                                            RuntimeEventType::ToolCallResult,
-                                            json!({
-                                                "tool": dispatch_result.canonical_ref,
-                                                "call_id": dispatch_result.call_id,
-                                                "blocked": true,
-                                                "level": risk.level,
-                                                "requires_ack": risk.requires_ack,
-                                            }),
-                                        )
-                                        .await,
-                                );
-                                ToolResult {
-                                    tool: tool_name.clone(),
-                                    raw_size: body_str.len() as u64,
-                                    content: body_str,
-                                    result_guard_truncated: false,
-                                    duplicate_of: None,
-                                    truncated_reason_override: Some("error_envelope"),
-                                }
-                            } else {
-                                match self
-                                    .callback
-                                    .dispatch_action(
-                                        ryeos_runtime::callback::DispatchActionRequest {
-                                            thread_id: self.thread_id.clone(),
-                                            project_path: self.callback.project_path().to_string(),
-                                            action: ryeos_runtime::callback::ActionPayload {
-                                                operation_id: None,
-                                                item_id: dispatch_result.canonical_ref.clone(),
-                                                ref_bindings: std::collections::BTreeMap::new(),
-                                                params: dispatch_result.arguments.clone(),
-                                                thread: "inline".to_string(),
-                                                // Directive tool-calls dispatch
-                                                // `tool:` refs at their default
-                                                // method; no method selector.
-                                                call: None,
-                                                facets: None,
-                                                launch_window: None,
-                                            },
-                                            hook_dispatch: None,
-                                        },
-                                    )
-                                    .await
-                                {
-                                    Ok(response) => {
-                                        // Model-visible bytes are ONLY the leaf
-                                        // dispatcher's `result` — never the
-                                        // wrapping `thread` snapshot. Without
-                                        // this, the LLM saw the whole
-                                        // {thread, result} envelope and the
-                                        // child-thread metadata leaked into
-                                        // every tool-result message.
-                                        let raw_bytes = serde_json::to_vec(&response.result)
-                                            .unwrap_or_else(|e| {
-                                                tracing::warn!(
-                                                    "failed to serialize dispatch result: {e}"
-                                                );
-                                                Vec::new()
-                                            });
-                                        let raw_size = raw_bytes.len() as u64;
-                                        let guarded = self.result_guard.process_bytes(&raw_bytes);
-                                        let content =
-                                            String::from_utf8_lossy(&guarded.bytes).to_string();
-                                        ToolResult {
-                                            tool: tool_name.clone(),
-                                            content,
-                                            raw_size,
-                                            result_guard_truncated: guarded.truncated,
-                                            duplicate_of: guarded.duplicate_of,
-                                            truncated_reason_override: None,
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let body_str = serde_json::to_string(
-                                            &json!({"error": format!("{e:#}")}),
-                                        )
-                                        .unwrap_or_else(|_| {
-                                            "{\"error\":\"dispatch failed\"}".to_string()
-                                        });
-                                        ToolResult {
-                                            tool: tool_name.clone(),
-                                            raw_size: body_str.len() as u64,
-                                            content: body_str,
-                                            result_guard_truncated: false,
-                                            duplicate_of: None,
-                                            truncated_reason_override: Some("error_envelope"),
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let body_str = serde_json::to_string(&json!({"error": e}))
-                                .unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string());
-                            ToolResult {
-                                tool: tool_name.clone(),
-                                raw_size: body_str.len() as u64,
-                                content: body_str,
-                                result_guard_truncated: false,
-                                duplicate_of: None,
-                                truncated_reason_override: Some("error_envelope"),
-                            }
-                        }
-                    };
-
-                    // Determine inline body and truncation flags
-                    let inline_capped = tool_result.content.len()
-                        > ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES;
-                    let body: Option<&str>;
-                    let truncated: bool;
-                    let truncated_reason: Option<&str>;
-                    if inline_capped {
-                        body = None;
-                        truncated = true;
-                        truncated_reason = Some("size_cap_exceeded");
-                    } else if tool_result.result_guard_truncated {
-                        body = Some(&tool_result.content);
-                        truncated = true;
-                        truncated_reason = Some("result_guard");
-                    } else if let Some(reason) = tool_result.truncated_reason_override {
-                        body = Some(&tool_result.content);
-                        truncated = false;
-                        truncated_reason = Some(reason);
-                    } else {
-                        body = Some(&tool_result.content);
-                        truncated = false;
-                        truncated_reason = None;
-                    }
-                    if let Err(e) = self
-                        .callback
-                        .emit_tool_result(
-                            &call_id,
-                            &tool_result.tool,
-                            body,
-                            truncated,
-                            truncated_reason,
-                            tool_result.raw_size,
-                            tool_result.duplicate_of.as_deref(),
-                        )
+                    let tool_result: RenderedToolResult = match self
+                        .preflight_tool_call(&tool_name, &raw_args, &call_id, &mut warnings)
                         .await
                     {
-                        state = State::Errored {
-                            error: format!("resume-critical callback emit_tool_result failed: {e}"),
-                        };
+                        Ok(request) => match self.callback.dispatch_action(*request).await {
+                            Ok(response) => {
+                                self.rendered_success(&tool_name, &response.result)
+                            }
+                            Err(e) => {
+                                let body_str = serde_json::to_string(
+                                    &json!({"error": format!("{e:#}")}),
+                                )
+                                .unwrap_or_else(|_| {
+                                    "{\"error\":\"dispatch failed\"}".to_string()
+                                });
+                                Self::rendered_error_envelope(&tool_name, body_str)
+                            }
+                        },
+                        Err(body) => Self::rendered_error_envelope(&tool_name, body),
+                    };
+
+                    if let Err(error) = self.settle_tool_result(call_id, tool_result).await {
+                        state = State::Errored { error };
                         continue;
                     }
-                    self.messages.push(ProviderMessage {
-                        role: "tool".to_string(),
-                        content: Some(json!(tool_result.content)),
-                        tool_calls: None,
-                        tool_call_id: Some(call_id),
-                        reasoning_content: None,
-                    });
 
                     let next_index = index + 1;
                     if next_index < pending.len() {
@@ -2401,6 +2308,204 @@ impl Runner {
                             context: json!({"turn": turn}),
                             resume_to: Box::new(State::CheckingContinuation),
                         }
+                    }
+                }
+
+                State::DispatchingToolBatch { pending } => {
+                    if self.harness.is_cancelled() {
+                        state = State::Cancelled;
+                        continue;
+                    }
+
+                    // Phase A — serial, in call order. Braid dispatch intents,
+                    // resolution, spawn accounting, and risk policy keep their
+                    // serial ordering and their `&mut` access; only the daemon
+                    // dispatch awaits overlap in phase B.
+                    enum BatchWork {
+                        /// Admitted for concurrent dispatch; taken at spawn.
+                        Dispatch(Option<Box<ryeos_runtime::callback::DispatchActionRequest>>),
+                        /// Preflight refusal: an error-envelope body that never
+                        /// passes the result guard, exactly like the serial path.
+                        Immediate(String),
+                    }
+                    let mut prepared: Vec<(String, String, BatchWork)> =
+                        Vec::with_capacity(pending.len());
+                    let mut fatal: Option<String> = None;
+                    let mut admission_cancelled = false;
+                    for tc in &pending {
+                        if self.harness.is_cancelled() {
+                            admission_cancelled = true;
+                            break;
+                        }
+                        if let Err(e) = self
+                            .callback
+                            .emit_tool_dispatch(
+                                &tc.name,
+                                tc.id.as_deref(),
+                                self.harness.effective_caps(),
+                            )
+                            .await
+                        {
+                            fatal = Some(format!(
+                                "resume-critical callback emit_tool_dispatch failed: {e}"
+                            ));
+                            break;
+                        }
+                        let call_id = tc.id.clone().unwrap_or_default();
+                        let raw_args = tc.arguments.to_string();
+                        let work = match self
+                            .preflight_tool_call(&tc.name, &raw_args, &call_id, &mut warnings)
+                            .await
+                        {
+                            Ok(request) => BatchWork::Dispatch(Some(request)),
+                            Err(body) => BatchWork::Immediate(body),
+                        };
+                        prepared.push((call_id, tc.name.clone(), work));
+                    }
+                    if let Some(error) = fatal {
+                        state = State::Errored { error };
+                        continue;
+                    }
+
+                    // Phase B — bounded concurrent dispatch. Each task owns a
+                    // callback clone and its sealed request; no task touches
+                    // runner state. Cancellation stops admission; in-flight
+                    // children are joined (they are daemon-managed threads
+                    // under this thread's lineage, so a cancelled parent
+                    // settlement cascades to them).
+                    let width = self.execution.tool_concurrency.clamp(1, 16) as usize;
+                    let dispatch_indices: Vec<usize> = prepared
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, (_, _, work))| {
+                            matches!(work, BatchWork::Dispatch(_)).then_some(index)
+                        })
+                        .collect();
+                    let mut outcomes: std::collections::BTreeMap<
+                        usize,
+                        Result<
+                            ryeos_runtime::callback_contract::CallbackDispatchResponse,
+                            String,
+                        >,
+                    > = std::collections::BTreeMap::new();
+                    {
+                        let mut join = tokio::task::JoinSet::new();
+                        let mut next = 0usize;
+                        loop {
+                            while !admission_cancelled
+                                && join.len() < width
+                                && next < dispatch_indices.len()
+                            {
+                                if self.harness.is_cancelled() {
+                                    admission_cancelled = true;
+                                    break;
+                                }
+                                let index = dispatch_indices[next];
+                                next += 1;
+                                let request = match &mut prepared[index].2 {
+                                    BatchWork::Dispatch(slot) => {
+                                        slot.take().expect("dispatch slot spawns once")
+                                    }
+                                    BatchWork::Immediate(_) => unreachable!(
+                                        "dispatch_indices selects only Dispatch work"
+                                    ),
+                                };
+                                let callback = self.callback.clone();
+                                join.spawn(tracing::Instrument::instrument(
+                                    async move {
+                                        let result = callback
+                                            .dispatch_action(*request)
+                                            .await
+                                            .map_err(|e| format!("{e:#}"));
+                                        (index, result)
+                                    },
+                                    tracing::Span::current(),
+                                ));
+                            }
+                            match join.join_next().await {
+                                Some(Ok((index, result))) => {
+                                    outcomes.insert(index, result);
+                                }
+                                Some(Err(join_error)) => {
+                                    // A task-level failure (panic/abort) is
+                                    // run-fatal, but the siblings' completed
+                                    // work still folds: stop admitting, keep
+                                    // draining, and settle every gathered
+                                    // outcome before erroring.
+                                    fatal.get_or_insert(format!(
+                                        "tool dispatch task failed: {join_error}"
+                                    ));
+                                    admission_cancelled = true;
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+
+                    // Phase C — fold strictly by call order. The result guard,
+                    // result events, and transcript pushes run serially here,
+                    // so dedup/truncation decisions and the provider-visible
+                    // ordering are identical to a serial run. Under a
+                    // cancellation only calls that actually dispatched fold;
+                    // unadmitted calls are dropped exactly as the serial path
+                    // drops undispatched ones.
+                    for (index, (call_id, tool_name, work)) in
+                        prepared.into_iter().enumerate()
+                    {
+                        let rendered = match work {
+                            BatchWork::Immediate(body) => {
+                                Self::rendered_error_envelope(&tool_name, body)
+                            }
+                            BatchWork::Dispatch(_) => match outcomes.remove(&index) {
+                                Some(Ok(response)) => {
+                                    self.rendered_success(&tool_name, &response.result)
+                                }
+                                Some(Err(e)) => {
+                                    let body =
+                                        serde_json::to_string(&json!({ "error": e }))
+                                            .unwrap_or_else(|_| {
+                                                "{\"error\":\"dispatch failed\"}".to_string()
+                                            });
+                                    Self::rendered_error_envelope(&tool_name, body)
+                                }
+                                None => {
+                                    // Never admitted (cancellation or a batch
+                                    // abort stopped the window). Settle an
+                                    // explicit error envelope so every emitted
+                                    // dispatch intent pairs with exactly one
+                                    // result — the transcript never carries a
+                                    // non-suffix hole.
+                                    let body = serde_json::to_string(&json!({
+                                        "error": "batch aborted before this call dispatched"
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        "{\"error\":\"not dispatched\"}".to_string()
+                                    });
+                                    Self::rendered_error_envelope(&tool_name, body)
+                                }
+                            },
+                        };
+                        if let Err(error) = self.settle_tool_result(call_id, rendered).await {
+                            fatal.get_or_insert(error);
+                            break;
+                        }
+                    }
+                    if let Some(error) = fatal {
+                        state = State::Errored { error };
+                        continue;
+                    }
+                    if admission_cancelled || self.harness.is_cancelled() {
+                        state = State::Cancelled;
+                        continue;
+                    }
+                    State::FiringHooks {
+                        occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                            definition_ref: self.definition_ref.clone(),
+                            definition_hash: self.definition_hash.clone(),
+                            turn,
+                        },
+                        context: json!({"turn": turn}),
+                        resume_to: Box::new(State::CheckingContinuation),
                     }
                 }
 
@@ -2946,8 +3051,176 @@ impl Runner {
         }
     }
 
+    /// Serial per-call preflight shared by the serial and batch dispatch
+    /// paths: resolution, spawn accounting, risk policy, and the blocked-call
+    /// advisory event. Returns the sealed dispatch request, or the immediate
+    /// error-envelope body for a refused call. `&mut` because spawn accounting
+    /// lives on the harness; MUST run in call order.
+    async fn preflight_tool_call(
+        &mut self,
+        tool_name: &str,
+        raw_args: &str,
+        call_id: &str,
+        warnings: &mut Vec<String>,
+    ) -> Result<Box<ryeos_runtime::callback::DispatchActionRequest>, String> {
+        match self
+            .dispatcher
+            .resolve(tool_name, raw_args, Some(call_id.to_string()))
+        {
+            Ok(dispatch_result) => {
+                // Record spawn for child executions (directive/graph)
+                match dispatch_result.dispatch_kind {
+                    DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
+                        self.harness.record_spawn();
+                    }
+                    DispatchKind::Tool => {}
+                }
+
+                // Risk assessment before dispatch
+                let required_cap =
+                    format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
+                let risk = self.harness.assess(&required_cap);
+                if risk.blocked {
+                    tracing::warn!(
+                        tool = %dispatch_result.canonical_ref,
+                        call_id = ?dispatch_result.call_id,
+                        risk_level = %risk.level,
+                        requires_ack = risk.requires_ack,
+                        "tool call blocked by risk policy"
+                    );
+                    let body_str = serde_json::to_string(&json!({
+                        "error": format!(
+                            "blocked by risk policy: {}",
+                            dispatch_result.canonical_ref
+                        )
+                    }))
+                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
+                    // Risk-policy block surfaces as a `tool_call_result` with a
+                    // `blocked` status payload so the daemon's event-store
+                    // validator (which has no `risk_blocked` name) accepts it.
+                    record_callback_warning(
+                        warnings,
+                        "tool_call_result(blocked)",
+                        self.callback
+                            .append_runtime_event(
+                                RuntimeEventType::ToolCallResult,
+                                json!({
+                                    "tool": dispatch_result.canonical_ref,
+                                    "call_id": dispatch_result.call_id,
+                                    "blocked": true,
+                                    "level": risk.level,
+                                    "requires_ack": risk.requires_ack,
+                                }),
+                            )
+                            .await,
+                    );
+                    Err(body_str)
+                } else {
+                    Ok(Box::new(ryeos_runtime::callback::DispatchActionRequest {
+                        thread_id: self.thread_id.clone(),
+                        project_path: self.callback.project_path().to_string(),
+                        action: ryeos_runtime::callback::ActionPayload {
+                            operation_id: None,
+                            item_id: dispatch_result.canonical_ref.clone(),
+                            ref_bindings: std::collections::BTreeMap::new(),
+                            params: dispatch_result.arguments.clone(),
+                            thread: "inline".to_string(),
+                            // Directive tool-calls dispatch `tool:` refs at
+                            // their default method; no method selector.
+                            call: None,
+                            facets: None,
+                            launch_window: None,
+                        },
+                        hook_dispatch: None,
+                    }))
+                }
+            }
+            Err(e) => Err(serde_json::to_string(&json!({ "error": e }))
+                .unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string())),
+        }
+    }
+
+    /// Render a successful dispatch response into the model-visible result.
+    /// Applies the cross-result guard (truncation + duplicate collapse), so it
+    /// MUST be called in call order — the guard is ordering-sensitive state.
+    fn rendered_success(
+        &mut self,
+        tool_name: &str,
+        response_result: &Value,
+    ) -> RenderedToolResult {
+        // Model-visible bytes are ONLY the leaf dispatcher's `result` — never
+        // the wrapping `thread` snapshot. Without this, the LLM saw the whole
+        // {thread, result} envelope and the child-thread metadata leaked into
+        // every tool-result message.
+        let raw_bytes = serde_json::to_vec(response_result).unwrap_or_else(|e| {
+            tracing::warn!("failed to serialize dispatch result: {e}");
+            Vec::new()
+        });
+        let raw_size = raw_bytes.len() as u64;
+        let guarded = self.result_guard.process_bytes(&raw_bytes);
+        RenderedToolResult {
+            tool: tool_name.to_string(),
+            content: String::from_utf8_lossy(&guarded.bytes).to_string(),
+            raw_size,
+            result_guard_truncated: guarded.truncated,
+            duplicate_of: guarded.duplicate_of,
+            truncated_reason_override: None,
+        }
+    }
+
+    /// Render a preflight or dispatch failure as the standard error envelope
+    /// the model sees. Error envelopes never pass the result guard.
+    fn rendered_error_envelope(tool_name: &str, body: String) -> RenderedToolResult {
+        RenderedToolResult {
+            tool: tool_name.to_string(),
+            raw_size: body.len() as u64,
+            content: body,
+            result_guard_truncated: false,
+            duplicate_of: None,
+            truncated_reason_override: Some("error_envelope"),
+        }
+    }
+
+    /// Emit the result event and append the transcript message for one settled
+    /// tool call. Shared by the serial and batch paths so truncation flags,
+    /// event shape, and message shape cannot diverge. An emission failure is
+    /// resume-critical and returned as the run-fatal error string.
+    async fn settle_tool_result(
+        &mut self,
+        call_id: String,
+        rendered: RenderedToolResult,
+    ) -> Result<(), String> {
+        let (inline_body, truncated, truncated_reason) = result_emission_flags(&rendered);
+        let body = inline_body.then_some(rendered.content.as_str());
+        self.callback
+            .emit_tool_result(
+                &call_id,
+                &rendered.tool,
+                body,
+                truncated,
+                truncated_reason,
+                rendered.raw_size,
+                rendered.duplicate_of.as_deref(),
+            )
+            .await
+            .map_err(|e| format!("resume-critical callback emit_tool_result failed: {e}"))?;
+        self.messages.push(ProviderMessage {
+            role: "tool".to_string(),
+            content: Some(json!(rendered.content)),
+            tool_calls: None,
+            tool_call_id: Some(call_id),
+            reasoning_content: None,
+        });
+        Ok(())
+    }
+
     fn continuation_hook_context(&self, live_context_tokens: u64, threshold_tokens: u64) -> Value {
-        let remaining_spend_usd = self.budget.remaining_spend_usd();
+        // One-way display floats: hook conditions compare numerically, and the
+        // event payload is observability, not settlement authority.
+        let remaining_spend_usd = self
+            .budget
+            .remaining_spend_usd()
+            .map(|remaining| remaining.display_usd_lossy());
         json!({
             "event": {
                 "name": "continuation",
@@ -2955,7 +3228,13 @@ impl Runner {
                 "live_context_tokens": live_context_tokens,
                 "threshold_tokens": threshold_tokens,
                 "messages": self.messages.clone(),
-                "usage": self.budget.cost(),
+                // Hook conditions compare numerically: usage money is the
+                // one-way display float, matching `budget_remaining` below.
+                "usage": {
+                    "input_tokens": self.budget.cost().input_tokens,
+                    "output_tokens": self.budget.cost().output_tokens,
+                    "total_usd": self.budget.cost().total_usd.display_usd_lossy(),
+                },
                 "budget_remaining": {
                     "spend_usd": remaining_spend_usd,
                     "spend_unlimited": remaining_spend_usd.is_none(),
@@ -2969,7 +3248,7 @@ impl Runner {
         &mut self,
         turn: u32,
         usage: &crate::provider_adapter::http::TokenUsage,
-        usd: f64,
+        usd: ryeos_runtime::envelope::UsdNanos,
         elapsed_ms: u64,
     ) -> anyhow::Result<()> {
         let (input_tokens, output_tokens) = usage
@@ -3441,7 +3720,7 @@ impl Runner {
             return Ok(false);
         };
         if usage.is_valid() {
-            let cost = self.compute_cost_for_usage(Some(usage));
+            let cost = self.compute_cost_for_usage(Some(usage))?;
             self.settle_provider_usage(turn, usage, cost.usd, elapsed_ms)
                 .await?;
             return Ok(true);
@@ -3463,6 +3742,10 @@ impl Runner {
         usd: f64,
         elapsed_ms: u64,
     ) -> anyhow::Result<()> {
+        // Entry boundary: quantize the provider-reported float once, rounding up.
+        let usd = ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(usd)
+            .map_err(|error| anyhow::anyhow!("provider-reported spend is invalid: {error}"))?
+            .0;
         let mut proposed_cost = self.budget.cost();
         proposed_cost
             .checked_accumulate(&provider_reported_spend_runtime_cost(usd))
@@ -3534,18 +3817,22 @@ impl Runner {
         }
     }
 
-    fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> CostBreakdown {
+    fn compute_cost(
+        &self,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> anyhow::Result<CostBreakdown> {
         let Some(ref pricing) = self.provider_config.pricing else {
-            return CostBreakdown {
-                usd: 0.0,
+            return Ok(CostBreakdown {
+                usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                 source: PricingSource::Unpriced,
-            };
+            });
         };
         if pricing.explicitly_free {
-            return CostBreakdown {
-                usd: 0.0,
+            return Ok(CostBreakdown {
+                usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                 source: PricingSource::ExplicitlyFree,
-            };
+            });
         }
         // Distinguish a per-model entry from the provider-default fallback so
         // the caller can flag the (otherwise silent) fallback exactly once.
@@ -3554,10 +3841,10 @@ impl Runner {
         } else {
             match (pricing.input_per_million, pricing.output_per_million) {
                 (Some(i), Some(o)) if i.is_zero() && o.is_zero() => {
-                    return CostBreakdown {
-                        usd: 0.0,
+                    return Ok(CostBreakdown {
+                        usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    }
+                    })
                 }
                 (Some(i), Some(o)) => (
                     ryeos_directive_core::ModelPricing {
@@ -3567,44 +3854,51 @@ impl Runner {
                     PricingSource::ProviderDefault,
                 ),
                 _ => {
-                    return CostBreakdown {
-                        usd: 0.0,
+                    return Ok(CostBreakdown {
+                        usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    }
+                    })
                 }
             }
         };
-        // Settled reporting derives one-way presentation dollars from the
-        // fixed-point rates; this value never feeds budget authority.
+        // Rate-derived spend is exact from birth: rate × tokens in checked
+        // i128 nanos, rounded toward positive infinity, never float math.
         let input_cost =
-            (input_tokens as f64 / 1_000_000.0) * rates.input_per_million.display_usd_lossy();
+            ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(rates.input_per_million, input_tokens)
+                .map_err(|error| anyhow::anyhow!("input token pricing overflowed: {error}"))?;
         let output_cost =
-            (output_tokens as f64 / 1_000_000.0) * rates.output_per_million.display_usd_lossy();
-        CostBreakdown {
-            usd: input_cost + output_cost,
+            ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(rates.output_per_million, output_tokens)
+                .map_err(|error| anyhow::anyhow!("output token pricing overflowed: {error}"))?;
+        Ok(CostBreakdown {
+            usd: input_cost
+                .checked_add(output_cost)
+                .map_err(|error| anyhow::anyhow!("turn pricing overflowed: {error}"))?,
             source,
-        }
+        })
     }
 
     fn compute_cost_for_usage(
         &self,
         usage: Option<&crate::provider_adapter::http::TokenUsage>,
-    ) -> CostBreakdown {
+    ) -> anyhow::Result<CostBreakdown> {
         let (input_tokens, output_tokens) = usage
             .and_then(|usage| usage.complete_token_counts())
             .unwrap_or((0, 0));
         if let Some(reported) = usage.and_then(|usage| usage.reported_cost_usd) {
-            if reported.is_finite() && reported >= 0.0 {
-                return CostBreakdown {
-                    usd: reported,
-                    source: if reported == 0.0
+            // The provider float quantizes into nanos here, at its entry; a
+            // non-money figure (negative, non-finite) falls through to the
+            // rate-derived path, as before.
+            if let Ok((usd, _rounded)) = ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(reported) {
+                return Ok(CostBreakdown {
+                    usd,
+                    source: if usd.is_zero()
                         && usage.is_some_and(|usage| usage.is_byok == Some(true))
                     {
                         PricingSource::ByokUntracked
                     } else {
                         PricingSource::ProviderReported
                     },
-                };
+                });
             }
         }
         self.compute_cost(input_tokens, output_tokens)
@@ -3630,7 +3924,7 @@ impl Runner {
             thread_id = %self.thread_id,
             turns = self.harness.turns_used(),
             tokens = self.harness.tokens_used(),
-            spend = format!("${:.4}", self.harness.spend_used()),
+            spend = format!("${}", self.harness.spend_used().to_canonical_string()),
             depth = self.harness.depth(),
             "directive completed"
         );
@@ -3653,7 +3947,7 @@ impl Runner {
 /// determine the charge: `None` is cost incurred by this thread and `rollup`
 /// is cost aggregated from children. The accounting ledger independently
 /// records the charge source as `ChargeBasis::ProviderReported`.
-fn provider_reported_spend_runtime_cost(usd: f64) -> RuntimeCost {
+fn provider_reported_spend_runtime_cost(usd: ryeos_runtime::envelope::UsdNanos) -> RuntimeCost {
     RuntimeCost {
         input_tokens: 0,
         output_tokens: 0,
@@ -3751,13 +4045,91 @@ mod tests {
         ryeos_accounting::UsdNanos::parse_canonical(canonical).unwrap()
     }
 
+    fn tool_call(name: &str) -> crate::directive::ToolCall {
+        crate::directive::ToolCall {
+            id: Some(format!("call-{name}")),
+            name: name.to_string(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn lifecycle_bearing_batches_are_detected_anywhere_in_the_batch() {
+        assert!(!batch_is_lifecycle_bearing(&[]));
+        assert!(!batch_is_lifecycle_bearing(&[tool_call("a"), tool_call("b")]));
+        assert!(batch_is_lifecycle_bearing(&[tool_call("directive_return")]));
+        assert!(batch_is_lifecycle_bearing(&[
+            tool_call("a"),
+            tool_call("directive_return"),
+            tool_call("b"),
+        ]));
+    }
+
+    #[test]
+    fn result_emission_flags_precedence_matches_the_serial_contract() {
+        let clean = RenderedToolResult {
+            tool: "t".to_string(),
+            content: "ok".to_string(),
+            raw_size: 2,
+            result_guard_truncated: false,
+            duplicate_of: None,
+            truncated_reason_override: None,
+        };
+        assert_eq!(result_emission_flags(&clean), (true, false, None));
+
+        let error_envelope = RenderedToolResult {
+            truncated_reason_override: Some("error_envelope"),
+            ..clean_clone(&clean)
+        };
+        assert_eq!(
+            result_emission_flags(&error_envelope),
+            (true, false, Some("error_envelope"))
+        );
+
+        let guard_truncated = RenderedToolResult {
+            result_guard_truncated: true,
+            // Guard truncation dominates an override.
+            truncated_reason_override: Some("error_envelope"),
+            ..clean_clone(&clean)
+        };
+        assert_eq!(
+            result_emission_flags(&guard_truncated),
+            (true, true, Some("result_guard"))
+        );
+
+        let over_cap = RenderedToolResult {
+            content: "x".repeat(
+                ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES + 1,
+            ),
+            // The size cap dominates everything.
+            result_guard_truncated: true,
+            truncated_reason_override: Some("error_envelope"),
+            ..clean_clone(&clean)
+        };
+        assert_eq!(
+            result_emission_flags(&over_cap),
+            (false, true, Some("size_cap_exceeded"))
+        );
+    }
+
+    fn clean_clone(r: &RenderedToolResult) -> RenderedToolResult {
+        RenderedToolResult {
+            tool: r.tool.clone(),
+            content: r.content.clone(),
+            raw_size: r.raw_size,
+            result_guard_truncated: r.result_guard_truncated,
+            duplicate_of: r.duplicate_of.clone(),
+            truncated_reason_override: r.truncated_reason_override,
+        }
+    }
+
     #[test]
     fn provider_reported_spend_is_own_runtime_cost_not_a_rollup_basis() {
-        let cost = provider_reported_spend_runtime_cost(0.125);
+        let cost = provider_reported_spend_runtime_cost(usd("0.125"));
         cost.validate().unwrap();
         assert_eq!(cost.input_tokens, 0);
         assert_eq!(cost.output_tokens, 0);
-        assert_eq!(cost.total_usd, 0.125);
+        assert_eq!(cost.total_usd, usd("0.125"));
         assert_eq!(cost.basis, None);
     }
 
@@ -3833,7 +4205,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -3857,8 +4229,8 @@ mod tests {
         });
 
         // Model not in the (empty) per-model table → provider-default rates.
-        let cost = runner.compute_cost(1_000_000, 500_000);
-        assert!((cost.usd - 10.5).abs() < f64::EPSILON);
+        let cost = runner.compute_cost(1_000_000, 500_000).unwrap();
+        assert_eq!(cost.usd, usd("10.5"));
         assert_eq!(cost.source, PricingSource::ProviderDefault);
 
         let usage = crate::provider_adapter::http::TokenUsage {
@@ -3867,8 +4239,8 @@ mod tests {
             reported_cost_usd: Some(7.25),
             ..Default::default()
         };
-        let reported = runner.compute_cost_for_usage(Some(&usage));
-        assert_eq!(reported.usd, 7.25);
+        let reported = runner.compute_cost_for_usage(Some(&usage)).unwrap();
+        assert_eq!(reported.usd, usd("7.25"));
         assert_eq!(reported.source, PricingSource::ProviderReported);
     }
 
@@ -3895,7 +4267,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -3953,7 +4325,7 @@ mod tests {
             system_prompt: Some("You are helpful".to_string()),
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4009,7 +4381,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4063,8 +4435,8 @@ mod tests {
             spend_authority: None,
             profiles: vec![],
         };
-        let mut budget = BudgetTracker::new(1.0);
-        budget.report(10, 5, 0.25).unwrap();
+        let mut budget = BudgetTracker::new(usd("1"));
+        budget.report(10, 5, usd("0.25")).unwrap();
         let runner = Runner::new(RunnerConfig {
             messages: vec![ProviderMessage {
                 role: "assistant".to_string(),
@@ -4245,7 +4617,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4312,7 +4684,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(100.0),
+            budget: BudgetTracker::new(usd("100")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4335,18 +4707,14 @@ mod tests {
             terminal_source_path: "directive:test/fixture".to_string(),
         });
 
-        // 1M input + 1M output → 0.80 + 4.00 = 4.80
-        let cost = runner.compute_cost(1_000_000, 1_000_000);
-        assert!(
-            (cost.usd - 4.80).abs() < f64::EPSILON,
-            "expected $4.80 for per-model pricing, got ${}",
-            cost.usd
-        );
+        // 1M input + 1M output → 0.80 + 4.00 = 4.80, exact in nanos
+        let cost = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert_eq!(cost.usd, usd("4.8"));
         assert_eq!(cost.source, PricingSource::PerModel);
 
         runner.model_name = "missing-paid-model".to_string();
-        let missing = runner.compute_cost(1_000_000, 1_000_000);
-        assert_eq!(missing.usd, 0.0);
+        let missing = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert!(missing.usd.is_zero());
         assert_eq!(
             missing.source,
             PricingSource::Unpriced,
@@ -4382,7 +4750,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(100.0),
+            budget: BudgetTracker::new(usd("100")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4406,12 +4774,8 @@ mod tests {
         });
 
         // Falls back to provider defaults: 1M input + 1M output → 1.0 + 5.0 = 6.0
-        let cost = runner.compute_cost(1_000_000, 1_000_000);
-        assert!(
-            (cost.usd - 6.0).abs() < f64::EPSILON,
-            "expected $6.00 for provider default pricing, got ${}",
-            cost.usd
-        );
+        let cost = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert_eq!(cost.usd, usd("6"));
         assert_eq!(cost.source, PricingSource::ProviderDefault);
     }
 
@@ -4438,7 +4802,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: make_callback(),
             context_window: 200_000,
             context_threshold_ratio: 0.9,
@@ -4463,8 +4827,8 @@ mod tests {
 
         // No pricing configured: nonzero tokens but $0 cost, flagged Unpriced so
         // the run loop can warn that spend is untracked (not free).
-        let cost = runner.compute_cost(1_000_000, 1_000_000);
-        assert_eq!(cost.usd, 0.0);
+        let cost = runner.compute_cost(1_000_000, 1_000_000).unwrap();
+        assert!(cost.usd.is_zero());
         assert_eq!(cost.source, PricingSource::Unpriced);
     }
 
@@ -5174,7 +5538,7 @@ mod tests {
             system_prompt: None,
             harness: Harness::new(&make_policy(), 0, None),
             continuation: ContinuationConfig::Flag(true),
-            budget: BudgetTracker::new(1.0),
+            budget: BudgetTracker::new(usd("1")),
             callback: CallbackClient::from_inner(
                 mock as Arc<dyn RuntimeCallbackAPI>,
                 "T-test",

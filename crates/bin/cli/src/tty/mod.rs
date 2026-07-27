@@ -1061,7 +1061,7 @@ pub fn render_command_result(
         rows.push((
             "hint".to_string(),
             thread_id
-                .map(|thread_id| format!("run `ryeos follow {thread_id}` to watch progress"))
+                .map(crate::thread_diagnostics::watch_progress_hint)
                 .unwrap_or_else(|| "use the returned thread ID to follow progress".to_string()),
         ));
     }
@@ -1548,9 +1548,7 @@ fn stream_failure_reason(payload: &Value, fallback: &str) -> String {
                 .and_then(Value::as_str);
             return thread_id.map_or_else(
                 || summary.to_string(),
-                |thread_id| {
-                    format!("{summary}; full child diagnostic: `ryeos thread tail {thread_id}`")
-                },
+                |thread_id| crate::thread_diagnostics::child_diagnostic(summary, thread_id),
             );
         }
         // Failure diagnostics are not a compact result projection. Preserve the
@@ -1809,6 +1807,13 @@ mod tests {
             TerminalCapabilities::plain(80),
         );
         assert!(lines.iter().any(|line| line.contains("follow this thread")));
+    }
+
+    #[test]
+    fn detached_execution_hint_uses_the_registered_thread_tail_command() {
+        let hint = crate::thread_diagnostics::watch_progress_hint("T-detached");
+        assert_eq!(hint, "run `ryeos thread tail T-detached` to watch progress");
+        assert!(!hint.contains("`ryeos follow "));
     }
 
     #[test]

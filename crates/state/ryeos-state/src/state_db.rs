@@ -6469,7 +6469,7 @@ mod tests {
                         "completed_turns": 3,
                         "input_tokens": 100,
                         "output_tokens": 50,
-                        "spend_usd": 0.15,
+                        "spend_usd": "0.15",
                         "spawns_used": 1,
                         "started_at": "2026-06-01T00:00:00Z",
                         "settled_at": "2026-06-01T00:01:00Z",

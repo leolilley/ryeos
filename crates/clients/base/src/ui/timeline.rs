@@ -1117,7 +1117,12 @@ fn stimulus_by_thread(records: &[ProjectedRecord]) -> std::collections::BTreeMap
 fn usage_summary(payload: &Value) -> Option<String> {
     let input = payload.get("input_tokens").and_then(Value::as_u64);
     let output = payload.get("output_tokens").and_then(Value::as_u64);
-    let spend = payload.get("spend_usd").and_then(Value::as_f64);
+    // `spend_usd` is the exact canonical decimal string from `ThreadUsage`;
+    // parsed to a float only for this one-way display rendering.
+    let spend = payload
+        .get("spend_usd")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<f64>().ok());
     let turns = payload.get("completed_turns").and_then(Value::as_u64);
     let mut parts = Vec::new();
     if let (Some(i), Some(o)) = (input, output) {
@@ -1759,7 +1764,7 @@ mod tests {
             "event_type": "thread_usage",
             "payload": {
                 "input_tokens": 1200, "output_tokens": 3400,
-                "spend_usd": 0.0123, "completed_turns": 3
+                "spend_usd": "0.0123", "completed_turns": 3
             }
         }));
         let Some(RyeOsTimelineEntryVm::Line { primary, tone, .. }) = entry else {

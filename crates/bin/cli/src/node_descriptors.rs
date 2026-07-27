@@ -116,6 +116,7 @@ mod tests {
                         matcher: ryeos_runtime::CommandArgumentKind::String,
                     }],
                 }],
+                sensitive_fields: Vec::new(),
                 defaults: Default::default(),
                 parameter_binding: None,
                 control_flags: Vec::new(),

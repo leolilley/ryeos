@@ -18,5 +18,6 @@ pub mod project_resolve;
 pub(crate) mod setup;
 #[cfg(test)]
 pub(crate) mod test_env;
+pub(crate) mod thread_diagnostics;
 pub mod transport;
 pub mod tty;

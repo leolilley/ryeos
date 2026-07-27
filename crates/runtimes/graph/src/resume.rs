@@ -803,13 +803,13 @@ config:
         first["cost"] = json!({
             "input_tokens": i64::MAX as u64,
             "output_tokens": 0,
-            "total_usd": 0.0,
+            "total_usd": "0",
         });
         let mut second = follow_terminal(ryeos_runtime::envelope::RuntimeResultStatus::Completed);
         second["cost"] = json!({
             "input_tokens": 1,
             "output_tokens": 0,
-            "total_usd": 0.0,
+            "total_usd": "0",
         });
         overflow_cohort[crate::walker::follow_keys::FOLLOW_RESULT] = json!({
             "fanout": true,
@@ -1084,13 +1084,13 @@ config:
             "cost": {
                 "input_tokens": 3,
                 "output_tokens": 5,
-                "total_usd": 0.25
+                "total_usd": "0.25"
             }
         });
         let total = json!({
             "input_tokens": 3,
             "output_tokens": 5,
-            "total_usd": 0.25,
+            "total_usd": "0.25",
             "basis": ryeos_runtime::envelope::COST_BASIS_ROLLUP
         });
 
@@ -1098,16 +1098,16 @@ config:
         valid["accounting"] = json!({"total": total, "nodes": [node.clone()], "hooks": []});
         from_checkpoint_value(&valid, &definition).unwrap();
 
-        // Follow-result splicing decodes and re-encodes the checkpoint through
-        // JSON. Preserve a valid resume when that changes only the USD total's
-        // final representation bit, as observed in a real multi-follow run.
-        let checked_usd = 0.023255329999999998_f64;
-        let mut adjacent_usd = checkpoint(&definition);
-        adjacent_usd["accounting"] = json!({
+        // Money is exact fixed-point (canonical decimal strings): a follow
+        // splice decoding and re-encoding the checkpoint through JSON is
+        // byte-stable for costs, so the rollup check needs no representation
+        // tolerance. A sub-cent total round-trips exactly.
+        let mut string_usd = checkpoint(&definition);
+        string_usd["accounting"] = json!({
             "total": {
                 "input_tokens": 3,
                 "output_tokens": 5,
-                "total_usd": f64::from_bits(checked_usd.to_bits() + 1),
+                "total_usd": "0.02325533",
                 "basis": ryeos_runtime::envelope::COST_BASIS_ROLLUP
             },
             "nodes": [{
@@ -1117,16 +1117,16 @@ config:
                 "cost": {
                     "input_tokens": 3,
                     "output_tokens": 5,
-                    "total_usd": checked_usd
+                    "total_usd": "0.02325533"
                 }
             }],
             "hooks": []
         });
-        from_checkpoint_value(&adjacent_usd, &definition).unwrap();
+        from_checkpoint_value(&string_usd, &definition).unwrap();
 
-        let mut non_adjacent_usd = adjacent_usd;
-        non_adjacent_usd["accounting"]["total"]["total_usd"] =
-            json!(f64::from_bits(checked_usd.to_bits() + 2));
+        // Lossy JSON-number money is rejected outright.
+        let mut numeric_usd = string_usd.clone();
+        numeric_usd["accounting"]["total"]["total_usd"] = json!(0.02325533);
 
         let mut missing_total = checkpoint(&definition);
         missing_total["accounting"] = json!({"total": null, "nodes": [node], "hooks": []});
@@ -1142,7 +1142,7 @@ config:
         duplicate_cost_step["accounting"]["total"] = json!({
             "input_tokens": 6,
             "output_tokens": 10,
-            "total_usd": 0.5,
+            "total_usd": "0.5",
             "basis": ryeos_runtime::envelope::COST_BASIS_ROLLUP
         });
 
@@ -1150,7 +1150,7 @@ config:
         unknown_cost_node["accounting"]["nodes"][0]["node"] = json!("removed");
 
         let mut negative_cost = valid.clone();
-        negative_cost["accounting"]["nodes"][0]["cost"]["total_usd"] = json!(-0.25);
+        negative_cost["accounting"]["nodes"][0]["cost"]["total_usd"] = json!("-0.25");
 
         let mut future_error = checkpoint(&definition);
         future_error["suppressed_errors"] = json!([{"step": 4, "node": "wait", "error": "future"}]);
@@ -1166,7 +1166,7 @@ config:
             json!([{"step": 1, "node": "removed", "error": "unknown"}]);
 
         for value in [
-            non_adjacent_usd,
+            numeric_usd,
             missing_total,
             contradictory_total,
             future_cost,

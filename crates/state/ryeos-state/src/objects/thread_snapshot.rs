@@ -16,7 +16,9 @@ use super::validate_object_kind;
 /// current project authority contract and admitted launch capsule root.
 /// Schema identifiers are immutable CAS wire identities; older shapes are not
 /// accepted through a compatibility reader.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 6;
+/// v7: embedded `ThreadUsage.spend_usd` is exact fixed-point money as a
+/// canonical decimal string; JSON-number money does not decode.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,7 +71,10 @@ pub struct ThreadUsage {
     pub completed_turns: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
-    pub spend_usd: f64,
+    /// Exact fixed-point USD, serialized as a canonical decimal string. A
+    /// JSON number is rejected at decode — same contract as every other money
+    /// wire field.
+    pub spend_usd: ryeos_accounting::UsdNanos,
     pub spawns_used: u32,
     pub started_at: String,
     pub settled_at: String,
@@ -92,9 +97,7 @@ impl ThreadUsage {
         if settled_at < started_at {
             anyhow::bail!("thread usage settled_at must not precede started_at");
         }
-        if !self.spend_usd.is_finite() || self.spend_usd < 0.0 {
-            anyhow::bail!("thread usage spend_usd must be finite and non-negative");
-        }
+        // `spend_usd` is `UsdNanos`: finite and non-negative by construction.
         Ok(())
     }
 }
@@ -1326,12 +1329,12 @@ mod tests {
     }
 
     #[test]
-    fn thread_usage_requires_canonical_chronology_and_finite_nonnegative_spend() {
+    fn thread_usage_requires_canonical_chronology_and_string_money() {
         let mut usage = ThreadUsage {
             completed_turns: 1,
             input_tokens: 2,
             output_tokens: 3,
-            spend_usd: 0.5,
+            spend_usd: ryeos_accounting::UsdNanos::parse_canonical("0.5").unwrap(),
             spawns_used: 0,
             started_at: "2026-04-21T12:00:00Z".to_string(),
             settled_at: "2026-04-21T12:00:01Z".to_string(),
@@ -1344,11 +1347,12 @@ mod tests {
         assert!(usage.validate().is_ok());
         usage.settled_at = "2026-04-21T11:59:59Z".to_string();
         assert!(usage.validate().is_err());
-        usage.settled_at = "2026-04-21T12:00:01Z".to_string();
-        usage.spend_usd = f64::INFINITY;
-        assert!(usage.validate().is_err());
-        usage.spend_usd = -0.01;
-        assert!(usage.validate().is_err());
+
+        // Non-finite and negative spend are unrepresentable in `UsdNanos`;
+        // the boundary moved to decode: JSON-number money is rejected.
+        let mut numeric_spend = serde_json::to_value(&usage).unwrap();
+        numeric_spend["spend_usd"] = serde_json::json!(0.5);
+        assert!(serde_json::from_value::<ThreadUsage>(numeric_spend).is_err());
     }
 
     #[test]

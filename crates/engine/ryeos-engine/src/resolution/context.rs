@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
-use crate::contracts::{ItemSpace, TrustClass as ContractTrustClass};
+use crate::contracts::{ItemSpace, ProbedAbsence, TrustClass as ContractTrustClass};
 use crate::error::{EngineError, ParseErrKind};
 use crate::item_resolution::ResolutionRoots;
 use crate::kind_registry::KindRegistry;
@@ -45,6 +45,9 @@ pub(crate) struct LoadedItem {
     /// fields). Used by steps to read `extends`/`references` etc.; not
     /// shipped in the envelope (runtimes re-parse `raw_content`).
     pub parsed: Value,
+    /// Negative dependencies of THIS item's own resolution (paths probed
+    /// absent at a precedence >= its winner). Accumulated into the context.
+    pub probed_absent: Vec<ProbedAbsence>,
 }
 
 impl LoadedItem {
@@ -127,6 +130,10 @@ pub struct ResolutionContext<'a> {
     pub(crate) done_extends: HashSet<PathBuf>,
     /// Per-step structured output.
     pub step_outputs: HashMap<String, Value>,
+    /// Accumulated negative dependencies across every item loaded during this
+    /// pipeline run (root + ancestors + references). Interior-mutable because
+    /// the step-facing `load_item` is `&self`; resolution is single-threaded.
+    pub(crate) probed_absent: std::cell::RefCell<Vec<ProbedAbsence>>,
 }
 
 impl<'a> ResolutionContext<'a> {
@@ -144,6 +151,9 @@ impl<'a> ResolutionContext<'a> {
         aliases: AliasResolver,
         root_loaded: LoadedItem,
     ) -> Self {
+        // Seed the negative-dependency accumulator with the root item's own
+        // probes before `root_loaded` is moved into the context.
+        let root_probes = root_loaded.probed_absent.clone();
         // Build the root ancestor up-front so `into_output` can ship a
         // `ResolvedAncestor` as `root` without keeping `LoadedItem` alive.
         let root_ancestor = ResolvedAncestor {
@@ -174,6 +184,7 @@ impl<'a> ResolutionContext<'a> {
             visiting_extends: HashSet::new(),
             done_extends: HashSet::new(),
             step_outputs: HashMap::new(),
+            probed_absent: std::cell::RefCell::new(root_probes),
         }
     }
 
@@ -182,12 +193,16 @@ impl<'a> ResolutionContext<'a> {
     /// Composition happens here while the parsed values are still in
     /// scope — the parser dispatcher's `Value` outputs never make it
     /// into the envelope, only the composed view does.
-    pub fn into_output(
+    /// Consume the context, producing the output plus the negative
+    /// dependencies (probed-absent paths) accumulated across every load. The
+    /// probes are an admission-time cache concern and never ship in the
+    /// `ResolutionOutput` envelope.
+    pub fn into_output_with_probes(
         self,
         composers: &crate::composers::ComposerRegistry,
         kind: &str,
         include_references_in_trust: bool,
-    ) -> Result<ResolutionOutput, ResolutionError> {
+    ) -> Result<(ResolutionOutput, Vec<ProbedAbsence>), ResolutionError> {
         let mut effective_trust_class =
             effective_trust(self.root_ancestor.trust_class, &self.ancestors);
         if include_references_in_trust {
@@ -228,15 +243,31 @@ impl<'a> ResolutionContext<'a> {
             });
         }
 
-        Ok(ResolutionOutput {
-            root: self.root_ancestor,
-            ancestors: self.ancestors,
-            references_edges: self.references_edges,
-            referenced_items: self.referenced_items,
-            step_outputs: self.step_outputs,
-            effective_trust_class,
-            composed,
-        })
+        let probed_absent = self.probed_absent.into_inner();
+        Ok((
+            ResolutionOutput {
+                root: self.root_ancestor,
+                ancestors: self.ancestors,
+                references_edges: self.references_edges,
+                referenced_items: self.referenced_items,
+                step_outputs: self.step_outputs,
+                effective_trust_class,
+                composed,
+            },
+            probed_absent,
+        ))
+    }
+
+    /// Consume the context and produce the final pipeline output, discarding
+    /// the negative-dependency record. Callers that do not cache use this.
+    pub fn into_output(
+        self,
+        composers: &crate::composers::ComposerRegistry,
+        kind: &str,
+        include_references_in_trust: bool,
+    ) -> Result<ResolutionOutput, ResolutionError> {
+        self.into_output_with_probes(composers, kind, include_references_in_trust)
+            .map(|(output, _probes)| output)
     }
 
     /// Run a single declared step.
@@ -265,7 +296,7 @@ impl<'a> ResolutionContext<'a> {
         referenced_by: &str,
         step: ResolutionStepName,
     ) -> Result<LoadedItem, ResolutionError> {
-        load_item_at(
+        let loaded = load_item_at(
             self.kinds,
             self.parsers,
             self.roots,
@@ -273,7 +304,11 @@ impl<'a> ResolutionContext<'a> {
             ref_,
             referenced_by,
             step,
-        )
+        )?;
+        self.probed_absent
+            .borrow_mut()
+            .extend(loaded.probed_absent.iter().cloned());
+        Ok(loaded)
     }
 }
 
@@ -349,6 +384,7 @@ pub(crate) fn load_item_at(
         source_content_digest: raw.source_content_digest,
         raw_content_digest: raw.raw_content_digest,
         parsed,
+        probed_absent: raw.probed_absent,
     })
 }
 
@@ -373,6 +409,8 @@ pub(crate) struct RawLoadedItem {
     /// SHA-256 of `content`, including the signature envelope.
     pub source_content_digest: String,
     pub raw_content_digest: String,
+    /// See [`LoadedItem::probed_absent`].
+    pub probed_absent: Vec<ProbedAbsence>,
 }
 
 pub(crate) fn load_item_raw(
@@ -475,6 +513,7 @@ pub(crate) fn load_item_raw(
     let raw_content_digest = crate::item_resolution::content_hash(&raw_content);
 
     Ok(RawLoadedItem {
+        probed_absent: result.probed_absent,
         source_path: result.winner_path,
         source_space: result.winner_space,
         winner_ai_root: result.winner_ai_root,

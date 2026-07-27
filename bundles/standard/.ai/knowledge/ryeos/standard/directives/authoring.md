@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-03T01:46:19Z:7817ce52a51e22e7c00e3f85894c2b415438b1b122a5877fe989e3d6e8041f9d:bfKRS9KyvxzAahj/wRIBq094EEdaK/wpKiZLqmIEOSBDzPPzRO5l3ZV7brXUjh0PHutcRJLsONi9tGAmsacgCg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T04:06:35Z:63d146c3be0e544edbe4b10153fd9df52b2aeb3dfbbbbb8f6573cdd5fba033b3:+oyI8RH/E+CnHW/MUnYlyEfAIlGNk9+dz9Su//iWHqqY9/PEckX2HBb/AuYEuZplZdz6ASPGf+07oJ5yAPt/AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
@@ -35,6 +35,15 @@ Instructions for the runtime.
 - `limits`: runtime limits such as turn/token/spend budgets.
 - `inputs` / `outputs`: structured contract for callers and summaries.
 - `actions`: tool or service actions the runtime may call through callbacks.
+- `execution.tool_concurrency` (default 4, range 1..=16): how many tool calls
+  from ONE assistant message dispatch concurrently. Results always fold back
+  in call order — the provider transcript is identical to a serial run — while
+  the braid records the real shape (a batch's `tool_call_start` intents first,
+  then results; consumers pair by `call_id`, never adjacency). `1` is strict
+  serial dispatch. Batches carrying `directive_return` always run serially.
+  Each in-flight dispatch holds one dedicated daemon connection for the
+  child's whole duration, so raise the bound with the node's connection
+  budget and concurrent-directive count in mind.
 
 Keep directives focused: one job, clear inputs, explicit declared capabilities, and no hidden reliance on project-root provider configs unless trust policy allows it.
 

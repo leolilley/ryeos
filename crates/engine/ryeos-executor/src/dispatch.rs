@@ -3794,6 +3794,8 @@ fn finish_root_dispatch_preflight(
         usage_subject.cloned(),
         usage_subject_asserted_by.map(str::to_string),
         launch_timings,
+        Some(&*state.resolution_cache),
+        state.engine_cache.system_install_generation(),
     )
     .map_err(DispatchError::Internal)?;
     Ok(RootDispatchPreflight {

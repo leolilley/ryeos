@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-19T13:42:20Z:08c6a97883b4f8126dced884757aedd0ab262fa8ebc2214b3d0c55a055a124b6:aQlFuH2N+3VwKkB1d7fXGEtDBPvQXtllOe1WU2iLalmLGFrvyT9tphOfCSsWqXdT69f2qZyY9zViK7Pi9lThCQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T01:32:35Z:ac962dd22e59b958ca9f6d71f159aec383bb856fa22c47a788c8b144ae3449fa:neqSfmaEh9yQzbA94bu1Tq//BPz1ZfFpXDELBvBvHLwJzPoiFk6smmwg9cfS1UMhZFSjvhCuGNwwMQ+KtugPAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard
 tags: [secrets, vault, env, dotenv, providers, security]
@@ -58,7 +58,7 @@ These names control the executor/daemon and can never be loaded as secrets
 
 | Class | Examples | Put it in |
 |---|---|---|
-| Tool/provider secrets | `ZEN_API_KEY`, `OPENROUTER_API_KEY`, `SUPABASE_*`, `OXYLABS_*` | vault (preferred), daemon/service env, or a project/operator `.env` |
+| Tool/provider secrets | `ZEN_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `SUPABASE_*`, `OXYLABS_*` | vault (preferred), daemon/service env, or a project/operator `.env` |
 | RyeOS client/control config | `RYEOSD_URL`, `RYE_CLIENT_KEY_PEM` | operator shell / client app config — **not** the tool-secret path |
 
 `RYEOSD_URL` and friends are not secrets; they configure how a *client* reaches

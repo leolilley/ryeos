@@ -214,6 +214,31 @@ impl UsdNanos {
     pub fn display_usd_lossy(self) -> f64 {
         self.0 as f64 / NANOS_PER_USD as f64
     }
+
+    /// Quantize a lossy `f64` USD figure at an entry boundary.
+    ///
+    /// This is the ONE sanctioned `f64 → UsdNanos` conversion, for the
+    /// boundary where money arrives as a float: a provider adapter's parsed
+    /// JSON number. The float's exact value is rendered
+    /// as its shortest round-trip decimal and quantized through
+    /// [`Self::parse_reported_round_up`], so sub-nano residue rounds toward
+    /// positive infinity rather than truncating spend. Internal code must
+    /// never round-trip authority money through this — it exists to move a
+    /// figure INTO the exact domain exactly once.
+    pub fn quantize_reported_f64_round_up(usd: f64) -> Result<(Self, bool), MoneyError> {
+        if !usd.is_finite() {
+            return Err(MoneyError::NotCanonical(format!("{usd}")));
+        }
+        if usd < 0.0 {
+            return Err(MoneyError::Negative);
+        }
+        // `-0.0` compares equal to zero but would render as "-0"; both zeros
+        // are exactly zero nanos.
+        if usd == 0.0 {
+            return Ok((Self::ZERO, false));
+        }
+        Self::parse_reported_round_up(&format!("{usd}"))
+    }
 }
 
 /// Split a non-negative decimal token with optional exponent into its
@@ -482,6 +507,26 @@ mod tests {
         }
         assert_eq!(reported_decimal_scale("-1"), None);
         assert_eq!(reported_decimal_scale("1e"), None);
+    }
+
+    #[test]
+    fn quantize_reported_f64_rounds_up_and_rejects_non_money() {
+        let q = UsdNanos::quantize_reported_f64_round_up;
+        // Exact representable values pass through without rounding.
+        assert_eq!(q(0.25).unwrap(), (UsdNanos::from_nanos(250_000_000).unwrap(), false));
+        assert_eq!(q(0.0).unwrap(), (UsdNanos::ZERO, false));
+        assert_eq!(q(-0.0).unwrap(), (UsdNanos::ZERO, false));
+        // Sub-nano float residue rounds toward positive infinity.
+        let (v, rounded) = q(0.023255329999999998).unwrap();
+        assert_eq!(v, UsdNanos::from_nanos(23_255_330).unwrap());
+        assert!(rounded);
+        // Strictly positive but below one nano still charges one nano.
+        assert_eq!(q(1e-12).unwrap(), (UsdNanos::from_nanos(1).unwrap(), true));
+        // Non-money floats are rejected, never coerced.
+        assert!(q(f64::NAN).is_err());
+        assert!(q(f64::INFINITY).is_err());
+        assert_eq!(q(-0.01), Err(MoneyError::Negative));
+        assert_eq!(q(f64::MAX), Err(MoneyError::Overflow));
     }
 
     #[test]

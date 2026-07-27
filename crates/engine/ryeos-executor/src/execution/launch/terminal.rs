@@ -405,7 +405,7 @@ mod tests {
             let cost = ryeos_runtime::envelope::RuntimeCost {
                 input_tokens,
                 output_tokens,
-                total_usd: 1.0,
+                total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("1").unwrap(),
                 basis: None,
             };
             assert!(cost.validate().is_err());
@@ -424,7 +424,7 @@ mod tests {
         with_cost.cost = Some(ryeos_runtime::envelope::RuntimeCost {
             input_tokens: 3,
             output_tokens: 5,
-            total_usd: 0.02,
+            total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.02").unwrap(),
             basis: None,
         });
         let mut cost_authority = authority(ThreadStatus::Completed);
@@ -432,7 +432,7 @@ mod tests {
             turns: 0,
             input_tokens: 3,
             output_tokens: 5,
-            spend: 0.02,
+            spend: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.02").unwrap(),
             provider: None,
             basis: None,
             metadata: None,
@@ -452,7 +452,7 @@ mod tests {
         cost_result.cost = Some(ryeos_runtime::envelope::RuntimeCost {
             input_tokens: 1,
             output_tokens: 2,
-            total_usd: 0.01,
+            total_usd: ryeos_runtime::envelope::UsdNanos::parse_canonical("0.01").unwrap(),
             basis: None,
         });
         assert!(reconcile_callback_finalization(&completed, &cost_result).is_err());

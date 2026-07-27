@@ -2875,7 +2875,10 @@ mod tests {
                 "completed_turns": chain_seq,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "spend_usd": (input_tokens + output_tokens) as f64 / 1000.0,
+                "spend_usd": ryeos_accounting::UsdNanos::from_nanos(
+                    i64::try_from((input_tokens + output_tokens) * 1_000_000).unwrap()
+                )
+                .unwrap(),
                 "spawns_used": 0,
                 "started_at": "2026-06-01T00:00:00Z",
                 "settled_at": format!("2026-06-01T00:0{chain_seq}:00Z"),
@@ -3255,7 +3258,7 @@ mod tests {
                 "completed_turns": 1,
                 "input_tokens": 100,
                 "output_tokens": 10,
-                "spend_usd": 0.11,
+                "spend_usd": "0.11",
                 "spawns_used": 0,
                 "started_at": "2026-06-01T00:00:00Z",
                 "settled_at": "2026-06-01T00:01:00Z",
