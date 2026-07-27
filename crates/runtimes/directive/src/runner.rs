@@ -38,9 +38,9 @@ use request_context::{initial_messages, visible_provider_tools};
 /// enum.
 const CONTINUATION_LOG_REASON: &str = "context_window";
 
-#[derive(Debug)]
 /// Rendered model-visible tool result plus SSE emission metadata. Shared by
 /// the serial and batch dispatch paths so their emitted shapes cannot diverge.
+#[derive(Debug)]
 struct RenderedToolResult {
     tool: String,
     content: String,
@@ -76,6 +76,7 @@ fn result_emission_flags(rendered: &RenderedToolResult) -> (bool, bool, Option<&
     }
 }
 
+#[derive(Debug)]
 pub enum State {
     CheckingLimits,
     CallingProvider,
@@ -2562,31 +2563,35 @@ impl Runner {
                                     ),
                                 };
                                 let callback = self.callback.clone();
-                                join.spawn(async move {
-                                    let result = callback
-                                        .dispatch_action(*request)
-                                        .await
-                                        .map_err(|e| format!("{e:#}"));
-                                    (index, result)
-                                });
+                                join.spawn(tracing::Instrument::instrument(
+                                    async move {
+                                        let result = callback
+                                            .dispatch_action(*request)
+                                            .await
+                                            .map_err(|e| format!("{e:#}"));
+                                        (index, result)
+                                    },
+                                    tracing::Span::current(),
+                                ));
                             }
                             match join.join_next().await {
                                 Some(Ok((index, result))) => {
                                     outcomes.insert(index, result);
                                 }
                                 Some(Err(join_error)) => {
-                                    fatal = Some(format!(
+                                    // A task-level failure (panic/abort) is
+                                    // run-fatal, but the siblings' completed
+                                    // work still folds: stop admitting, keep
+                                    // draining, and settle every gathered
+                                    // outcome before erroring.
+                                    fatal.get_or_insert(format!(
                                         "tool dispatch task failed: {join_error}"
                                     ));
-                                    break;
+                                    admission_cancelled = true;
                                 }
                                 None => break,
                             }
                         }
-                    }
-                    if let Some(error) = fatal {
-                        state = State::Errored { error };
-                        continue;
                     }
 
                     // Phase C — fold strictly by call order. The result guard,
@@ -2615,11 +2620,25 @@ impl Runner {
                                             });
                                     Self::rendered_error_envelope(&tool_name, body)
                                 }
-                                None => continue,
+                                None => {
+                                    // Never admitted (cancellation or a batch
+                                    // abort stopped the window). Settle an
+                                    // explicit error envelope so every emitted
+                                    // dispatch intent pairs with exactly one
+                                    // result — the transcript never carries a
+                                    // non-suffix hole.
+                                    let body = serde_json::to_string(&json!({
+                                        "error": "batch aborted before this call dispatched"
+                                    }))
+                                    .unwrap_or_else(|_| {
+                                        "{\"error\":\"not dispatched\"}".to_string()
+                                    });
+                                    Self::rendered_error_envelope(&tool_name, body)
+                                }
                             },
                         };
                         if let Err(error) = self.settle_tool_result(call_id, rendered).await {
-                            fatal = Some(error);
+                            fatal.get_or_insert(error);
                             break;
                         }
                     }

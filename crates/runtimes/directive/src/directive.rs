@@ -318,9 +318,16 @@ pub struct ExecutionConfig {
     pub tool_preload: bool,
     /// Maximum tool calls from ONE assistant message dispatched concurrently.
     /// Independent calls run through a bounded window; results fold back in
-    /// call order, so the provider transcript is identical to a serial run
-    /// while the braid records real overlap. `1` is strict serial dispatch.
-    /// Batches carrying `directive_return` always run serially. Range 1..=16.
+    /// call order, so the provider transcript is identical to a serial run,
+    /// while the braid records the real shape: all of a batch's
+    /// `tool_call_start` intents first, then results — consumers pair by
+    /// `call_id`, never by adjacency. `1` serializes dispatch through the
+    /// same path. Batches carrying `directive_return` always run serially.
+    ///
+    /// Range 1..=16. Each in-flight dispatch holds one dedicated daemon UDS
+    /// connection for the child's whole duration against the node-wide
+    /// connection budget (`MAX_UDS_CONNECTIONS`); raise this only with that
+    /// budget and the fleet's concurrent directive count in mind.
     #[serde(default = "default_tool_concurrency")]
     pub tool_concurrency: u32,
     #[serde(default)]
