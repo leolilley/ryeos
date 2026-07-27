@@ -63,6 +63,16 @@ pub enum MockResponse {
         name: String,
         arguments: String,
     },
+    /// One assistant message carrying SEVERAL tool calls — the shape a
+    /// batching model emits and the runner's concurrent dispatch consumes.
+    ToolCalls(Vec<MockToolCallSpec>),
+}
+
+#[derive(Clone)]
+pub struct MockToolCallSpec {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }
 
 impl MockResponse {
@@ -94,6 +104,24 @@ impl MockResponse {
                 },
                 "finish_reason": "tool_calls",
             }),
+            MockResponse::ToolCalls(calls) => json!({
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": calls
+                        .into_iter()
+                        .map(|call| json!({
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            }
+                        }))
+                        .collect::<Vec<_>>(),
+                },
+                "finish_reason": "tool_calls",
+            }),
         }
     }
 }
@@ -104,6 +132,9 @@ impl MockResponse {
 struct MockState {
     queue: Vec<MockResponse>,
     captured_headers: Vec<HashMap<String, String>>,
+    /// Every request body received, in arrival order, so a test can assert
+    /// the exact transcript the NEXT turn was given (tool-result ordering).
+    captured_bodies: Vec<Value>,
     /// Artificial latency applied before each response is served. Lets a
     /// test keep a thread observably `running` long enough to attach an SSE
     /// subscriber before the thread settles. Zero by default.
@@ -141,6 +172,7 @@ impl MockProvider {
         let state = Arc::new(Mutex::new(MockState {
             queue: canned,
             captured_headers: Vec::new(),
+            captured_bodies: Vec::new(),
             response_delay,
         }));
 
@@ -182,6 +214,10 @@ impl MockProvider {
     pub async fn captured_headers(&self) -> Vec<HashMap<String, String>> {
         self.state.lock().await.captured_headers.clone()
     }
+
+    pub async fn captured_bodies(&self) -> Vec<Value> {
+        self.state.lock().await.captured_bodies.clone()
+    }
 }
 
 impl Drop for MockProvider {
@@ -213,6 +249,7 @@ async fn handle_chat_completions(
     let (next, response_delay) = {
         let mut g = state.lock().await;
         g.captured_headers.push(flatten_headers(&headers));
+        g.captured_bodies.push(body.clone());
         if g.queue.is_empty() {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -262,6 +299,20 @@ async fn handle_chat_completions(
 /// (or tool call) chunk, then the final chunk carrying `usage` +
 /// `finish_reason`. Closes with `data: [DONE]`.
 fn sse_response(resp: MockResponse) -> Response {
+    let resp = match resp {
+        // Normalize the single-call form into the list form so the SSE
+        // construction below has one shape to build.
+        MockResponse::ToolCall {
+            id,
+            name,
+            arguments,
+        } => MockResponse::ToolCalls(vec![MockToolCallSpec {
+            id,
+            name,
+            arguments,
+        }]),
+        other => other,
+    };
     let (delta_payload, finish_reason) = match resp {
         MockResponse::Text(text) => (
             json!({
@@ -276,25 +327,31 @@ fn sse_response(resp: MockResponse) -> Response {
             }),
             "stop",
         ),
-        MockResponse::ToolCall {
-            id,
-            name,
-            arguments,
-        } => (
+        MockResponse::ToolCall { .. } => {
+            unreachable!("normalized into ToolCalls above")
+        }
+        MockResponse::ToolCalls(calls) => (
             json!({
                 "choices": [{
                     "index": 0,
                     "delta": {
                         "role": "assistant",
-                        "tool_calls": [{
-                            "index": 0,
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": arguments,
-                            }
-                        }]
+                        // Whole calls in a single chunk (id + name +
+                        // arguments together), one accumulator index per
+                        // call, to keep the harness minimal.
+                        "tool_calls": calls
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, call)| json!({
+                                "index": index,
+                                "id": call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": call.name,
+                                    "arguments": call.arguments,
+                                }
+                            }))
+                            .collect::<Vec<_>>(),
                     },
                     "finish_reason": null,
                 }]

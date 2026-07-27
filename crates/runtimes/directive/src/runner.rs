@@ -2265,101 +2265,25 @@ impl Runner {
                     pending,
                     index,
                 } => {
-                    let tool_result: RenderedToolResult = match self.dispatcher.resolve(
-                        &tool_name,
-                        &raw_args,
-                        Some(call_id.clone()),
-                    ) {
-                        Ok(dispatch_result) => {
-                            // Record spawn for child executions (directive/graph)
-                            match dispatch_result.dispatch_kind {
-                                DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
-                                    self.harness.record_spawn();
-                                }
-                                DispatchKind::Tool => {}
+                    let tool_result: RenderedToolResult = match self
+                        .preflight_tool_call(&tool_name, &raw_args, &call_id, &mut warnings)
+                        .await
+                    {
+                        Ok(request) => match self.callback.dispatch_action(*request).await {
+                            Ok(response) => {
+                                self.rendered_success(&tool_name, &response.result)
                             }
-
-                            // Risk assessment before dispatch
-                            let required_cap =
-                                format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
-                            let risk = self.harness.assess(&required_cap);
-                            if risk.blocked {
-                                tracing::warn!(
-                                    tool = %dispatch_result.canonical_ref,
-                                    call_id = ?dispatch_result.call_id,
-                                    risk_level = %risk.level,
-                                    requires_ack = risk.requires_ack,
-                                    "tool call blocked by risk policy"
-                                );
-                                let body_str = serde_json::to_string(&json!({"error": format!("blocked by risk policy: {}", dispatch_result.canonical_ref)}))
-                                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
-                                // Risk-policy block surfaces as a
-                                // `tool_call_result` with a `blocked`
-                                // status payload so the daemon's
-                                // event-store validator (which has no
-                                // `risk_blocked` name) accepts it.
-                                record_callback_warning(
-                                    &mut warnings,
-                                    "tool_call_result(blocked)",
-                                    self.callback
-                                        .append_runtime_event(
-                                            RuntimeEventType::ToolCallResult,
-                                            json!({
-                                                "tool": dispatch_result.canonical_ref,
-                                                "call_id": dispatch_result.call_id,
-                                                "blocked": true,
-                                                "level": risk.level,
-                                                "requires_ack": risk.requires_ack,
-                                            }),
-                                        )
-                                        .await,
-                                );
+                            Err(e) => {
+                                let body_str = serde_json::to_string(
+                                    &json!({"error": format!("{e:#}")}),
+                                )
+                                .unwrap_or_else(|_| {
+                                    "{\"error\":\"dispatch failed\"}".to_string()
+                                });
                                 Self::rendered_error_envelope(&tool_name, body_str)
-                            } else {
-                                match self
-                                    .callback
-                                    .dispatch_action(
-                                        ryeos_runtime::callback::DispatchActionRequest {
-                                            thread_id: self.thread_id.clone(),
-                                            project_path: self.callback.project_path().to_string(),
-                                            action: ryeos_runtime::callback::ActionPayload {
-                                                operation_id: None,
-                                                item_id: dispatch_result.canonical_ref.clone(),
-                                                ref_bindings: std::collections::BTreeMap::new(),
-                                                params: dispatch_result.arguments.clone(),
-                                                thread: "inline".to_string(),
-                                                // Directive tool-calls dispatch
-                                                // `tool:` refs at their default
-                                                // method; no method selector.
-                                                call: None,
-                                                facets: None,
-                                                launch_window: None,
-                                            },
-                                            hook_dispatch: None,
-                                        },
-                                    )
-                                    .await
-                                {
-                                    Ok(response) => {
-                                        self.rendered_success(&tool_name, &response.result)
-                                    }
-                                    Err(e) => {
-                                        let body_str = serde_json::to_string(
-                                            &json!({"error": format!("{e:#}")}),
-                                        )
-                                        .unwrap_or_else(|_| {
-                                            "{\"error\":\"dispatch failed\"}".to_string()
-                                        });
-                                        Self::rendered_error_envelope(&tool_name, body_str)
-                                    }
-                                }
                             }
-                        }
-                        Err(e) => {
-                            let body_str = serde_json::to_string(&json!({"error": e}))
-                                .unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string());
-                            Self::rendered_error_envelope(&tool_name, body_str)
-                        }
+                        },
+                        Err(body) => Self::rendered_error_envelope(&tool_name, body),
                     };
 
                     if let Err(error) = self.settle_tool_result(call_id, tool_result).await {
@@ -2429,88 +2353,12 @@ impl Runner {
                         }
                         let call_id = tc.id.clone().unwrap_or_default();
                         let raw_args = tc.arguments.to_string();
-                        let work = match self.dispatcher.resolve(
-                            &tc.name,
-                            &raw_args,
-                            Some(call_id.clone()),
-                        ) {
-                            Ok(dispatch_result) => {
-                                match dispatch_result.dispatch_kind {
-                                    DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
-                                        self.harness.record_spawn();
-                                    }
-                                    DispatchKind::Tool => {}
-                                }
-                                let required_cap = format!(
-                                    "ryeos.execute.tool.{}",
-                                    dispatch_result.canonical_ref
-                                );
-                                let risk = self.harness.assess(&required_cap);
-                                if risk.blocked {
-                                    tracing::warn!(
-                                        tool = %dispatch_result.canonical_ref,
-                                        call_id = ?dispatch_result.call_id,
-                                        risk_level = %risk.level,
-                                        requires_ack = risk.requires_ack,
-                                        "tool call blocked by risk policy"
-                                    );
-                                    let body_str = serde_json::to_string(&json!({
-                                        "error": format!(
-                                            "blocked by risk policy: {}",
-                                            dispatch_result.canonical_ref
-                                        )
-                                    }))
-                                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
-                                    record_callback_warning(
-                                        &mut warnings,
-                                        "tool_call_result(blocked)",
-                                        self.callback
-                                            .append_runtime_event(
-                                                RuntimeEventType::ToolCallResult,
-                                                json!({
-                                                    "tool": dispatch_result.canonical_ref,
-                                                    "call_id": dispatch_result.call_id,
-                                                    "blocked": true,
-                                                    "level": risk.level,
-                                                    "requires_ack": risk.requires_ack,
-                                                }),
-                                            )
-                                            .await,
-                                    );
-                                    BatchWork::Immediate(body_str)
-                                } else {
-                                    BatchWork::Dispatch(Some(Box::new(
-                                        ryeos_runtime::callback::DispatchActionRequest {
-                                            thread_id: self.thread_id.clone(),
-                                            project_path: self
-                                                .callback
-                                                .project_path()
-                                                .to_string(),
-                                            action: ryeos_runtime::callback::ActionPayload {
-                                                operation_id: None,
-                                                item_id: dispatch_result.canonical_ref.clone(),
-                                                ref_bindings: std::collections::BTreeMap::new(),
-                                                params: dispatch_result.arguments.clone(),
-                                                thread: "inline".to_string(),
-                                                // Directive tool-calls dispatch
-                                                // `tool:` refs at their default
-                                                // method; no method selector.
-                                                call: None,
-                                                facets: None,
-                                                launch_window: None,
-                                            },
-                                            hook_dispatch: None,
-                                        },
-                                    )))
-                                }
-                            }
-                            Err(e) => {
-                                let body_str = serde_json::to_string(&json!({ "error": e }))
-                                    .unwrap_or_else(|_| {
-                                        "{\"error\":\"resolve failed\"}".to_string()
-                                    });
-                                BatchWork::Immediate(body_str)
-                            }
+                        let work = match self
+                            .preflight_tool_call(&tc.name, &raw_args, &call_id, &mut warnings)
+                            .await
+                        {
+                            Ok(request) => BatchWork::Dispatch(Some(request)),
+                            Err(body) => BatchWork::Immediate(body),
                         };
                         prepared.push((call_id, tc.name.clone(), work));
                     }
@@ -3200,6 +3048,95 @@ impl Runner {
                     return Self::attach_warnings(runtime_result, &mut warnings);
                 }
             };
+        }
+    }
+
+    /// Serial per-call preflight shared by the serial and batch dispatch
+    /// paths: resolution, spawn accounting, risk policy, and the blocked-call
+    /// advisory event. Returns the sealed dispatch request, or the immediate
+    /// error-envelope body for a refused call. `&mut` because spawn accounting
+    /// lives on the harness; MUST run in call order.
+    async fn preflight_tool_call(
+        &mut self,
+        tool_name: &str,
+        raw_args: &str,
+        call_id: &str,
+        warnings: &mut Vec<String>,
+    ) -> Result<Box<ryeos_runtime::callback::DispatchActionRequest>, String> {
+        match self
+            .dispatcher
+            .resolve(tool_name, raw_args, Some(call_id.to_string()))
+        {
+            Ok(dispatch_result) => {
+                // Record spawn for child executions (directive/graph)
+                match dispatch_result.dispatch_kind {
+                    DispatchKind::DirectiveChild | DispatchKind::GraphChild => {
+                        self.harness.record_spawn();
+                    }
+                    DispatchKind::Tool => {}
+                }
+
+                // Risk assessment before dispatch
+                let required_cap =
+                    format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
+                let risk = self.harness.assess(&required_cap);
+                if risk.blocked {
+                    tracing::warn!(
+                        tool = %dispatch_result.canonical_ref,
+                        call_id = ?dispatch_result.call_id,
+                        risk_level = %risk.level,
+                        requires_ack = risk.requires_ack,
+                        "tool call blocked by risk policy"
+                    );
+                    let body_str = serde_json::to_string(&json!({
+                        "error": format!(
+                            "blocked by risk policy: {}",
+                            dispatch_result.canonical_ref
+                        )
+                    }))
+                    .unwrap_or_else(|_| "{\"error\":\"blocked\"}".to_string());
+                    // Risk-policy block surfaces as a `tool_call_result` with a
+                    // `blocked` status payload so the daemon's event-store
+                    // validator (which has no `risk_blocked` name) accepts it.
+                    record_callback_warning(
+                        warnings,
+                        "tool_call_result(blocked)",
+                        self.callback
+                            .append_runtime_event(
+                                RuntimeEventType::ToolCallResult,
+                                json!({
+                                    "tool": dispatch_result.canonical_ref,
+                                    "call_id": dispatch_result.call_id,
+                                    "blocked": true,
+                                    "level": risk.level,
+                                    "requires_ack": risk.requires_ack,
+                                }),
+                            )
+                            .await,
+                    );
+                    Err(body_str)
+                } else {
+                    Ok(Box::new(ryeos_runtime::callback::DispatchActionRequest {
+                        thread_id: self.thread_id.clone(),
+                        project_path: self.callback.project_path().to_string(),
+                        action: ryeos_runtime::callback::ActionPayload {
+                            operation_id: None,
+                            item_id: dispatch_result.canonical_ref.clone(),
+                            ref_bindings: std::collections::BTreeMap::new(),
+                            params: dispatch_result.arguments.clone(),
+                            thread: "inline".to_string(),
+                            // Directive tool-calls dispatch `tool:` refs at
+                            // their default method; no method selector.
+                            call: None,
+                            facets: None,
+                            launch_window: None,
+                        },
+                        hook_dispatch: None,
+                    }))
+                }
+            }
+            Err(e) => Err(serde_json::to_string(&json!({ "error": e }))
+                .unwrap_or_else(|_| "{\"error\":\"resolve failed\"}".to_string())),
         }
     }
 
