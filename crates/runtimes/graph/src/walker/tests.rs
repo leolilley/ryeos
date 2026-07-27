@@ -4959,6 +4959,17 @@ config:
       action: {item_id: "tool:test/evidence", ref_bindings: {}}
       assign:
         evidence: "${result.evidence}"
+        duplicate_evidence: "${result.duplicate_evidence}"
+      next:
+        type: unconditional
+        to: forward
+    forward:
+      action:
+        item_id: "tool:test/forward"
+        ref_bindings: {}
+        params:
+          evidence: "${state.evidence}"
+          exploration: "${state.duplicate_evidence}"
       next:
         type: unconditional
         to: done
@@ -4971,7 +4982,7 @@ config:
         "evidence": evidence,
         "duplicate_evidence": evidence,
     });
-    let (walker, recorder) = make_recording_walker(graph, vec![action_result], None);
+    let (walker, recorder) = make_recording_walker(graph, vec![action_result, json!({})], None);
 
     let result = walker
         .execute(json!({}), Some("gr-large-action-result".to_string()))
@@ -4981,7 +4992,7 @@ config:
         result.success,
         "bounded external action results must be shape-validated without spending expression fuel: {result:?}"
     );
-    assert_eq!(recorder.dispatch_count(), 1);
+    assert_eq!(recorder.dispatch_count(), 2);
     assert_eq!(
         result.state["evidence"].as_str().map(str::len),
         Some(ryeos_runtime::EvaluationLimits::default().fuel * 3 / 5)

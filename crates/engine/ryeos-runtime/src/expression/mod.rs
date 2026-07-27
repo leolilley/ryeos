@@ -314,6 +314,11 @@ impl<'a> EvaluationSession<'a> {
                         output.len().saturating_add(literal.len()),
                         SourceSpan::at(0),
                     )?;
+                    evaluator.spend_materialization_fuel(
+                        literal.len(),
+                        SourceSpan::at(0),
+                        "materializing template literal",
+                    )?;
                     evaluator.allocate(literal.len(), SourceSpan::at(0))?;
                     output.push_str(literal);
                 }
@@ -355,7 +360,7 @@ impl<'a> EvaluationSession<'a> {
         let span = SourceSpan::new(0, source.len());
         evaluator.check_scalar(value, span)?;
         evaluator.check_produced_string(value.len(), span)?;
-        evaluator.spend_fuel(value.len(), span, "cloning integration text")?;
+        evaluator.spend_materialization_fuel(value.len(), span, "cloning integration text")?;
         evaluator.allocate(value.len(), span)?;
         Ok(value.to_string())
     }
@@ -419,7 +424,7 @@ impl<'a> EvaluationSession<'a> {
             .try_fold(0usize, |total, part| total.checked_add(part.len()))
             .ok_or_else(|| evaluator.limit_error(span, "produced string byte count overflow"))?;
         evaluator.check_produced_string(bytes, span)?;
-        evaluator.spend_fuel(bytes, span, "assembling integration text")?;
+        evaluator.spend_materialization_fuel(bytes, span, "assembling integration text")?;
         evaluator.allocate(bytes, span)?;
         let mut output = String::with_capacity(bytes);
         for part in parts {
@@ -668,6 +673,11 @@ fn append_embedded(
                 .and_then(Numeric::canonical)
                 .map_err(|message| evaluator.error(span, message))?;
             evaluator.check_produced_string(output.len().saturating_add(rendered.len()), span)?;
+            evaluator.spend_materialization_fuel(
+                rendered.len(),
+                span,
+                "materializing embedded number",
+            )?;
             evaluator.allocate(rendered.len().saturating_mul(2), span)?;
             output.push_str(&rendered);
             return Ok(());
@@ -675,6 +685,11 @@ fn append_embedded(
         Value::String(value) => {
             evaluator.check_scalar(value, span)?;
             evaluator.check_produced_string(output.len().saturating_add(value.len()), span)?;
+            evaluator.spend_materialization_fuel(
+                value.len(),
+                span,
+                "materializing embedded string",
+            )?;
             evaluator.allocate(value.len(), span)?;
             output.push_str(value);
             return Ok(());
@@ -689,6 +704,7 @@ fn append_embedded(
         }
     };
     evaluator.check_produced_string(output.len().saturating_add(rendered.len()), span)?;
+    evaluator.spend_materialization_fuel(rendered.len(), span, "materializing embedded scalar")?;
     evaluator.allocate(rendered.len(), span)?;
     output.push_str(rendered);
     Ok(())

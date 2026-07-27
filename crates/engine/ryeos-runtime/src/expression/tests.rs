@@ -717,6 +717,21 @@ fn serialized_result_validation_does_not_consume_expression_fuel() {
 }
 
 #[test]
+fn selected_value_materialization_does_not_consume_expression_fuel() {
+    let context = json!({"state": "x".repeat(32)});
+    let limits = EvaluationLimits {
+        // One AST node plus the five-byte root lookup. The selected value copy
+        // is bounded by materialization/allocation authority instead.
+        fuel: 6,
+        ..EvaluationLimits::default()
+    };
+    assert_eq!(
+        evaluate(&expression("state"), &context, &limits).unwrap(),
+        context["state"]
+    );
+}
+
+#[test]
 fn missing_path_materialization_is_allocation_bounded() {
     let context = json!({});
     let limits = EvaluationLimits {
