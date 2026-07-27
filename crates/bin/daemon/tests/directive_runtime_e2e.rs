@@ -1088,12 +1088,12 @@ fn plant_sleepy_marker_tool(
     sleep_secs: f64,
     marker_dir: &Path,
 ) -> anyhow::Result<()> {
-    let dir = root.join(".ai/tools");
+    let dir = root.join(".ai/tools").join(name);
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"#!/usr/bin/env python3
 # ryeos-tool:
-#   category: ""
+#   category: "{name}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
 #   description: "concurrency e2e marker tool {index}"
@@ -1112,6 +1112,7 @@ with open(MARKER_DIR + "/" + str(INDEX) + ".end", "w") as f:
 print(json.dumps({{"idx": INDEX}}))
 "#,
         index = index,
+        name = name,
         sleep_secs = sleep_secs,
         marker_dir = marker_dir.to_str().expect("utf-8 marker dir"),
     );
@@ -1270,6 +1271,13 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
         Some(true),
         "body={body:#}"
     );
+    let tool_messages = second_request_tool_messages(&mock).await;
+    assert!(
+        tool_messages
+            .iter()
+            .all(|(_, content)| !content.contains("error")),
+        "batch tools must execute successfully; messages={tool_messages:?}"
+    );
 
     // Overlap: the latest start precedes the earliest end, so all three tool
     // executions coexisted. Serial dispatch cannot produce this shape (each
@@ -1289,7 +1297,6 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
 
     // Fold order: transcript tool messages are in CALL order despite the
     // completion order being (2, 3, 1).
-    let tool_messages = second_request_tool_messages(&mock).await;
     let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["c1", "c2", "c3"], "messages={tool_messages:?}");
 
@@ -1321,6 +1328,13 @@ async fn e2e_tool_batch_at_width_one_is_strictly_serial() {
         Some(true),
         "body={body:#}"
     );
+    let tool_messages = second_request_tool_messages(&mock).await;
+    assert!(
+        tool_messages
+            .iter()
+            .all(|(_, content)| !content.contains("error")),
+        "serial tools must execute successfully; messages={tool_messages:?}"
+    );
 
     // Strict serial: every next call starts only after the previous ended.
     for i in 1..3u32 {
@@ -1332,7 +1346,6 @@ async fn e2e_tool_batch_at_width_one_is_strictly_serial() {
             i + 1
         );
     }
-    let tool_messages = second_request_tool_messages(&mock).await;
     let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["c1", "c2", "c3"]);
 
@@ -1377,12 +1390,23 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
         Some(true),
         "a refused batch member must not sink the run; body={body:#}"
     );
+    let tool_messages = second_request_tool_messages(&mock).await;
+    assert_eq!(
+        tool_messages.len(),
+        3,
+        "every batch member must settle once; messages={tool_messages:?}"
+    );
+    assert!(
+        !tool_messages[0].1.contains("error")
+            && tool_messages[1].1.contains("error")
+            && !tool_messages[2].1.contains("error"),
+        "only the refused middle member may fail; messages={tool_messages:?}"
+    );
 
     // The real tools on both sides of the refusal executed.
     let _ = read_marker(markers.path(), 1, "end");
     let _ = read_marker(markers.path(), 3, "end");
 
-    let tool_messages = second_request_tool_messages(&mock).await;
     let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["c1", "c2", "c3"], "messages={tool_messages:?}");
     assert!(
