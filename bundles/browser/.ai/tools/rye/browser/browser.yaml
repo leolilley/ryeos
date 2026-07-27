@@ -1,4 +1,4 @@
-# ryeos:signed:2026-06-13T05:03:33Z:6a244f16064477c62fe705f69036f76d485736ff6cf429ef66880fe4077e457c:3rJ+JZvsPrcUZcofkBf5uh9RTKesLtCgLayLdULS15ehU2XFLjAER8IjKGjsV2EIbenfMdE5rTSviRUyWWSiAg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:06Z:e52b46fc2b28cc0792f54639f7dcc1e24e8c45d6b9208299aa8e2c76340662fe:N6YWEC3RGWUkbr2U/8TdtCPl1JERe7grtWEiRRxkLOdxfttB6pXMTM0S2Vf1ftxuV9Gjf1vKOTJNuJ8fZvQKAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "rye/browser"
 version: "1.0.0"
 tool_type: "subprocess"
@@ -10,7 +10,7 @@ config:
   args:
     - "browser"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 120
 
 config_schema:

@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-06-24T04:44:15Z:10f3079809382a2ce0fc9f2a82a7a40be7a33d92022b51d5efe427dc9953f54c:rG5yFAaYOWkZQBCANlbS9p4eyS0h9LNwt63QtO7v6x6xUz/c39dk+cBM2fz6g74scfo4c5TI+kL+8ZQS/9oZAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-27T09:03:55Z:ec6fa2358547998310b66b77be1f17ced3f8028f99f5b72de15e26dd2729235e:dTW4hCRuDYKqF+IS1W7ZoS3ifecoNx5TdeXYHgRxrT7UDABTlZSmQUrl2sxX8J8W90s/w8Uz204kfg4WsTL7BQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/core
 tags: [reference, runtimes, execution, subprocess]
@@ -27,7 +27,7 @@ Loads a Python module and calls its `execute(params, project_path)`.
 ### Python Script (`tool:ryeos/core/runtimes/python/script`)
 Runs a Python script as `__main__`.
 
-- **Command:** runtime launcher invokes `{tool_path}` as `__main__` with `--project-path {project_path}`
+- **Command:** runtime launcher invokes `${tool_path}` as `__main__` with `--project-path ${project_path}`
 - **Same interpreter and bundle-local `sys.path` setup as function runtime**
 - **Timeout:** 300s
 - **Use case:** Self-contained Python scripts

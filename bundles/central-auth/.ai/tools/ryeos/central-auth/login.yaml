@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-21T23:12:22Z:364982f7c00d787dcb4534e4cc86db48f42b972ddc03e1373b78e15aa50caa7f:6NplKdN+MNtpOBZJiamrGnMbJk6eeWARL9qXK478bsMqW1l7RCUzspBTmHI2u63HbSyPLKzc5b8CZwVjhcZeAQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T09:00:06Z:be92bf45e0d221d84c9d166ef973303b5643647fbabda3ac87559f91ba251fa7:3eokvEkL/kvwFD6WGeiJzvbcvrYyLbxnBKU4xj2iwGoxxjP/ee+iLSfuMBLvmIuMWxhmZpfrM7Hlxknep2VLDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "ryeos/central-auth"
 name: "login"
@@ -9,9 +9,9 @@ description: "Validate credentials or redeem an invite and issue an opaque sessi
 config:
   command: "python3"
   args:
-    - "{tool_dir}/lib/central_auth.py"
+    - "${tool_dir}/lib/central_auth.py"
     - "login"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 15
 
 config_schema:

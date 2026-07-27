@@ -1385,7 +1385,7 @@ metadata:
 executor_id: null
 config:
   command: /bin/sh
-  args: [\"-c\", \"{tool_path}\"]
+  args: [\"-c\", \"${tool_path}\"]
   timeout_secs: 300
 ";
         fs::write(&file_path, content).unwrap();
@@ -1690,7 +1690,7 @@ config:
     fn multiple_runtime_configs_error() {
         let config_block = json!({
             "command": "python3",
-            "args": ["{tool_path}"],
+            "args": ["${tool_path}"],
             "timeout_secs": 300
         });
         let intermediates = vec![
@@ -1792,8 +1792,8 @@ config:
     fn runtime_config_compiles_to_spec() {
         let config_block = json!({
             "command": "python3",
-            "args": ["{tool_path}", "--project-path", "{project_path}"],
-            "input_data": "{params_json}",
+            "args": ["${tool_path}", "--project-path", "${project_path}"],
+            "input_data": "${params_json}",
             "timeout_secs": 60,
             "env": { "PYTHONUNBUFFERED": "1" }
         });
@@ -2068,7 +2068,7 @@ config:
     //       → execute.yaml executor_id = null             (terminal)
     //
     // Verifies that the final SubprocessSpec has the correct expanded
-    // {interpreter} template, tool_path, project_path, and timeout_secs.
+    // ${interpreter} template, tool_path, project_path, and timeout_secs.
 
     #[test]
     fn e2e_full_chain_with_interpreter() {
@@ -2089,7 +2089,7 @@ config:
         // 2. Write runtime YAML: runtimes/python/script.yaml
         //    - executor_id: "@subprocess"
         //    - env_config with interpreter pointing to .venv/bin
-        //    - config with {interpreter} template
+        //    - config with ${interpreter} template
         let runtime_dir = project_dir
             .join(AI_DIR)
             .join("tools")
@@ -2109,12 +2109,12 @@ env_config:
   env:
     PYTHONUNBUFFERED: "1"
 config:
-  command: "{interpreter}"
+  command: "${interpreter}"
   args:
-    - "{tool_path}"
+    - "${tool_path}"
     - "--project-path"
-    - "{project_path}"
-  input_data: "{params_json}"
+    - "${project_path}"
+  input_data: "${params_json}"
   timeout_secs: 120
 "#
         .to_string();
@@ -2219,14 +2219,14 @@ category: ryeos/core/subprocess\n";
 
         // Args should have tool_path and --project-path expanded
         assert_eq!(dispatch.args.len(), 3);
-        // args[0] = {tool_path} → root tool source path
+        // args[0] = ${tool_path} → root tool source path
         assert!(
             dispatch.args[0].contains("my_tool"),
             "args[0] should contain my_tool, got: {:?}",
             dispatch.args[0],
         );
         assert_eq!(dispatch.args[1], "--project-path");
-        // args[2] = {project_path} → project root
+        // args[2] = ${project_path} → project root
         assert!(
             dispatch.args[2].contains("rye_plan_test"),
             "args[2] should be project path, got: {:?}",

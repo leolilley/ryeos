@@ -3,7 +3,7 @@
 //! Owns interpreter resolution (currently only the `local_binary`
 //! strategy) and merges declared env entries into the compile
 //! context. Sets `template_ctx.interpreter` so downstream templates
-//! like `{interpreter}` resolve.
+//! like `${interpreter}` resolve.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -161,7 +161,7 @@ impl RuntimeHandler for EnvConfigHandler {
         })?;
 
         // Always-present extra: this element's directory. Templates
-        // may reference `{runtime_dir}` to locate sibling files
+        // may reference `${runtime_dir}` to locate sibling files
         // (e.g. PATH entries or runtime launcher args) without
         // cross-element peeking.
         // Last-write-wins across the chain, matching env_paths
@@ -202,7 +202,7 @@ impl RuntimeHandler for EnvConfigHandler {
         // against the same `template_ctx` that `tool_dir`,
         // `runtime_dir`, `interpreter`, etc. already populated, so
         // bundle YAMLs can write entries like
-        // `{prepend: ["{runtime_dir}/bin"]}` directly.
+        // `{prepend: ["${runtime_dir}/bin"]}` directly.
         apply_env_paths(
             &env_config.env_paths,
             &mut ctx.env,

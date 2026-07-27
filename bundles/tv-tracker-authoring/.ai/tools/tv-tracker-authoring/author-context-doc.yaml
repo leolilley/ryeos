@@ -1,3 +1,4 @@
+# ryeos:signed:2026-07-27T09:00:08Z:b9e857c9907ba12b5290215d757b64201e32ce1be84aaaf6f173f750e7ac638c:bMHQAX92S0vPS0H23O2/VNio52trRbfaHJJEbXYXk3Vj6GUCxJ4QRDP57MLlPmLTAcm9CcgFrWQoRWEzEJkZDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "0.1.0"
 category: "tv-tracker-authoring"
 name: "author-context-doc"
@@ -23,7 +24,7 @@ config:
   args:
     - "author-item"
     - "--stdin-json"
-  input_data: "{params_json}"
+  input_data: "${params_json}"
   timeout_secs: 30
 
 config_schema:

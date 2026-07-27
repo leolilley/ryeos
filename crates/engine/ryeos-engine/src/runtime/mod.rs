@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::contracts::{ExecutionDecorations, PlanSubprocessSpec, RuntimeEnvSource};
 use crate::error::EngineError;
@@ -106,9 +106,8 @@ pub struct TemplateContext {
     pub project_path: Option<PathBuf>,
     pub params_json: String,
     pub interpreter: Option<String>,
-    /// Forward-compat: handlers may add their own tokens here without
-    /// the engine knowing about them. Lookup is checked AFTER the
-    /// known tokens, so handlers can shadow nothing.
+    /// Handler-owned runtime context roots such as `tool_dir` and
+    /// `runtime_dir`. Fixed roots above take precedence.
     pub extra: HashMap<String, String>,
 }
 
@@ -125,139 +124,114 @@ impl TemplateContext {
 }
 
 pub fn expand_template(template: &str, ctx: &TemplateContext) -> Result<String, EngineError> {
-    let mut result = String::with_capacity(template.len());
-    let mut remaining = template;
-    while let Some(open) = remaining.find('{') {
-        result.push_str(&remaining[..open]);
-        remaining = &remaining[open..];
-
-        // Runtime templates commonly embed source languages whose literal
-        // braces may spell RyeOS token names (for example a Python f-string
-        // containing `{tool_path}`). Double braces are the explicit escape
-        // contract: `{{tool_path}}` emits literal `{tool_path}` without
-        // consulting the RyeOS template context.
-        if remaining.starts_with("{{") {
-            result.push('{');
-            remaining = &remaining[2..];
-            if let Some(close) = remaining.find("}}") {
-                result.push_str(&remaining[..close]);
-                result.push('}');
-                remaining = &remaining[close + 2..];
-            }
-            continue;
-        }
-
-        let Some(close) = remaining.find('}') else {
-            result.push_str(remaining);
-            remaining = "";
-            break;
-        };
-        let token = &remaining[1..close];
-
-        // Empty braces are common literal syntax in embedded scripts
-        // (for example Python's `'{}'` JSON fallback). They are not a
-        // RyeOS template reference.
-        if token.is_empty() {
-            result.push_str("{}");
-            remaining = &remaining[close + 1..];
-            continue;
-        }
-
-        let value = match token {
-            "tool_path" => ctx.tool_path.to_string_lossy().to_string(),
-            "project_path" => ctx
-                .project_path
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .ok_or_else(|| EngineError::TemplateMissingContext {
-                    token: "project_path".into(),
-                })?,
-            "params_json" => ctx.params_json.clone(),
-            "interpreter" => {
-                ctx.interpreter
-                    .clone()
-                    .ok_or_else(|| EngineError::TemplateMissingContext {
-                        token: "interpreter".into(),
-                    })?
-            }
-            other => match ctx.extra.get(other) {
-                Some(v) => v.clone(),
-                None => {
-                    return Err(EngineError::UnknownTemplateToken {
-                        token: other.to_string(),
-                    });
-                }
-            },
-        };
-        result.push_str(&value);
-        remaining = &remaining[close + 1..];
-    }
-    result.push_str(remaining);
-    Ok(result)
+    render_runtime_template(template, ctx, None)
 }
 
-/// Two-pass expansion for env-config env values:
-///   1. Resolve `${VAR}` from `host_env` (allowlisted host env).
-///   2. Run existing `{token}` expansion via `expand_template`.
-///
-/// This keeps host-env passthrough OUT of `command`, `args`, `cwd`,
-/// and stdin templates — those still call `expand_template` directly
-/// and reject unknown tokens loudly.
-///
-/// The `${VAR}` form is intentionally distinct from `{token}`: the
-/// `$` makes the intent explicit ("read from host env, not the
-/// template context") and avoids ambiguity with the existing tokens.
-///
-/// A literal `$` not followed by `{` is passed through untouched, so
-/// prose values like `"price: $5"` still work.
+/// Render an env-config value through the same bounded rye-expr/1 template
+/// language as every other runtime field. Uppercase roots retain the existing
+/// allowlisted host-environment contract; runtime roots come from
+/// `TemplateContext`. `$${...}` is the rye-expr/1 literal escape.
 pub fn expand_env_value(
     raw: &str,
     template_ctx: &TemplateContext,
     host_env: &HostEnvBindings,
 ) -> Result<String, EngineError> {
-    // Pass 1: ${VAR}. Scan from left to right, replace literal
-    // ${...} occurrences. Do NOT support nested expansions; a
-    // sigil immediately followed by `{` is the only trigger.
-    let mut out = String::with_capacity(raw.len());
-    let bytes = raw.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1] == b'{' {
-            // Find the matching `}`.
-            let Some(close_rel) = raw[i + 2..].find('}') else {
-                // Unterminated `${`: bubble up as a typed error so
-                // operators see the offending YAML clearly.
-                return Err(EngineError::UnknownTemplateToken {
-                    token: raw[i..].to_string(),
-                });
-            };
-            let close = i + 2 + close_rel;
-            let var = &raw[i + 2..close];
-            if is_reserved_env_name(var) {
+    render_runtime_template(raw, template_ctx, Some(host_env))
+}
+
+fn render_runtime_template(
+    source: &str,
+    ctx: &TemplateContext,
+    host_env: Option<&HostEnvBindings>,
+) -> Result<String, EngineError> {
+    let compilation_limits = ryeos_expression::CompilationLimits::default();
+    let compiled = ryeos_expression::compile_template_for(
+        source,
+        "runtime subprocess template",
+        &compilation_limits,
+    )
+    .map_err(|error| EngineError::RuntimeTemplateExpression {
+        reason: error.to_string(),
+    })?;
+
+    let mut roots = Map::new();
+    for (name, value) in &ctx.extra {
+        roots.insert(name.clone(), Value::String(value.clone()));
+    }
+    roots.insert(
+        "tool_path".to_owned(),
+        Value::String(ctx.tool_path.to_string_lossy().into_owned()),
+    );
+    roots.insert(
+        "params_json".to_owned(),
+        Value::String(ctx.params_json.clone()),
+    );
+    if let Some(project_path) = &ctx.project_path {
+        roots.insert(
+            "project_path".to_owned(),
+            Value::String(project_path.to_string_lossy().into_owned()),
+        );
+    }
+    if let Some(interpreter) = &ctx.interpreter {
+        roots.insert("interpreter".to_owned(), Value::String(interpreter.clone()));
+    }
+
+    if let Some(host_env) = host_env {
+        for root in compiled.references().roots() {
+            if roots.contains_key(root) || !is_host_env_root(root) {
+                continue;
+            }
+            if is_reserved_env_name(root) {
                 return Err(EngineError::ReservedHostEnvPassthrough {
-                    var: var.to_string(),
+                    var: root.to_owned(),
                 });
             }
-            if !host_env.allowed.contains(var) {
+            if !host_env.allowed.contains(root) {
                 return Err(EngineError::HostEnvPassthroughNotAllowed {
-                    var: var.to_string(),
+                    var: root.to_owned(),
                 });
             }
-            let Some(value) = host_env.values.get(var) else {
-                return Err(EngineError::HostEnvPassthroughMissing {
-                    var: var.to_string(),
-                });
-            };
-            out.push_str(value);
-            i = close + 1;
-        } else {
-            out.push(bytes[i] as char);
-            i += 1;
+            let value = host_env.values.get(root).ok_or_else(|| {
+                EngineError::HostEnvPassthroughMissing {
+                    var: root.to_owned(),
+                }
+            })?;
+            roots.insert(root.to_owned(), Value::String(value.clone()));
         }
     }
 
-    // Pass 2: old `{token}` expansion.
-    expand_template(&out, template_ctx)
+    let context = Value::Object(roots);
+    let evaluation_limits = ryeos_expression::EvaluationLimits::default();
+    let rendered = ryeos_expression::render_template(&compiled, &context, &evaluation_limits)
+        .map_err(|error| EngineError::RuntimeTemplateExpression {
+            reason: error.to_string(),
+        })?;
+    rendered
+        .as_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| EngineError::RuntimeTemplateExpression {
+            reason: format!(
+                "runtime subprocess template produced {}; expected string",
+                json_type_name(&rendered)
+            ),
+        })
+}
+
+fn is_host_env_root(root: &str) -> bool {
+    root.bytes()
+        .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        && root.bytes().any(|byte| byte.is_ascii_uppercase())
+}
+
+fn json_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 // ── Handler-side mutable state ───────────────────────────────────────────
@@ -488,7 +462,7 @@ pub fn compile_with_handlers(
     ctx.template_ctx.project_path = project_root.map(|p| p.to_path_buf());
 
     // Inject project_path into params so tools that accept it in their
-    // config_schema receive it via {params_json}. Tools that don't
+    // config_schema receive it via ${params_json}. Tools that don't
     // declare it will ignore the extra field (serde deny_unknown_fields
     // is NOT used by the subprocess — it's only for the config_schema
     // validation hint). This ensures subprocess tools can locate project
@@ -794,28 +768,26 @@ mod tests {
 
     #[test]
     fn env_value_expands_both_host_and_template() {
-        // Verify both passes work: `${VAR}` from host env AND
-        // `{tool_path}` from template context.
+        // Host and runtime roots share one rye-expr/1 evaluation.
         let mut host_env = HostEnvBindings::default();
         host_env.allowed.insert("MY_HOST".into());
         host_env.values.insert("MY_HOST".into(), "hello".into());
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
-        let got = expand_env_value("${MY_HOST}-{tool_path}", &ctx, &host_env).unwrap();
+        let got = expand_env_value("${MY_HOST}-${tool_path}", &ctx, &host_env).unwrap();
         assert_eq!(got, "hello-/tool.yaml");
     }
 
     #[test]
     fn template_leaves_empty_braces_literal() {
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
-        let got = expand_template("print('{}') {tool_path}", &ctx).unwrap();
+        let got = expand_template("print('{}') ${tool_path}", &ctx).unwrap();
         assert_eq!(got, "print('{}') /tool.yaml");
     }
 
     #[test]
-    fn template_double_braces_escape_a_known_token() {
+    fn template_uses_rye_expr_literal_escape() {
         let ctx = TemplateContext::new(PathBuf::from("/tool.yaml"));
-        let got =
-            expand_template("f'logical path: {{tool_path}}' {tool_path}", &ctx).unwrap();
-        assert_eq!(got, "f'logical path: {tool_path}' /tool.yaml");
+        let got = expand_template("$${tool_path} ${tool_path}", &ctx).unwrap();
+        assert_eq!(got, "${tool_path} /tool.yaml");
     }
 }
