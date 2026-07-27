@@ -5906,7 +5906,15 @@ fn execution_plan_identity_hash(
         // behavior while removing only that host-specific root spelling.
         normalize_plan_project_paths(&mut identity, path);
     }
-    let canonical = lillux::canonical_json(&identity)?;
+    let mut canonical = lillux::canonical_json(&identity)?;
+    if let ProjectContext::LocalPath { path } = project_context {
+        // Some handlers intentionally carry structured JSON as a plan string
+        // (for example `params_json`). Normalize the same root spelling inside
+        // those strings as well; otherwise a relocated CAS checkout still
+        // produces a different identity for the same relative request.
+        let root = path.to_string_lossy();
+        canonical = canonical.replace(root.as_ref(), "$RYEOS_PROJECT_ROOT");
+    }
     Ok(lillux::sha256_hex(canonical.as_bytes()))
 }
 
@@ -6425,9 +6433,12 @@ mod tests {
                     "RYEOS_ITEM_PATH": root.join(".ai/tools/resume/resume_test.yaml"),
                     "UNCHANGED": "/outside/project",
                 },
+                "stdin_data": format!("{{\"project_path\":\"{}\"}}", root.display()),
             });
             normalize_plan_project_paths(&mut plan, root);
-            let canonical = lillux::canonical_json(&plan).unwrap();
+            let canonical = lillux::canonical_json(&plan)
+                .unwrap()
+                .replace(root.to_string_lossy().as_ref(), "$RYEOS_PROJECT_ROOT");
             lillux::sha256_hex(canonical.as_bytes())
         }
 
