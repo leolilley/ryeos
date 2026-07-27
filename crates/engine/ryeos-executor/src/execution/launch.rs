@@ -1236,6 +1236,134 @@ fn inspect_materialized_executor(
     }
 }
 
+/// Reopen the exact native executor already admitted into a managed launch
+/// capsule. The capsule's content hash is the authority: recovery must not
+/// resolve the executor name through a newer installed bundle generation.
+///
+/// The executor cache is populated only after full bundle-chain verification
+/// and is content-addressed by the admitted blob hash. We nevertheless reopen
+/// it through the descriptor-pinned hierarchy and hash every byte again before
+/// returning a launch handle.
+fn materialize_admitted_native_executor(
+    executor_ref: &str,
+    cache_root: &Path,
+    content_hash: &str,
+    bundle_manifest_hash: &str,
+    bundle_signer_fingerprint: &str,
+) -> Result<MaterializedExecutor, MaterializationError> {
+    let bare = executor_ref.strip_prefix("native:").ok_or_else(|| {
+        MaterializationError::ExecutorUnavailable {
+            executor_ref: executor_ref.to_string(),
+            detail: "executor_ref is not a native executor".to_string(),
+        }
+    })?;
+    let mut components = Path::new(bare).components();
+    if bare.is_empty()
+        || !matches!(components.next(), Some(std::path::Component::Normal(_)))
+        || components.next().is_some()
+    {
+        return Err(MaterializationError::ExecutorUnavailable {
+            executor_ref: executor_ref.to_string(),
+            detail: "native executor id must be one normal filename component".to_string(),
+        });
+    }
+    for (label, hash) in [
+        ("admitted executor content hash", content_hash),
+        (
+            "admitted executor bundle manifest hash",
+            bundle_manifest_hash,
+        ),
+    ] {
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(MaterializationError::Internal(format!(
+                "{label} is not a canonical SHA-256 hash"
+            )));
+        }
+    }
+
+    let layout = open_executor_cache_layout(cache_root, bare)?;
+    let blob_dir = layout
+        .executors
+        .open_child_directory(OsStr::new(content_hash))
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("failed to open admitted executor cache entry: {error}"),
+        })?
+        .ok_or_else(|| MaterializationError::BlobNotFound {
+            hash: content_hash.to_string(),
+        })?;
+    validate_executor_cache_ancestors(&layout, &blob_dir, bare)?;
+    let file = blob_dir
+        .open_regular(OsStr::new(bare), false)
+        .map_err(|error| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("admitted executor cache entry is not a regular file: {error}"),
+        })?
+        .ok_or_else(|| MaterializationError::BlobNotFound {
+            hash: content_hash.to_string(),
+        })?;
+    let metadata =
+        file.metadata()
+            .map_err(|error| MaterializationError::MaterializationFailed {
+                executor_ref: executor_ref.to_string(),
+                detail: format!("failed to inspect admitted executor cache entry: {error}"),
+            })?;
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::MetadataExt as _;
+        let mode = metadata.mode() & 0o7777;
+        if mode & 0o111 == 0 {
+            return Err(MaterializationError::MaterializationFailed {
+                executor_ref: executor_ref.to_string(),
+                detail: "admitted executor cache entry is not executable".to_string(),
+            });
+        }
+        mode
+    };
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        return Err(MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: "admitted executor cache recovery requires Unix file identity".to_string(),
+        });
+    }
+    let opened = verify_opened_executor_file(file, content_hash, metadata.len(), mode, bare)
+        .map_err(|detail| MaterializationError::MaterializationFailed {
+            executor_ref: executor_ref.to_string(),
+            detail: format!("admitted executor cache verification failed: {detail}"),
+        })?;
+    let path = executor_cache_target(cache_root, content_hash, bare);
+    Ok(MaterializedExecutor {
+        path: path.clone(),
+        content_hash: content_hash.to_string(),
+        bundle_manifest_hash: bundle_manifest_hash.to_string(),
+        bundle_signer_fingerprint: bundle_signer_fingerprint.to_string(),
+        verified_command: ryeos_engine::isolation::IsolationDescriptorBoundCommand::new(
+            ryeos_engine::isolation::IsolationVerifiedCode {
+                source_path: path,
+                content_hash: content_hash.to_string(),
+            },
+            opened.handle,
+            ryeos_engine::isolation::IsolationDescriptorFileIdentity {
+                device: opened.identity.device,
+                inode: opened.identity.inode,
+                size: opened.identity.size,
+                modified_seconds: opened.identity.modified_seconds,
+                modified_nanoseconds: opened.identity.modified_nanoseconds,
+                changed_seconds: opened.identity.changed_seconds,
+                changed_nanoseconds: opened.identity.changed_nanoseconds,
+                mode: opened.identity.mode,
+                file_type: opened.identity.file_type,
+            },
+        ),
+    })
+}
+
 enum QuarantinedExecutorEntry {
     Directory {
         name: String,
@@ -2379,6 +2507,28 @@ async fn prepare_managed_launch_authority(
         .join(ryeos_engine::AI_DIR)
         .join("state");
     let materialization_timings = params.launch_timings.clone();
+    let admitted_executor_identity = admitted_capsule
+        .as_ref()
+        .map(|capsule| match &capsule.artifact_identity {
+            ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                executor_ref,
+                executor_content_hash,
+                executor_bundle_manifest_hash,
+                executor_bundle_signer_fingerprint,
+                ..
+            } => Ok((
+                executor_ref.clone(),
+                executor_content_hash.clone(),
+                executor_bundle_manifest_hash.clone(),
+                executor_bundle_signer_fingerprint.clone(),
+            )),
+            ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. } => {
+                Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                    "managed recovery found a non-managed admitted artifact identity"
+                )))
+            }
+        })
+        .transpose()?;
     let materialization_queue_timer = materialization_timings.as_ref().map(|timings| {
         timings.nested(
             "background_dispatch",
@@ -2393,14 +2543,38 @@ async fn prepare_managed_launch_authority(
                 "executor_materialization_blocking_work",
             )
         });
-        materialize_native_executor_for_engine(
-            &materialization_engine,
-            &materialization_bundle_roots,
-            &materialization_executor_ref,
-            &materialization_cache_root,
-            ryeos_engine::resolution::TrustClass::TrustedBundle,
-            materialization_timings.as_ref(),
-        )
+        if let Some((
+            admitted_executor_ref,
+            admitted_content_hash,
+            admitted_manifest_hash,
+            admitted_signer_fingerprint,
+        )) = admitted_executor_identity
+        {
+            if admitted_executor_ref != materialization_executor_ref {
+                return Err(MaterializationError::ResolutionFailed {
+                    executor_ref: materialization_executor_ref,
+                    detail: format!(
+                        "installed executor ref differs from admitted managed executor {admitted_executor_ref}"
+                    ),
+                });
+            }
+            materialize_admitted_native_executor(
+                &admitted_executor_ref,
+                &materialization_cache_root,
+                &admitted_content_hash,
+                &admitted_manifest_hash,
+                &admitted_signer_fingerprint,
+            )
+        } else {
+            materialize_native_executor_for_engine(
+                &materialization_engine,
+                &materialization_bundle_roots,
+                &materialization_executor_ref,
+                &materialization_cache_root,
+                ryeos_engine::resolution::TrustClass::TrustedBundle,
+                materialization_timings.as_ref(),
+            )
+        }
     });
 
     let augmentation = async {
@@ -7228,6 +7402,83 @@ mod tests {
         MATERIALIZER_TEST_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn write_admitted_executor_cache(cache_root: &Path, bare: &str, bytes: &[u8]) -> String {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let hash = lillux::cas::sha256_hex(bytes);
+        let layout = open_executor_cache_layout(cache_root, bare).unwrap();
+        let blob_dir = layout
+            .executors
+            .create_child(OsStr::new(&hash), 0o700)
+            .unwrap();
+        let mut file = blob_dir
+            .open_regular_create(OsStr::new(bare), true, true, 0o755)
+            .unwrap();
+        file.write_all(bytes).unwrap();
+        file.set_permissions(std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+        file.sync_all().unwrap();
+        hash
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_recovery_reopens_exact_admitted_executor_from_cache() {
+        let _guard = materializer_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = "admitted-recovery-executor";
+        let content_hash =
+            write_admitted_executor_cache(tmp.path(), bare, b"previous signed executor");
+        let manifest_hash = "b".repeat(64);
+
+        let materialized = materialize_admitted_native_executor(
+            &format!("native:{bare}"),
+            tmp.path(),
+            &content_hash,
+            &manifest_hash,
+            "trusted-signer",
+        )
+        .unwrap();
+
+        assert_eq!(materialized.content_hash, content_hash);
+        assert_eq!(materialized.bundle_manifest_hash, manifest_hash);
+        assert_eq!(materialized.bundle_signer_fingerprint, "trusted-signer");
+        assert_eq!(
+            materialized.verified_command.identity().content_hash,
+            materialized.content_hash
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_recovery_rejects_cached_executor_with_wrong_bytes() {
+        let _guard = materializer_test_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = "tampered-recovery-executor";
+        let admitted_bytes = b"admitted executor bytes";
+        let admitted_hash = write_admitted_executor_cache(tmp.path(), bare, admitted_bytes);
+        std::fs::write(
+            executor_cache_target(tmp.path(), &admitted_hash, bare),
+            vec![b'x'; admitted_bytes.len()],
+        )
+        .unwrap();
+
+        let error = materialize_admitted_native_executor(
+            &format!("native:{bare}"),
+            tmp.path(),
+            &admitted_hash,
+            &"c".repeat(64),
+            "trusted-signer",
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("content-address check"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
