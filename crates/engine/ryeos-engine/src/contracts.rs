@@ -2898,6 +2898,19 @@ pub struct ShadowedCandidate {
     pub path: PathBuf,
 }
 
+/// A candidate path probed and found ABSENT at a precedence at least as high
+/// as the resolution winner — i.e. a NEGATIVE dependency of the outcome. If
+/// any of these paths later becomes present, resolution would select a
+/// different (higher-precedence) winner. Recorded so a resolution cache can
+/// prove an outcome is still current (re-probe: still absent) without
+/// recomputing the pipeline. Absences strictly below the winner are omitted:
+/// they cannot change the winner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbedAbsence {
+    pub space: ItemSpace,
+    pub path: PathBuf,
+}
+
 /// Result of successful item resolution.
 #[derive(Debug, Clone)]
 pub struct ResolvedItem {
