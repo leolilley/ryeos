@@ -1088,11 +1088,10 @@ pub fn run(action: CasAction) -> serde_json::Value {
         CasAction::Has { root, hash } => {
             let store = CasStore::new(PathBuf::from(&root));
             let membership = store.has(&hash);
-            let output = match membership {
+            match membership {
                 Ok(exists) => serde_json::json!({ "exists": exists, "hash": hash }),
                 Err(error) => serde_json::json!({ "error": error.to_string(), "hash": hash }),
-            };
-            output
+            }
         }
     }
 }
