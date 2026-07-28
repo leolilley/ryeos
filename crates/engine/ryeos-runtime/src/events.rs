@@ -13,8 +13,9 @@
 //! ephemeral live-stream events; everything else is an `indexed`
 //! milestone unless a caller deliberately requests `journal_only`.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 
 // Wire strings live in `ryeos-state` (the lower shared layer the projection also
 // reads), so the enum and the projection reference one source of truth.
@@ -26,6 +27,315 @@ use ryeos_state::event_types as wire;
 /// This is observability transport only. It is not a persisted runtime event
 /// type or launch-envelope field.
 pub const CAPTURED_CHILD_TIMING_PREFIX: &str = "RYEOS_CHILD_TIMING_JSON ";
+
+/// Runtime-facing event admission ceilings. The daemon consumes these same
+/// constants, so producers can form an atomic batch that the event store will
+/// admit without duplicating wire limits.
+pub const MAX_RUNTIME_EVENT_PAYLOAD_BYTES: usize = 256 * 1024;
+pub const MAX_RUNTIME_EVENT_BATCH_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_RUNTIME_EVENT_BATCH_ITEMS: usize = 64;
+
+/// Versioned payload used only when a rendered `cognition_in` stimulus cannot
+/// fit in one runtime event. The complete set is appended atomically and folds
+/// back into one provider message; individual chunks are never provider turns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CognitionInChunk {
+    pub schema_version: u32,
+    pub content_hash: String,
+    pub chunk_index: u32,
+    pub chunk_count: u32,
+    pub content_chunk: String,
+}
+
+/// Result of folding one `cognition_in` payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CognitionInAssembly {
+    /// A marker-only payload such as `{ "turn": 1 }`.
+    Marker,
+    /// A multipart stimulus is valid so far but is not complete.
+    Pending,
+    /// One complete stimulus, either inline or reassembled from chunks.
+    Complete(String),
+}
+
+#[derive(Debug)]
+struct PendingCognitionIn {
+    content_hash: String,
+    chunk_count: u32,
+    next_chunk_index: u32,
+    serialized_payload_bytes: usize,
+    content: String,
+}
+
+/// Stateful validator/folder for the typed multipart `cognition_in` contract.
+///
+/// Chunk groups must be contiguous, begin at zero, have one stable digest and
+/// count, stay within the runtime batch budgets, and finish with an exact
+/// content-hash match. Call [`Self::finish`] at the end of a batch or replay.
+#[derive(Debug, Default)]
+pub struct CognitionInAssembler {
+    pending: Option<PendingCognitionIn>,
+}
+
+impl CognitionInAssembler {
+    pub fn has_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    pub fn push(&mut self, payload: &Value) -> Result<CognitionInAssembly> {
+        if payload.get("content_chunk").is_some() {
+            let chunk: CognitionInChunk = serde_json::from_value(payload.clone())
+                .context("invalid chunked cognition_in payload")?;
+            validate_cognition_in_chunk(&chunk)?;
+            let payload_bytes = serde_json::to_vec(payload)
+                .context("serialize chunked cognition_in payload")?
+                .len();
+            if payload_bytes > MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
+                bail!(
+                    "chunked cognition_in payload is {payload_bytes} bytes (max {})",
+                    MAX_RUNTIME_EVENT_PAYLOAD_BYTES
+                );
+            }
+
+            if chunk.chunk_index == 0 {
+                if self.pending.is_some() {
+                    bail!("chunked cognition_in began before the prior stimulus completed");
+                }
+                self.pending = Some(PendingCognitionIn {
+                    content_hash: chunk.content_hash.clone(),
+                    chunk_count: chunk.chunk_count,
+                    next_chunk_index: 0,
+                    serialized_payload_bytes: 0,
+                    content: String::new(),
+                });
+            }
+
+            let pending = self.pending.as_mut().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "chunked cognition_in starts at index {}, expected 0",
+                    chunk.chunk_index
+                )
+            })?;
+            if chunk.content_hash != pending.content_hash {
+                bail!("chunked cognition_in content_hash changed within one stimulus");
+            }
+            if chunk.chunk_count != pending.chunk_count {
+                bail!("chunked cognition_in chunk_count changed within one stimulus");
+            }
+            if chunk.chunk_index != pending.next_chunk_index {
+                bail!(
+                    "chunked cognition_in index {} is out of order; expected {}",
+                    chunk.chunk_index,
+                    pending.next_chunk_index
+                );
+            }
+            pending.serialized_payload_bytes = pending
+                .serialized_payload_bytes
+                .checked_add(payload_bytes)
+                .context("chunked cognition_in byte count overflow")?;
+            if pending.serialized_payload_bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
+                bail!(
+                    "chunked cognition_in payloads total {} bytes (max {})",
+                    pending.serialized_payload_bytes,
+                    MAX_RUNTIME_EVENT_BATCH_BYTES
+                );
+            }
+            pending.content.push_str(&chunk.content_chunk);
+            pending.next_chunk_index += 1;
+
+            if pending.next_chunk_index == pending.chunk_count {
+                let completed = self
+                    .pending
+                    .take()
+                    .expect("completed cognition input must be pending");
+                let observed = lillux::signature::content_hash(&completed.content);
+                if observed != completed.content_hash {
+                    bail!(
+                        "chunked cognition_in content hash mismatch: expected {}, got {}",
+                        completed.content_hash,
+                        observed
+                    );
+                }
+                return Ok(CognitionInAssembly::Complete(completed.content));
+            }
+            return Ok(CognitionInAssembly::Pending);
+        }
+
+        if self.pending.is_some() {
+            bail!("chunked cognition_in was interrupted before all chunks arrived");
+        }
+        match payload.get("content") {
+            Some(content) => Ok(CognitionInAssembly::Complete(
+                content
+                    .as_str()
+                    .context("cognition_in content must be a string")?
+                    .to_string(),
+            )),
+            None => Ok(CognitionInAssembly::Marker),
+        }
+    }
+
+    pub fn finish(&self) -> Result<()> {
+        if let Some(pending) = &self.pending {
+            bail!(
+                "chunked cognition_in ended after {} of {} chunks",
+                pending.next_chunk_index,
+                pending.chunk_count
+            );
+        }
+        Ok(())
+    }
+}
+
+fn validate_cognition_in_chunk(chunk: &CognitionInChunk) -> Result<()> {
+    if chunk.schema_version != 1 {
+        bail!(
+            "unsupported chunked cognition_in schema_version {}",
+            chunk.schema_version
+        );
+    }
+    if chunk.content_hash.len() != 64
+        || !chunk
+            .content_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("chunked cognition_in content_hash must be lowercase SHA-256 hex");
+    }
+    if !(2..=MAX_RUNTIME_EVENT_BATCH_ITEMS as u32).contains(&chunk.chunk_count) {
+        bail!(
+            "chunked cognition_in chunk_count must be between 2 and {}",
+            MAX_RUNTIME_EVENT_BATCH_ITEMS
+        );
+    }
+    if chunk.chunk_index >= chunk.chunk_count {
+        bail!(
+            "chunked cognition_in chunk_index {} is outside chunk_count {}",
+            chunk.chunk_index,
+            chunk.chunk_count
+        );
+    }
+    if chunk.content_chunk.is_empty() {
+        bail!("chunked cognition_in content_chunk must not be empty");
+    }
+    Ok(())
+}
+
+/// Encode a rendered stimulus as one inline payload when possible, otherwise
+/// as an atomic, hash-bound multipart payload set under the runtime event
+/// admission ceilings.
+pub fn encode_cognition_in_payloads(content: &str) -> Result<Vec<Value>> {
+    let inline = json!({ "content": content });
+    if serde_json::to_vec(&inline)
+        .context("serialize cognition_in payload")?
+        .len()
+        <= MAX_RUNTIME_EVENT_PAYLOAD_BYTES
+    {
+        return Ok(vec![inline]);
+    }
+    if content.len() > MAX_RUNTIME_EVENT_BATCH_BYTES {
+        bail!(
+            "rendered cognition_in is {} UTF-8 bytes (atomic event-batch max {})",
+            content.len(),
+            MAX_RUNTIME_EVENT_BATCH_BYTES
+        );
+    }
+
+    let content_hash = lillux::signature::content_hash(content);
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < content.len() {
+        let mut low = start + 1;
+        let mut high = content.len();
+        let mut best = None;
+        while low <= high {
+            let middle = low + (high - low) / 2;
+            let mut end = middle;
+            while end > start && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == start {
+                low = middle + 1;
+                continue;
+            }
+            let candidate = CognitionInChunk {
+                schema_version: 1,
+                content_hash: content_hash.clone(),
+                chunk_index: (MAX_RUNTIME_EVENT_BATCH_ITEMS - 1) as u32,
+                chunk_count: MAX_RUNTIME_EVENT_BATCH_ITEMS as u32,
+                content_chunk: content[start..end].to_string(),
+            };
+            let bytes = serde_json::to_vec(&candidate)
+                .context("serialize candidate cognition_in chunk")?
+                .len();
+            if bytes <= MAX_RUNTIME_EVENT_PAYLOAD_BYTES {
+                best = Some(end);
+                low = middle + 1;
+            } else {
+                high = end.saturating_sub(1);
+            }
+        }
+        let end = best.context("one UTF-8 scalar does not fit in a cognition_in chunk")?;
+        chunks.push(content[start..end].to_string());
+        if chunks.len() > MAX_RUNTIME_EVENT_BATCH_ITEMS {
+            bail!(
+                "rendered cognition_in requires more than {} atomic event chunks",
+                MAX_RUNTIME_EVENT_BATCH_ITEMS
+            );
+        }
+        start = end;
+    }
+    if chunks.len() < 2 {
+        bail!("oversized cognition_in did not produce a multipart payload");
+    }
+
+    let chunk_count = u32::try_from(chunks.len()).context("cognition_in chunk count overflow")?;
+    let payloads = chunks
+        .into_iter()
+        .enumerate()
+        .map(|(chunk_index, content_chunk)| {
+            serde_json::to_value(CognitionInChunk {
+                schema_version: 1,
+                content_hash: content_hash.clone(),
+                chunk_index: u32::try_from(chunk_index)
+                    .expect("runtime event chunk count is bounded by u32"),
+                chunk_count,
+                content_chunk,
+            })
+            .expect("CognitionInChunk serialization cannot fail")
+        })
+        .collect::<Vec<_>>();
+
+    let total_bytes = payloads.iter().try_fold(0usize, |total, payload| {
+        let bytes = serde_json::to_vec(payload)
+            .context("serialize chunked cognition_in payload")?
+            .len();
+        total
+            .checked_add(bytes)
+            .context("chunked cognition_in byte count overflow")
+    })?;
+    if total_bytes > MAX_RUNTIME_EVENT_BATCH_BYTES {
+        bail!(
+            "chunked cognition_in payloads total {total_bytes} bytes (max {})",
+            MAX_RUNTIME_EVENT_BATCH_BYTES
+        );
+    }
+
+    let mut assembler = CognitionInAssembler::default();
+    let mut recovered = None;
+    for payload in &payloads {
+        if let CognitionInAssembly::Complete(content) = assembler.push(payload)? {
+            recovered = Some(content);
+        }
+    }
+    assembler.finish()?;
+    if recovered.as_deref() != Some(content) {
+        bail!("chunked cognition_in failed its local reassembly check");
+    }
+
+    Ok(payloads)
+}
 
 /// Storage strategy for a persisted event.
 ///
@@ -376,6 +686,61 @@ impl RuntimeEventType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_cognition_input_round_trips_as_bounded_atomic_chunks() {
+        let content = "ARC evidence \"quoted\"\n".repeat(16_000);
+        let payloads = encode_cognition_in_payloads(&content).unwrap();
+
+        assert!(payloads.len() > 1);
+        assert!(payloads.len() <= MAX_RUNTIME_EVENT_BATCH_ITEMS);
+        let total = payloads
+            .iter()
+            .map(|payload| {
+                let bytes = serde_json::to_vec(payload).unwrap().len();
+                assert!(bytes <= MAX_RUNTIME_EVENT_PAYLOAD_BYTES);
+                bytes
+            })
+            .sum::<usize>();
+        assert!(total <= MAX_RUNTIME_EVENT_BATCH_BYTES);
+
+        let mut assembler = CognitionInAssembler::default();
+        let mut recovered = None;
+        for payload in &payloads {
+            if let CognitionInAssembly::Complete(content) = assembler.push(payload).unwrap() {
+                recovered = Some(content);
+            }
+        }
+        assembler.finish().unwrap();
+        assert_eq!(recovered.as_deref(), Some(content.as_str()));
+    }
+
+    #[test]
+    fn chunked_cognition_input_rejects_missing_or_tampered_parts() {
+        let content = "x".repeat(MAX_RUNTIME_EVENT_PAYLOAD_BYTES + 1024);
+        let mut payloads = encode_cognition_in_payloads(&content).unwrap();
+        assert!(payloads.len() > 1);
+
+        let mut incomplete = CognitionInAssembler::default();
+        incomplete.push(&payloads[0]).unwrap();
+        assert!(incomplete.finish().is_err());
+
+        payloads[1]["content_chunk"] = json!("tampered");
+        let mut tampered = CognitionInAssembler::default();
+        let mut error = None;
+        for payload in &payloads {
+            match tampered.push(payload) {
+                Ok(_) => {}
+                Err(observed) => {
+                    error = Some(observed);
+                    break;
+                }
+            }
+        }
+        assert!(error
+            .map(|error| error.to_string().contains("content hash mismatch"))
+            .unwrap_or(false));
+    }
 
     /// Every variant round-trips its `as_str` through `parse` to the
     /// same variant. Catches typos and missing arms.

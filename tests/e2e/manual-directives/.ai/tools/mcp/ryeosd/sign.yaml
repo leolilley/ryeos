@@ -1,4 +1,4 @@
-# ryeos:signed:2026-04-09T00:59:52Z:4ef237c5e5069331aadc8b0861b981d8d1e6774b460c3ec5eec5081c28c20c1c:BXoWbRcS8AKtMHTX_hgIio6QXqdOQpOwf7VPLBAfBS11Al-_N4yTspZd47Qux8OuUrQ-hOfWvIfnhrAiV3fsDQ:4b987fd4e40303ac
+# ryeos:signed:2026-07-27T23:40:19Z:9a55e0a5796eef44041ef4c5e729447ce6f04f318856e0bae686a4533b440c48:ekdFIP5Eo1n3DInNvReaoOnsO8RZFOgqqJ1DzJhVbNMM69AuW7G+HTgBK0j2Bw8u9IJrQH6j5doawbXSNF1iDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tool_type: mcp
 executor_id: rye/core/runtimes/mcp/stdio
 category: mcp/ryeosd
@@ -6,7 +6,7 @@ version: 1.0.0
 description: Run the ryeos CLI through the local MCP wrapper
 config:
   server: mcp/servers/ryeosd
-  server_config_path: '{project_path}/.ai/tools/mcp/servers/ryeosd.yaml'
+  server_config_path: '${project_path}/.ai/tools/mcp/servers/ryeosd.yaml'
   tool_name: cli
 input_schema:
   type: object

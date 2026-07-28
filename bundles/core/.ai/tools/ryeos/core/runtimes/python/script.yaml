@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T09:00:07Z:2bddb0fe7f5092b88b999d402c11cd6b6ab96744d0a3d20b4268023a2dbffc8f:iK302gu3mveNvTIT2k211f4ymFWJjCd/u6zhwot380zIMajw988mNLIc1w95sdtlJBYOuTeyEEY23FkDKq8BCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T23:40:19Z:8e6bab687751899f07eed60213093af81a5660f1ffb7be53be89b658d5a014a9:+KuRhSMlm3Ke+NSrksFQamTAYhWiRnTXyBKzfnSB4ze0mczkKPx6QAbOHsQ6trBRYReDlTXDwV/fsV7XLlOyBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -35,55 +35,55 @@ config:
     - "-I"
     - "-u"
     - "-c"
-    - |
-      import hashlib, json, os, sys
-      from pathlib import Path
+    - literal: |
+        import hashlib, json, os, sys
+        from pathlib import Path
 
-      def prepend(path):
-          value = str(path)
-          if value and value not in sys.path:
-              sys.path.insert(0, value)
+        def prepend(path):
+            value = str(path)
+            if value and value not in sys.path:
+                sys.path.insert(0, value)
 
-      sealed_path = sys.argv[1]
-      handoff = json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP", "null"))
-      entry = handoff.get("entries", dict()).get(sealed_path) if isinstance(handoff, dict) else None
-      if not isinstance(handoff, dict) or handoff.get("version") != 1 or not entry:
-          raise SystemExit("RyeOS Python runtime: missing sealed tool identity")
-      tool_path = Path(entry["logical_path"])
-      source = Path(sealed_path).read_bytes()
-      actual_hash = hashlib.sha256(source).hexdigest()
-      if actual_hash != entry["content_hash"]:
-          raise SystemExit("RyeOS Python runtime: sealed tool digest mismatch")
-      runtime_lib = Path(sys.argv[2]).resolve()
-      project_path = sys.argv[3]
+        sealed_path = sys.argv[1]
+        handoff = json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP", "null"))
+        entry = handoff.get("entries", dict()).get(sealed_path) if isinstance(handoff, dict) else None
+        if not isinstance(handoff, dict) or handoff.get("version") != 1 or not entry:
+            raise SystemExit("RyeOS Python runtime: missing sealed tool identity")
+        tool_path = Path(entry["logical_path"])
+        source = Path(sealed_path).read_bytes()
+        actual_hash = hashlib.sha256(source).hexdigest()
+        if actual_hash != entry["content_hash"]:
+            raise SystemExit("RyeOS Python runtime: sealed tool digest mismatch")
+        runtime_lib = Path(sys.argv[2]).resolve()
+        project_path = sys.argv[3]
 
-      tools_root = None
-      for candidate in [tool_path.parent, *tool_path.parents]:
-          if candidate.name == "tools" and candidate.parent.name == ".ai":
-              tools_root = candidate
-              break
-      if tools_root is None:
-          raise SystemExit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
+        tools_root = None
+        for candidate in [tool_path.parent, *tool_path.parents]:
+            if candidate.name == "tools" and candidate.parent.name == ".ai":
+                tools_root = candidate
+                break
+        if tools_root is None:
+            raise SystemExit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
 
-      rel = tool_path.relative_to(tools_root)
-      if len(rel.parts) < 2:
-          raise SystemExit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
+        rel = tool_path.relative_to(tools_root)
+        if len(rel.parts) < 2:
+            raise SystemExit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
 
-      bundle_tool_root = tools_root / rel.parts[0]
-      tool_dir = tool_path.parent
+        bundle_tool_root = tools_root / rel.parts[0]
+        tool_dir = tool_path.parent
 
-      for path in reversed([tool_dir, bundle_tool_root, bundle_tool_root / "lib", runtime_lib]):
-          prepend(path)
+        for path in reversed([tool_dir, bundle_tool_root, bundle_tool_root / "lib", runtime_lib]):
+            prepend(path)
 
-      sys.argv = [str(tool_path), "--project-path", project_path]
-      globals_dict = dict(
-          __name__="__main__",
-          __file__=str(tool_path),
-          __package__=None,
-          __cached__=None,
-          __spec__=None,
-      )
-      exec(compile(source, str(tool_path), "exec"), globals_dict)
+        sys.argv = [str(tool_path), "--project-path", project_path]
+        globals_dict = dict(
+            __name__="__main__",
+            __file__=str(tool_path),
+            __package__=None,
+            __cached__=None,
+            __spec__=None,
+        )
+        exec(compile(source, str(tool_path), "exec"), globals_dict)
     - "${tool_path}"
     - "${runtime_dir}/lib"
     - "${project_path}"

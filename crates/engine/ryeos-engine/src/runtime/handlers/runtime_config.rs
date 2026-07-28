@@ -20,12 +20,28 @@ use crate::runtime::{expand_template, is_reserved_env_name, CompileContext, Runt
 
 pub const KEY: &str = "config";
 
+/// One subprocess argv entry. Strings are rye-expr/1 templates. Embedded
+/// program source and other bytes that must not be parsed are explicit
+/// `{literal: ...}` values.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum RuntimeArgument {
+    Template(String),
+    Literal(LiteralRuntimeArgument),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LiteralRuntimeArgument {
+    pub literal: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
     pub command: String,
     #[serde(default)]
-    pub args: Vec<String>,
+    pub args: Vec<RuntimeArgument>,
     pub input_data: Option<String>,
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
@@ -208,5 +224,38 @@ mod tests {
             matches!(err, EngineError::InvalidRuntimeConfig { ref reason, .. } if reason.contains("invalid execution timeout")),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn runtime_arguments_distinguish_templates_from_literal_source() {
+        let config: RuntimeConfig = serde_json::from_value(json!({
+            "command": "${interpreter}",
+            "args": [
+                "${tool_path}",
+                {"literal": "print(f'{tool_path}')"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            config.args,
+            vec![
+                RuntimeArgument::Template("${tool_path}".into()),
+                RuntimeArgument::Literal(LiteralRuntimeArgument {
+                    literal: "print(f'{tool_path}')".into(),
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_argument_literal_wrapper_rejects_unknown_fields() {
+        let error = serde_json::from_value::<RuntimeConfig>(json!({
+            "command": "tool",
+            "args": [{"literal": "source", "template": "${tool_path}"}]
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("did not match"), "{error}");
     }
 }

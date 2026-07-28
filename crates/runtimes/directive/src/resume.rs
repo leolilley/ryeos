@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value;
 
 use ryeos_runtime::callback_client::CallbackClient;
@@ -131,19 +131,31 @@ fn extract_thread_usage_from_events(
 /// mapping applied here, not a substrate concept.
 fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMessage>> {
     let mut messages = Vec::new();
+    let mut cognition_in = ryeos_runtime::CognitionInAssembler::default();
 
     for event in events {
+        if cognition_in.has_pending() && event.event_type != "cognition_in" {
+            anyhow::bail!(
+                "resume: chunked cognition_in was interrupted by event '{}'",
+                event.event_type
+            );
+        }
         match event.event_type.as_str() {
-            // A content-bearing cognition_in is a stimulus; a content-less one
-            // is a turn-boundary marker (skip it).
-            "cognition_in" if event.payload.get("content").is_some() => {
-                messages.push(ProviderMessage {
-                    role: "user".to_string(),
-                    content: event.payload.get("content").cloned(),
-                    tool_calls: None,
-                    tool_call_id: None,
-                    reasoning_content: None,
-                });
+            // An inline or completely reassembled cognition_in is exactly one
+            // stimulus. Marker-only payloads and intermediate chunks add no
+            // provider turn.
+            "cognition_in" => {
+                if let ryeos_runtime::CognitionInAssembly::Complete(content) =
+                    cognition_in.push(&event.payload)?
+                {
+                    messages.push(ProviderMessage {
+                        role: "user".to_string(),
+                        content: Some(serde_json::json!(content)),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                    });
+                }
             }
             "cognition_out"
                 if event.payload.get("delta").is_some()
@@ -220,6 +232,9 @@ fn reconstruct_messages(events: &[ReplayedEventRecord]) -> Result<Vec<ProviderMe
             _ => {}
         }
     }
+    cognition_in
+        .finish()
+        .context("resume: incomplete chunked cognition_in")?;
 
     Ok(messages)
 }
@@ -477,6 +492,27 @@ mod tests {
         assert!(messages[3].tool_calls.is_some());
         assert_eq!(messages[4].role, "tool");
         assert_eq!(messages[4].tool_call_id.as_deref(), Some("c1"));
+    }
+
+    #[test]
+    fn reconstruct_messages_folds_chunked_cognition_input_once() {
+        let content = "large ARC evidence\n".repeat(20_000);
+        let events = ryeos_runtime::encode_cognition_in_payloads(&content)
+            .unwrap()
+            .into_iter()
+            .map(|payload| ReplayedEventRecord {
+                event_type: "cognition_in".to_string(),
+                payload,
+            })
+            .collect::<Vec<_>>();
+
+        let messages = reconstruct_messages(&events).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(
+            messages[0].content.as_ref().and_then(Value::as_str),
+            Some(content.as_str())
+        );
     }
 
     #[test]

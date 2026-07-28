@@ -590,6 +590,23 @@ pub fn compile_template_for(
     template::compile(Arc::from(source), Some(Arc::from(field.into())), limits)
 }
 
+/// Reject the removed runtime-subprocess `{name}` interpolation syntax in an
+/// already compiled template. Keeping this check here lets callers apply the
+/// clean-break rule only to the surface that formerly accepted it, while
+/// ordinary braces remain literal data in general rye-expr/1 templates.
+/// Callers supply the roots available on their surface so unrelated literal
+/// grammars such as `bin/{triple}/...` are not misclassified.
+pub fn reject_removed_single_brace_interpolation<I, S>(
+    template: &CompiledTemplate,
+    roots: I,
+) -> Result<(), ExpressionError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    template::reject_removed_single_brace_interpolation(template, roots)
+}
+
 /// Compile a condition's canonical unwrapped expression or one whole `${...}`
 /// wrapper. Embedded/multipart templates are rejected rather than coerced.
 pub fn compile_condition_for(

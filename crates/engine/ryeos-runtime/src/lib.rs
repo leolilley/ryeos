@@ -46,14 +46,18 @@ pub use command::{
 };
 pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
 pub use daemon_rpc::{resolve_daemon_socket_path, DaemonRpcClient, RpcError};
-pub use events::{RuntimeEventType, StorageClass};
+pub use events::{
+    encode_cognition_in_payloads, CognitionInAssembler, CognitionInAssembly, CognitionInChunk,
+    RuntimeEventType, StorageClass, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
+    MAX_RUNTIME_EVENT_PAYLOAD_BYTES,
+};
 pub use expression::{
     compile_and_render, compile_condition_for, compile_expression, compile_expression_for,
-    compile_template, compile_template_for, evaluate, evaluate_bool, render_template,
-    CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,
-    EvaluationLimits, EvaluationSession, ExpressionError, ExpressionValueType, Reference,
-    ReferenceSegment, ReferenceSet, RuntimeJsonArrayBudget, RuntimeJsonObjectBudget, SourceSpan,
-    TemplatePart,
+    compile_template, compile_template_for, evaluate, evaluate_bool,
+    reject_removed_single_brace_interpolation, render_template, CompilationLimits,
+    CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext, EvaluationLimits,
+    EvaluationSession, ExpressionError, ExpressionValueType, Reference, ReferenceSegment,
+    ReferenceSet, RuntimeJsonArrayBudget, RuntimeJsonObjectBudget, SourceSpan, TemplatePart,
 };
 pub use expression_condition::ExpressionCondition;
 pub use framing::{recv_frame, send_frame};

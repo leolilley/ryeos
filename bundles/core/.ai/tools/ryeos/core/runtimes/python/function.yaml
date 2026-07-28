@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T09:00:07Z:2270780ddf6bf91d1e7eeed3a2920a3a02022788a17d45de54c8fa4455553b94:78CLp6HQG6UxkhpnnfqUyZLSfTk3Ha0tk9BZrUh603OJKkjngLPWXUyny0Ux3odvaZsqFPzsCjh929lFdn4mCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-27T23:40:19Z:1d5f7907b77fac69d1e3fb2c78bd4877f2e394fd641b591ef4c63d35908e9e96:TTmxPBPyTkUSBY1Q4HmeIvX1NibuR6EHJQA1k3t+bHeoetc6tLdFZ1bmJtqlSOwaaXD/10RDn8MfgOyHUttjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -35,51 +35,51 @@ config:
     - "-I"
     - "-u"
     - "-c"
-    - |
-      import os,sys,json,hashlib,types,inspect,asyncio
-      from pathlib import Path
-      _saved_stdout=os.dup(1)
-      os.set_inheritable(_saved_stdout,False)
-      os.dup2(2,1)
-      sys.stdout=sys.stderr
-      def prepend(path):
-          value=str(path)
-          if value and value not in sys.path:sys.path.insert(0,value)
-      sealed_path=sys.argv[1]
-      handoff=json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP","null"))
-      entry=handoff.get("entries",dict()).get(sealed_path) if isinstance(handoff,dict) else None
-      if not isinstance(handoff,dict) or handoff.get("version")!=1 or not entry:sys.exit("RyeOS Python runtime: missing sealed tool identity")
-      tool_path=Path(entry["logical_path"])
-      source=Path(sealed_path).read_bytes()
-      actual_hash=hashlib.sha256(source).hexdigest()
-      if actual_hash!=entry["content_hash"]:sys.exit("RyeOS Python runtime: sealed tool digest mismatch")
-      runtime_lib=Path(sys.argv[2]).resolve()
-      project_path=sys.argv[3]
-      tools_root=None
-      for candidate in [tool_path.parent,*tool_path.parents]:
-          if candidate.name=="tools" and candidate.parent.name==".ai":
-              tools_root=candidate
-              break
-      if tools_root is None:sys.exit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
-      rel=tool_path.relative_to(tools_root)
-      if len(rel.parts)<2:sys.exit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
-      bundle_tool_root=tools_root/rel.parts[0]
-      tool_dir=tool_path.parent
-      for path in reversed([tool_dir,bundle_tool_root,bundle_tool_root/"lib",runtime_lib]):prepend(path)
-      mod=types.ModuleType("tool")
-      mod.__file__=str(tool_path)
-      mod.__loader__=None
-      mod.__package__=None
-      mod.__spec__=None
-      exec(compile(source,str(tool_path),"exec"),mod.__dict__)
-      fn=getattr(mod,"execute",None)
-      if not fn:sys.exit("No execute() in "+str(tool_path))
-      p=json.loads(sys.stdin.read())
-      if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,project_path))
-      else:r=fn(p,project_path)
-      sys.stdout.flush()
-      _payload=(json.dumps(r,default=str)if r is not None else json.dumps(dict()))+"\n"
-      os.write(_saved_stdout,_payload.encode())
+    - literal: |
+        import os,sys,json,hashlib,types,inspect,asyncio
+        from pathlib import Path
+        _saved_stdout=os.dup(1)
+        os.set_inheritable(_saved_stdout,False)
+        os.dup2(2,1)
+        sys.stdout=sys.stderr
+        def prepend(path):
+            value=str(path)
+            if value and value not in sys.path:sys.path.insert(0,value)
+        sealed_path=sys.argv[1]
+        handoff=json.loads(os.environ.get("RYEOS_VERIFIED_CODE_MAP","null"))
+        entry=handoff.get("entries",dict()).get(sealed_path) if isinstance(handoff,dict) else None
+        if not isinstance(handoff,dict) or handoff.get("version")!=1 or not entry:sys.exit("RyeOS Python runtime: missing sealed tool identity")
+        tool_path=Path(entry["logical_path"])
+        source=Path(sealed_path).read_bytes()
+        actual_hash=hashlib.sha256(source).hexdigest()
+        if actual_hash!=entry["content_hash"]:sys.exit("RyeOS Python runtime: sealed tool digest mismatch")
+        runtime_lib=Path(sys.argv[2]).resolve()
+        project_path=sys.argv[3]
+        tools_root=None
+        for candidate in [tool_path.parent,*tool_path.parents]:
+            if candidate.name=="tools" and candidate.parent.name==".ai":
+                tools_root=candidate
+                break
+        if tools_root is None:sys.exit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
+        rel=tool_path.relative_to(tools_root)
+        if len(rel.parts)<2:sys.exit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
+        bundle_tool_root=tools_root/rel.parts[0]
+        tool_dir=tool_path.parent
+        for path in reversed([tool_dir,bundle_tool_root,bundle_tool_root/"lib",runtime_lib]):prepend(path)
+        mod=types.ModuleType("tool")
+        mod.__file__=str(tool_path)
+        mod.__loader__=None
+        mod.__package__=None
+        mod.__spec__=None
+        exec(compile(source,str(tool_path),"exec"),mod.__dict__)
+        fn=getattr(mod,"execute",None)
+        if not fn:sys.exit("No execute() in "+str(tool_path))
+        p=json.loads(sys.stdin.read())
+        if inspect.iscoroutinefunction(fn):r=asyncio.run(fn(p,project_path))
+        else:r=fn(p,project_path)
+        sys.stdout.flush()
+        _payload=(json.dumps(r,default=str)if r is not None else json.dumps(dict()))+"\n"
+        os.write(_saved_stdout,_payload.encode())
     - "${tool_path}"
     - "${runtime_dir}/lib"
     - "${project_path}"

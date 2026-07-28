@@ -174,6 +174,64 @@ fn find_expression_end(
     ))
 }
 
+pub(crate) fn reject_removed_single_brace_interpolation<I, S>(
+    compiled: &CompiledTemplate,
+    roots: I,
+) -> Result<(), ExpressionError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let roots = roots
+        .into_iter()
+        .map(|root| root.as_ref().to_owned())
+        .collect::<std::collections::HashSet<_>>();
+    for part in compiled.parts() {
+        let TemplatePart::Literal(literal) = part else {
+            continue;
+        };
+        let bytes = literal.as_bytes();
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            let Some(open_offset) = literal[cursor..].find('{') else {
+                break;
+            };
+            let open = cursor + open_offset;
+            if open > 0 && bytes[open - 1] == b'$' {
+                cursor = open + 1;
+                continue;
+            }
+            let Some(close_offset) = literal[open + 1..].find('}') else {
+                break;
+            };
+            let close = open + 1 + close_offset;
+            let reference = &literal[open + 1..close];
+            let mut characters = reference.chars();
+            let removed_reference = characters
+                .next()
+                .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+                && characters
+                    .all(|character| character == '_' || character.is_ascii_alphanumeric());
+            if removed_reference && roots.contains(reference) {
+                return Err(ExpressionError::new(
+                    ErrorPhase::Parse,
+                    compiled.field().map(Arc::from),
+                    Arc::from(literal.as_str()),
+                    SourceSpan::new(open, close + 1),
+                    format!(
+                        "removed `{{{reference}}}` interpolation is not valid in rye-expr/1"
+                    ),
+                )
+                .correction(format!(
+                    "write `${{{reference}}}`; bare braces matching an available runtime root are reserved"
+                )));
+            }
+            cursor = close + 1;
+        }
+    }
+    Ok(())
+}
+
 fn scan_error(
     source: &Arc<str>,
     field: Option<Arc<str>>,
