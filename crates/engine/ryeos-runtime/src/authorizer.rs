@@ -166,19 +166,20 @@ impl RequiredPattern {
             }
             RequiredPattern::VerbWildcard { verb } => {
                 // `ryeos.<verb>.*` — verb must match, kind/subject free.
-                if let Ok(cap) = Capability::parse(granted) {
-                    if cap.verb == *verb {
-                        return true;
-                    }
+                if let Ok(cap) = Capability::parse(granted)
+                    && cap.verb == *verb
+                {
+                    return true;
                 }
                 cap_matches(granted, &format!("ryeos.{}.*", verb))
             }
             RequiredPattern::SubjectWildcard { verb, kind } => {
                 // `ryeos.<verb>.<kind>.*` — verb and kind must match.
-                if let Ok(cap) = Capability::parse(granted) {
-                    if cap.verb == *verb && cap.kind == *kind {
-                        return true;
-                    }
+                if let Ok(cap) = Capability::parse(granted)
+                    && cap.verb == *verb
+                    && cap.kind == *kind
+                {
+                    return true;
                 }
                 cap_matches(granted, &format!("ryeos.{}.{}.*", verb, kind))
             }
@@ -187,11 +188,12 @@ impl RequiredPattern {
                 kind,
                 subject,
             } => {
-                if let Ok(cap) = Capability::parse(granted) {
-                    if cap.verb == *verb && cap.kind == *kind && cap_matches(subject, &cap.subject)
-                    {
-                        return true;
-                    }
+                if let Ok(cap) = Capability::parse(granted)
+                    && cap.verb == *verb
+                    && cap.kind == *kind
+                    && cap_matches(subject, &cap.subject)
+                {
+                    return true;
                 }
                 cap_matches(granted, &format!("ryeos.{}.{}.{}", verb, kind, subject))
             }

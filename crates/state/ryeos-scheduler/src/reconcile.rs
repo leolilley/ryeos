@@ -264,10 +264,10 @@ async fn update_fire_terminal<Ctx: SchedulerContext>(
     outcome: &str,
 ) -> Result<()> {
     let now = lillux::time::timestamp_millis();
-    if let Some(thread_id) = thread_id {
-        if fire.thread_id.as_deref() != Some(thread_id) {
-            anyhow::bail!("terminal fire update changed deterministic thread identity");
-        }
+    if let Some(thread_id) = thread_id
+        && fire.thread_id.as_deref() != Some(thread_id)
+    {
+        anyhow::bail!("terminal fire update changed deterministic thread identity");
     }
     let fired_at = fire.fired_at.context("dispatched fire has no fired_at")?;
 

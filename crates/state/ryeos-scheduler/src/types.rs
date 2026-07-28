@@ -120,14 +120,14 @@ impl ScheduleSourceRecord {
             );
         }
         super::crontab::validate_schedule_id(&self.schedule_id)?;
-        if let Some(expected_id) = expected_id {
-            if self.schedule_id != expected_id {
-                anyhow::bail!(
-                    "schedule record declares schedule_id '{}' but filename is '{}'",
-                    self.schedule_id,
-                    expected_id
-                );
-            }
+        if let Some(expected_id) = expected_id
+            && self.schedule_id != expected_id
+        {
+            anyhow::bail!(
+                "schedule record declares schedule_id '{}' but filename is '{}'",
+                self.schedule_id,
+                expected_id
+            );
         }
         ryeos_engine::canonical_ref::CanonicalRef::parse(&self.item_ref)
             .with_context(|| format!("invalid scheduled item_ref: {}", self.item_ref))?;
