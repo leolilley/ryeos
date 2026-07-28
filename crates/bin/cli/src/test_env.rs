@@ -1,9 +1,7 @@
-//! Shared test-only mutex for app-root env-var mutations.
+//! Shared test-only mutex for process-global test state.
 //!
-//! Multiple modules (`project_resolve`, `dispatcher`) mutate the
-//! process-wide `RYEOS_APP_ROOT` environment variable in their tests. To
-//! prevent races when tests run in parallel inside the same binary,
-//! they all acquire this single shared mutex via `test_env::lock()`.
+//! Tests that temporarily change the process working directory acquire this
+//! mutex so parallel tests in the same binary cannot observe that transition.
 #![cfg(test)]
 
 use std::sync::{Mutex, MutexGuard};

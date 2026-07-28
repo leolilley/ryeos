@@ -297,6 +297,22 @@ pub fn read_required_secrets(
     required_secrets: &[String],
     dotenv_search_dirs: &[PathBuf],
 ) -> std::result::Result<HashMap<String, String>, VaultReadError> {
+    read_required_secrets_with_host_env(
+        vault,
+        principal,
+        required_secrets,
+        dotenv_search_dirs,
+        read_declared_host_env,
+    )
+}
+
+fn read_required_secrets_with_host_env(
+    vault: &dyn NodeVault,
+    principal: &str,
+    required_secrets: &[String],
+    dotenv_search_dirs: &[PathBuf],
+    read_host_env: impl FnOnce(&[String]) -> Result<HashMap<String, String>>,
+) -> std::result::Result<HashMap<String, String>, VaultReadError> {
     if required_secrets.is_empty() {
         return Ok(HashMap::new());
     }
@@ -306,7 +322,7 @@ pub fn read_required_secrets(
             .map_err(|e| anyhow!("vault: invalid declared secret `{key}`: {e:#}"))?;
     }
     let vault_map = vault.read_all(principal)?;
-    let host_env_map = read_declared_host_env(required_secrets)?;
+    let host_env_map = read_host_env(required_secrets)?;
     // Only consult the `.env` overlay for secrets the higher-precedence sources
     // (vault, daemon host env) did not already satisfy. This keeps vault > host
     // > dotenv precedence at the I/O level: a poisoned or unreadable `.env`
@@ -795,6 +811,22 @@ pub fn read_explicit_secret(
     name: &str,
     dotenv_search_dirs: &[PathBuf],
 ) -> Result<Option<String>> {
+    read_explicit_secret_with_host_env(
+        vault,
+        principal,
+        name,
+        dotenv_search_dirs,
+        read_declared_host_env,
+    )
+}
+
+fn read_explicit_secret_with_host_env(
+    vault: &dyn NodeVault,
+    principal: &str,
+    name: &str,
+    dotenv_search_dirs: &[PathBuf],
+    read_host_env: impl FnOnce(&[String]) -> Result<HashMap<String, String>>,
+) -> Result<Option<String>> {
     validate_operator_secret_name(name)?;
     crate::process::validate_spawn_secret_name(name)
         .map_err(|e| anyhow!("vault: invalid explicit secret `{name}`: {e:#}"))?;
@@ -803,7 +835,7 @@ pub fn read_explicit_secret(
     if let Some(value) = vault_map.get(name) {
         return Ok(Some(value.clone()));
     }
-    let host_env_map = read_declared_host_env(&required)?;
+    let host_env_map = read_host_env(&required)?;
     if let Some(value) = host_env_map.get(name) {
         return Ok(Some(value.clone()));
     }
@@ -855,6 +887,22 @@ pub fn resolve_secret_sources(
     names: &[String],
     dotenv_search_dirs: &[PathBuf],
 ) -> Result<Vec<(String, SecretSource)>> {
+    resolve_secret_sources_with_host_env(
+        vault,
+        principal,
+        names,
+        dotenv_search_dirs,
+        read_declared_host_env,
+    )
+}
+
+fn resolve_secret_sources_with_host_env(
+    vault: &dyn NodeVault,
+    principal: &str,
+    names: &[String],
+    dotenv_search_dirs: &[PathBuf],
+    read_host_env: impl FnOnce(&[String]) -> Result<HashMap<String, String>>,
+) -> Result<Vec<(String, SecretSource)>> {
     // Same boundary checks as `read_required_secrets`, so a report reflects
     // exactly what a real launch would do: empty fast-path (no source reads),
     // and reject invalid/blocked declared names up front rather than
@@ -868,7 +916,7 @@ pub fn resolve_secret_sources(
             .map_err(|e| anyhow!("vault: invalid declared secret `{name}`: {e:#}"))?;
     }
     let vault_map = vault.read_all(principal)?;
-    let host_env_map = read_declared_host_env(names)?;
+    let host_env_map = read_host_env(names)?;
     // Only the names the higher-precedence sources did not satisfy reach the
     // `.env` probe — and we probe each dir separately so we can attribute which
     // file would supply the key (later dir wins, matching resolution order).
@@ -907,47 +955,41 @@ pub fn resolve_secret_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard};
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvVarGuard {
-        _guard: MutexGuard<'static, ()>,
-        previous: Vec<(String, Option<OsString>)>,
+    fn host_env(vars: &[(&str, &str)]) -> HashMap<String, String> {
+        vars.iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect()
     }
 
-    impl EnvVarGuard {
-        fn set(vars: &[(&str, Option<&str>)]) -> Self {
-            let guard = ENV_LOCK.lock().unwrap();
-            let previous = vars
-                .iter()
-                .map(|(key, _)| ((*key).to_string(), std::env::var_os(key)))
-                .collect::<Vec<_>>();
-            for (key, value) in vars {
-                if let Some(value) = value {
-                    std::env::set_var(key, value);
-                } else {
-                    std::env::remove_var(key);
-                }
-            }
-            Self {
-                _guard: guard,
-                previous,
-            }
-        }
+    fn read_required_with_host(
+        vault: &dyn NodeVault,
+        required: &[String],
+        dotenv_dirs: &[PathBuf],
+        vars: &[(&str, &str)],
+    ) -> std::result::Result<HashMap<String, String>, VaultReadError> {
+        let values = host_env(vars);
+        read_required_secrets_with_host_env(vault, "op", required, dotenv_dirs, move |_| Ok(values))
     }
 
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            for (key, value) in &self.previous {
-                if let Some(value) = value {
-                    std::env::set_var(key, value);
-                } else {
-                    std::env::remove_var(key);
-                }
-            }
-        }
+    fn read_explicit_with_host(
+        vault: &dyn NodeVault,
+        name: &str,
+        dotenv_dirs: &[PathBuf],
+        vars: &[(&str, &str)],
+    ) -> Result<Option<String>> {
+        let values = host_env(vars);
+        read_explicit_secret_with_host_env(vault, "op", name, dotenv_dirs, move |_| Ok(values))
+    }
+
+    fn resolve_sources_with_host(
+        vault: &dyn NodeVault,
+        names: &[String],
+        dotenv_dirs: &[PathBuf],
+        vars: &[(&str, &str)],
+    ) -> Result<Vec<(String, SecretSource)>> {
+        let values = host_env(vars);
+        resolve_secret_sources_with_host_env(vault, "op", names, dotenv_dirs, move |_| Ok(values))
     }
 
     #[test]
@@ -1036,11 +1078,16 @@ mod tests {
 
     #[test]
     fn host_env_supplies_declared_secret() {
-        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_SECRET", Some("from-host"))]);
         let v = FixedVault(HashMap::new());
         let required = vec!["SNAPTRACK_TEST_HOST_SECRET".to_string()];
 
-        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+        let bindings = read_required_with_host(
+            &v,
+            &required,
+            &[],
+            &[("SNAPTRACK_TEST_HOST_SECRET", "from-host")],
+        )
+        .unwrap();
 
         assert_eq!(
             bindings.get("SNAPTRACK_TEST_HOST_SECRET"),
@@ -1050,7 +1097,6 @@ mod tests {
 
     #[test]
     fn vault_beats_host_env_for_declared_secret() {
-        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_PRECEDENCE", Some("from-host"))]);
         let mut all = HashMap::new();
         all.insert(
             "SNAPTRACK_TEST_PRECEDENCE".to_string(),
@@ -1059,7 +1105,13 @@ mod tests {
         let v = FixedVault(all);
         let required = vec!["SNAPTRACK_TEST_PRECEDENCE".to_string()];
 
-        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+        let bindings = read_required_with_host(
+            &v,
+            &required,
+            &[],
+            &[("SNAPTRACK_TEST_PRECEDENCE", "from-host")],
+        )
+        .unwrap();
 
         assert_eq!(
             bindings.get("SNAPTRACK_TEST_PRECEDENCE"),
@@ -1069,7 +1121,6 @@ mod tests {
 
     #[test]
     fn host_env_beats_dotenv_for_declared_secret() {
-        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_DOTENV", Some("from-host"))]);
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
             tmp.path().join(".env"),
@@ -1080,7 +1131,13 @@ mod tests {
         let required = vec!["SNAPTRACK_TEST_HOST_DOTENV".to_string()];
         let dirs = vec![tmp.path().to_path_buf()];
 
-        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        let bindings = read_required_with_host(
+            &v,
+            &required,
+            &dirs,
+            &[("SNAPTRACK_TEST_HOST_DOTENV", "from-host")],
+        )
+        .unwrap();
 
         assert_eq!(
             bindings.get("SNAPTRACK_TEST_HOST_DOTENV"),
@@ -1090,14 +1147,19 @@ mod tests {
 
     #[test]
     fn host_env_only_returns_declared_keys() {
-        let _env = EnvVarGuard::set(&[
-            ("SNAPTRACK_TEST_DECLARED", Some("declared")),
-            ("SNAPTRACK_TEST_UNDECLARED", Some("must-not-leak")),
-        ]);
         let v = FixedVault(HashMap::new());
         let required = vec!["SNAPTRACK_TEST_DECLARED".to_string()];
 
-        let bindings = read_required_secrets(&v, "op", &required, &[]).unwrap();
+        let bindings = read_required_with_host(
+            &v,
+            &required,
+            &[],
+            &[
+                ("SNAPTRACK_TEST_DECLARED", "declared"),
+                ("SNAPTRACK_TEST_UNDECLARED", "must-not-leak"),
+            ],
+        )
+        .unwrap();
 
         assert_eq!(bindings.len(), 1);
         assert_eq!(
@@ -1121,11 +1183,10 @@ mod tests {
 
     #[test]
     fn missing_declared_secret_mentions_host_env_source() {
-        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_MISSING_SECRET", None)]);
         let v = FixedVault(HashMap::new());
         let required = vec!["SNAPTRACK_TEST_MISSING_SECRET".to_string()];
 
-        let err = read_required_secrets(&v, "op", &required, &[]).unwrap_err();
+        let err = read_required_with_host(&v, &required, &[], &[]).unwrap_err();
         let msg = format!("{err:#}");
 
         assert!(msg.contains("SNAPTRACK_TEST_MISSING_SECRET"), "got: {msg}");
@@ -1412,7 +1473,7 @@ mod tests {
 
         let v = FixedVault(HashMap::new());
         let dirs = vec![tmp.path().to_path_buf()];
-        let got = read_explicit_secret(&v, "op", "PROVIDER_IGNORE_KEY", &dirs).unwrap();
+        let got = read_explicit_with_host(&v, "PROVIDER_IGNORE_KEY", &dirs, &[]).unwrap();
         assert_eq!(got, Some("zk".to_string()));
     }
 
@@ -1421,13 +1482,18 @@ mod tests {
         // Host env provides the only required secret; the `.env` (a bare wanted
         // key that WOULD fail if parsed) is never read because dotenv_wanted is
         // empty once vault + host satisfy everything.
-        let _env = EnvVarGuard::set(&[("SNAPTRACK_TEST_HOST_POISON", Some("from-host"))]);
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".env"), "SNAPTRACK_TEST_HOST_POISON\n").unwrap();
         let v = FixedVault(HashMap::new());
         let required = vec!["SNAPTRACK_TEST_HOST_POISON".to_string()];
         let dirs = vec![tmp.path().to_path_buf()];
-        let bindings = read_required_secrets(&v, "op", &required, &dirs).unwrap();
+        let bindings = read_required_with_host(
+            &v,
+            &required,
+            &dirs,
+            &[("SNAPTRACK_TEST_HOST_POISON", "from-host")],
+        )
+        .unwrap();
         assert_eq!(
             bindings.get("SNAPTRACK_TEST_HOST_POISON"),
             Some(&"from-host".to_string())
@@ -1436,25 +1502,27 @@ mod tests {
 
     #[test]
     fn read_explicit_secret_vault_beats_host_and_dotenv() {
-        let _env = EnvVarGuard::set(&[("ZEN_API_KEY", Some("from-host"))]);
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY=from-dotenv\n").unwrap();
         let mut all = HashMap::new();
         all.insert("ZEN_API_KEY".to_string(), "from-vault".to_string());
         let v = FixedVault(all);
         let dirs = vec![tmp.path().to_path_buf()];
-        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        let got =
+            read_explicit_with_host(&v, "ZEN_API_KEY", &dirs, &[("ZEN_API_KEY", "from-host")])
+                .unwrap();
         assert_eq!(got, Some("from-vault".to_string()));
     }
 
     #[test]
     fn read_explicit_secret_host_beats_dotenv() {
-        let _env = EnvVarGuard::set(&[("ZEN_API_KEY", Some("from-host"))]);
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(".env"), "ZEN_API_KEY=from-dotenv\n").unwrap();
         let v = FixedVault(HashMap::new());
         let dirs = vec![tmp.path().to_path_buf()];
-        let got = read_explicit_secret(&v, "op", "ZEN_API_KEY", &dirs).unwrap();
+        let got =
+            read_explicit_with_host(&v, "ZEN_API_KEY", &dirs, &[("ZEN_API_KEY", "from-host")])
+                .unwrap();
         assert_eq!(got, Some("from-host".to_string()));
     }
 
@@ -1474,7 +1542,6 @@ mod tests {
 
     #[test]
     fn resolve_secret_sources_reports_per_secret_source() {
-        let _env = EnvVarGuard::set(&[("ENVCHECK_HOST", Some("h"))]);
         let user = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         // project `.env` has a wanted key plus an unrelated blocked control key
@@ -1495,7 +1562,8 @@ mod tests {
             "ENVCHECK_MISSING".to_string(),
         ];
         let dirs = vec![user.path().to_path_buf(), project.path().to_path_buf()];
-        let report = resolve_secret_sources(&v, "op", &names, &dirs).unwrap();
+        let report =
+            resolve_sources_with_host(&v, &names, &dirs, &[("ENVCHECK_HOST", "h")]).unwrap();
 
         // Order preserved.
         let labels: Vec<&str> = report.iter().map(|(_, s)| s.label()).collect();
@@ -1523,7 +1591,6 @@ mod tests {
     fn resolve_secret_sources_rejects_blocked_name_like_launch() {
         // A blocked name can never be a declared secret; env-check must reject
         // it up front (as a real launch would), not report it as host_env.
-        let _env = EnvVarGuard::set(&[("PATH", Some("/evil"))]);
         let v = FixedVault(HashMap::new());
         let err = resolve_secret_sources(&v, "op", &["PATH".to_string()], &[]).unwrap_err();
         assert!(
