@@ -364,7 +364,10 @@ async fn open_gateway_stream(
 
     // Read until stream_started (id) AND thread_created (row exists).
     let mut buf: Vec<u8> = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Loaded CI runners can spend more than ten seconds admitting the launch
+    // before either opening event is emitted. This bounds the wait without
+    // weakening the later assertions that the chain tail attached live.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(
             Instant::now() < deadline,
