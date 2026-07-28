@@ -457,10 +457,10 @@ fn api_handler_service_refs() -> Vec<String> {
     let mut module_names = Vec::new();
     for line in mod_rs.lines() {
         let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("pub mod ") {
-            if let Some(name) = rest.strip_suffix(';') {
-                module_names.push(name.to_string());
-            }
+        if let Some(rest) = trimmed.strip_prefix("pub mod ")
+            && let Some(name) = rest.strip_suffix(';')
+        {
+            module_names.push(name.to_string());
         }
     }
 
