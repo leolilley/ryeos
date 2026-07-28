@@ -695,14 +695,14 @@ impl Engine {
     ) -> Result<EffectiveItem, EngineError> {
         let ref_str = request.item_ref.to_string();
 
-        if let Some(expected) = &request.expected_kind {
-            if expected != &request.item_ref.kind {
-                return Err(EngineError::EffectiveItemWrongKind {
-                    canonical_ref: ref_str,
-                    expected: expected.clone(),
-                    found: request.item_ref.kind.clone(),
-                });
-            }
+        if let Some(expected) = &request.expected_kind
+            && expected != &request.item_ref.kind
+        {
+            return Err(EngineError::EffectiveItemWrongKind {
+                canonical_ref: ref_str,
+                expected: expected.clone(),
+                found: request.item_ref.kind.clone(),
+            });
         }
 
         let roots = self.resolution_roots(request.project_root.clone());

@@ -156,6 +156,8 @@ pub fn claim_bundle_outbox_messages(
              ORDER BY next_attempt_at, id
              LIMIT ?",
         )?;
+        // Keep query temporaries scoped ahead of `stmt`'s drop under Edition 2024.
+        #[allow(clippy::let_and_return)]
         let ids = stmt
             .query_map(
                 params![
@@ -206,13 +208,12 @@ pub fn claim_bundle_outbox_messages(
 
     let mut messages = Vec::with_capacity(ids.len());
     for id in ids {
-        if let Some(message) = select_outbox_message(&tx, id)? {
-            if message.status == "in_progress"
-                && message.leased_by.as_deref() == Some(worker_id)
-                && message.lease_until.as_deref() == Some(lease_until)
-            {
-                messages.push(message);
-            }
+        if let Some(message) = select_outbox_message(&tx, id)?
+            && message.status == "in_progress"
+            && message.leased_by.as_deref() == Some(worker_id)
+            && message.lease_until.as_deref() == Some(lease_until)
+        {
+            messages.push(message);
         }
     }
     tx.commit()?;

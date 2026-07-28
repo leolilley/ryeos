@@ -200,14 +200,13 @@ impl Drop for VerifiedArtifactStore {
             if let Ok(Some(cleanup_lock)) = self
                 .stores_root
                 .open_regular(".cleanup.lock".as_ref(), true)
+                && unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } == 0
             {
-                if unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                    let _ = remove_flat_artifact_generation(
-                        &self.stores_root,
-                        &self.generation,
-                        &self.root,
-                    );
-                }
+                let _ = remove_flat_artifact_generation(
+                    &self.stores_root,
+                    &self.generation,
+                    &self.root,
+                );
             }
         }
     }
@@ -1712,10 +1711,9 @@ impl IsolationRuntime {
                 let mut verified = context.verified_code.iter().collect::<Vec<_>>();
                 if let Some(admitted) =
                     verified_command_authority.map(IsolationCommandAuthorityRef::identity)
+                    && !verified.contains(&admitted)
                 {
-                    if !verified.contains(&admitted) {
-                        verified.push(admitted);
-                    }
+                    verified.push(admitted);
                 }
                 let mut sealed_command = None;
                 let mut sealed_code_map = BTreeMap::new();
@@ -2243,10 +2241,9 @@ impl IsolationRuntime {
         let mut verified_code = context.verified_code.iter().collect::<Vec<_>>();
         if let Some(command) =
             verified_command_authority.map(IsolationCommandAuthorityRef::identity)
+            && !verified_code.contains(&command)
         {
-            if !verified_code.contains(&command) {
-                verified_code.push(command);
-            }
+            verified_code.push(command);
         }
         let mut prepared_code = Vec::with_capacity(verified_code.len());
         let mut verified_code_handoff = BTreeMap::new();
@@ -2499,16 +2496,15 @@ impl IsolationRuntime {
         ] {
             if let (Some(required_destination), Some(required_source)) =
                 (required_destination, required_source)
-            {
-                if !writable_mounts.iter().any(|mount| {
+                && !writable_mounts.iter().any(|mount| {
                     required_source.starts_with(&mount.source)
                         && required_destination.starts_with(&mount.destination)
-                }) {
-                    return Err(refused(format!(
-                        "{kind} {} is not writable under the node isolation policy",
-                        required_destination.display()
-                    )));
-                }
+                })
+            {
+                return Err(refused(format!(
+                    "{kind} {} is not writable under the node isolation policy",
+                    required_destination.display()
+                )));
             }
         }
         if let (Some(requested), Some(canonical_requested)) = (
@@ -4619,14 +4615,14 @@ fn validate_writable_mount(
             )));
         }
     }
-    if let Some(socket) = validation.daemon_socket {
-        if paths_overlap(path, socket) {
-            return Err(refused(format!(
-                "isolation writable path {} overlaps protected daemon socket {}",
-                path.display(),
-                socket.display()
-            )));
-        }
+    if let Some(socket) = validation.daemon_socket
+        && paths_overlap(path, socket)
+    {
+        return Err(refused(format!(
+            "isolation writable path {} overlaps protected daemon socket {}",
+            path.display(),
+            socket.display()
+        )));
     }
 
     for protected in [
@@ -4645,17 +4641,17 @@ fn validate_writable_mount(
         }
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
-        if let Ok(home) = std::fs::canonicalize(home) {
-            // Projects beneath HOME are normal; HOME itself or an ancestor is
-            // too broad because it would expose unrelated credentials/config.
-            if home.starts_with(path) {
-                return Err(refused(format!(
-                    "isolation writable path {} contains protected home directory {}",
-                    path.display(),
-                    home.display()
-                )));
-            }
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(home) = std::fs::canonicalize(home)
+    {
+        // Projects beneath HOME are normal; HOME itself or an ancestor is
+        // too broad because it would expose unrelated credentials/config.
+        if home.starts_with(path) {
+            return Err(refused(format!(
+                "isolation writable path {} contains protected home directory {}",
+                path.display(),
+                home.display()
+            )));
         }
     }
 

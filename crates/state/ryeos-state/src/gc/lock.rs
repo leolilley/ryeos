@@ -122,15 +122,15 @@ impl GcLock {
         file.seek(SeekFrom::Start(0))?;
         let mut content = String::new();
         file.read_to_string(&mut content)?;
-        if let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(obj) = state.as_object_mut() {
-                obj.insert("phase".to_string(), json!(phase));
-                let bytes = serde_json::to_vec_pretty(&state)?;
-                file.set_len(0)?;
-                file.seek(SeekFrom::Start(0))?;
-                file.write_all(&bytes)?;
-                file.sync_all()?;
-            }
+        if let Ok(mut state) = serde_json::from_str::<serde_json::Value>(&content)
+            && let Some(obj) = state.as_object_mut()
+        {
+            obj.insert("phase".to_string(), json!(phase));
+            let bytes = serde_json::to_vec_pretty(&state)?;
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
         }
         Ok(())
     }

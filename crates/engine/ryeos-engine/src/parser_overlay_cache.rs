@@ -80,38 +80,37 @@ impl ParserOverlayCache {
             EngineError::Internal("parser overlay cache mutex was poisoned".to_string())
         })?;
 
-        if cacheable {
-            if let Some(dispatcher) = state
+        if cacheable
+            && let Some(dispatcher) = state
                 .entries
                 .get(&key)
                 .map(|entry| entry.dispatcher.clone())
-            {
-                touch_lru(&mut state.lru, &key);
-                if verify_hits {
-                    drop(state);
-                    let rebuilt = build()?;
-                    if rebuilt.parser_tools.fingerprint() != dispatcher.parser_tools.fingerprint()
-                        || rebuilt.handler_cache_identity() != dispatcher.handler_cache_identity()
-                    {
-                        return Err(EngineError::Internal(format!(
-                            "parser overlay cache verification diverged for {}",
-                            key.project_root.display()
-                        )));
-                    }
-                    tracing::info!(
-                        project_root = %key.project_root.display(),
-                        overlay_fingerprint = %key.overlay_fingerprint,
-                        "parser overlay cache cold/hot verification passed"
-                    );
-                    return Ok(dispatcher);
+        {
+            touch_lru(&mut state.lru, &key);
+            if verify_hits {
+                drop(state);
+                let rebuilt = build()?;
+                if rebuilt.parser_tools.fingerprint() != dispatcher.parser_tools.fingerprint()
+                    || rebuilt.handler_cache_identity() != dispatcher.handler_cache_identity()
+                {
+                    return Err(EngineError::Internal(format!(
+                        "parser overlay cache verification diverged for {}",
+                        key.project_root.display()
+                    )));
                 }
-                tracing::debug!(
+                tracing::info!(
                     project_root = %key.project_root.display(),
                     overlay_fingerprint = %key.overlay_fingerprint,
-                    "parser overlay cache hit"
+                    "parser overlay cache cold/hot verification passed"
                 );
                 return Ok(dispatcher);
             }
+            tracing::debug!(
+                project_root = %key.project_root.display(),
+                overlay_fingerprint = %key.overlay_fingerprint,
+                "parser overlay cache hit"
+            );
+            return Ok(dispatcher);
         }
 
         // A same-granule fingerprint is deliberately non-cacheable. It also
@@ -197,22 +196,22 @@ impl ParserOverlayCache {
         })?;
         state.in_flight.remove(&key);
 
-        if let Ok(dispatcher) = &build_result {
-            if cacheable {
-                let estimated_bytes = usize::try_from(overlay_bytes)
-                    .unwrap_or(usize::MAX)
-                    .saturating_add(dispatcher.parser_tools.estimated_size_bytes())
-                    .saturating_add(estimated_key_bytes(&key));
-                if estimated_bytes > MAX_CACHE_BYTES {
-                    tracing::debug!(
-                        project_root = %key.project_root.display(),
-                        estimated_bytes,
-                        cache_limit_bytes = MAX_CACHE_BYTES,
-                        "effective parser overlay exceeds cache byte limit"
-                    );
-                } else {
-                    insert_entry(&mut state, &key, dispatcher, estimated_bytes);
-                }
+        if let Ok(dispatcher) = &build_result
+            && cacheable
+        {
+            let estimated_bytes = usize::try_from(overlay_bytes)
+                .unwrap_or(usize::MAX)
+                .saturating_add(dispatcher.parser_tools.estimated_size_bytes())
+                .saturating_add(estimated_key_bytes(&key));
+            if estimated_bytes > MAX_CACHE_BYTES {
+                tracing::debug!(
+                    project_root = %key.project_root.display(),
+                    estimated_bytes,
+                    cache_limit_bytes = MAX_CACHE_BYTES,
+                    "effective parser overlay exceeds cache byte limit"
+                );
+            } else {
+                insert_entry(&mut state, &key, dispatcher, estimated_bytes);
             }
         }
 

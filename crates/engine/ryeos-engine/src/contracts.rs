@@ -222,13 +222,13 @@ impl TryFrom<FieldTypeRaw> for FieldType {
                 }
                 // Nested contract root must be Mapping (it describes
                 // sub-fields of a mapping value).
-                if let Some(ref c) = contract {
-                    if c.root_type != ShapeType::Mapping {
-                        return Err(format!(
-                            "field: nested `contract` root_type must be mapping (got {:?})",
-                            c.root_type
-                        ));
-                    }
+                if let Some(ref c) = contract
+                    && c.root_type != ShapeType::Mapping
+                {
+                    return Err(format!(
+                        "field: nested `contract` root_type must be mapping (got {:?})",
+                        c.root_type
+                    ));
                 }
                 if elements.is_some() && prim != PrimType::Sequence {
                     return Err(format!(
@@ -825,16 +825,16 @@ fn validate_field(
             }
 
             // Validate sequence elements.
-            if let Some(elem_ft) = element_type {
-                if let Some(arr) = value.as_array() {
-                    for (i, elem) in arr.iter().enumerate() {
-                        let elem_name = format!("{}[{}]", field_name, i);
-                        validate_field(elem, elem_ft, parent_path, &elem_name, report);
-                    }
+            if let Some(elem_ft) = element_type
+                && let Some(arr) = value.as_array()
+            {
+                for (i, elem) in arr.iter().enumerate() {
+                    let elem_name = format!("{}[{}]", field_name, i);
+                    validate_field(elem, elem_ft, parent_path, &elem_name, report);
                 }
-                // If value is not an array but prim == Sequence, we
-                // already reported a TypeMismatch above.
             }
+            // If value is not an array but prim == Sequence, we
+            // already reported a TypeMismatch above.
         }
         FieldType::Union { prims } => {
             let matches = match value {

@@ -249,75 +249,74 @@ pub fn validate_boot(
                 }
             };
 
-            if let Some(h) = handler {
-                if !config_checked.contains_key(parser_ref) {
-                    let request =
-                        HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
-                            parser_config: descriptor.parser_config.clone(),
+            if let Some(h) = handler
+                && !config_checked.contains_key(parser_ref)
+            {
+                let request = HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
+                    parser_config: descriptor.parser_config.clone(),
+                });
+                match run_handler_subprocess(
+                    h,
+                    &request,
+                    VALIDATION_SUBPROCESS_TIMEOUT,
+                    handler_registry.launch_runtime(),
+                ) {
+                    Ok(HandlerResponse::ValidateOk) => {}
+                    Ok(HandlerResponse::ValidateErr { message }) => {
+                        issues.push(BootIssue::InvalidParserConfig {
+                            parser_ref: parser_ref.clone(),
+                            reason: message,
                         });
-                    match run_handler_subprocess(
-                        h,
-                        &request,
-                        VALIDATION_SUBPROCESS_TIMEOUT,
-                        handler_registry.launch_runtime(),
-                    ) {
-                        Ok(HandlerResponse::ValidateOk) => {}
-                        Ok(HandlerResponse::ValidateErr { message }) => {
-                            issues.push(BootIssue::InvalidParserConfig {
-                                parser_ref: parser_ref.clone(),
-                                reason: message,
-                            });
-                        }
-                        Ok(other) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: format!("unexpected response: {other:?}"),
-                            });
-                        }
-                        Err(EngineError::HandlerExitNonZero {
-                            exit_code, stderr, ..
-                        }) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: format!("exit {exit_code}: {}", stderr.trim()),
-                            });
-                        }
-                        Err(EngineError::HandlerSpawnFailed { detail, .. }) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail,
-                            });
-                        }
-                        Err(EngineError::HandlerProtocolViolation { detail, .. }) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: format!("malformed response: {detail}"),
-                            });
-                        }
-                        Err(EngineError::HandlerBinaryMissing {
-                            handler, reason, ..
-                        }) => {
-                            tracing::warn!(
-                                handler = %handler,
-                                reason = %reason,
-                                "skipping boot-time subprocess validation for unresolved handler; \
-                                 invocation will hard-error if the handler is ever called"
-                            );
-                        }
-                        Err(other) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: other.to_string(),
-                            });
-                        }
                     }
-                    config_checked.insert(parser_ref.clone(), ());
+                    Ok(other) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: format!("unexpected response: {other:?}"),
+                        });
+                    }
+                    Err(EngineError::HandlerExitNonZero {
+                        exit_code, stderr, ..
+                    }) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: format!("exit {exit_code}: {}", stderr.trim()),
+                        });
+                    }
+                    Err(EngineError::HandlerSpawnFailed { detail, .. }) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail,
+                        });
+                    }
+                    Err(EngineError::HandlerProtocolViolation { detail, .. }) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: format!("malformed response: {detail}"),
+                        });
+                    }
+                    Err(EngineError::HandlerBinaryMissing {
+                        handler, reason, ..
+                    }) => {
+                        tracing::warn!(
+                            handler = %handler,
+                            reason = %reason,
+                            "skipping boot-time subprocess validation for unresolved handler; \
+                             invocation will hard-error if the handler is ever called"
+                        );
+                    }
+                    Err(other) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: other.to_string(),
+                        });
+                    }
                 }
+                config_checked.insert(parser_ref.clone(), ());
             }
 
             // Contract check always runs regardless of handler availability.
@@ -842,13 +841,12 @@ pub fn validate_protocol_builder(
         };
         if let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref }) =
             &exec.terminator
+            && protocols.get(protocol_ref).is_none()
         {
-            if protocols.get(protocol_ref).is_none() {
-                issues.push(BootIssue::DanglingProtocolRef {
-                    kind: kind_name.to_string(),
-                    protocol_ref: protocol_ref.clone(),
-                });
-            }
+            issues.push(BootIssue::DanglingProtocolRef {
+                kind: kind_name.to_string(),
+                protocol_ref: protocol_ref.clone(),
+            });
         }
         if let Some(method_dispatch) = &exec.method_dispatch {
             match protocols.get(&method_dispatch.protocol) {
@@ -940,14 +938,13 @@ fn parser_output_compatible_with_kind_contract(
                 .required
                 .get(name)
                 .or_else(|| kind_contract.optional.get(name))
+                && !field_type_covers(needed, produced)
             {
-                if !field_type_covers(needed, produced) {
-                    violations.push(ContractViolation::FieldTypeMismatch {
-                        name: name.clone(),
-                        needed: needed.clone(),
-                        produced: produced.clone(),
-                    });
-                }
+                violations.push(ContractViolation::FieldTypeMismatch {
+                    name: name.clone(),
+                    needed: needed.clone(),
+                    produced: produced.clone(),
+                });
             }
         }
     }

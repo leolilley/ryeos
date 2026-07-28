@@ -150,44 +150,43 @@ fn open_recovered_projection(
         }
     };
 
-    if let Some(generation) = generation {
-        if generation.projection_schema_epoch == expected_epoch {
-            let projection_path = runtime_state_dir.join(&generation.projection_file);
-            match ProjectionDb::open_selected_current_in_directory(
-                recovery.runtime_directory(),
-                std::ffi::OsStr::new(&generation.projection_file),
-                false,
-            ) {
-                Ok(db)
-                    if db.projection_instance_id()?.as_deref()
-                        == Some(generation.projection_instance_id.as_str()) =>
-                {
-                    replay_pending_into(
-                        &db,
-                        cas_root,
-                        refs_root,
-                        recovery,
-                        trust_store,
-                        runtime_liveness,
-                        true,
-                        observer,
-                    )?;
-                    let deleted =
-                        cleanup_superseded_projection_instances(recovery, &projection_path)?;
-                    if deleted != 0 {
-                        tracing::info!(deleted, "removed superseded projection instances");
-                    }
-                    return Ok(db);
+    if let Some(generation) = generation
+        && generation.projection_schema_epoch == expected_epoch
+    {
+        let projection_path = runtime_state_dir.join(&generation.projection_file);
+        match ProjectionDb::open_selected_current_in_directory(
+            recovery.runtime_directory(),
+            std::ffi::OsStr::new(&generation.projection_file),
+            false,
+        ) {
+            Ok(db)
+                if db.projection_instance_id()?.as_deref()
+                    == Some(generation.projection_instance_id.as_str()) =>
+            {
+                replay_pending_into(
+                    &db,
+                    cas_root,
+                    refs_root,
+                    recovery,
+                    trust_store,
+                    runtime_liveness,
+                    true,
+                    observer,
+                )?;
+                let deleted = cleanup_superseded_projection_instances(recovery, &projection_path)?;
+                if deleted != 0 {
+                    tracing::info!(deleted, "removed superseded projection instances");
                 }
-                Ok(_) => tracing::warn!(
-                    expected_instance = %generation.projection_instance_id,
-                    "projection instance does not match recovery generation; rebuilding baseline"
-                ),
-                Err(error) => tracing::warn!(
-                    error = %error,
-                    "selected projection is not current; rebuilding generation baseline"
-                ),
+                return Ok(db);
             }
+            Ok(_) => tracing::warn!(
+                expected_instance = %generation.projection_instance_id,
+                "projection instance does not match recovery generation; rebuilding baseline"
+            ),
+            Err(error) => tracing::warn!(
+                error = %error,
+                "selected projection is not current; rebuilding generation baseline"
+            ),
         }
     }
 
@@ -1537,10 +1536,10 @@ fn classify_pending_set_head<'a>(
         .target_hash
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("pending Set is missing target_hash"))?;
-    if let Some(head) = head {
-        if head.target_hash == target {
-            return Ok(PendingSetHead::Published(head));
-        }
+    if let Some(head) = head
+        && head.target_hash == target
+    {
+        return Ok(PendingSetHead::Published(head));
     }
     if transition.phase == TransitionPhase::Prepared {
         let still_previous = match (transition.expected_previous_hash.as_deref(), head) {
@@ -3015,16 +3014,16 @@ impl StateDb {
             &head.target_hash,
             None,
         )?;
-        if let Some(pending) = pending {
-            if !acknowledge_if_projection_current(
+        if let Some(pending) = pending
+            && !acknowledge_if_projection_current(
                 &self.projection,
                 &self.recovery,
                 &chain_lock,
                 &pending,
                 Some(&head),
-            )? {
-                anyhow::bail!("repaired projection did not converge for {chain_root_id}");
-            }
+            )?
+        {
+            anyhow::bail!("repaired projection did not converge for {chain_root_id}");
         }
         Ok(report)
     }
@@ -3208,12 +3207,10 @@ impl StateDb {
         if let Some(deployed) = self
             ._refs_directory
             .open_child_directory(std::ffi::OsStr::new("deployed"))?
-        {
-            if let Some(projects) =
+            && let Some(projects) =
                 deployed.open_child_directory(std::ffi::OsStr::new("projects"))?
-            {
-                projects.remove_contents_recursive()?;
-            }
+        {
+            projects.remove_contents_recursive()?;
         }
         Ok(head_count)
     }
@@ -5100,21 +5097,21 @@ impl StateDb {
             );
             return Err(error);
         }
-        if pending.phase == TransitionPhase::Prepared {
-            if let Err(error) = self.recovery.advance_phase(
+        if pending.phase == TransitionPhase::Prepared
+            && let Err(error) = self.recovery.advance_phase(
                 &chain_lock,
                 chain_root_id,
                 &pending.transition_id,
                 TransitionPhase::Prepared,
                 TransitionPhase::HeadPublished,
-            ) {
-                self.note_pending_transition_error(
-                    chain_root_id,
-                    "publish_external_chain_head",
-                    &error,
-                );
-                return Err(error);
-            }
+            )
+        {
+            self.note_pending_transition_error(
+                chain_root_id,
+                "publish_external_chain_head",
+                &error,
+            );
+            return Err(error);
         }
         self.head_cache
             .lock()

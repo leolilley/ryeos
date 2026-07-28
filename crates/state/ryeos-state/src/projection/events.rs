@@ -116,16 +116,17 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
     }
 
     // Derive artifact row from artifact_published events (CAS-truth derived)
-    if event.event_type == crate::event_types::ARTIFACT_PUBLISHED {
-        if let Some(artifact_type) = event.payload.get("artifact_type").and_then(|v| v.as_str()) {
-            let metadata = event.payload.get("metadata").cloned();
-            let metadata_blob = metadata
-                .map(|m| serde_json::to_vec(&m).context("failed to serialize metadata"))
-                .transpose()?;
+    if event.event_type == crate::event_types::ARTIFACT_PUBLISHED
+        && let Some(artifact_type) = event.payload.get("artifact_type").and_then(|v| v.as_str())
+    {
+        let metadata = event.payload.get("metadata").cloned();
+        let metadata_blob = metadata
+            .map(|m| serde_json::to_vec(&m).context("failed to serialize metadata"))
+            .transpose()?;
 
-            db.connection()
-                .execute(
-                    "INSERT INTO thread_artifacts (
+        db.connection()
+            .execute(
+                "INSERT INTO thread_artifacts (
                     source_event_hash, chain_root_id, thread_id, kind, metadata, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                  ON CONFLICT(source_event_hash) DO UPDATE SET
@@ -134,17 +135,16 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
                     kind = excluded.kind,
                     metadata = excluded.metadata,
                     created_at = excluded.created_at",
-                    rusqlite::params![
-                        &event_hash,
-                        &event.chain_root_id,
-                        &event.thread_id,
-                        artifact_type,
-                        metadata_blob,
-                        &event.ts,
-                    ],
-                )
-                .context("failed to project derived artifact")?;
-        }
+                rusqlite::params![
+                    &event_hash,
+                    &event.chain_root_id,
+                    &event.thread_id,
+                    artifact_type,
+                    metadata_blob,
+                    &event.ts,
+                ],
+            )
+            .context("failed to project derived artifact")?;
     }
 
     if event.event_type == crate::event_types::THREAD_USAGE {
@@ -166,20 +166,20 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
     // source-event hash is the semantic idempotency key, so replay reasserts
     // the exact derived row instead of duplicating it. The emitting thread is
     // the parent.
-    if event.event_type == crate::event_types::CHILD_THREAD_SPAWNED {
-        if let Some(child_id) = event
+    if event.event_type == crate::event_types::CHILD_THREAD_SPAWNED
+        && let Some(child_id) = event
             .payload
             .get("child_thread_id")
             .and_then(|v| v.as_str())
-        {
-            let spawn_reason = event
-                .payload
-                .get("spawn_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("dispatch");
-            db.connection()
-                .execute(
-                    "INSERT INTO thread_edges (
+    {
+        let spawn_reason = event
+            .payload
+            .get("spawn_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("dispatch");
+        db.connection()
+            .execute(
+                "INSERT INTO thread_edges (
                         chain_root_id, parent_thread_id, child_thread_id, spawn_seq,
                         spawn_reason, source_event_hash, created_at
                     ) VALUES (?, ?, ?, NULL, ?, ?, ?)
@@ -190,38 +190,37 @@ pub fn project_event(db: &ProjectionDb, event: &crate::ThreadEvent) -> anyhow::R
                         spawn_seq = excluded.spawn_seq,
                         spawn_reason = excluded.spawn_reason,
                         created_at = excluded.created_at",
-                    rusqlite::params![
-                        &event.chain_root_id,
-                        &event.thread_id,
-                        child_id,
-                        spawn_reason,
-                        &event_hash,
-                        &event.ts,
-                    ],
-                )
-                .context("failed to project dispatch thread edge")?;
-        }
+                rusqlite::params![
+                    &event.chain_root_id,
+                    &event.thread_id,
+                    child_id,
+                    spawn_reason,
+                    &event_hash,
+                    &event.ts,
+                ],
+            )
+            .context("failed to project dispatch thread edge")?;
     }
 
     // Derive a facet row from a thread_facet_set event. Facets MUST originate in
     // an event (not a bare table write) to survive a projection rebuild, which
     // clears thread_facets and re-derives it from the event log. Upsert on
     // (thread_id, key): the latest set wins.
-    if event.event_type == crate::event_types::THREAD_FACET_SET {
-        if let (Some(key), Some(value)) = (
+    if event.event_type == crate::event_types::THREAD_FACET_SET
+        && let (Some(key), Some(value)) = (
             event.payload.get("key").and_then(|v| v.as_str()),
             event.payload.get("value").and_then(|v| v.as_str()),
-        ) {
-            db.connection()
-                .execute(
-                    "INSERT INTO thread_facets (thread_id, key, value, updated_at)
+        )
+    {
+        db.connection()
+            .execute(
+                "INSERT INTO thread_facets (thread_id, key, value, updated_at)
                      VALUES (?, ?, ?, ?)
                      ON CONFLICT(thread_id, key)
                      DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                    rusqlite::params![&event.thread_id, key, value.as_bytes(), &event.ts,],
-                )
-                .context("failed to project thread facet")?;
-        }
+                rusqlite::params![&event.thread_id, key, value.as_bytes(), &event.ts,],
+            )
+            .context("failed to project thread facet")?;
     }
 
     Ok(())

@@ -426,14 +426,14 @@ pub fn run_gc_with_pinned_authority(
     let recovery = authority.recovery();
     let cas = authority.cas_store()?;
 
-    if !params.dry_run {
-        if let Some(max_age_seconds) = params.durable_cas_upload_max_age_seconds {
-            let cutoff = iso8601_seconds_ago(max_age_seconds);
-            result.retired_durable_cas_uploads = authority
-                .require_recovery()?
-                .retire_durable_cas_uploads_created_before(&cutoff, cas_mutation_guard)
-                .context("retire abandoned durable CAS upload stages")?;
-        }
+    if !params.dry_run
+        && let Some(max_age_seconds) = params.durable_cas_upload_max_age_seconds
+    {
+        let cutoff = iso8601_seconds_ago(max_age_seconds);
+        result.retired_durable_cas_uploads = authority
+            .require_recovery()?
+            .retire_durable_cas_uploads_created_before(&cutoff, cas_mutation_guard)
+            .context("retire abandoned durable CAS upload stages")?;
     }
     let capture_cleanup = cas
         .prune_abandoned_blob_captures(params.dry_run)
@@ -628,13 +628,13 @@ fn sweep_sharded_directory(
                     anyhow::anyhow!("non-UTF8 CAS filename under {}", shard2.path().display())
                 })?;
                 let atomic_staging_hash = incomplete_atomic_write_temp_hash(filename, ext);
-                if let Some(hash) = atomic_staging_hash {
-                    if !canonical_cas_hash_at_shard(hash, shard1_text, shard2_text) {
-                        anyhow::bail!(
-                            "CAS atomic staging entry is not stored at its canonical shard path: {}",
-                            shard2.path().join(&file_name).display()
-                        );
-                    }
+                if let Some(hash) = atomic_staging_hash
+                    && !canonical_cas_hash_at_shard(hash, shard1_text, shard2_text)
+                {
+                    anyhow::bail!(
+                        "CAS atomic staging entry is not stored at its canonical shard path: {}",
+                        shard2.path().join(&file_name).display()
+                    );
                 }
                 if is_incomplete_batch_temp(filename) || atomic_staging_hash.is_some() {
                     let file_size = file.metadata()?.len();

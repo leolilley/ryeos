@@ -326,12 +326,12 @@ impl ExecutionProjectAuthority {
     }
 
     pub fn for_child(mut self) -> anyhow::Result<Self> {
-        if let Self::PinnedGeneration { realization, .. } = &mut self {
-            if matches!(realization, PinnedProjectRealization::Cow { .. }) {
-                *realization = PinnedProjectRealization::Cow {
-                    terminal_publication: PinnedTerminalPublication::Discard,
-                };
-            }
+        if let Self::PinnedGeneration { realization, .. } = &mut self
+            && matches!(realization, PinnedProjectRealization::Cow { .. })
+        {
+            *realization = PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            };
         }
         self.validate()?;
         Ok(self)
@@ -551,12 +551,9 @@ impl ExecutionProjectAuthority {
                     project_authority_id,
                     ..
                 } = environment
+                    && project_authority_id != authority_id
                 {
-                    if project_authority_id != authority_id {
-                        anyhow::bail!(
-                            "live project environment authority is bound to another project"
-                        );
-                    }
+                    anyhow::bail!("live project environment authority is bound to another project");
                 }
                 environment.validate(true)?;
                 validate_capability_ceiling(capability_ceiling)

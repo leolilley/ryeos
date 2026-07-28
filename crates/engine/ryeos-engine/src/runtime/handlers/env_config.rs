@@ -88,10 +88,10 @@ fn resolve_interpreter_with_env(
             path_candidates,
         } => {
             // 1. Env-var override
-            if let Some(v) = var {
-                if let Some(val) = read_env(v) {
-                    return Ok(val);
-                }
+            if let Some(v) = var
+                && let Some(val) = read_env(v)
+            {
+                return Ok(val);
             }
             // 2. Project-local search paths × {binary, ...candidates}
             if let Some(root) = project_root {

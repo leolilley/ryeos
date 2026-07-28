@@ -312,10 +312,10 @@ fn is_not_directly_invokable_tool_descriptor(
 /// or no candidate is present.
 fn pick_schema(parsed: &Value, keys: &[String]) -> Option<Value> {
     for key in keys {
-        if let Some(v) = parsed.get(key) {
-            if !v.is_null() {
-                return Some(v.clone());
-            }
+        if let Some(v) = parsed.get(key)
+            && !v.is_null()
+        {
+            return Some(v.clone());
         }
     }
     None

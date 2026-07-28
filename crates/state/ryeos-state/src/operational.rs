@@ -1644,14 +1644,13 @@ impl OperationalDb {
         validate_non_empty_label("admission claim", &record.claim)?;
         validate_non_empty_label("admission issuer", &record.issuer)?;
         validate_non_empty_label("admission issued_at", &record.issued_at)?;
-        if let Some(head_ref_path) = record.head_ref_path.as_deref() {
-            if head_ref_path.is_empty()
+        if let Some(head_ref_path) = record.head_ref_path.as_deref()
+            && (head_ref_path.is_empty()
                 || head_ref_path.len() > 512
                 || head_ref_path.starts_with('/')
-                || head_ref_path.contains("..")
-            {
-                anyhow::bail!("invalid admission head_ref_path: {head_ref_path}");
-            }
+                || head_ref_path.contains(".."))
+        {
+            anyhow::bail!("invalid admission head_ref_path: {head_ref_path}");
         }
         let now = lillux::time::iso8601_now();
         self.conn

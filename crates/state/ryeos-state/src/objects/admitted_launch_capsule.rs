@@ -670,12 +670,9 @@ impl AdmittedLaunchCapsule {
                 executor_blob_hash, ..
             },
         ) = (&self.artifact_identity, &self.execution_closure)
+            && executor_content_hash != executor_blob_hash
         {
-            if executor_content_hash != executor_blob_hash {
-                anyhow::bail!(
-                    "admitted managed executor blob hash contradicts executable identity"
-                );
-            }
+            anyhow::bail!("admitted managed executor blob hash contradicts executable identity");
         }
         if let (
             AdmittedLaunchArtifactIdentity::DirectItemExecutor {
@@ -706,12 +703,11 @@ impl AdmittedLaunchCapsule {
                     executable_blob_hash,
                 },
             ) = (executable_identity, command)
+                && content_hash != executable_blob_hash
             {
-                if content_hash != executable_blob_hash {
-                    anyhow::bail!(
-                        "admitted direct executable blob hash contradicts executable identity"
-                    );
-                }
+                anyhow::bail!(
+                    "admitted direct executable blob hash contradicts executable identity"
+                );
             }
         }
         if self.artifact_identity.launch_driver() != self.launch_driver {

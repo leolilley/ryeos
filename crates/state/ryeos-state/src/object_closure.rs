@@ -718,16 +718,16 @@ fn collect_object_closure_from_source(
                         )
                     })? {
                     Some((actual_size, actual_hash)) => {
-                        if let Some(expected_size) = project_file_size {
-                            if actual_size != expected_size {
-                                report.malformed_objects.push(MalformedObject {
-                                    hash: hash.clone(),
-                                    reason: format!(
-                                        "project_file declares size {expected_size}, but blob {blob} has size {actual_size}"
-                                    ),
-                                });
-                                continue;
-                            }
+                        if let Some(expected_size) = project_file_size
+                            && actual_size != expected_size
+                        {
+                            report.malformed_objects.push(MalformedObject {
+                                hash: hash.clone(),
+                                reason: format!(
+                                    "project_file declares size {expected_size}, but blob {blob} has size {actual_size}"
+                                ),
+                            });
+                            continue;
                         }
                         if !report.blob_hashes.contains(&blob) {
                             if report.blob_hashes.len() + 1 > limits.max_blobs {

@@ -2030,14 +2030,14 @@ pub(crate) fn advance_verified_generic_head_ref_in_directory(
         std::ffi::OsStr::new("head"),
         trust_store,
     )?;
-    if let Some((current, _current_file)) = current.as_ref() {
-        if current.ref_path != expected_ref_path {
-            anyhow::bail!(
-                "generic head ref_path mismatch: expected {}, got {}",
-                expected_ref_path,
-                current.ref_path
-            );
-        }
+    if let Some((current, _current_file)) = current.as_ref()
+        && current.ref_path != expected_ref_path
+    {
+        anyhow::bail!(
+            "generic head ref_path mismatch: expected {}, got {}",
+            expected_ref_path,
+            current.ref_path
+        );
     }
     validate_generic_head_cas(
         namespace,

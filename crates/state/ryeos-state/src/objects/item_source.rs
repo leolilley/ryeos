@@ -77,12 +77,12 @@ impl ItemSource {
             ),
             _ => anyhow::bail!("item_source mode must be a u32 or null"),
         };
-        if let Some(mode) = mode {
-            if mode > 0o7777 || mode & 0o111 == 0 {
-                anyhow::bail!(
-                    "item_source mode must be executable Unix permission bits in 0o0000..=0o7777"
-                );
-            }
+        if let Some(mode) = mode
+            && (mode > 0o7777 || mode & 0o111 == 0)
+        {
+            anyhow::bail!(
+                "item_source mode must be executable Unix permission bits in 0o0000..=0o7777"
+            );
         }
         Ok(Self {
             item_ref: wire.item_ref,

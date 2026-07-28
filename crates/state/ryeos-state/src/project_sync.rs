@@ -551,10 +551,10 @@ pub fn classify_project_ai_path(
         return ProjectAiPathClass::NeverDeploySecret { prefix };
     }
 
-    if let Some(m) = ignore {
-        if m.is_ignored(rel_path) {
-            return ProjectAiPathClass::Ignored;
-        }
+    if let Some(m) = ignore
+        && m.is_ignored(rel_path)
+    {
+        return ProjectAiPathClass::Ignored;
     }
 
     if let Some(prefix) = matched_prefix(rel_path, NODE_OWNED) {

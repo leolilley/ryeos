@@ -328,10 +328,10 @@ fn pick_kind_for_extension<'a>(
     let mut names: Vec<&str> = ctx.kinds.kinds().collect();
     names.sort();
     for name in names {
-        if let Some(schema) = ctx.kinds.get(name) {
-            if schema.spec_for(suffix).is_some() {
-                return Some(schema);
-            }
+        if let Some(schema) = ctx.kinds.get(name)
+            && schema.spec_for(suffix).is_some()
+        {
+            return Some(schema);
         }
     }
     None

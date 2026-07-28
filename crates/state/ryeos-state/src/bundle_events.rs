@@ -750,17 +750,17 @@ fn read_bundle_event_chain_page_from_hash(
         {
             anyhow::bail!("bundle event chain cursor contains mismatched event metadata");
         }
-        if let Some(expected_seq) = expected_seq {
-            if record.event.chain_seq != expected_seq {
-                anyhow::bail!(
-                    "bundle event chain {}/{}/{} has sequence gap: expected {}, got {}",
-                    bundle_id,
-                    event_kind,
-                    chain_id,
-                    expected_seq,
-                    record.event.chain_seq
-                );
-            }
+        if let Some(expected_seq) = expected_seq
+            && record.event.chain_seq != expected_seq
+        {
+            anyhow::bail!(
+                "bundle event chain {}/{}/{} has sequence gap: expected {}, got {}",
+                bundle_id,
+                event_kind,
+                chain_id,
+                expected_seq,
+                record.event.chain_seq
+            );
         }
         match &record.event.prev_chain_event_hash {
             Some(_) if record.event.chain_seq == 1 => anyhow::bail!(
@@ -848,10 +848,10 @@ fn next_bundle_event_chain_head(
             .into_string()
             .map_err(|_| anyhow::anyhow!("bundle event chain directory name is not valid UTF-8"))?;
         validate_bundle_identifier("chain_id", &chain_id)?;
-        if let Some(after_chain_id) = after_chain_id {
-            if chain_id.as_str() <= after_chain_id {
-                continue;
-            }
+        if let Some(after_chain_id) = after_chain_id
+            && chain_id.as_str() <= after_chain_id
+        {
+            continue;
         }
         if match next_chain_id.as_ref() {
             Some(current) => chain_id < *current,
@@ -1076,30 +1076,30 @@ fn idempotent_result_or_conflict(
             request.chain_id
         );
     }
-    if let Some(signer) = repair_signer {
-        if let Some(idempotency_key) = &existing.event.idempotency_key {
-            let idempotency_name = idempotency_ref_name(
-                bundle_id,
-                &existing.event.event_kind,
-                &existing.event.chain_id,
-                idempotency_key,
-            );
-            let idempotency_lock = refs::GenericHeadLock::acquire_in_refs_directory(
-                refs_directory,
-                BUNDLE_EVENTS_NAMESPACE,
-                &idempotency_name,
-            )?;
-            refs::write_verified_generic_head_ref_in_directory(
-                refs_directory,
-                BUNDLE_EVENTS_NAMESPACE,
-                &idempotency_name,
-                &existing.event_hash,
-                signer,
-                trust_store,
-                &idempotency_lock,
-            )
-            .context("failed to repair bundle event idempotency head")?;
-        }
+    if let Some(signer) = repair_signer
+        && let Some(idempotency_key) = &existing.event.idempotency_key
+    {
+        let idempotency_name = idempotency_ref_name(
+            bundle_id,
+            &existing.event.event_kind,
+            &existing.event.chain_id,
+            idempotency_key,
+        );
+        let idempotency_lock = refs::GenericHeadLock::acquire_in_refs_directory(
+            refs_directory,
+            BUNDLE_EVENTS_NAMESPACE,
+            &idempotency_name,
+        )?;
+        refs::write_verified_generic_head_ref_in_directory(
+            refs_directory,
+            BUNDLE_EVENTS_NAMESPACE,
+            &idempotency_name,
+            &existing.event_hash,
+            signer,
+            trust_store,
+            &idempotency_lock,
+        )
+        .context("failed to repair bundle event idempotency head")?;
     }
     let chain_head_hash = current_chain_head_hash(
         refs_directory,

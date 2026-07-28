@@ -1817,12 +1817,12 @@ fn parse_execution_schema(
     }
 
     let mut aliases = HashMap::new();
-    if let Some(aliases_value) = execution_value.get("aliases") {
-        if let Some(aliases_mapping) = aliases_value.as_mapping() {
-            for (k, v) in aliases_mapping {
-                if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-                    aliases.insert(key.to_owned(), val.to_owned());
-                }
+    if let Some(aliases_value) = execution_value.get("aliases")
+        && let Some(aliases_mapping) = aliases_value.as_mapping()
+    {
+        for (k, v) in aliases_mapping {
+            if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+                aliases.insert(key.to_owned(), val.to_owned());
             }
         }
     }
@@ -1925,40 +1925,39 @@ fn parse_execution_schema(
     }
 
     // Validate: the default method, when declared, must name a method.
-    if let Some(md) = &method_dispatch {
-        if let Some(default) = &md.default {
-            if !methods.contains_key(default) {
-                return Err(EngineError::SchemaLoaderError {
-                    reason: format!(
-                        "{display}: method_dispatch.default `{default}` does not match any declared method"
-                    ),
-                });
-            }
-        }
+    if let Some(md) = &method_dispatch
+        && let Some(default) = &md.default
+        && !methods.contains_key(default)
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: method_dispatch.default `{default}` does not match any declared method"
+            ),
+        });
     }
 
     // Parse launch_augmentations
     let mut launch_augmentations = Vec::new();
-    if let Some(la_value) = execution_value.get("launch_augmentations") {
-        if let Some(la_seq) = la_value.as_sequence() {
-            for item in la_seq {
-                let aug: LaunchAugmentationDecl =
-                    serde_yaml::from_value(item.clone()).map_err(|e| {
-                        EngineError::SchemaLoaderError {
-                            reason: format!("{display}: invalid launch_augmentations entry: {e}"),
-                        }
-                    })?;
-                match &aug {
-                    LaunchAugmentationDecl::ComposeContextPositions { runtime_config, .. } => {
-                        validate_method_runtime_config_requirements(
-                            display,
-                            "execution.launch_augmentations[].runtime_config",
-                            runtime_config,
-                        )?;
+    if let Some(la_value) = execution_value.get("launch_augmentations")
+        && let Some(la_seq) = la_value.as_sequence()
+    {
+        for item in la_seq {
+            let aug: LaunchAugmentationDecl =
+                serde_yaml::from_value(item.clone()).map_err(|e| {
+                    EngineError::SchemaLoaderError {
+                        reason: format!("{display}: invalid launch_augmentations entry: {e}"),
                     }
+                })?;
+            match &aug {
+                LaunchAugmentationDecl::ComposeContextPositions { runtime_config, .. } => {
+                    validate_method_runtime_config_requirements(
+                        display,
+                        "execution.launch_augmentations[].runtime_config",
+                        runtime_config,
+                    )?;
                 }
-                launch_augmentations.push(aug);
             }
+            launch_augmentations.push(aug);
         }
     }
 

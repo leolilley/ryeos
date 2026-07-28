@@ -111,12 +111,12 @@ impl ResolvedNodeThreadHistoryPolicy {
     }
 
     fn validate(&self) -> Result<(), EngineError> {
-        if let NodeHistoryPolicyProvenance::SignedConfig { path, .. } = &self.provenance {
-            if path != Path::new(NODE_HISTORY_POLICY_CONFIG) {
-                return Err(invalid_node_policy(format!(
-                    "signed node history provenance path must be exactly `{NODE_HISTORY_POLICY_CONFIG}`"
-                )));
-            }
+        if let NodeHistoryPolicyProvenance::SignedConfig { path, .. } = &self.provenance
+            && path != Path::new(NODE_HISTORY_POLICY_CONFIG)
+        {
+            return Err(invalid_node_policy(format!(
+                "signed node history provenance path must be exactly `{NODE_HISTORY_POLICY_CONFIG}`"
+            )));
         }
         let (ThreadHistoryRetention::TerminalFor { seconds }, Some(minimum_terminal_for_seconds)) =
             (&self.default_retention, self.minimum_terminal_for_seconds)
