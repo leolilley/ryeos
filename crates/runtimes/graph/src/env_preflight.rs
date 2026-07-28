@@ -2,6 +2,16 @@ pub fn check_env_requires(
     graph_requires: &[String],
     node_requires: &[String],
 ) -> Result<(), String> {
+    check_env_requires_with(graph_requires, node_requires, |var| {
+        std::env::var(var).is_ok()
+    })
+}
+
+fn check_env_requires_with(
+    graph_requires: &[String],
+    node_requires: &[String],
+    mut is_present: impl FnMut(&str) -> bool,
+) -> Result<(), String> {
     let mut all = graph_requires.to_vec();
     all.extend(node_requires.iter().cloned());
     all.sort();
@@ -9,7 +19,7 @@ pub fn check_env_requires(
 
     let mut missing = Vec::new();
     for var in &all {
-        if std::env::var(var).is_err() {
+        if !is_present(var) {
             missing.push(var.clone());
         }
     }
@@ -27,9 +37,9 @@ mod tests {
 
     #[test]
     fn check_passes_when_all_present() {
-        std::env::set_var("_TEST_ENV_PREFLIGHT_X", "1");
-        let result = check_env_requires(&["_TEST_ENV_PREFLIGHT_X".to_string()], &[]);
-        std::env::remove_var("_TEST_ENV_PREFLIGHT_X");
+        let result = check_env_requires_with(&["_TEST_ENV_PREFLIGHT_X".to_string()], &[], |var| {
+            var == "_TEST_ENV_PREFLIGHT_X"
+        });
         assert!(result.is_ok());
     }
 
@@ -42,12 +52,11 @@ mod tests {
 
     #[test]
     fn check_merges_graph_and_node_requires() {
-        std::env::set_var("_TEST_ENV_A", "1");
-        let result = check_env_requires(
+        let result = check_env_requires_with(
             &["_TEST_ENV_A".to_string()],
             &["_NONEXISTENT_NODE_VAR".to_string()],
+            |var| var == "_TEST_ENV_A",
         );
-        std::env::remove_var("_TEST_ENV_A");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("_NONEXISTENT_NODE_VAR"));
     }

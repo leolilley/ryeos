@@ -674,6 +674,15 @@ fn validate_upload_response(actual: &[String], expected: &[String], kind: &str) 
 /// message names the offending path so the operator can copy-paste a
 /// corrected `-p` flag.
 fn refuse_walking_root(project_path: &Path, app_root: &Path) -> Result<()> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    refuse_walking_root_with_home(project_path, app_root, home.as_deref())
+}
+
+fn refuse_walking_root_with_home(
+    project_path: &Path,
+    app_root: &Path,
+    home: Option<&Path>,
+) -> Result<()> {
     // Canonicalise both so symlinks and `.` cannot bypass the protected-root
     // checks. This gate fails closed; a path we cannot identify exactly is not
     // safe to walk recursively.
@@ -698,7 +707,7 @@ fn refuse_walking_root(project_path: &Path, app_root: &Path) -> Result<()> {
     // $HOME comparison via env var to avoid a new dependency. The
     // env var is stable on every platform ryeos targets (Linux,
     // macOS). If $HOME is unset we just skip this check.
-    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+    if let Some(home) = home {
         let home = home
             .canonicalize()
             .with_context(|| format!("canonicalize HOME {}", home.display()))?;
@@ -733,11 +742,8 @@ fn refuse_walking_root(project_path: &Path, app_root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod refuse_walking_root_tests {
-    use super::refuse_walking_root;
+    use super::{refuse_walking_root, refuse_walking_root_with_home};
     use tempfile::TempDir;
-
-    /// Tests in this module mutate `$HOME`; serialize those mutations.
-    static HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn ordinary_project_dir_outside_home_passes() {
@@ -752,22 +758,7 @@ mod refuse_walking_root_tests {
     fn project_path_equal_to_home_is_refused() {
         let proj = TempDir::new().unwrap();
         let sys = TempDir::new().unwrap();
-        // Spoof $HOME to point at the project dir; the function
-        // must catch that and refuse with a clear $HOME message.
-        // SAFETY: serialised via HOME_ENV_LOCK to prevent concurrent
-        // HOME-mutating tests in this module from racing.
-        let _guard = HOME_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let old_home = std::env::var_os("HOME");
-        unsafe {
-            std::env::set_var("HOME", proj.path());
-        }
-        let result = refuse_walking_root(proj.path(), sys.path());
-        unsafe {
-            match old_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+        let result = refuse_walking_root_with_home(proj.path(), sys.path(), Some(proj.path()));
         let err = result.expect_err("home dir must be refused");
         let msg = format!("{err:#}");
         assert!(

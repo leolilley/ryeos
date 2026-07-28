@@ -57,10 +57,6 @@ mod tests {
     use super::*;
     use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     const POLICY: &str = r#"
 version: "0.1.0"
 schema_version: "1.0.0"
@@ -91,44 +87,26 @@ operations:
 
     struct Fixture {
         _tmp: tempfile::TempDir,
-        _env_guard: MutexGuard<'static, ()>,
         system: std::path::PathBuf,
         key: lillux::crypto::SigningKey,
     }
 
     impl Fixture {
         fn new() -> Self {
-            let env_guard = ENV_MUTEX.lock().unwrap();
             let tmp = tempfile::tempdir().unwrap();
-            let user = tmp.path().join("user");
-            let trust_dir = user
-                .join(ryeos_engine::AI_DIR)
-                .join("config")
-                .join("keys")
-                .join("trusted");
-            std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
-            ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            std::env::set_var("RYEOS_APP_ROOT", &user);
             let system = tmp.path().join("system");
             write_node_bootstrap(&system, &key);
 
             Self {
                 system,
                 _tmp: tmp,
-                _env_guard: env_guard,
                 key,
             }
         }
 
         fn write_policy(&self, path: &Path) {
             write_policy(path, &self.key);
-        }
-    }
-
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            std::env::remove_var("RYEOS_APP_ROOT");
         }
     }
 

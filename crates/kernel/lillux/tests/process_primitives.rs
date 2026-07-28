@@ -4,9 +4,8 @@
 //! (`spawn` → `RunningProcess::wait`), detached spawn (`spawn_detached`),
 //! liveness (`is_alive`), and termination (`kill`). The most load-bearing
 //! contract exercised here is `env_clear`: `SubprocessRequest::envs` is
-//! authoritative, so a variable exported into the parent must NOT leak
-//! into the child — this is the secret-scoping guarantee documented on
-//! `SubprocessRequest`.
+//! authoritative, so parent variables must NOT leak into the child — this is
+//! the secret-scoping guarantee documented on `SubprocessRequest`.
 
 #![cfg(unix)]
 
@@ -143,25 +142,26 @@ fn spawn_rejects_an_unbounded_open_file_limit_before_fork() {
 
 #[test]
 fn run_env_is_authoritative_no_parent_leak() {
-    // Export a probe into THIS process, then confirm the child cannot see
-    // it (env_clear) unless it is passed explicitly through `envs`.
-    std::env::set_var("LILLUX_LEAK_PROBE", "leaked");
+    // PATH is present in the test process, but the child must not see it
+    // (env_clear) unless it is passed explicitly through `envs`.
+    assert!(
+        std::env::var_os("PATH").is_some(),
+        "test runner must set PATH"
+    );
 
-    let absent = run(sh(&["-c", "printf %s \"${LILLUX_LEAK_PROBE:-absent}\""]));
+    let absent = run(sh(&["-c", "printf %s \"${PATH:-absent}\""]));
     assert_eq!(
         absent.stdout, "absent",
         "parent env must not leak into the child"
     );
 
-    let mut with_env = sh(&["-c", "printf %s \"$LILLUX_LEAK_PROBE\""]);
-    with_env.envs = vec![("LILLUX_LEAK_PROBE".to_string(), "explicit".to_string())];
+    let mut with_env = sh(&["-c", "printf %s \"$PATH\""]);
+    with_env.envs = vec![("PATH".to_string(), "explicit".to_string())];
     let explicit = run(with_env);
     assert_eq!(
         explicit.stdout, "explicit",
         "an explicitly-passed env var must reach the child"
     );
-
-    std::env::remove_var("LILLUX_LEAK_PROBE");
 }
 
 // ── timeout kills the process group ────────────────────────────────────

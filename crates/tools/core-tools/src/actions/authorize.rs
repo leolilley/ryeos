@@ -320,19 +320,13 @@ mod tests {
     use super::*;
     use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     struct HostedPolicyFixture {
-        _env_guard: MutexGuard<'static, ()>,
         _user: std::path::PathBuf,
         key: lillux::crypto::SigningKey,
     }
 
     impl HostedPolicyFixture {
         fn new(root: &std::path::Path) -> Self {
-            let env_guard = ENV_MUTEX.lock().unwrap();
             let user = root.join("user");
             let trust_dir = user
                 .join(ryeos_engine::AI_DIR)
@@ -342,19 +336,8 @@ mod tests {
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            std::env::set_var("RYEOS_APP_ROOT", &user);
             write_node_bootstrap(root, &trust_dir, &key);
-            Self {
-                _env_guard: env_guard,
-                _user: user,
-                key,
-            }
-        }
-    }
-
-    impl Drop for HostedPolicyFixture {
-        fn drop(&mut self) {
-            std::env::remove_var("RYEOS_APP_ROOT");
+            Self { _user: user, key }
         }
     }
 

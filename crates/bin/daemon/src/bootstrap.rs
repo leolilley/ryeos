@@ -787,42 +787,10 @@ mod tests {
         id.fingerprint().to_string()
     }
 
-    /// Process-wide mutex for tests that mutate the `RYEOS_APP_ROOT` env var.
-    /// Without this, parallel tests in this module race on the shared env
-    /// and observe each other's `RYEOS_APP_ROOT` values, producing trust-dir
-    /// paths under the wrong tempdir and bogus "stale entry not removed"
-    /// failures.
-    static RYEOS_APP_ROOT_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// RAII guard that holds `RYEOS_APP_ROOT_MUTEX`, sets `RYEOS_APP_ROOT` for the
-    /// duration of the test, and unsets it on drop (not restore — avoids
-    /// inheriting stale values from previous tests).
-    struct PrincipalGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl PrincipalGuard {
-        fn new(tmp: &std::path::Path) -> Self {
-            // Recover from prior panics: PoisonError still exposes the guard.
-            let lock = RYEOS_APP_ROOT_MUTEX
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            std::env::set_var("RYEOS_APP_ROOT", tmp);
-            Self { _lock: lock }
-        }
-    }
-
-    impl Drop for PrincipalGuard {
-        fn drop(&mut self) {
-            std::env::remove_var("RYEOS_APP_ROOT");
-        }
-    }
-
     #[test]
     fn init_creates_both_keys_on_fresh_state() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: false }).unwrap();
 
@@ -854,7 +822,6 @@ mod tests {
     fn init_idempotent_reuses_existing_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: false }).unwrap();
         let node_fp1 = fingerprint_at(&config.node_signing_key_path);
@@ -879,7 +846,6 @@ mod tests {
     fn force_regenerates_node_key_but_preserves_operator_key() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: false }).unwrap();
         let user_fp_before = fingerprint_at(&config.operator_signing_key_path);
@@ -918,7 +884,6 @@ mod tests {
     fn force_creates_fresh_keys_when_none_exist() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = PrincipalGuard::new(tmp.path());
 
         init(&config, &InitOptions { force: true }).unwrap();
 
@@ -938,7 +903,6 @@ mod tests {
     fn force_refuses_when_signed_node_config_exists() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = PrincipalGuard::new(tmp.path());
 
         // Run init once normally to create node key.
         init(&config, &InitOptions { force: false }).unwrap();
@@ -962,7 +926,6 @@ mod tests {
     fn force_succeeds_on_fresh_install() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = PrincipalGuard::new(tmp.path());
 
         // Fresh state, --force should succeed (no signed items to protect).
         init(&config, &InitOptions { force: true })
@@ -973,7 +936,6 @@ mod tests {
     fn force_succeeds_when_node_dir_has_only_unsigned_files() {
         let tmp = tempfile::tempdir().unwrap();
         let config = test_config(tmp.path());
-        let _guard = PrincipalGuard::new(tmp.path());
 
         // Run init once to create keys and node dir.
         init(&config, &InitOptions { force: false }).unwrap();

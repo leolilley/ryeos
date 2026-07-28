@@ -54,7 +54,6 @@ fn workspace_root() -> PathBuf {
 /// `graph_run` and their continuation flags are present), backed by a temp
 /// state store. The temp dir is returned so it outlives the service.
 fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
-    std::env::set_var("HOSTNAME", "testhost");
     let tmp = TempDir::new().unwrap();
 
     let trust_dir =
@@ -101,8 +100,15 @@ fn lifecycle_with_real_kinds() -> (TempDir, Arc<ThreadLifecycleService>) {
         Vec::new(),
     ));
     let threads = Arc::new(
-        ThreadLifecycleService::new(state_store, engine, kind_profiles, events, event_streams)
-            .unwrap(),
+        ThreadLifecycleService::new_for_test_with_site_id(
+            state_store,
+            engine,
+            kind_profiles,
+            events,
+            event_streams,
+            "site:testhost",
+        )
+        .unwrap(),
     );
     (tmp, threads)
 }

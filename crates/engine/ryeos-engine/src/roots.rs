@@ -163,14 +163,24 @@ pub fn runtime_root() -> Result<RuntimeRoot, RootError> {
 /// "use the daemon's state dir" magic in this module; the caller
 /// resolves bundle registrations and passes them in.
 pub fn bundle_roots(additional_roots: &[PathBuf]) -> Vec<PathBuf> {
+    bundle_roots_with_app_root(
+        additional_roots,
+        std::env::var_os("RYEOS_APP_ROOT").map(PathBuf::from),
+    )
+}
+
+fn bundle_roots_with_app_root(
+    additional_roots: &[PathBuf],
+    app_root: Option<PathBuf>,
+) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     let mut push = |p: PathBuf| {
         if !out.iter().any(|q| q == &p) {
             out.push(p);
         }
     };
-    if let Some(p) = std::env::var_os("RYEOS_APP_ROOT") {
-        push(PathBuf::from(p));
+    if let Some(p) = app_root {
+        push(p);
     }
     for r in additional_roots {
         push(r.clone());
@@ -185,17 +195,11 @@ pub fn bundle_roots(additional_roots: &[PathBuf]) -> Vec<PathBuf> {
 mod tests {
     use super::*;
     use std::path::Path;
-    use std::sync::Mutex;
-
-    // Process-wide mutex; RYEOS_APP_ROOT is shared global state.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn bundle_roots_dedupes_and_orders() {
-        let _g = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
-        std::env::set_var("RYEOS_APP_ROOT", "/tmp/sys-a");
         let extra = vec![PathBuf::from("/tmp/sys-a"), PathBuf::from("/tmp/sys-b")];
-        let r = bundle_roots(&extra);
+        let r = bundle_roots_with_app_root(&extra, Some(PathBuf::from("/tmp/sys-a")));
         // /tmp/sys-a appears first (env), de-duplicated when seen again
         // in additional_roots; /tmp/sys-b after that.
         assert_eq!(r[0], PathBuf::from("/tmp/sys-a"));
@@ -203,7 +207,6 @@ mod tests {
         // No duplicate /tmp/sys-a.
         let count = r.iter().filter(|p| **p == Path::new("/tmp/sys-a")).count();
         assert_eq!(count, 1);
-        std::env::remove_var("RYEOS_APP_ROOT");
     }
 
     #[test]

@@ -1626,21 +1626,6 @@ mod tests {
         assert!(result.get("error").unwrap().is_null());
     }
 
-    fn with_app_root<T>(f: impl FnOnce() -> T) -> T {
-        let _g = crate::test_env::lock();
-        let saved = std::env::var_os("RYEOS_APP_ROOT");
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(ryeos_engine::AI_DIR)).unwrap();
-        std::env::set_var("RYEOS_APP_ROOT", tmp.path());
-        let result = f();
-        if let Some(v) = saved {
-            std::env::set_var("RYEOS_APP_ROOT", v);
-        } else {
-            std::env::remove_var("RYEOS_APP_ROOT");
-        }
-        result
-    }
-
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
     }
@@ -2241,29 +2226,27 @@ mod tests {
 
     #[test]
     fn remote_doctor_accepts_optional_project_after_command() {
-        with_app_root(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            let commands = vec![command(
-                &["remote", "doctor"],
-                vec![vec![("remote", CommandArgumentKind::String)]],
-                CommandProjectResolution::Optional,
-            )];
-            let out = canonicalize_tokens_with_commands(
-                &s(&[
-                    "remote",
-                    "doctor",
-                    "prod",
-                    "--project",
-                    &tmp.path().to_string_lossy(),
-                ]),
-                &commands,
-            )
-            .unwrap();
-            assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
-            assert!(out
-                .windows(2)
-                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
-        });
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![command(
+            &["remote", "doctor"],
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::Optional,
+        )];
+        let out = canonicalize_tokens_with_commands(
+            &s(&[
+                "remote",
+                "doctor",
+                "prod",
+                "--project",
+                &tmp.path().to_string_lossy(),
+            ]),
+            &commands,
+        )
+        .unwrap();
+        assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
+        assert!(out
+            .windows(2)
+            .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
     }
 
     #[test]
@@ -2293,71 +2276,67 @@ mod tests {
 
     #[test]
     fn remote_execute_remote_then_item_is_normalized() {
-        with_app_root(|| {
-            let commands = vec![command(
-                &["remote", "execute"],
+        let commands = vec![command(
+            &["remote", "execute"],
+            vec![
                 vec![
-                    vec![
-                        ("remote", CommandArgumentKind::String),
-                        ("item_ref", CommandArgumentKind::CanonicalRef),
-                    ],
-                    vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+                    ("remote", CommandArgumentKind::String),
+                    ("item_ref", CommandArgumentKind::CanonicalRef),
                 ],
-                CommandProjectResolution::Optional,
-            )];
-            let out = canonicalize_tokens_with_commands(
-                &s(&[
-                    "remote",
-                    "execute",
-                    "railway",
-                    "service:health/status",
-                    "--no-project",
-                ]),
-                &commands,
-            )
-            .unwrap();
-            assert_eq!(
-                out,
-                s(&[
-                    "remote",
-                    "execute",
-                    "--item-ref",
-                    "service:health/status",
-                    "--remote",
-                    "railway",
-                    "--no-project",
-                ])
-            );
-        });
+                vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+            ],
+            CommandProjectResolution::Optional,
+        )];
+        let out = canonicalize_tokens_with_commands(
+            &s(&[
+                "remote",
+                "execute",
+                "railway",
+                "service:health/status",
+                "--no-project",
+            ]),
+            &commands,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            s(&[
+                "remote",
+                "execute",
+                "--item-ref",
+                "service:health/status",
+                "--remote",
+                "railway",
+                "--no-project",
+            ])
+        );
     }
 
     #[test]
     fn remote_execute_item_only_is_left_for_default_remote() {
-        with_app_root(|| {
-            let commands = vec![command(
-                &["remote", "execute"],
+        let commands = vec![command(
+            &["remote", "execute"],
+            vec![
                 vec![
-                    vec![
-                        ("remote", CommandArgumentKind::String),
-                        ("item_ref", CommandArgumentKind::CanonicalRef),
-                    ],
-                    vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+                    ("remote", CommandArgumentKind::String),
+                    ("item_ref", CommandArgumentKind::CanonicalRef),
                 ],
-                CommandProjectResolution::Optional,
-            )];
-            let input = s(&["remote", "execute", "service:health/status", "--no-project"]);
-            let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
-            assert_eq!(
-                out,
-                s(&[
-                    "remote",
-                    "execute",
-                    "--item-ref",
-                    "service:health/status",
-                    "--no-project",
-                ])
-            );
-        });
+                vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+            ],
+            CommandProjectResolution::Optional,
+        )];
+        let input = s(&["remote", "execute", "service:health/status", "--no-project"]);
+        let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
+        assert_eq!(
+            out,
+            s(&[
+                "remote",
+                "execute",
+                "--item-ref",
+                "service:health/status",
+                "--no-project",
+            ])
+        );
     }
 
     #[test]

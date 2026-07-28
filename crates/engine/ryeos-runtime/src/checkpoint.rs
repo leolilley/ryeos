@@ -127,15 +127,21 @@ impl CheckpointWriter {
     /// unset, which means the tool was not launched with `native_resume`
     /// (or is running outside the daemon entirely — e.g. unit tests).
     pub fn from_env() -> Option<Self> {
-        std::env::var("RYEOS_CHECKPOINT_DIR")
-            .ok()
-            .map(|s| Self::new(PathBuf::from(s)))
+        Self::from_checkpoint_dir(std::env::var_os("RYEOS_CHECKPOINT_DIR"))
+    }
+
+    fn from_checkpoint_dir(dir: Option<impl Into<PathBuf>>) -> Option<Self> {
+        dir.map(Self::new)
     }
 
     /// True iff the daemon launched this run as a resume (`RYEOS_RESUME=1`).
     /// Tools should check this on startup and `load_latest()` if true.
     pub fn is_resume() -> bool {
-        std::env::var("RYEOS_RESUME").ok().as_deref() == Some("1")
+        Self::is_resume_value(std::env::var("RYEOS_RESUME").ok().as_deref())
+    }
+
+    fn is_resume_value(value: Option<&str>) -> bool {
+        value == Some("1")
     }
 
     /// Copy the latest checkpoint from `from_dir` into `to_dir` — used by the
@@ -412,27 +418,14 @@ mod tests {
 
     #[test]
     fn from_env_returns_none_without_var() {
-        // SAFELY isolate from any caller env.
-        let prev = std::env::var("RYEOS_CHECKPOINT_DIR").ok();
-        std::env::remove_var("RYEOS_CHECKPOINT_DIR");
-        let w = CheckpointWriter::from_env();
+        let w = CheckpointWriter::from_checkpoint_dir(None::<PathBuf>);
         assert!(w.is_none());
-        if let Some(v) = prev {
-            std::env::set_var("RYEOS_CHECKPOINT_DIR", v);
-        }
     }
 
     #[test]
     fn is_resume_reads_env_flag() {
-        let prev = std::env::var("RYEOS_RESUME").ok();
-        std::env::set_var("RYEOS_RESUME", "1");
-        assert!(CheckpointWriter::is_resume());
-        std::env::set_var("RYEOS_RESUME", "0");
-        assert!(!CheckpointWriter::is_resume());
-        std::env::remove_var("RYEOS_RESUME");
-        assert!(!CheckpointWriter::is_resume());
-        if let Some(v) = prev {
-            std::env::set_var("RYEOS_RESUME", v);
-        }
+        assert!(CheckpointWriter::is_resume_value(Some("1")));
+        assert!(!CheckpointWriter::is_resume_value(Some("0")));
+        assert!(!CheckpointWriter::is_resume_value(None));
     }
 }

@@ -11,7 +11,6 @@ use ryeos_engine::contracts::{
 };
 
 fn build_test_state() -> (tempfile::TempDir, AppState) {
-    std::env::set_var("HOSTNAME", "recovery-testhost");
     let tmpdir = tempfile::TempDir::new().unwrap();
     let runtime_state_dir = tmpdir.path().join(".ai/state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -63,12 +62,13 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
     ));
     let event_streams = Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16));
     let threads = Arc::new(
-        ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
+        ryeos_app::thread_lifecycle::ThreadLifecycleService::new_for_test_with_site_id(
             state_store.clone(),
             engine.clone(),
             kind_profiles.clone(),
             events.clone(),
             event_streams.clone(),
+            "site:recovery-testhost",
         )
         .unwrap(),
     );

@@ -71,6 +71,14 @@ pub fn resolve_interpreter(
     config: &InterpreterConfig,
     project_root: Option<&Path>,
 ) -> Result<String, EngineError> {
+    resolve_interpreter_with_env(config, project_root, |name| std::env::var(name).ok())
+}
+
+fn resolve_interpreter_with_env(
+    config: &InterpreterConfig,
+    project_root: Option<&Path>,
+    mut read_env: impl FnMut(&str) -> Option<String>,
+) -> Result<String, EngineError> {
     match config {
         InterpreterConfig::LocalBinary {
             binary,
@@ -81,7 +89,7 @@ pub fn resolve_interpreter(
         } => {
             // 1. Env-var override
             if let Some(v) = var {
-                if let Ok(val) = std::env::var(v) {
+                if let Some(val) = read_env(v) {
                     return Ok(val);
                 }
             }
@@ -321,14 +329,13 @@ mod interpreter_resolution_tests {
 
     #[test]
     fn env_var_override_wins_over_venv_and_path() {
-        // Uniquely-named var so the process-global env mutation can't
-        // collide with other (parallel) tests.
         let var = "RYE_PYTHON_OVERRIDE_INTERP_TEST";
         let root = tempfile::tempdir().unwrap();
         touch(&root.path().join(".venv/bin/python3"));
-        std::env::set_var(var, "/custom/python");
-        let got = resolve_interpreter(&python_like(Some(var)), Some(root.path()));
-        std::env::remove_var(var);
+        let got =
+            resolve_interpreter_with_env(&python_like(Some(var)), Some(root.path()), |name| {
+                (name == var).then(|| "/custom/python".to_string())
+            });
         assert_eq!(got.unwrap(), "/custom/python");
     }
 }

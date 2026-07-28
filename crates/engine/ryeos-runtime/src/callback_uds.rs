@@ -23,12 +23,24 @@ impl UdsRuntimeClient {
 
     pub fn from_env() -> Result<Self, CallbackError> {
         let path = crate::daemon_rpc::resolve_daemon_socket_path(None);
-        let token = std::env::var("RYEOSD_CALLBACK_TOKEN").map_err(|_| {
+        Self::from_environment(
+            path,
+            std::env::var("RYEOSD_CALLBACK_TOKEN").ok(),
+            std::env::var("RYEOSD_THREAD_AUTH_TOKEN").ok(),
+        )
+    }
+
+    fn from_environment(
+        path: PathBuf,
+        callback_token: Option<String>,
+        thread_auth_token: Option<String>,
+    ) -> Result<Self, CallbackError> {
+        let token = callback_token.ok_or_else(|| {
             CallbackError::Transport(anyhow::anyhow!(
                 "RYEOSD_CALLBACK_TOKEN must be set by daemon"
             ))
         })?;
-        let tat = std::env::var("RYEOSD_THREAD_AUTH_TOKEN").map_err(|_| {
+        let tat = thread_auth_token.ok_or_else(|| {
             CallbackError::Transport(anyhow::anyhow!(
                 "RYEOSD_THREAD_AUTH_TOKEN must be set by daemon"
             ))
@@ -509,8 +521,11 @@ mod tests {
 
     #[test]
     fn from_env_returns_error_without_token() {
-        std::env::remove_var("RYEOSD_CALLBACK_TOKEN");
-        let result = UdsRuntimeClient::from_env();
+        let result = UdsRuntimeClient::from_environment(
+            std::path::PathBuf::from("/tmp/test"),
+            None,
+            Some("thread-token".to_string()),
+        );
         assert!(
             result.is_err(),
             "from_env() should fail when RYEOSD_CALLBACK_TOKEN is not set"

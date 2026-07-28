@@ -1662,7 +1662,6 @@ mod tests {
 
     /// Build a minimal AppState for UDS dispatch tests.
     fn setup_app_state() -> (TempDir, AppState) {
-        std::env::set_var("HOSTNAME", "testhost");
         let tmpdir = TempDir::new().unwrap();
         let runtime_state_dir = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -1741,14 +1740,15 @@ mod tests {
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
-            ThreadLifecycleService::new(
+            ThreadLifecycleService::new_for_test_with_site_id(
                 state_store.clone(),
                 engine.clone(),
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
+                "site:testhost",
             )
-            .expect("HOSTNAME not set in test environment"),
+            .expect("valid test site identity"),
         );
         let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
         threads.set_live_input_queue(live_input.clone());
