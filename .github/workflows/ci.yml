@@ -302,7 +302,7 @@ jobs:
 
       - name: Build and install standard distribution
         run: |
-          sudo ./scripts/pkg/install-local-direct.sh \
+          CARGO="$CARGO_HOME/bin/cargo" sudo --preserve-env=CARGO ./scripts/pkg/install-local-direct.sh \
             --populate --all --bundle-set standard --no-init --no-daemon-restart
 
       - name: Exercise installed restart and resume
