@@ -1,24 +1,24 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::evaluation::{
-    validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value, ExpressionScope,
+    ExpressionScope, validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value,
 };
 use crate::model::*;
 use crate::{dispatch, edges, env_preflight};
-use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::RuntimeJsonArrayBudget;
+use ryeos_runtime::envelope::RuntimeCost;
 
 use super::outcome::{
-    add_runtime_cost, ActionOkOutcome, DispatchHardErrorOutcome, ExpressionFailedOutcome,
-    ExpressionFailureEffects, FollowFanoutDoneOutcome, FollowFanoutSuspendOutcome,
-    FollowSuspendOutcome, IntegrityFailedOutcome, LeafSoftErrorOutcome, RetryScheduledOutcome,
-    RunNodeBodyContext, StepOutcome, TerminalOrigin, TerminalOutcome,
+    ActionOkOutcome, DispatchHardErrorOutcome, ExpressionFailedOutcome, ExpressionFailureEffects,
+    FollowFanoutDoneOutcome, FollowFanoutSuspendOutcome, FollowSuspendOutcome,
+    IntegrityFailedOutcome, LeafSoftErrorOutcome, RetryScheduledOutcome, RunNodeBodyContext,
+    StepOutcome, TerminalOrigin, TerminalOutcome, add_runtime_cost,
 };
 use super::transitions::{resolve_next_on_error, retry_attempts_remaining};
-use super::{compute_cache_key, merge_into, Walker};
+use super::{Walker, compute_cache_key, merge_into};
 
 impl Walker {
     /// Action node body: permission check → env preflight → dispatch
@@ -276,13 +276,13 @@ impl Walker {
                 Ok(classified) => Ok(classified.outcome),
                 Err(error) => {
                     return StepOutcome::Terminal(TerminalOutcome {
-                            status: GraphRunStatus::Error,
-                            error: Some(format!(
-                                "follow node `{current}` resumed with invalid terminal envelope: {error}"
-                            )),
-                            origin: TerminalOrigin::RunControl,
-                            output: None,
-                        });
+                        status: GraphRunStatus::Error,
+                        error: Some(format!(
+                            "follow node `{current}` resumed with invalid terminal envelope: {error}"
+                        )),
+                        origin: TerminalOrigin::RunControl,
+                        output: None,
+                    });
                 }
             }
         } else if node.is_cacheable() {
@@ -739,11 +739,7 @@ impl Walker {
                             next_on_error: route,
                             elapsed_ms: start.elapsed().as_millis() as u64,
                             cost: total_cost,
-                            effects: ExpressionFailureEffects::fanout(
-                                results,
-                                statuses,
-                                errors,
-                            ),
+                            effects: ExpressionFailureEffects::fanout(results, statuses, errors),
                         });
                     }
                     Err(FanoutNextError::Integrity(error)) => {
@@ -754,11 +750,7 @@ impl Walker {
                             ),
                             elapsed_ms: start.elapsed().as_millis() as u64,
                             cost: total_cost,
-                            effects: ExpressionFailureEffects::fanout(
-                                results,
-                                statuses,
-                                errors,
-                            ),
+                            effects: ExpressionFailureEffects::fanout(results, statuses, errors),
                         });
                     }
                 }
@@ -1018,7 +1010,7 @@ impl Walker {
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     cost: None,
-                })
+                });
             }
         };
         StepOutcome::FollowFanoutSuspend(Box::new(FollowFanoutSuspendOutcome {

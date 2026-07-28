@@ -641,10 +641,12 @@ mod tests {
 
         observe_child_callback(&observed_thread_id);
 
-        assert!(observed
-            .snapshot()
-            .milestones_us
-            .contains_key("first_child_callback_received"));
+        assert!(
+            observed
+                .snapshot()
+                .milestones_us
+                .contains_key("first_child_callback_received")
+        );
         let mut registry = REGISTERED_THREAD_TIMINGS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

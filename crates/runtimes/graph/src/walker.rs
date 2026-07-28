@@ -2,13 +2,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::cache::NodeCache;
 use crate::context;
 use crate::edges;
-use crate::evaluation::{validate_runtime_value, ExpressionScope};
+use crate::evaluation::{ExpressionScope, validate_runtime_value};
 use crate::foreach;
 use crate::model::*;
 use crate::validation::analyze_graph;
@@ -49,8 +49,8 @@ fn continued_terminal_completion(
         warnings,
     }
 }
-pub(crate) use history::validate_checkpoint_snapshots;
 use history::WarningBuffer;
+pub(crate) use history::validate_checkpoint_snapshots;
 #[cfg(test)]
 use history::{GRAPH_WARNINGS_TRUNCATED, MAX_GRAPH_WARNING_SCALAR_BYTES};
 use outcome::*;

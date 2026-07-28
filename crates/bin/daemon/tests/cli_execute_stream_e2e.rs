@@ -14,11 +14,11 @@ mod common;
 use std::path::Path;
 
 use common::fast_fixture::{
-    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
-    FastFixture,
+    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
-use common::{ryeos_binary, ryeosd_binary, DaemonHarness};
+use common::{DaemonHarness, ryeos_binary, ryeosd_binary};
 
 fn plant_mock_provider(
     project: &Path,

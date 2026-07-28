@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -849,7 +849,9 @@ impl ProviderConfig {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
             {
-                bail!("provider '{provider_id}' setup credential fields are empty, unsafe, or too long");
+                bail!(
+                    "provider '{provider_id}' setup credential fields are empty, unsafe, or too long"
+                );
             }
             if self.auth.env_var.as_deref() != Some(credential.secret_name.as_str()) {
                 bail!(

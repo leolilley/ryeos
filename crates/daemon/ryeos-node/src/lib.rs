@@ -19,21 +19,21 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 pub use init::{
-    run_init, run_init_with_operator_ceremony, run_init_with_progress, verify_init_completion,
     InitCompletionReport, InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase,
-    InitProgress, InitReport,
+    InitProgress, InitReport, run_init, run_init_with_operator_ceremony, run_init_with_progress,
+    verify_init_completion,
 };
-pub use init_check::{require_initialized, InitDiagnostics, InitState};
+pub use init_check::{InitDiagnostics, InitState, require_initialized};
 pub use lifecycle_wire::{
-    LifecycleIdentity, LifecycleResponse, LifecycleWireState, StartupPhase, StartupSnapshot,
-    LIFECYCLE_FRAME_MAX_BYTES, LIFECYCLE_PROTOCOL_VERSION,
+    LIFECYCLE_FRAME_MAX_BYTES, LIFECYCLE_PROTOCOL_VERSION, LifecycleIdentity, LifecycleResponse,
+    LifecycleWireState, StartupPhase, StartupSnapshot,
 };
 pub use metadata::DaemonMetadata;
 pub use model_setup::{
-    persist_default_model_route, PersistModelRouteOptions, PersistModelRouteReport,
+    PersistModelRouteOptions, PersistModelRouteReport, persist_default_model_route,
 };
 pub use start::{LifecycleStartLock, StartReport};
-pub use status::{is_ready, LifecycleStatus, StaleDiagnostics};
+pub use status::{LifecycleStatus, StaleDiagnostics, is_ready};
 pub use stop::{StopOptions, StopReport};
 
 /// Synchronous observer for local lifecycle transitions. Implementations must

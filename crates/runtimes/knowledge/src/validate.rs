@@ -346,10 +346,11 @@ mod tests {
         let p = yaml_payload("k/a", "title: A\ncategory: c\ntags: [t]\nreferences: 123\n");
         let out = validate(&p).unwrap();
         assert!(!out.valid);
-        assert!(out
-            .errors
-            .iter()
-            .any(|e| e.contains("invalid `references`")));
+        assert!(
+            out.errors
+                .iter()
+                .any(|e| e.contains("invalid `references`"))
+        );
     }
 
     #[test]

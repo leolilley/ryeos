@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ryeos_engine::executor_resolution::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// In-memory CAS fixture for tests.
 struct FakeCas {

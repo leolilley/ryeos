@@ -38,7 +38,7 @@ use crate::canonical_ref::CanonicalRef;
 use crate::launch_envelope_types::LaunchEnvelope;
 use crate::method_wire::MethodCallEnvelope;
 use crate::protocol_vocabulary::{
-    validate_env_name, EnvInjectionSource, StdinShape, VocabularyError,
+    EnvInjectionSource, StdinShape, VocabularyError, validate_env_name,
 };
 use crate::protocols::descriptor::ProtocolDescriptor;
 use crate::subprocess_spec::SubprocessSpec;

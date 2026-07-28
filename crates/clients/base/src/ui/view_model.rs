@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
-use super::scene_model::{build_scene_model, RyeOsSceneModel};
+use super::scene_model::{RyeOsSceneModel, build_scene_model};
 use super::seat::InvokeTemplate;
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
@@ -16,10 +16,10 @@ mod navigation;
 pub use dialogs::{
     RyeOsOverlayChoice, RyeOsOverlayItemVm, RyeOsOverlayVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm,
 };
+pub use execution::RyeOsTimelineEntryVm;
 #[cfg(test)]
 use execution::status_tone;
 pub(crate) use execution::timeline_summary_entry;
-pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
 pub use navigation::{
     RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
@@ -2988,10 +2988,12 @@ mod tests {
             .expect("backdrop scene on empty center");
         // The scene resolves from the view body — objects incl. text labels.
         assert!(!backdrop.objects.is_empty());
-        assert!(backdrop
-            .objects
-            .iter()
-            .any(|o| o.label.as_deref() == Some("RYE OS")));
+        assert!(
+            backdrop
+                .objects
+                .iter()
+                .any(|o| o.label.as_deref() == Some("RYE OS"))
+        );
     }
 
     #[test]
@@ -3125,10 +3127,12 @@ mod tests {
         );
         // Every leaf sits under its group header, indented one level.
         assert!(items.iter().any(|item| item.header));
-        assert!(items
-            .iter()
-            .filter(|item| !item.header)
-            .all(|item| item.depth == 1));
+        assert!(
+            items
+                .iter()
+                .filter(|item| !item.header)
+                .all(|item| item.depth == 1)
+        );
     }
 
     #[test]
@@ -3330,7 +3334,7 @@ mod tests {
 
     #[test]
     fn actual_threads_list_binding_projects_a_table() {
-        use crate::ui::content::{project_table, table_columns, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_table, table_columns};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml"
         ))
@@ -3346,7 +3350,9 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "project", "status", "lineage", "created"]
+            [
+                "thread", "kind", "item", "project", "status", "lineage", "created"
+            ]
         );
         let rows = project_table(
             &binding,
@@ -3421,7 +3427,7 @@ mod tests {
 
     #[test]
     fn actual_thread_detail_binding_projects_inspect_sections() {
-        use crate::ui::content::{project_section, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_section};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml"
         ))
@@ -3493,7 +3499,7 @@ mod tests {
 
     #[test]
     fn actual_items_space_binding_projects_renamed_and_nested_fields() {
-        use crate::ui::content::{project_table, project_tone, table_columns, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_table, project_tone, table_columns};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos-ui/.ai/views/ryeos/items/space.yaml"
         ))

@@ -23,8 +23,8 @@ use serde_json::Value;
 
 use crate::remote::client::RemoteClient;
 use crate::remote::config::ResolvedRemote;
-use crate::remote::pull::{extract_snapshot_hash, pull_results, PullResultsError};
-use crate::remote::push::{push_project, push_snapshot_generation, PushResult};
+use crate::remote::pull::{PullResultsError, extract_snapshot_hash, pull_results};
+use crate::remote::push::{PushResult, push_project, push_snapshot_generation};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
 use ryeos_state::{
@@ -134,7 +134,9 @@ pub enum RemoteForwardError {
     #[error("invalid remote snapshot: {message}")]
     PullInvalidRemoteSnapshot { message: String },
     /// Pull refused to apply an unrelated snapshot.
-    #[error("remote returned result snapshot '{result}' which is not a descendant of pushed snapshot '{pushed}' — refusing to apply")]
+    #[error(
+        "remote returned result snapshot '{result}' which is not a descendant of pushed snapshot '{pushed}' — refusing to apply"
+    )]
     PullUnrelatedSnapshot { pushed: String, result: String },
     /// Pull phase failed unexpectedly.
     #[error("pull results failed: {0}")]

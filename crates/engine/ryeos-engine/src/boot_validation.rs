@@ -31,16 +31,16 @@ use std::time::Duration;
 const VALIDATION_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::canonical_ref::CanonicalRef;
-use crate::composers::{field_requirements_for_schema, ComposerRegistry};
-use crate::contracts::{field_type_covers, ContractViolation, ShapeType, ValueShape};
+use crate::composers::{ComposerRegistry, field_requirements_for_schema};
+use crate::contracts::{ContractViolation, ShapeType, ValueShape, field_type_covers};
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
 use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 use crate::kind_registry::KindRegistry;
 use crate::launch_preparers::LaunchPreparerRunner;
 use crate::parsers::{DuplicateRef, ParserRegistry};
-use crate::protocols::builder::{build_subprocess_spec, BuildRequest, CallbackBindings};
 use crate::protocols::ProtocolRegistry;
+use crate::protocols::builder::{BuildRequest, CallbackBindings, build_subprocess_spec};
 use crate::resolution::TrustClass;
 use crate::runtime_registry::{
     ConfigMergeMode, LaunchConfigInputDecl, LaunchItemSpace, LaunchPreparationDecl,
@@ -961,10 +961,10 @@ mod tests {
     use crate::canonical_ref::CanonicalRef;
     use crate::composers::ComposerRegistry;
     use crate::kind_registry::KindRegistry;
-    use crate::parsers::descriptor::ParserDescriptor;
     use crate::parsers::ParserRegistry;
+    use crate::parsers::descriptor::ParserDescriptor;
     use crate::test_support::load_live_handler_registry;
-    use crate::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+    use crate::trust::{TrustStore, TrustedSigner, compute_fingerprint};
     use lillux::crypto::SigningKey;
     use ryeos_handler_protocol::{ComposerFieldRequirement, ComposerFieldSemantics};
     use serde_json::Value;
@@ -1204,12 +1204,16 @@ composed_value_contract:
         let composers = composers_from(&kinds);
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
-        assert!(issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::UnknownHandler { .. })));
-        assert!(!issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::DanglingParserRef { .. })));
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::UnknownHandler { .. }))
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::DanglingParserRef { .. }))
+        );
     }
 
     #[test]
@@ -1450,12 +1454,16 @@ composed_value_contract:
         let composers = ComposerRegistry::new();
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
-        assert!(!issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::DanglingParserRef { .. })));
-        assert!(issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::UnknownHandler { .. })));
+        assert!(
+            !issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::DanglingParserRef { .. }))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::UnknownHandler { .. }))
+        );
     }
 
     // ── Parser → composer wiring contract tests ──────────────────────

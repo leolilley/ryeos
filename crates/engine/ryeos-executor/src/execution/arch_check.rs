@@ -110,7 +110,7 @@ mod tests {
         bytes[2] = b'L';
         bytes[3] = b'F';
         bytes[4] = 2; // ELFCLASS64
-                      // e_machine = EM_X86_64 = 0x3E at offset 18 (little-endian)
+        // e_machine = EM_X86_64 = 0x3E at offset 18 (little-endian)
         bytes[18] = 0x3E;
         bytes[19] = 0x00;
 

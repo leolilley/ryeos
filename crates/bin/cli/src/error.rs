@@ -131,7 +131,7 @@ impl CliError {
             Self::ProjectResolution(_) => {
                 diagnostic.heading = Some("PROJECT RESOLUTION FAILED".to_string());
                 diagnostic.hint = Some(crate::tty::Hint::new(
-                    "pass `--project <DIR>` or `--no-project` explicitly; either selector may appear before or after the command"
+                    "pass `--project <DIR>` or `--no-project` explicitly; either selector may appear before or after the command",
                 ));
             }
             Self::ProjectRequired(_) => {

@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use base64::Engine;
-use lillux::crypto::{fingerprint as compute_fp, load_signing_key, SigningKey};
+use lillux::crypto::{SigningKey, fingerprint as compute_fp, load_signing_key};
 use ryeos_engine::AI_DIR;
 
 use crate::error::CliTransportError;

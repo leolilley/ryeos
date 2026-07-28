@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{BufRead, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::db::SchedulerDb;
 use super::types::{FireRecord, ScheduleSourceRecord, ScheduleSpecRecord};
@@ -766,12 +766,10 @@ mod tests {
             serde_yaml::to_string(&test_source("unsigned")).unwrap(),
         )
         .unwrap();
-        assert!(rebuild_specs_from_dir(
-            &unsigned_schedules,
-            &test_db(),
-            &test_trust_store(TEST_KEY),
-        )
-        .is_err());
+        assert!(
+            rebuild_specs_from_dir(&unsigned_schedules, &test_db(), &test_trust_store(TEST_KEY),)
+                .is_err()
+        );
 
         let untrusted_dir = tempfile::tempdir().unwrap();
         let untrusted_schedules = schedule_dir(untrusted_dir.path());
@@ -781,12 +779,14 @@ mod tests {
             &test_source("untrusted"),
             TEST_KEY,
         );
-        assert!(rebuild_specs_from_dir(
-            &untrusted_schedules,
-            &test_db(),
-            &test_trust_store([99; 32]),
-        )
-        .is_err());
+        assert!(
+            rebuild_specs_from_dir(
+                &untrusted_schedules,
+                &test_db(),
+                &test_trust_store([99; 32]),
+            )
+            .is_err()
+        );
 
         let tampered_dir = tempfile::tempdir().unwrap();
         let tampered_schedules = schedule_dir(tampered_dir.path());
@@ -799,12 +799,10 @@ mod tests {
         let tampered = signed.replace("enabled: true", "enabled: false");
         assert_ne!(tampered, signed);
         fs::write(tampered_schedules.join("tampered.yaml"), tampered).unwrap();
-        assert!(rebuild_specs_from_dir(
-            &tampered_schedules,
-            &test_db(),
-            &test_trust_store(TEST_KEY),
-        )
-        .is_err());
+        assert!(
+            rebuild_specs_from_dir(&tampered_schedules, &test_db(), &test_trust_store(TEST_KEY),)
+                .is_err()
+        );
     }
 
     #[test]

@@ -16,10 +16,10 @@ use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
-use lillux::cas::{sha256_hex, CasStore};
+use anyhow::{Context, Result, anyhow, bail};
+use lillux::cas::{CasStore, sha256_hex};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
 use crate::state::AppState;
@@ -715,7 +715,7 @@ fn capture_regular_file_no_follow(root: &Path, path: &Path) -> Result<Option<Cap
                     "open snapshot input without following links: {}",
                     path.display()
                 )
-            })
+            });
         }
     };
     let before = require_regular_metadata(&file, path)?;

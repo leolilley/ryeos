@@ -345,7 +345,7 @@ mod tests {
     use crate::parsers::ParserDispatcher;
     use crate::runtime::{ChainIntermediate, HostEnvBindings, SpecOverrides, TemplateContext};
     use crate::trust::TrustStore;
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
     use std::collections::HashMap;
     use std::path::PathBuf;
 

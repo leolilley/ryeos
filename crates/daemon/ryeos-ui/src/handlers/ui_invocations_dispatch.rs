@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::service_registry::{
-    extract_required_caps, extract_ui_dispatch, extract_ui_read_only, UiDispatchMode,
+    UiDispatchMode, extract_required_caps, extract_ui_dispatch, extract_ui_read_only,
 };
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;

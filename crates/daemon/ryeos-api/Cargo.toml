@@ -1,7 +1,7 @@
 [package]
 name = "ryeos-api"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "ryeos-api: HTTP routes, service handlers, remote client, and API state"
 license.workspace = true
 repository = "https://github.com/leolilley/ryeos"

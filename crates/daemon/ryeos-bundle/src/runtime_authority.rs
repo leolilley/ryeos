@@ -779,11 +779,13 @@ mod tests {
     fn subject_path_wildcard_is_admitted_but_cannot_evade_reserved_surfaces() {
         // The trailing `/*` subject wildcard is valid grammar for ordinary
         // execute grants (the fleet-parent namespace case)…
-        assert!(reject_disallowed_composed_grants(&[
-            "ryeos.execute.tool.arc/*".into(),
-            "ryeos.execute.directive.arc/*".into(),
-        ])
-        .is_ok());
+        assert!(
+            reject_disallowed_composed_grants(&[
+                "ryeos.execute.tool.arc/*".into(),
+                "ryeos.execute.directive.arc/*".into(),
+            ])
+            .is_ok()
+        );
         // …and because classification keys on the verb/kind segments — which
         // the subject wildcard never touches — a path wildcard on a
         // manifest-authority surface still classifies Reserved.
@@ -939,10 +941,12 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(empty_ns
-            .validate()
-            .unwrap_err()
-            .contains("empty `namespace`"));
+        assert!(
+            empty_ns
+                .validate()
+                .unwrap_err()
+                .contains("empty `namespace`")
+        );
     }
 
     #[test]

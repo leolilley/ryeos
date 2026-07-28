@@ -7,10 +7,10 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use ryeos_app::node_config::SectionTable;
 use ryeos_app::node_config::loader::BootstrapLoader;
 use ryeos_app::node_config::sections::hosted_node::HostedNodePolicyRecord;
-use ryeos_app::node_config::SectionTable;
 
 /// Load the single installed hosted-node policy for `app_root`.
 ///

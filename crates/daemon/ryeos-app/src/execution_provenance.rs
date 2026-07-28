@@ -328,7 +328,9 @@ impl ExecutionProvenance {
         match &mut self {
             Self::Projectless { .. } => {
                 if override_root.is_some() {
-                    panic!("ExecutionProvenance::with_state_root: projectless execution cannot redirect project state");
+                    panic!(
+                        "ExecutionProvenance::with_state_root: projectless execution cannot redirect project state"
+                    );
                 }
             }
             Self::RootLiveProject { state_root, .. }

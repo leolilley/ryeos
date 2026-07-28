@@ -8,8 +8,9 @@ use lillux::crypto::Verifier as _;
 use serde::{Deserialize, Serialize};
 
 use crate::objects::{
-    hash_bundle_event, validate_bundle_identifier, BundleEventAttachment, BundleEventAttribution,
-    BundleEventObject, BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_SERIALIZED_BYTES, SCHEMA_VERSION,
+    BUNDLE_EVENT_KIND, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
+    MAX_BUNDLE_EVENT_SERIALIZED_BYTES, SCHEMA_VERSION, hash_bundle_event,
+    validate_bundle_identifier,
 };
 use crate::refs;
 use crate::signer::Signer;
@@ -1528,9 +1529,11 @@ mod tests {
         .unwrap();
 
         cursor.verify("ryeos-email", "email_event", &trust).unwrap();
-        assert!(cursor
-            .verify("other-bundle", "email_event", &trust)
-            .is_err());
+        assert!(
+            cursor
+                .verify("other-bundle", "email_event", &trust)
+                .is_err()
+        );
 
         let mut forged = cursor;
         forged.event_hash = "c".repeat(64);

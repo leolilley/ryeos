@@ -8,8 +8,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ryeos_client_base::ui::view_model::{RyeOsLayoutNodeVm, RyeOsViewVm};
 use ryeos_client_base::ui::{
-    ryeos_key_command, RyeOsCore, RyeOsEffect, RyeOsEvent, RyeOsKey, RyeOsKeyCommand,
-    RyeOsKeyContext, RyeOsKeyEvent, RyeOsKeyModifiers, RyeOsUiEvent,
+    RyeOsCore, RyeOsEffect, RyeOsEvent, RyeOsKey, RyeOsKeyCommand, RyeOsKeyContext, RyeOsKeyEvent,
+    RyeOsKeyModifiers, RyeOsUiEvent, ryeos_key_command,
 };
 
 pub fn handle_key(core: &mut RyeOsCore, key: KeyEvent) -> Vec<RyeOsEffect> {

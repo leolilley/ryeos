@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::{fs::File, io::Read as _};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::handler_error::HandlerError;

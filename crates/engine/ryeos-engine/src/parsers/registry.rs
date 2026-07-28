@@ -26,11 +26,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::AI_DIR;
 use crate::contracts::SignatureEnvelope;
 use crate::error::EngineError;
 use crate::kind_registry::KindRegistry;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 use super::descriptor::ParserDescriptor;
 

@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::contracts::RuntimeEnvSource;
 use crate::error::EngineError;
 use crate::runtime::{
-    expand_env_value, is_reserved_env_name, CompileContext, HostEnvBindings, RuntimeHandler,
+    CompileContext, HostEnvBindings, RuntimeHandler, expand_env_value, is_reserved_env_name,
 };
 
 pub const KEY: &str = "env_config";

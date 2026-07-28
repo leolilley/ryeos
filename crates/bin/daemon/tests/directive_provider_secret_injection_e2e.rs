@@ -38,9 +38,9 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
-use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
 /// Plant a mock model_provider config with a fully-specified `auth`

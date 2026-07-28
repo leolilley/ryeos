@@ -1081,13 +1081,17 @@ mod value_shape_tests {
             optional: Default::default(),
             strict_fields: None,
         };
-        assert!(consumer_root_any
-            .is_satisfied_by(&producer_mapping)
-            .is_empty());
+        assert!(
+            consumer_root_any
+                .is_satisfied_by(&producer_mapping)
+                .is_empty()
+        );
         assert!(consumer_root_any.is_satisfied_by(&producer_seq).is_empty());
-        assert!(consumer_root_any
-            .is_satisfied_by(&producer_root_any)
-            .is_empty());
+        assert!(
+            consumer_root_any
+                .is_satisfied_by(&producer_root_any)
+                .is_empty()
+        );
 
         // Consumer field-level Any: accepts any producer field type.
         let consumer = shape_mapping(&[("body", ft_any())], &[]);
@@ -1217,9 +1221,10 @@ mod value_shape_tests {
             strict_fields: None,
         };
         let v = consumer.is_satisfied_by(&producer);
-        assert!(v
-            .iter()
-            .any(|x| matches!(x, ContractViolation::RootTypeMismatch { .. })));
+        assert!(
+            v.iter()
+                .any(|x| matches!(x, ContractViolation::RootTypeMismatch { .. }))
+        );
     }
 
     #[test]
@@ -2260,14 +2265,18 @@ strict_fields: warn
         let report = validate(&shape, &value);
         assert_eq!(report.errors.len(), 2);
         // Missing required + type mismatch.
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.code == InstanceViolationCode::MissingRequiredField));
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.code == InstanceViolationCode::TypeMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == InstanceViolationCode::MissingRequiredField)
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == InstanceViolationCode::TypeMismatch)
+        );
     }
 
     #[test]
@@ -2422,10 +2431,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "launch.mode" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "launch.mode" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     #[test]
@@ -2448,11 +2459,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "serves.kind"
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(|e| e.path == "serves.kind"
+                && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     #[test]
@@ -2462,10 +2472,11 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "launch" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(
+                |e| e.path == "launch" && e.code == InstanceViolationCode::MissingRequiredField
+            )
+        );
     }
 
     // ── service kind ─────────────────────────────────────────────
@@ -2528,10 +2539,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&service_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "availability" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "availability" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     // ── handler kind ─────────────────────────────────────────────
@@ -2581,10 +2594,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&handler_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "serves" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "serves" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     // ── runtime kind ─────────────────────────────────────────────
@@ -2649,10 +2664,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&runtime_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "kind" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "kind" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     #[test]
@@ -2666,11 +2683,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&runtime_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "schema.result"
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(|e| e.path == "schema.result"
+                && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     // ── surface kind ─────────────────────────────────────────────
@@ -2729,11 +2745,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&surface_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "layout.root"
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(|e| e.path == "layout.root"
+                && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     #[test]
@@ -2746,11 +2761,13 @@ mod kind_contract_regressions {
         });
         let report = validate(&surface_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path.starts_with("affordances[")
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path.starts_with("affordances[")
+                    && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     #[test]

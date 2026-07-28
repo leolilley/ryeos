@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::edges;
 use crate::knowledge;
@@ -9,7 +9,7 @@ use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
 use super::events::node_ref;
 use super::outcome::*;
 use super::transitions::foreach_failure_summary;
-use super::{hash_json_value, merge_into, Walker};
+use super::{Walker, hash_json_value, merge_into};
 
 mod action;
 mod errors;

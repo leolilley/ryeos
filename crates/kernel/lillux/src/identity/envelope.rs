@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use hkdf::Hkdf;
@@ -597,7 +597,7 @@ pub fn cli_open(key_dir: &str) -> serde_json::Value {
     match input.get("version").and_then(|v| v.as_u64()) {
         Some(1) => {}
         other => {
-            return serde_json::json!({ "error": format!("unsupported envelope version: {other:?}") })
+            return serde_json::json!({ "error": format!("unsupported envelope version: {other:?}") });
         }
     }
     for field in &["enc", "ciphertext", "aad_fields"] {
@@ -608,7 +608,7 @@ pub fn cli_open(key_dir: &str) -> serde_json::Value {
     match input.pointer("/aad_fields/kind").and_then(|k| k.as_str()) {
         Some(ENVELOPE_KIND) => {}
         other => {
-            return serde_json::json!({ "error": format!("unexpected envelope kind: {other:?}") })
+            return serde_json::json!({ "error": format!("unexpected envelope kind: {other:?}") });
         }
     }
 
@@ -899,9 +899,11 @@ mod tests {
         });
         let report = inspect_envelope(&raw);
         assert!(!report.well_formed);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|w| w.contains("enc is not valid base64url")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("enc is not valid base64url"))
+        );
     }
 }

@@ -11,7 +11,7 @@ use super::interaction::{
     Event, EventReader, Frame, InputAction, Key, KeyEvent, ListItem, ListState, Pager,
     TerminalGuard, TextInput,
 };
-use super::{theme, Console, Tone};
+use super::{Console, Tone, theme};
 use crate::error::CliError;
 use crate::help::{CachedHelpRow, DescriptorHelpRow, ResolvedCommandHelp};
 

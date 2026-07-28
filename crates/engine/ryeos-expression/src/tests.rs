@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::*;
 
@@ -188,12 +188,14 @@ fn missing_null_and_falsy_values_have_distinct_coalescing_semantics() {
     assert_eq!(evaluate_source("state.zero ?? 8", &context), json!(0));
     assert_eq!(evaluate_source("state.empty ?? 'x'", &context), json!(""));
     assert_eq!(evaluate_source("state.list ?? [1]", &context), json!([]));
-    assert!(evaluate(
-        &expression("state.absent"),
-        &context,
-        &EvaluationLimits::default()
-    )
-    .is_err());
+    assert!(
+        evaluate(
+            &expression("state.absent"),
+            &context,
+            &EvaluationLimits::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -231,12 +233,14 @@ fn exists_only_suppresses_missing_paths() {
         json!(false)
     );
     assert!(compile_expression("exists(1 + 2)", &CompilationLimits::default()).is_err());
-    assert!(evaluate(
-        &expression("exists(state.scalar.child)"),
-        &context,
-        &EvaluationLimits::default()
-    )
-    .is_err());
+    assert!(
+        evaluate(
+            &expression("exists(state.scalar.child)"),
+            &context,
+            &EvaluationLimits::default()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -246,18 +250,22 @@ fn dynamic_indices_must_succeed_even_when_the_target_is_missing() {
         evaluate_source("state.absent['key'] ?? 4", &context),
         json!(4)
     );
-    assert!(evaluate(
-        &expression("state.absent[state.missing] ?? 4"),
-        &context,
-        &EvaluationLimits::default()
-    )
-    .is_err());
-    assert!(evaluate(
-        &expression("state.absent[1 / 0] ?? 4"),
-        &context,
-        &EvaluationLimits::default()
-    )
-    .is_err());
+    assert!(
+        evaluate(
+            &expression("state.absent[state.missing] ?? 4"),
+            &context,
+            &EvaluationLimits::default()
+        )
+        .is_err()
+    );
+    assert!(
+        evaluate(
+            &expression("state.absent[1 / 0] ?? 4"),
+            &context,
+            &EvaluationLimits::default()
+        )
+        .is_err()
+    );
     for source in [
         "state.absent[true] ?? 4",
         "state.absent[-1] ?? 4",
@@ -345,12 +353,14 @@ fn regex_matching_is_bounded_and_reports_invalid_patterns() {
         evaluate_source(r#"matches('abc123', '^[a-z]+\\d+$')"#, &context),
         json!(true)
     );
-    assert!(evaluate(
-        &expression("matches('x', '[')"),
-        &context,
-        &EvaluationLimits::default()
-    )
-    .is_err());
+    assert!(
+        evaluate(
+            &expression("matches('x', '[')"),
+            &context,
+            &EvaluationLimits::default()
+        )
+        .is_err()
+    );
     let limits = EvaluationLimits {
         max_regex_pattern_bytes: 2,
         ..EvaluationLimits::default()
@@ -382,13 +392,15 @@ fn embedded_templates_are_scalar_and_one_pass() {
         render("generated: ${state.generated}", &context),
         json!("generated: ${state.count}")
     );
-    assert!(compile_and_render(
-        "items=${state.items}",
-        &context,
-        &CompilationLimits::default(),
-        &EvaluationLimits::default()
-    )
-    .is_err());
+    assert!(
+        compile_and_render(
+            "items=${state.items}",
+            &context,
+            &CompilationLimits::default(),
+            &EvaluationLimits::default()
+        )
+        .is_err()
+    );
     assert_eq!(
         render("items=${json(state.items)}", &context),
         json!("items=[1,2]")
@@ -578,10 +590,12 @@ fn single_pipe_reports_the_removed_filter_migration() {
     .unwrap_err();
     assert_eq!(error.phase(), ErrorPhase::Lex);
     assert!(error.message().contains("pipe-filter syntax was removed"));
-    assert!(error
-        .correction_text()
-        .unwrap_or_default()
-        .contains("length(value)"));
+    assert!(
+        error
+            .correction_text()
+            .unwrap_or_default()
+            .contains("length(value)")
+    );
 }
 
 #[test]
@@ -644,9 +658,11 @@ fn condition_normalization_accepts_only_scalar_expression_forms() {
     let literal_template_marker =
         compile_condition_for(r#"state.label == "${literal}""#, "next.when", &limits).unwrap();
     assert_eq!(bare.references(), wrapped.references());
-    assert!(literal_template_marker
-        .references()
-        .contains_exact("state", &["label"]));
+    assert!(
+        literal_template_marker
+            .references()
+            .contains_exact("state", &["label"])
+    );
     assert!(compile_condition_for("", "next.when", &limits).is_err());
     assert!(compile_condition_for("prefix ${state.ready}", "next.when", &limits).is_err());
 }
@@ -852,12 +868,14 @@ fn evaluator_enforces_each_data_dependent_limit() {
         max_produced_string_bytes: 2,
         ..EvaluationLimits::default()
     };
-    assert!(render_template(
-        &compile_template("x${'yz'}", &CompilationLimits::default()).unwrap(),
-        &context,
-        &produced
-    )
-    .is_err());
+    assert!(
+        render_template(
+            &compile_template("x${'yz'}", &CompilationLimits::default()).unwrap(),
+            &context,
+            &produced
+        )
+        .is_err()
+    );
     for source in ["type(state.text)", "string(true)", "keys({long: 1})"] {
         let error = evaluate(&expression(source), &context, &produced).unwrap_err();
         assert_eq!(error.phase(), ErrorPhase::Limit, "source: {source}");
@@ -897,12 +915,14 @@ fn evaluator_enforces_each_data_dependent_limit() {
         max_regex_haystack_bytes: 2,
         ..EvaluationLimits::default()
     };
-    assert!(evaluate(
-        &expression("matches('long', '.*')"),
-        &context,
-        &regex_haystack
-    )
-    .is_err());
+    assert!(
+        evaluate(
+            &expression("matches('long', '.*')"),
+            &context,
+            &regex_haystack
+        )
+        .is_err()
+    );
 }
 
 #[test]

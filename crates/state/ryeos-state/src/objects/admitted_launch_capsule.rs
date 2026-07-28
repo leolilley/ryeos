@@ -2,8 +2,8 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    validate_trimmed_control_free, ExecutionLaunchDriver, ExecutionLifecycleAuthority,
-    ExecutionProjectAuthority, ExecutionRecoveryAuthority,
+    ExecutionLaunchDriver, ExecutionLifecycleAuthority, ExecutionProjectAuthority,
+    ExecutionRecoveryAuthority, validate_trimmed_control_free,
 };
 
 pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 7;
@@ -961,9 +961,11 @@ mod tests {
         });
         capsule.launch_driver = ExecutionLaunchDriver::InProcessHandler;
         let error = capsule.validate().unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("cannot carry admitted subprocess capsules"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot carry admitted subprocess capsules")
+        );
     }
 
     #[test]
@@ -1004,9 +1006,11 @@ mod tests {
         runtime.runtime_bundle_manifest_hash = None;
         runtime.runtime_bundle_signer_fingerprint = None;
         let error = capsule.validate().unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("no complete source-bundle generation identity"));
+        assert!(
+            error
+                .to_string()
+                .contains("no complete source-bundle generation identity")
+        );
     }
 
     #[test]
@@ -1046,9 +1050,11 @@ mod tests {
             .unwrap()
             .remove("project_authority");
         let error = missing.validate().unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("sealed invocation is missing project_authority"));
+        assert!(
+            error
+                .to_string()
+                .contains("sealed invocation is missing project_authority")
+        );
 
         let mut malformed = direct_capsule(DirectExecutableIdentity::CapturedContent {
             content_hash: "f".repeat(64),
@@ -1058,9 +1064,11 @@ mod tests {
             serde_json::json!({"kind": "predecessor_shape"}),
         );
         let error = malformed.validate().unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("decode sealed invocation project authority"));
+        assert!(
+            error
+                .to_string()
+                .contains("decode sealed invocation project authority")
+        );
     }
 
     #[test]
@@ -1103,9 +1111,11 @@ mod tests {
     fn restart_recovery_rejects_a_node_policy_direct_executable() {
         let capsule = direct_capsule(DirectExecutableIdentity::NodePolicy);
         let error = capsule.validate().unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("not eligible for autonomous restart recovery"));
+        assert!(
+            error
+                .to_string()
+                .contains("not eligible for autonomous restart recovery")
+        );
     }
 
     #[test]
@@ -1146,11 +1156,13 @@ mod tests {
             content_hash: "f".repeat(64),
         });
         capsule.exact_program_hash = "0".repeat(64);
-        assert!(capsule
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("mismatch"));
+        assert!(
+            capsule
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("mismatch")
+        );
     }
 
     #[test]

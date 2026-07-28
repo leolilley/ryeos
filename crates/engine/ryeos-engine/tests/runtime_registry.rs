@@ -14,7 +14,7 @@ use ryeos_engine::error::EngineError;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::resolution::TrustClass;
 use ryeos_engine::runtime_registry::{RuntimeRegistry, RuntimeYaml};
-use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
 // ── Test helpers ─────────────────────────────────────────────────────
 
@@ -568,10 +568,12 @@ abi_version: "v1"
         &kinds,
     )
     .unwrap();
-    assert!(registry.lookup_for("fake_kind").is_ok_and(|runtime| runtime
-        .canonical_ref
-        .to_string()
-        .contains("wrong-protocol-rt")));
+    assert!(registry.lookup_for("fake_kind").is_ok_and(|runtime| {
+        runtime
+            .canonical_ref
+            .to_string()
+            .contains("wrong-protocol-rt")
+    }));
 }
 
 /// ε: runtime YAML whose `serves` kind has no execution block at all

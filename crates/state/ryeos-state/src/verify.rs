@@ -143,10 +143,12 @@ mod tests {
 
         let result = verify_chain_integrity(&chain, None);
         assert!(!result.valid);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.contains("should have prev_chain_state_hash=None")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.contains("should have prev_chain_state_hash=None"))
+        );
     }
 
     #[test]
@@ -166,10 +168,12 @@ mod tests {
 
         let result = verify_chain_integrity(&chain, Some(&("03".repeat(32))));
         assert!(!result.valid);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.contains("prev_chain_state_hash mismatch")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.contains("prev_chain_state_hash mismatch"))
+        );
     }
 
     #[test]
@@ -177,9 +181,11 @@ mod tests {
         let chain = make_chain_state();
         let result = verify_chain_integrity(&chain, Some(&("02".repeat(32))));
         assert!(!result.valid);
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.contains("expected prev_chain_state_hash") && i.contains("found None")));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.contains("expected prev_chain_state_hash") && i.contains("found None"))
+        );
     }
 }

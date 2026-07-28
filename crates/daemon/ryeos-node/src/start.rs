@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::status::{is_ready, LifecycleStatus};
+use crate::status::{LifecycleStatus, is_ready};
 use crate::{LifecycleProgressObserver, LocalLifecycleEnv};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ pub async fn start_with_progress(
             return Ok(StartReport {
                 status,
                 already_running: true,
-            })
+            });
         }
         LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. } => {}
         LifecycleStatus::Unresponsive { diagnostics, .. } => {

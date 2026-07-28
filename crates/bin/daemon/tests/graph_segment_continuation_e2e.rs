@@ -23,10 +23,10 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
-use common::{build_signed_headers_for_bytes, DaemonHarness};
+use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::{DaemonHarness, build_signed_headers_for_bytes};
 use lillux::crypto::SigningKey;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Plant ZEN_API_KEY in the sealed vault so the graph runtime launch preflight
 /// passes (mirrors the crash-recovery + spawn-smoke fixtures).

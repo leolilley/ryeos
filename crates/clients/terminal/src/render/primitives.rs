@@ -5,7 +5,7 @@ use ryeos_client_base::layout::Rect;
 use ryeos_client_base::text_surface::{Style, TextSurface};
 
 use super::text::truncate;
-use super::theme::{style_fg, style_selected, PANEL, WARN};
+use super::theme::{PANEL, WARN, style_fg, style_selected};
 
 pub fn fill_rect(surface: &mut TextSurface, rect: Rect, style: Style) {
     let x = rect.x as usize;

@@ -1,18 +1,18 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 use crate::directive::FinishReason;
 use crate::directive::{
-    normalize_finish_reason, ExecutionConfig, MalformedArgs, ProtocolFamily, ProviderConfig,
-    ProviderMessage, SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema,
-    UsageUpdate,
+    ExecutionConfig, MalformedArgs, ProtocolFamily, ProviderConfig, ProviderMessage,
+    SamplingConfig, StreamEvent, SystemMessageMode, ToolCall, ToolSchema, UsageUpdate,
+    normalize_finish_reason,
 };
 use crate::provider_adapter::http::{
     AdapterResponse, ObservedOutput, ProviderLimitContractStatus, ProviderUsageSource, TokenUsage,
@@ -1779,7 +1779,8 @@ async fn send_prepared_streaming_inner(
             return Err(anyhow::Error::new(ProviderProtocolStreamError {
                 detail: format!(
                     "unterminated logical SSE event exceeded the configured framing limit: {} bytes > {} bytes",
-                    buffer.len(), execution.max_provider_stream_frame_bytes
+                    buffer.len(),
+                    execution.max_provider_stream_frame_bytes
                 ),
                 accepted_bytes: u64::try_from(output_meter.total_bytes()).unwrap_or(u64::MAX),
                 accepted_output_events: output_meter.accepted_output_events,
@@ -2682,9 +2683,10 @@ mod tests {
     #[test]
     fn per_turn_output_byte_cap_trips_only_above_boundary() {
         let err = enforce_per_turn_output_byte_cap(39, 0, 40, 0, 2).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("local per-turn output byte cap exceeded"));
+        assert!(
+            err.to_string()
+                .contains("local per-turn output byte cap exceeded")
+        );
         assert!(err.to_string().contains("40 bytes > cap 39 bytes"));
         assert!(err.downcast_ref::<ProviderStreamError>().is_none());
         let limit = err
@@ -2866,23 +2868,25 @@ mod tests {
                 &mut response_id,
                 Some(&streaming),
             );
-            assert!(provider_reported_error(
-                frame,
-                streaming
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.error.as_ref()),
-                ProviderReportedErrorContext {
-                    usage: usage.clone(),
-                    generation_header_id: None,
-                    response_id: response_id.clone(),
-                    output_meter: &meter,
-                    live_output_events_emitted: 0,
-                    requested_output_tokens: Some(32_768),
-                },
-            )
-            .unwrap()
-            .is_none());
+            assert!(
+                provider_reported_error(
+                    frame,
+                    streaming
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.error.as_ref()),
+                    ProviderReportedErrorContext {
+                        usage: usage.clone(),
+                        generation_header_id: None,
+                        response_id: response_id.clone(),
+                        output_meter: &meter,
+                        live_output_events_emitted: 0,
+                        requested_output_tokens: Some(32_768),
+                    },
+                )
+                .unwrap()
+                .is_none()
+            );
             validate_usage_against_requested_limit(usage.as_mut(), Some(32_768));
             for event in
                 parse_sse_events_with_state(frame, Some("delta_merge"), None, &mut parser_state)
@@ -2919,20 +2923,22 @@ mod tests {
             code_path: Some("code".into()),
             metadata_path: Some("metadata".into()),
         };
-        assert!(provider_reported_error(
-            block,
-            Some(&config),
-            ProviderReportedErrorContext {
-                usage: None,
-                generation_header_id: None,
-                response_id: None,
-                output_meter: &StreamOutputMeter::default(),
-                live_output_events_emitted: 0,
-                requested_output_tokens: None,
-            },
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            provider_reported_error(
+                block,
+                Some(&config),
+                ProviderReportedErrorContext {
+                    usage: None,
+                    generation_header_id: None,
+                    response_id: None,
+                    output_meter: &StreamOutputMeter::default(),
+                    live_output_events_emitted: 0,
+                    requested_output_tokens: None,
+                },
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
@@ -2976,10 +2982,12 @@ mod tests {
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, Some(5));
         assert_eq!(usage.snapshots_seen, 1);
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("prompt_tokens is not a u64")));
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("prompt_tokens is not a u64"))
+        );
     }
 
     #[test]
@@ -2995,9 +3003,11 @@ mod tests {
             None,
         )
         .expect_err("malformed logical payload must fail");
-        assert!(error
-            .downcast_ref::<ProviderProtocolStreamError>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<ProviderProtocolStreamError>()
+                .is_some()
+        );
         assert!(error.to_string().contains("provider_protocol_error"));
     }
 
@@ -4953,8 +4963,8 @@ owner = "ryeos-dev"
 
     #[tokio::test]
     async fn flag_signal_resolves_within_250ms_of_flag_set() {
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Duration;
 
         let flag = Arc::new(AtomicBool::new(false));
@@ -4988,8 +4998,8 @@ owner = "ryeos-dev"
 
     #[test]
     fn flag_set_returns_true_when_flag_set() {
-        use std::sync::atomic::AtomicBool;
         use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
         let flag = Arc::new(AtomicBool::new(true));
         assert!(flag_set(&Some(flag)));
     }
@@ -5223,7 +5233,7 @@ data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","
 
     #[test]
     fn normalize_finish_reason_case_insensitive() {
-        use crate::directive::{normalize_finish_reason, FinishReason};
+        use crate::directive::{FinishReason, normalize_finish_reason};
         assert_eq!(normalize_finish_reason(Some("stop")), FinishReason::Stop);
         assert_eq!(normalize_finish_reason(Some("STOP")), FinishReason::Stop);
         assert_eq!(normalize_finish_reason(Some("Stop")), FinishReason::Stop);

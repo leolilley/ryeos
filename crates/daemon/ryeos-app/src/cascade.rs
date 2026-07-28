@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_engine::contracts::CancellationMode;
 
@@ -196,7 +196,7 @@ pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> 
         Ok(Some(thread)) => thread,
         Ok(None) => return json!({ "thread_id": thread_id, "skipped": "no_thread_row" }),
         Err(e) => {
-            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": e.to_string() })
+            return json!({ "thread_id": thread_id, "skipped": "read_error", "error": e.to_string() });
         }
     };
     let stop_intent = match mode {
@@ -210,7 +210,7 @@ pub fn signal_thread(store: &StateStore, thread_id: &str, mode: CascadeMode) -> 
                 "thread_id": thread_id,
                 "skipped": "stop_tombstone_failed",
                 "error": error.to_string(),
-            })
+            });
         }
     };
     if crate::state_store::is_terminal_status(&thread.status) && runtime.process_identity.is_none()

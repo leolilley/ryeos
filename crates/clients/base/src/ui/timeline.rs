@@ -25,7 +25,7 @@ use super::dto::CognitionOutPayload;
 use super::effect::RyeOsEffect;
 use super::event::RyeOsUiIntent;
 use super::model::RyeOsCore;
-use super::view_model::{tone_from_name, RyeOsTone};
+use super::view_model::{RyeOsTone, tone_from_name};
 
 /// Detail source for one rendered timeline entry. Kept parallel to
 /// `RyeOsTimelineEntryVm`/indents so the view-model layer can apply a
@@ -2397,7 +2397,7 @@ mod tests {
     /// coalescer; the per-piece tests above don't exercise the binding.
     #[test]
     fn chain_replay_projection_coalesces_into_block_separator_pair() {
-        use super::super::content::{project_records, ViewBinding};
+        use super::super::content::{ViewBinding, project_records};
 
         // Mirrors bundles/ryeos-ui/.ai/views/ryeos/chain/timeline.yaml.
         let binding: ViewBinding = serde_json::from_value(json!({
@@ -2464,7 +2464,7 @@ mod tests {
 
     #[test]
     fn graph_runtime_events_render_payload_details_not_bare_event_types() {
-        use super::super::content::{project_records, ViewBinding};
+        use super::super::content::{ViewBinding, project_records};
 
         // This intentionally keeps the shipped tool projection shape
         // (`tool/call_id`) while feeding graph intent events (`item_id/node/step`)

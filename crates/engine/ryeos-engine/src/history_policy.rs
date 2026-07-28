@@ -209,7 +209,7 @@ pub fn load_node_thread_history_policy(
                 return Err(invalid_node_policy(format!(
                     "could not read {}: {error:#}",
                     path.display()
-                )))
+                )));
             }
         };
         let raw = String::from_utf8(raw).map_err(|error| {
@@ -1034,9 +1034,11 @@ mod tests {
             &ResolvedNodeThreadHistoryPolicy::durable_without_config(),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("content changed after verification"));
+        assert!(
+            error
+                .to_string()
+                .contains("content changed after verification")
+        );
     }
 
     #[test]
@@ -1091,9 +1093,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("must be exactly `config/execution/execution.yaml`"));
+        assert!(
+            error
+                .to_string()
+                .contains("must be exactly `config/execution/execution.yaml`")
+        );
     }
 
     #[test]

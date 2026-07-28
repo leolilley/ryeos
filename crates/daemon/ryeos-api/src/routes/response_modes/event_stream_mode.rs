@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::response::sse::{KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{KeepAlive, Sse};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_stream::StreamExt;
@@ -1133,14 +1133,16 @@ mod tests {
 
     #[test]
     fn extract_path_capture_rejects_non_path() {
-        assert!(validate_and_extract_path_capture(
-            "${query.id}",
-            "thread_events",
-            "thread_id",
-            "r1",
-            "/threads/{id}/stream",
-        )
-        .is_err());
+        assert!(
+            validate_and_extract_path_capture(
+                "${query.id}",
+                "thread_events",
+                "thread_id",
+                "r1",
+                "/threads/{id}/stream",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1153,25 +1155,29 @@ mod tests {
 
     #[test]
     fn validate_rejects_double_interpolation() {
-        assert!(validate_and_extract_path_capture(
-            "${path.x}-${path.y}",
-            "thread_events",
-            "f",
-            "r1",
-            "/threads/{x}/{y}",
-        )
-        .is_err());
+        assert!(
+            validate_and_extract_path_capture(
+                "${path.x}-${path.y}",
+                "thread_events",
+                "f",
+                "r1",
+                "/threads/{x}/{y}",
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_static_string() {
-        assert!(validate_and_extract_path_capture(
-            "static",
-            "thread_events",
-            "f",
-            "r1",
-            "/threads/{id}",
-        )
-        .is_err());
+        assert!(
+            validate_and_extract_path_capture(
+                "static",
+                "thread_events",
+                "f",
+                "r1",
+                "/threads/{id}",
+            )
+            .is_err()
+        );
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use anyhow::Context;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::thread_snapshot::{parse_canonical_timestamp, validate_canonical_hash};
 

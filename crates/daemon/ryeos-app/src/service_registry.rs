@@ -170,9 +170,7 @@ pub fn extract_standalone_state_access(
 ) -> Result<StandaloneStateAccess> {
     match metadata_extra.get("state_access") {
         None => Ok(StandaloneStateAccess::ReadWrite),
-        Some(Value::String(value)) if value == "read_write" => {
-            Ok(StandaloneStateAccess::ReadWrite)
-        }
+        Some(Value::String(value)) if value == "read_write" => Ok(StandaloneStateAccess::ReadWrite),
         Some(Value::String(value)) if value == "read_only_existing" => {
             Ok(StandaloneStateAccess::ReadOnlyExisting)
         }

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
@@ -49,7 +49,7 @@ pub async fn stop_with_progress(
             return Ok(StopReport {
                 status,
                 already_stopped: true,
-            })
+            });
         }
         LifecycleStatus::Stale { diagnostics, .. } => {
             bail!("stale daemon metadata: {}", diagnostics.message)

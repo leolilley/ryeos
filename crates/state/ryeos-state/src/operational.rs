@@ -2412,8 +2412,10 @@ mod tests {
             })
             .unwrap_err();
 
-        assert!(format!("{error:#}")
-            .contains("failed to commit operational commit failure transaction"));
+        assert!(
+            format!("{error:#}")
+                .contains("failed to commit operational commit failure transaction")
+        );
         assert!(db.conn.is_autocommit());
         let rows: i64 = db
             .conn
@@ -2456,9 +2458,11 @@ mod tests {
         let error = OperationalDb::open_at_runtime_state_dir(tempdir.path())
             .err()
             .expect("an established missing database must fail");
-        assert!(error
-            .to_string()
-            .contains("established operational database is absent"));
+        assert!(
+            error
+                .to_string()
+                .contains("established operational database is absent")
+        );
         assert!(
             !path.exists(),
             "failure must not recreate an empty database"
@@ -3359,9 +3363,10 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("invalid sync job state transition"));
+        assert!(
+            err.to_string()
+                .contains("invalid sync job state transition")
+        );
 
         db.update_sync_job(
             "job-transition",
@@ -3407,9 +3412,10 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("invalid sync job state transition"));
+        assert!(
+            err.to_string()
+                .contains("invalid sync job state transition")
+        );
     }
 
     #[test]

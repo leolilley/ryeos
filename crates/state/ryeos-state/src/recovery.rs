@@ -2002,9 +2002,9 @@ impl RecoveryStore {
                 {
                     Ok(existing)
                 }
-                HeadOperation::Remove => anyhow::bail!(
-                    "chain {chain_root_id} already has a different pending Remove"
-                ),
+                HeadOperation::Remove => {
+                    anyhow::bail!("chain {chain_root_id} already has a different pending Remove")
+                }
             };
         }
 
@@ -2654,9 +2654,16 @@ mod tests {
         let lock = chain_lock(temp.path(), "T-root");
         let remove = store.prepare_remove(&lock, "T-root", &hash("a")).unwrap();
 
-        assert!(store
-            .replace_remove_with_published_set(&lock, "T-root", "different-transition", &hash("b"),)
-            .is_err());
+        assert!(
+            store
+                .replace_remove_with_published_set(
+                    &lock,
+                    "T-root",
+                    "different-transition",
+                    &hash("b"),
+                )
+                .is_err()
+        );
         assert_eq!(
             store.read_pending("T-root").unwrap().unwrap(),
             remove,
@@ -2685,9 +2692,11 @@ mod tests {
         let first = store
             .prepare_set(&lock, "T-root", None, &hash("a"))
             .unwrap();
-        assert!(store
-            .prepare_set(&lock, "T-root", Some(&hash("a")), &hash("b"))
-            .is_err());
+        assert!(
+            store
+                .prepare_set(&lock, "T-root", Some(&hash("a")), &hash("b"))
+                .is_err()
+        );
         store
             .acknowledge(&lock, "T-root", &first.transition_id)
             .unwrap();
@@ -2706,9 +2715,11 @@ mod tests {
             .unwrap();
         assert!(!store.acknowledge(&lock, "T-root", "newer").unwrap());
         assert!(store.read_pending("T-root").unwrap().is_some());
-        assert!(store
-            .acknowledge(&lock, "T-root", &record.transition_id)
-            .unwrap());
+        assert!(
+            store
+                .acknowledge(&lock, "T-root", &record.transition_id)
+                .unwrap()
+        );
         assert!(store.read_pending("T-root").unwrap().is_none());
     }
 
@@ -2720,15 +2731,17 @@ mod tests {
         let record = store
             .prepare_set(&lock, "T-root", None, &hash("a"))
             .unwrap();
-        assert!(store
-            .advance_phase(
-                &lock,
-                "T-root",
-                &record.transition_id,
-                TransitionPhase::Prepared,
-                TransitionPhase::ApplyingProjection,
-            )
-            .is_err());
+        assert!(
+            store
+                .advance_phase(
+                    &lock,
+                    "T-root",
+                    &record.transition_id,
+                    TransitionPhase::Prepared,
+                    TransitionPhase::ApplyingProjection,
+                )
+                .is_err()
+        );
         let published = store
             .advance_phase(
                 &lock,

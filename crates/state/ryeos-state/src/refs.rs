@@ -16,11 +16,11 @@
 //! }
 //! ```
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use base64::Engine as _;
 use lillux::crypto::Verifier;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs::{self, File};
 use std::io::Read;
 #[cfg(test)]
@@ -1073,8 +1073,7 @@ pub fn list_verified_project_head_refs(
     #[cfg(not(unix))]
     anyhow::bail!("secure project-ref enumeration is unavailable on this platform");
     #[cfg(unix)]
-    let Some(projects_directory) = open_directory_path_no_follow(&projects_root, false)?
-    else {
+    let Some(projects_directory) = open_directory_path_no_follow(&projects_root, false)? else {
         return Ok(Vec::new());
     };
     let mut heads = Vec::new();
@@ -2235,8 +2234,7 @@ pub(crate) fn list_generic_head_envelopes_structural(
     #[cfg(not(unix))]
     anyhow::bail!("secure generic-ref enumeration is unavailable on this platform");
     #[cfg(unix)]
-    let Some(root_directory) = open_directory_path_no_follow(&root, false)?
-    else {
+    let Some(root_directory) = open_directory_path_no_follow(&root, false)? else {
         return Ok(Vec::new());
     };
 
@@ -2466,8 +2464,7 @@ pub fn list_verified_deployed_project_refs(
     #[cfg(not(unix))]
     anyhow::bail!("secure deployed-ref enumeration is unavailable on this platform");
     #[cfg(unix)]
-    let Some(projects_directory) = open_directory_path_no_follow(&projects_root, false)?
-    else {
+    let Some(projects_directory) = open_directory_path_no_follow(&projects_root, false)? else {
         return Ok(Vec::new());
     };
     let mut heads = Vec::new();
@@ -3043,17 +3040,19 @@ mod tests {
             "subject",
         )
         .unwrap();
-        assert!(advance_verified_generic_head_ref_in_directory(
-            &refs_directory,
-            "admissions/policy",
-            "subject",
-            &second,
-            Some(&first),
-            &signer,
-            &trust,
-            &replacement_lock,
-        )
-        .is_err());
+        assert!(
+            advance_verified_generic_head_ref_in_directory(
+                &refs_directory,
+                "admissions/policy",
+                "subject",
+                &second,
+                Some(&first),
+                &signer,
+                &trust,
+                &replacement_lock,
+            )
+            .is_err()
+        );
 
         advance_verified_project_head_ref_in_directory(
             &refs_directory,
@@ -3132,43 +3131,51 @@ mod tests {
             1
         );
         validate_authoritative_ref_namespaces_in_directory(&refs_directory).unwrap();
-        assert!(remove_generic_head_ref_in_directory(
-            &refs_directory,
-            "admissions/policy",
-            "subject",
-            &generic_lock,
-        )
-        .unwrap());
-        assert!(read_verified_generic_head_ref_in_directory(
-            &refs_directory,
-            "admissions/policy",
-            "subject",
-            &trust,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            remove_generic_head_ref_in_directory(
+                &refs_directory,
+                "admissions/policy",
+                "subject",
+                &generic_lock,
+            )
+            .unwrap()
+        );
+        assert!(
+            read_verified_generic_head_ref_in_directory(
+                &refs_directory,
+                "admissions/policy",
+                "subject",
+                &trust,
+            )
+            .unwrap()
+            .is_none()
+        );
 
-        assert!(read_verified_project_head_ref_in_directory(
-            &replacement,
-            "principal-a",
-            "project-a",
-            &trust,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            read_verified_project_head_ref_in_directory(
+                &replacement,
+                "principal-a",
+                "project-a",
+                &trust,
+            )
+            .unwrap()
+            .is_none()
+        );
         assert!(
             read_verified_deployed_project_ref_in_directory(&replacement, "project-a", &trust,)
                 .unwrap()
                 .is_none()
         );
-        assert!(read_verified_generic_head_ref_in_directory(
-            &replacement,
-            "admissions/policy",
-            "subject",
-            &trust,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            read_verified_generic_head_ref_in_directory(
+                &replacement,
+                "admissions/policy",
+                "subject",
+                &trust,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
@@ -3180,26 +3187,30 @@ mod tests {
         let target = "11".repeat(32);
         let valid_lock = GenericHeadLock::acquire(&refs_root, "namespace", "name").unwrap();
 
-        assert!(write_verified_generic_head_ref(
-            &refs_root,
-            "../escape",
-            "name",
-            &target,
-            &signer,
-            &trust,
-            &valid_lock,
-        )
-        .is_err());
-        assert!(write_verified_generic_head_ref(
-            &refs_root,
-            "namespace",
-            "../escape",
-            &target,
-            &signer,
-            &trust,
-            &valid_lock,
-        )
-        .is_err());
+        assert!(
+            write_verified_generic_head_ref(
+                &refs_root,
+                "../escape",
+                "name",
+                &target,
+                &signer,
+                &trust,
+                &valid_lock,
+            )
+            .is_err()
+        );
+        assert!(
+            write_verified_generic_head_ref(
+                &refs_root,
+                "namespace",
+                "../escape",
+                &target,
+                &signer,
+                &trust,
+                &valid_lock,
+            )
+            .is_err()
+        );
         assert!(list_verified_generic_head_refs(&refs_root, "../escape", &trust).is_err());
     }
 

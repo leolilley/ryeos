@@ -15,7 +15,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use ryeos_api::{handlers as service_handlers, ServiceAvailability, ServiceDescriptor};
+use ryeos_api::{ServiceAvailability, ServiceDescriptor, handlers as service_handlers};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
 use ryeos_engine::item_resolution::parse_signature_header;

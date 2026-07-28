@@ -640,18 +640,22 @@ mod tests {
             )
             .unwrap_err();
         assert!(format!("{pythonpath_err:#}").contains("PYTHONPATH"));
-        assert!(EnvContractBuilder::new()
-            .with_bindings(
-                EnvSourceKind::RuntimeDescriptor,
-                vec![("RYEOS_PYTHON".to_string(), "bad".to_string())],
-            )
-            .is_err());
-        assert!(EnvContractBuilder::new()
-            .with_bindings(
-                EnvSourceKind::RuntimeDescriptor,
-                vec![("PATH".to_string(), "bad".to_string())],
-            )
-            .is_err());
+        assert!(
+            EnvContractBuilder::new()
+                .with_bindings(
+                    EnvSourceKind::RuntimeDescriptor,
+                    vec![("RYEOS_PYTHON".to_string(), "bad".to_string())],
+                )
+                .is_err()
+        );
+        assert!(
+            EnvContractBuilder::new()
+                .with_bindings(
+                    EnvSourceKind::RuntimeDescriptor,
+                    vec![("PATH".to_string(), "bad".to_string())],
+                )
+                .is_err()
+        );
     }
 
     #[test]

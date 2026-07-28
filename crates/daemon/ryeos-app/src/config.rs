@@ -11,7 +11,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use directories::BaseDirs;
 use ryeos_engine::roots::{InstallRoot, RuntimeRoot};
 use serde::{Deserialize, Serialize};

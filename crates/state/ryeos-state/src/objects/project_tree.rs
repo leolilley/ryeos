@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use anyhow::Context;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::thread_snapshot::validate_canonical_hash;
 

@@ -1431,18 +1431,22 @@ mod tests {
         write_raw_object_at(&cas_root, &wrong_hash, canonical.as_bytes());
         let wrong = collect_object_closure(&cas_root, [wrong_hash]).unwrap();
         assert!(!wrong.is_complete());
-        assert!(wrong.malformed_objects[0]
-            .reason
-            .contains("object bytes hash mismatch"));
+        assert!(
+            wrong.malformed_objects[0]
+                .reason
+                .contains("object bytes hash mismatch")
+        );
 
         let pretty = serde_json::to_vec_pretty(&value).unwrap();
         let pretty_hash = lillux::sha256_hex(&pretty);
         write_raw_object_at(&cas_root, &pretty_hash, &pretty);
         let noncanonical = collect_object_closure(&cas_root, [pretty_hash]).unwrap();
         assert!(!noncanonical.is_complete());
-        assert!(noncanonical.malformed_objects[0]
-            .reason
-            .contains("canonical JSON"));
+        assert!(
+            noncanonical.malformed_objects[0]
+                .reason
+                .contains("canonical JSON")
+        );
     }
 
     #[test]
@@ -1495,10 +1499,12 @@ mod tests {
 
         let report = collect_object_closure(&cas_root, [manifest]).unwrap();
         assert!(!report.is_complete());
-        assert!(report
-            .malformed_objects
-            .iter()
-            .any(|object| object.reason.contains("does not match embedded")));
+        assert!(
+            report
+                .malformed_objects
+                .iter()
+                .any(|object| object.reason.contains("does not match embedded"))
+        );
     }
 
     #[test]

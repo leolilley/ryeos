@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;

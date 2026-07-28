@@ -1,7 +1,7 @@
 [package]
 name = "ryeos-tracing"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Shared tracing infrastructure for Rye OS workspace"
 license.workspace = true
 

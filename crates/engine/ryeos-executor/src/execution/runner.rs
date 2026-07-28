@@ -20,13 +20,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use tokio::task;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{ExecutionCompletion, ProjectContext};
-use ryeos_engine::protocol_vocabulary::{produce_env_value, CallbackChannel, EnvInjectionSource};
+use ryeos_engine::protocol_vocabulary::{CallbackChannel, EnvInjectionSource, produce_env_value};
 use ryeos_engine::subprocess_spec::SubprocessBuildRequest;
 
 use ryeos_app::callback_token::effective_bundle_id_for_request;
@@ -37,7 +37,7 @@ use ryeos_app::launch_metadata::ResumeContext;
 use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{
-    is_terminal_status, StopIfAdmissionOpenOutcome, StopIntent, ThreadDetail,
+    StopIfAdmissionOpenOutcome, StopIntent, ThreadDetail, is_terminal_status,
 };
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{
@@ -453,7 +453,7 @@ pub(crate) fn stop_owner_dropped_execution_tree(
             return Ok(OwnerDropStopOutcome::Settled);
         }
         OwnerDropThreadOutcome::PreservedForShutdown => {
-            return Ok(OwnerDropStopOutcome::PreservedForShutdown)
+            return Ok(OwnerDropStopOutcome::PreservedForShutdown);
         }
         OwnerDropThreadOutcome::Settled => {}
     }
@@ -517,7 +517,7 @@ fn stop_owner_dropped_thread(state: &AppState, thread_id: &str) -> Result<OwnerD
     {
         StopIfAdmissionOpenOutcome::Requested(runtime) => runtime,
         StopIfAdmissionOpenOutcome::AlreadyTerminal => {
-            return Ok(OwnerDropThreadOutcome::AlreadyTerminal)
+            return Ok(OwnerDropThreadOutcome::AlreadyTerminal);
         }
         StopIfAdmissionOpenOutcome::PreservedForFollow => {
             tracing::debug!(
@@ -527,7 +527,7 @@ fn stop_owner_dropped_thread(state: &AppState, thread_id: &str) -> Result<OwnerD
             return Ok(OwnerDropThreadOutcome::AlreadyTerminal);
         }
         StopIfAdmissionOpenOutcome::PreservedForShutdown => {
-            return Ok(OwnerDropThreadOutcome::PreservedForShutdown)
+            return Ok(OwnerDropThreadOutcome::PreservedForShutdown);
         }
     };
 
@@ -3670,7 +3670,7 @@ fn fail_thread_static_owned(
         Ok(true) => return Ok(ExecutionCleanupOutcome::DurableStopSettled),
         Ok(false) => {}
         Err(error) => {
-            return Err(error.context("settle durable stop before owned failure finalization"))
+            return Err(error.context("settle durable stop before owned failure finalization"));
         }
     }
     if !state.state_store.process_attachment_admission_is_open() {
@@ -4541,13 +4541,13 @@ mod tests {
             }
             (ProjectContext::LocalPath { path: root }, None) => {
                 ryeos_state::objects::ExecutionProjectAuthority::live(
-                root.clone(),
-                format!("local:{}", root.display()),
-                ryeos_state::objects::LiveProjectAccess::ReadWrite,
-                ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
-                ryeos_state::objects::EnvironmentAuthority::None,
-                Vec::new(),
-            )
+                    root.clone(),
+                    format!("local:{}", root.display()),
+                    ryeos_state::objects::LiveProjectAccess::ReadWrite,
+                    ryeos_state::objects::LiveFilesystemConfinement::standard_descriptor_rooted(),
+                    ryeos_state::objects::EnvironmentAuthority::None,
+                    Vec::new(),
+                )
                 .unwrap()
             }
             (ProjectContext::LocalPath { path }, Some(pushed)) => {

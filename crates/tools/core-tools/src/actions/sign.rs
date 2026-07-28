@@ -25,11 +25,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use lillux::crypto::{DecodePrivateKey, SigningKey};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::SignatureEnvelope;
-use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindRegistry, KindSchema};
+use ryeos_engine::kind_registry::{KindRegistry, KindSchema, validate_metadata_anchoring};
 use std::sync::Arc;
 
 use ryeos_engine::handlers::HandlerRegistry;
@@ -412,7 +412,9 @@ fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | '*' | '?'))
     {
-        bail!("malformed canonical ref `{item_ref}`: glob bare_id contains invalid characters: {bare_id}");
+        bail!(
+            "malformed canonical ref `{item_ref}`: glob bare_id contains invalid characters: {bare_id}"
+        );
     }
 
     Ok(SignTarget {
@@ -482,8 +484,8 @@ fn glob_match_items(
     kind_schema: &KindSchema,
     pattern: &str,
 ) -> Result<Vec<PathBuf>> {
-    use glob::glob_with;
     use glob::MatchOptions;
+    use glob::glob_with;
 
     if !kind_dir.is_dir() {
         return Ok(Vec::new());

@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 /// Run `author` against a private copy of `bundle_root`, then atomically make
 /// the completed copy live.
@@ -141,7 +141,7 @@ fn create_staging_directory(parent: &Path, bundle_root: &Path) -> Result<PathBuf
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect publisher staging {}", staging.display()))
+                .with_context(|| format!("inspect publisher staging {}", staging.display()));
         }
     }
     fs::create_dir(&staging)
@@ -294,9 +294,11 @@ mod tests {
         })
         .expect_err("failed authoring must not commit");
 
-        assert!(error
-            .to_string()
-            .contains("simulated late publisher failure"));
+        assert!(
+            error
+                .to_string()
+                .contains("simulated late publisher failure")
+        );
         assert_eq!(fs::read(bundle.join("first")).unwrap(), b"old-first");
         assert_eq!(fs::read(bundle.join("second")).unwrap(), b"old-second");
         assert!(!bundle.join("third").exists());

@@ -4,12 +4,12 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail, EnvSourceKind};
 use crate::event_store_service::EventStoreService;
@@ -36,8 +36,8 @@ use ryeos_engine::history_policy::{
     ResolvedThreadHistoryPolicy,
 };
 use ryeos_engine::resolution::TrustClass as ResolutionTrustClass;
-use ryeos_state::objects::ThreadStatus;
 use ryeos_state::UsageSubject;
+use ryeos_state::objects::ThreadStatus;
 
 /// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
 /// can name the watch sort without a direct `ryeos-state` dependency.
@@ -48,12 +48,12 @@ mod sealed_request;
 mod validation;
 
 pub use direct_execution::{
-    prepare_item_plan, spawn_item, PreparedItemPlan, RunningItem, SpawnItemParams,
-    SpawnedItemAwaitingAttachment,
+    PreparedItemPlan, RunningItem, SpawnItemParams, SpawnedItemAwaitingAttachment,
+    prepare_item_plan, spawn_item,
 };
-pub use sealed_request::SealedRootExecutionRequest;
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
+pub use sealed_request::SealedRootExecutionRequest;
 
 use validation::{
     normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
@@ -1417,7 +1417,9 @@ impl RootExecutionAdmission {
             );
         }
         if request.ref_bindings != self.ref_bindings {
-            bail!("resolved execution request secondary identities do not match the sealed root admission");
+            bail!(
+                "resolved execution request secondary identities do not match the sealed root admission"
+            );
         }
         if request.current_site_id != self.plan_context.current_site_id
             || request.origin_site_id != self.plan_context.origin_site_id
@@ -5117,9 +5119,11 @@ mod tests {
                 .expect_err(
                     "equivalent engine configuration must not replace the provenance engine",
                 );
-        assert!(error
-            .to_string()
-            .contains("does not match execution provenance engine"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match execution provenance engine")
+        );
     }
 
     #[test]

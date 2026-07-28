@@ -26,10 +26,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 use crate::canonical_ref::CanonicalRef;
-use crate::config_loading::{resolve_config_spec, ConfigLoadContext, ConfigSpec};
+use crate::config_loading::{ConfigLoadContext, ConfigSpec, resolve_config_spec};
 use crate::error::EngineError;
 use crate::execution_policy::{
-    value_has_execution_policy_shape, ExecutionPolicyResolver, PolicySourceKind,
+    ExecutionPolicyResolver, PolicySourceKind, value_has_execution_policy_shape,
 };
 use crate::runtime::{CompileContext, RuntimeHandler};
 

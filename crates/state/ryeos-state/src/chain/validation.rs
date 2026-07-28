@@ -1371,12 +1371,14 @@ mod tests {
     fn terminal_snapshot_cannot_transition_again() {
         let previous = child(ThreadStatus::Failed, "2026-01-01T00:00:01Z");
         let mut next = child(ThreadStatus::Completed, "2026-01-01T00:00:02Z");
-        assert!(normalize_and_validate_snapshot_transition(
-            &previous,
-            &mut next,
-            "2026-01-01T00:00:02Z"
-        )
-        .is_err());
+        assert!(
+            normalize_and_validate_snapshot_transition(
+                &previous,
+                &mut next,
+                "2026-01-01T00:00:02Z"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1456,9 +1458,11 @@ mod tests {
             Some("T-root"),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not match continuation source"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match continuation source")
+        );
 
         continuation.upstream_thread_id = Some("T-root".into());
         continuation.result_project_snapshot_hash = Some("22".repeat(32));

@@ -4,7 +4,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use super::thread_snapshot::parse_canonical_timestamp;
-use super::{validate_object_kind, SCHEMA_VERSION};
+use super::{SCHEMA_VERSION, validate_object_kind};
 
 pub const BUNDLE_EVENT_KIND: &str = "bundle_event";
 /// Maximum canonical JSON size of one bundle event CAS object.

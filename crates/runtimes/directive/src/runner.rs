@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
@@ -21,8 +21,8 @@ use ryeos_accounting::{
 };
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
-    normalize_hook_dispatch_result, EnvelopeAccountingScope, RuntimeCost, RuntimeResult,
-    RuntimeResultStatus,
+    EnvelopeAccountingScope, RuntimeCost, RuntimeResult, RuntimeResultStatus,
+    normalize_hook_dispatch_result,
 };
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
@@ -510,65 +510,66 @@ fn build_ledger_settlement(
         );
     }
 
-    let spend =
-        match &authority.reconciliation {
-            ChargeReconciliationAuthority::ProviderReportedFinalCharge { .. } => match usage {
-                Some(usage) if !usage.spend_anomalies.is_empty() => SpendAccounting::Unavailable {
-                    diagnostic: bound_diagnostic(&usage.spend_anomalies.join("; ")),
-                },
-                Some(usage) if usage.reported_cost_usd_raw.is_some() => {
-                    SpendAccounting::ProviderReportedFinal {
-                        raw_decimal: usage
-                            .reported_cost_usd_raw
-                            .clone()
-                            .expect("guarded by is_some"),
-                    }
-                }
-                _ => SpendAccounting::Unavailable {
-                    diagnostic: bound_diagnostic(
-                        "provider did not report a usable final charge for the attempt",
-                    ),
-                },
+    let spend = match &authority.reconciliation {
+        ChargeReconciliationAuthority::ProviderReportedFinalCharge { .. } => match usage {
+            Some(usage) if !usage.spend_anomalies.is_empty() => SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(&usage.spend_anomalies.join("; ")),
             },
-            ChargeReconciliationAuthority::DeterministicTariff { tariff } => {
-                match usage.filter(|usage| usage.anomalies.is_empty()).and_then(|usage| {
-                tariff
-                    .covered_dimensions
-                    .as_slice()
-                    .iter()
-                    .map(|dimension| {
-                        let units = match dimension {
-                            BillableDimension::InputTokens => usage.input_tokens?,
-                            BillableDimension::OutputTokens => usage.output_tokens?,
-                            BillableDimension::ReasoningTokens => usage.reasoning_tokens?,
-                            BillableDimension::CacheReadTokens => usage.cache_read_tokens?,
-                            BillableDimension::CacheWriteTokens => usage.cache_write_tokens?,
-                            // The daemon adds the tariff's flat per-request
-                            // rate itself; no provider observation is needed.
-                            BillableDimension::PerRequest => return Some(None),
-                        };
-                        Some(Some(UnitCount {
-                            dimension: *dimension,
-                            units,
-                        }))
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .map(|counts| counts.into_iter().flatten().collect())
-            }) {
+            Some(usage) if usage.reported_cost_usd_raw.is_some() => {
+                SpendAccounting::ProviderReportedFinal {
+                    raw_decimal: usage
+                        .reported_cost_usd_raw
+                        .clone()
+                        .expect("guarded by is_some"),
+                }
+            }
+            _ => SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(
+                    "provider did not report a usable final charge for the attempt",
+                ),
+            },
+        },
+        ChargeReconciliationAuthority::DeterministicTariff { tariff } => {
+            match usage
+                .filter(|usage| usage.anomalies.is_empty())
+                .and_then(|usage| {
+                    tariff
+                        .covered_dimensions
+                        .as_slice()
+                        .iter()
+                        .map(|dimension| {
+                            let units = match dimension {
+                                BillableDimension::InputTokens => usage.input_tokens?,
+                                BillableDimension::OutputTokens => usage.output_tokens?,
+                                BillableDimension::ReasoningTokens => usage.reasoning_tokens?,
+                                BillableDimension::CacheReadTokens => usage.cache_read_tokens?,
+                                BillableDimension::CacheWriteTokens => usage.cache_write_tokens?,
+                                // The daemon adds the tariff's flat per-request
+                                // rate itself; no provider observation is needed.
+                                BillableDimension::PerRequest => return Some(None),
+                            };
+                            Some(Some(UnitCount {
+                                dimension: *dimension,
+                                units,
+                            }))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .map(|counts| counts.into_iter().flatten().collect())
+                }) {
                 Some(unit_counts) => SpendAccounting::TariffUnits { unit_counts },
                 None => SpendAccounting::Unavailable {
-                diagnostic: bound_diagnostic(
+                    diagnostic: bound_diagnostic(
                         "deterministic tariff settlement is missing a covered billable dimension",
-                ),
-            },
+                    ),
+                },
             }
-            }
-            ChargeReconciliationAuthority::Unavailable => SpendAccounting::Unavailable {
-                diagnostic: bound_diagnostic(
-                    "route declares no charge reconciliation authority for issued attempts",
-                ),
-            },
-        };
+        }
+        ChargeReconciliationAuthority::Unavailable => SpendAccounting::Unavailable {
+            diagnostic: bound_diagnostic(
+                "route declares no charge reconciliation authority for issued attempts",
+            ),
+        },
+    };
     (spend, tokens)
 }
 
@@ -999,7 +1000,7 @@ impl Runner {
                                 Err(error) => {
                                     break Err(anyhow::anyhow!(
                                         "provider_spend_bound_unverified: {error:#}"
-                                    ))
+                                    ));
                                 }
                             };
                             match self
@@ -2609,15 +2610,20 @@ impl Runner {
                                 };
                                 if let Err(e) = self.callback.finalize_thread(completion).await {
                                     guard.finalized = true;
-                                    return Self::attach_warnings(RuntimeResult {
-                                        success: false,
-                                        status: RuntimeResultStatus::Failed,
-                                        thread_id: self.thread_id.clone(),
-                                        result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
-                                        outputs: json!({}),
-                                        cost: Some(self.budget.cost()),
-                                        warnings: std::mem::take(&mut warnings),
-                                    }, &mut warnings);
+                                    return Self::attach_warnings(
+                                        RuntimeResult {
+                                            success: false,
+                                            status: RuntimeResultStatus::Failed,
+                                            thread_id: self.thread_id.clone(),
+                                            result: Some(json!(format!(
+                                                "resume-critical callback finalize_thread failed: {e}"
+                                            ))),
+                                            outputs: json!({}),
+                                            cost: Some(self.budget.cost()),
+                                            warnings: std::mem::take(&mut warnings),
+                                        },
+                                        &mut warnings,
+                                    );
                                 }
                                 let mut result = self.finalize(json!("directive_return"));
                                 result.outputs = args;
@@ -3786,16 +3792,14 @@ impl Runner {
         match self.callback.emit_thread_usage(usage).await {
             Ok(()) => Ok(()),
             Err(append_error) => {
-                let replay =
-                    self.callback
-                        .replay_thread(&self.thread_id)
-                        .await
-                        .map_err(|replay_error| {
-                            anyhow::anyhow!(
+                let replay = self.callback.replay_thread(&self.thread_id).await.map_err(
+                    |replay_error| {
+                        anyhow::anyhow!(
                             "resume-critical callback emit_thread_usage failed: {append_error}; \
                              ACK recovery replay also failed: {replay_error}"
                         )
-                        })?;
+                    },
+                )?;
                 if replay.events.iter().rev().any(|event| {
                     event.event_type == RuntimeEventType::ThreadUsage.as_str()
                         && event.payload == expected
@@ -3838,7 +3842,7 @@ impl Runner {
                     return Ok(CostBreakdown {
                         usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    })
+                    });
                 }
                 (Some(i), Some(o)) => (
                     ryeos_directive_core::ModelPricing {
@@ -3851,7 +3855,7 @@ impl Runner {
                     return Ok(CostBreakdown {
                         usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    })
+                    });
                 }
             }
         };
@@ -4542,9 +4546,11 @@ mod tests {
             }),
         ] {
             match normalize_hook_dispatch_result(envelope) {
-                Ok(output) => assert!(output
-                    .failure
-                    .is_some_and(|failure| failure.contains("hook_child_failed"))),
+                Ok(output) => assert!(
+                    output
+                        .failure
+                        .is_some_and(|failure| failure.contains("hook_child_failed"))
+                ),
                 Err(error) => assert!(error.contains("hook_child_failed")),
             }
         }

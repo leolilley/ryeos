@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::node_config::{NodeConfigSection, NodeItemContext, SectionRecord, SectionSourcePolicy};

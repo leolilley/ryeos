@@ -1192,11 +1192,13 @@ mod tests {
 
     #[test]
     fn runtime_binary_ref_validation_preserves_nested_binary_paths() {
-        assert!(validate_runtime_binary_ref(
-            &test_path(),
-            "bin/x86_64-unknown-linux-gnu/tools/test-runtime",
-        )
-        .is_ok());
+        assert!(
+            validate_runtime_binary_ref(
+                &test_path(),
+                "bin/x86_64-unknown-linux-gnu/tools/test-runtime",
+            )
+            .is_ok()
+        );
     }
 
     #[test]

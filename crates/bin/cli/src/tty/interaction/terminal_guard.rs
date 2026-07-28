@@ -1,6 +1,6 @@
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};

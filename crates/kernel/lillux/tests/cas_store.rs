@@ -9,11 +9,11 @@ use std::fs;
 use std::path::Path;
 
 #[cfg(unix)]
-use lillux::cas::atomic_write_batch_in_pinned_root;
-use lillux::cas::{atomic_write_batch, canonical_json, shard_path, valid_hash, CasStore};
-use lillux::sha256_hex;
-#[cfg(unix)]
 use lillux::PinnedDirectory;
+#[cfg(unix)]
+use lillux::cas::atomic_write_batch_in_pinned_root;
+use lillux::cas::{CasStore, atomic_write_batch, canonical_json, shard_path, valid_hash};
+use lillux::sha256_hex;
 
 /// True when `dir` holds no atomic-write temp file (`*.tmp.<pid>`).
 fn no_temp_files_left(dir: &Path) -> bool {
@@ -246,9 +246,11 @@ fn blob_capture_prune_rejects_unknown_staging_entries() {
     let error = store
         .prune_abandoned_blob_captures(false)
         .expect_err("unknown stage must fail closed");
-    assert!(error
-        .to_string()
-        .contains("unexpected CAS blob capture staging entry"));
+    assert!(
+        error
+            .to_string()
+            .contains("unexpected CAS blob capture staging entry")
+    );
     assert!(unknown.is_file());
 }
 
@@ -329,10 +331,12 @@ fn cas_store_rejects_a_symlinked_root() {
 
     assert!(store.get_blob(&hash).is_err());
     assert!(store.store_blob(b"must not escape").is_err());
-    assert!(fs::read_dir(&outside)
-        .expect("outside listing")
-        .next()
-        .is_none());
+    assert!(
+        fs::read_dir(&outside)
+            .expect("outside listing")
+            .next()
+            .is_none()
+    );
 }
 
 // ── atomic write crash-window behavior ─────────────────────────────────
@@ -412,11 +416,10 @@ fn pinned_atomic_batch_rejects_targets_outside_its_root() {
         .expect("root exists");
     let outside = tmp.path().join("outside");
 
-    assert!(atomic_write_batch_in_pinned_root(
-        &root,
-        &[(outside.clone(), b"must not escape".to_vec())]
-    )
-    .is_err());
+    assert!(
+        atomic_write_batch_in_pinned_root(&root, &[(outside.clone(), b"must not escape".to_vec())])
+            .is_err()
+    );
     assert!(!outside.exists());
 }
 

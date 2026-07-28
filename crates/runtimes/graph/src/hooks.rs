@@ -11,15 +11,15 @@
 
 use serde_json::Value;
 
+use ryeos_runtime::CompiledHook;
 use ryeos_runtime::callback::{
-    parse_hook_action, CallbackError, DispatchActionRequest, HookDispatchOccurrence,
+    CallbackError, DispatchActionRequest, HookDispatchOccurrence, parse_hook_action,
 };
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
-    normalize_hook_dispatch_result, RuntimeCost, HOOK_INTEGRITY_FAILURE_CODE,
+    HOOK_INTEGRITY_FAILURE_CODE, RuntimeCost, normalize_hook_dispatch_result,
 };
-use ryeos_runtime::hooks_eval::{run_hooks, HookDispatcher, HookRunError};
-use ryeos_runtime::CompiledHook;
+use ryeos_runtime::hooks_eval::{HookDispatcher, HookRunError, run_hooks};
 
 /// Fire every hook matching `event` against `context`. Returns `Err` with a
 /// diagnostic when a hook's condition, action evaluation, or dispatch fails
@@ -186,9 +186,11 @@ mod tests {
             }),
         ] {
             match normalize_hook_dispatch_result(env) {
-                Ok(output) => assert!(output
-                    .failure
-                    .is_some_and(|failure| failure.contains("hook_child_failed"))),
+                Ok(output) => assert!(
+                    output
+                        .failure
+                        .is_some_and(|failure| failure.contains("hook_child_failed"))
+                ),
                 Err(error) => assert!(error.contains("hook_child_failed")),
             }
         }
@@ -228,20 +230,22 @@ mod tests {
         let ctx = json!({"event": "graph_started"});
         // Empty hook list → Ok, and the dispatcher (which would panic here) is
         // never built.
-        assert!(run_graph_hooks(
-            &client,
-            "T-test",
-            "/tmp",
-            &[],
-            HookDispatchOccurrence::GraphStarted {
-                graph_run_id: "run-1".to_string(),
-                definition_ref: "graph:test/fixture".to_string(),
-                definition_hash: "definition-hash".to_string(),
-            },
-            &ctx,
-        )
-        .await
-        .is_ok());
+        assert!(
+            run_graph_hooks(
+                &client,
+                "T-test",
+                "/tmp",
+                &[],
+                HookDispatchOccurrence::GraphStarted {
+                    graph_run_id: "run-1".to_string(),
+                    definition_ref: "graph:test/fixture".to_string(),
+                    definition_hash: "definition-hash".to_string(),
+                },
+                &ctx,
+            )
+            .await
+            .is_ok()
+        );
     }
 
     struct NoopClient;

@@ -42,8 +42,8 @@ use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
 use crate::error::EngineError;
-use crate::item_resolution::{enumerate_kind_refs, resolve_item_full, ResolutionRoots};
-use crate::kind_registry::{apply_extraction_rules, KindRegistry, KindSchema};
+use crate::item_resolution::{ResolutionRoots, enumerate_kind_refs, resolve_item_full};
+use crate::kind_registry::{KindRegistry, KindSchema, apply_extraction_rules};
 use crate::parsers::ParserDispatcher;
 
 /// One inventoried item, fully resolved by the daemon's engine. The

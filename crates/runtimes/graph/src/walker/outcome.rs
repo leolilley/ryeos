@@ -714,9 +714,11 @@ mod history_tests {
             accounting.total.as_ref().map(|total| total.input_tokens),
             Some(i64::MAX as u64)
         );
-        assert!(budgets
-            .failure()
-            .is_some_and(|error| error.contains("settlement storage maximum")));
+        assert!(
+            budgets
+                .failure()
+                .is_some_and(|error| error.contains("settlement storage maximum"))
+        );
     }
 
     #[test]
@@ -766,8 +768,10 @@ mod history_tests {
         };
 
         assert!(!budgets.accept_receipt(&receipt));
-        assert!(budgets
-            .failure()
-            .is_some_and(|error| error.contains("basis")));
+        assert!(
+            budgets
+                .failure()
+                .is_some_and(|error| error.contains("basis"))
+        );
     }
 }

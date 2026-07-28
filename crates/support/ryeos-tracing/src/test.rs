@@ -78,11 +78,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use tracing::{span, Event, Id, Level, Subscriber};
+use tracing::{Event, Id, Level, Subscriber, span};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 /// A recorded span with its fields, child spans, and events.
 #[derive(Debug, Clone)]
@@ -353,8 +353,8 @@ impl tracing::field::Visit for EventFieldRecorder<'_> {
 pub fn prime_callsites() {
     use std::sync::Once;
     use tracing::subscriber::set_global_default;
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
+    use tracing_subscriber::layer::SubscriberExt;
     static PRIMED: Once = Once::new();
     PRIMED.call_once(|| {
         let subscriber =

@@ -4,7 +4,7 @@ mod test_state;
 use test_state::build_test_state;
 
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::{extract_handler_error, HandlerError};
+use ryeos_app::handler_error::{HandlerError, extract_handler_error};
 use ryeos_ui::browser_session::LaunchContext;
 use ryeos_ui::state::get_ui_state;
 use serde_json::json;
@@ -68,12 +68,13 @@ async fn ryeos_config_is_isolated_by_durable_user_principal() {
     assert_eq!(loaded_b["theme"], "system");
 
     let principal_a_key = "aa".repeat(32);
-    assert!(tmp
-        .path()
-        .join(".ai/principals")
-        .join(principal_a_key)
-        .join("space/.ai/config/ryeos-ui.yaml")
-        .is_file());
+    assert!(
+        tmp.path()
+            .join(".ai/principals")
+            .join(principal_a_key)
+            .join("space/.ai/config/ryeos-ui.yaml")
+            .is_file()
+    );
 }
 
 #[tokio::test]

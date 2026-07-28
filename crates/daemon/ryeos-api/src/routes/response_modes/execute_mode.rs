@@ -21,7 +21,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::remote::config::{LoadedRemote, ProjectSyncScope, ResolvedRemote, TargetSiteError};
 use crate::route_error::{RouteConfigError, RouteDispatchError};
@@ -33,7 +33,7 @@ use ryeos_app::execution_policy::{
     PinnedRealization, PinnedSource, ProjectExecutionPolicy, TerminalPublication,
 };
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
-use ryeos_executor::execution::project_source::{self, ProjectSource, NO_PROJECT_SENTINEL};
+use ryeos_executor::execution::project_source::{self, NO_PROJECT_SENTINEL, ProjectSource};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use ryeos_state::ignore::IgnoreMatcher;
 
@@ -1933,7 +1933,9 @@ fn map_forward_error_to_dispatch(
         RemoteForwardError::PullUnrelatedSnapshot { pushed, result } => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
                 target_site_id: target_site_id.to_string(),
-                detail: format!("remote result snapshot '{result}' is not a descendant of pushed snapshot '{pushed}'"),
+                detail: format!(
+                    "remote result snapshot '{result}' is not a descendant of pushed snapshot '{pushed}'"
+                ),
             }
         }
     }

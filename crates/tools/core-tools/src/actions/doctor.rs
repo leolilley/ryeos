@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
@@ -214,12 +214,16 @@ fn check_manifest(source: &Path) -> CheckResult {
     } else if declares_runtime_authority {
         (
             WARN,
-            json!("manifest name differs from the directory AND this bundle declares runtime authority — if the items' effective bundle id does not equal the manifest name, the daemon will reject runtime-cap minting. Verify with `ryeos bundle publish` (it hard-fails a real mismatch)."),
+            json!(
+                "manifest name differs from the directory AND this bundle declares runtime authority — if the items' effective bundle id does not equal the manifest name, the daemon will reject runtime-cap minting. Verify with `ryeos bundle publish` (it hard-fails a real mismatch)."
+            ),
         )
     } else {
         (
             WARN,
-            json!("manifest name differs from the directory; pass --name on publish if the effective bundle id differs"),
+            json!(
+                "manifest name differs from the directory; pass --name on publish if the effective bundle id differs"
+            ),
         )
     };
     CheckResult::new(
@@ -249,7 +253,7 @@ fn check_verify(
                 "verify",
                 FAIL,
                 json!({ "error": format!("isolation policy unavailable: {reason}") }),
-            )
+            );
         }
     };
     let manifest_source = source
@@ -532,9 +536,11 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".ai")).unwrap();
         let r = check_manifest(tmp.path());
         assert_eq!(r.status, FAIL);
-        assert!(r.detail["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("required")));
+        assert!(
+            r.detail["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("required"))
+        );
     }
 
     #[test]
@@ -546,10 +552,12 @@ mod tests {
         );
         let r = check_manifest(tmp.path());
         assert_eq!(r.status, FAIL, "{:?}", r.detail);
-        assert!(r.detail["remedy"]
-            .as_str()
-            .unwrap()
-            .contains("manifest-sign"));
+        assert!(
+            r.detail["remedy"]
+                .as_str()
+                .unwrap()
+                .contains("manifest-sign")
+        );
     }
 
     #[test]
@@ -572,10 +580,12 @@ mod tests {
             "error should name the offending field: {:?}",
             r.detail
         );
-        assert!(r.detail["remedy"]
-            .as_str()
-            .unwrap()
-            .contains("runtime_authority:"));
+        assert!(
+            r.detail["remedy"]
+                .as_str()
+                .unwrap()
+                .contains("runtime_authority:")
+        );
         // The raw serde error is preserved for context.
         assert!(r.detail["serde_error"].is_string());
     }

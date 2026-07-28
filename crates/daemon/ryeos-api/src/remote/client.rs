@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::Verifier;
 use serde_json::Value;
@@ -2688,20 +2688,24 @@ mod tests {
         .validate_against_request(&[a.clone(), b.clone()], &[])
         .unwrap();
 
-        assert!(ObjectsHasResponse {
-            found_object_hashes: vec![a.clone()],
-            ..Default::default()
-        }
-        .validate_against_request(&[a.clone(), b.clone()], &[])
-        .is_err());
+        assert!(
+            ObjectsHasResponse {
+                found_object_hashes: vec![a.clone()],
+                ..Default::default()
+            }
+            .validate_against_request(&[a.clone(), b.clone()], &[])
+            .is_err()
+        );
 
-        assert!(ObjectsHasResponse {
-            found_blob_hashes: vec![a.clone()],
-            missing_blob_hashes: vec![a.clone()],
-            ..Default::default()
-        }
-        .validate_against_request(&[], &[a, b])
-        .is_err());
+        assert!(
+            ObjectsHasResponse {
+                found_blob_hashes: vec![a.clone()],
+                missing_blob_hashes: vec![a.clone()],
+                ..Default::default()
+            }
+            .validate_against_request(&[], &[a, b])
+            .is_err()
+        );
     }
 
     #[test]
@@ -2781,12 +2785,16 @@ mod tests {
         response
             .validate_against_request(&"11".repeat(32), Some("local-node-v1"))
             .unwrap();
-        assert!(response
-            .validate_against_request(&"33".repeat(32), Some("local-node-v1"))
-            .is_err());
-        assert!(response
-            .validate_against_request(&"11".repeat(32), Some("other"))
-            .is_err());
+        assert!(
+            response
+                .validate_against_request(&"33".repeat(32), Some("local-node-v1"))
+                .is_err()
+        );
+        assert!(
+            response
+                .validate_against_request(&"11".repeat(32), Some("other"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2992,9 +3000,11 @@ mod tests {
                 }]
             }))
             .unwrap();
-        assert!(mismatched_attempt
-            .validate_against_request("job-a")
-            .is_err());
+        assert!(
+            mismatched_attempt
+                .validate_against_request("job-a")
+                .is_err()
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::projection::{project_event, project_thread_snapshot, ProjectionDb};
+use crate::projection::{ProjectionDb, project_event, project_thread_snapshot};
 use crate::refs::{self, TrustStore};
 use crate::state_db::{
     ProjectionRecoveryObserver, ProjectionRecoveryProgress, ProjectionRecoveryStage,
@@ -805,16 +805,18 @@ fn with_projection_sqlite_cancellation<T>(
     let result = std::thread::scope(|scope| {
         let (finished_tx, finished_rx) = std::sync::mpsc::channel();
         let interrupted = &interrupted;
-        scope.spawn(move || loop {
-            match finished_rx.recv_timeout(SQLITE_CANCELLATION_POLL_EVERY) {
-                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if observer.is_cancelled() {
-                        interrupted.store(true, std::sync::atomic::Ordering::Release);
-                        // Keep interrupting until the scoped operation exits:
-                        // cancellation may become visible just before SQLite
-                        // starts its next scan/sort statement.
-                        interrupt.interrupt();
+        scope.spawn(move || {
+            loop {
+                match finished_rx.recv_timeout(SQLITE_CANCELLATION_POLL_EVERY) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if observer.is_cancelled() {
+                            interrupted.store(true, std::sync::atomic::Ordering::Release);
+                            // Keep interrupting until the scoped operation exits:
+                            // cancellation may become visible just before SQLite
+                            // starts its next scan/sort statement.
+                            interrupt.interrupt();
+                        }
                     }
                 }
             }

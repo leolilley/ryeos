@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use base64::Engine;
 use lillux::crypto::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;

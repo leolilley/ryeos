@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -59,7 +59,7 @@ use ryeos_engine::protocol_vocabulary::CallbackChannel;
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
 use crate::dispatch_error::DispatchError;
-use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
+use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
 use crate::execution::launch;
 use crate::executor::{
     self as service_executor, ExecutionContext, ExecutionMode, ServiceExecutionResult,
@@ -70,8 +70,8 @@ use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 mod subprocess_execution;
 mod subprocess_policy;
 pub(crate) use subprocess_execution::{dispatch_subprocess, validate_ordinary_protocol_contract};
-pub(crate) use subprocess_policy::strip_binary_ref_prefix;
 pub use subprocess_policy::PreparedManagedLaunch;
+pub(crate) use subprocess_policy::strip_binary_ref_prefix;
 use subprocess_policy::{
     enforce_runtime_caps, prepare_managed_launch, require_terminal_executor_id,
 };
@@ -152,7 +152,7 @@ pub(crate) fn require_callback_runtime_protocol<'a>(
                     "verified runtime '{}' declares non-subprocess terminator {other:?}",
                     verified_runtime.canonical_ref
                 ),
-            })
+            });
         }
         None => {
             return Err(DispatchError::SchemaMisconfigured {
@@ -161,7 +161,7 @@ pub(crate) fn require_callback_runtime_protocol<'a>(
                     "verified runtime '{}' has no subprocess terminator",
                     verified_runtime.canonical_ref
                 ),
-            })
+            });
         }
     };
     let protocol = engine
@@ -2421,7 +2421,10 @@ pub async fn dispatch_service(
             // through `anyhow`. Recover that typed error here so it keeps its
             // HTTP status — a blanket `?` would re-wrap it as `Internal` (500),
             // dropping the 404/409/etc. that the route path preserves.
-            .map_err(|e| e.downcast::<DispatchError>().unwrap_or_else(DispatchError::Internal))?;
+            .map_err(|e| {
+                e.downcast::<DispatchError>()
+                    .unwrap_or_else(DispatchError::Internal)
+            })?;
             let envelope = serde_json::json!({
                 "thread": {
                     "thread_id": result.invocation_id,
@@ -4358,7 +4361,7 @@ mod tests {
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-    use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+    use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
     #[test]
     fn cancelled_method_root_publication_preserves_launch_cancelled_contract() {

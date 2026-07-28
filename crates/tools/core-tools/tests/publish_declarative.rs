@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use lillux::crypto::{DecodePrivateKey, SigningKey};
-use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
 fn host_triple() -> String {
     let output = std::process::Command::new("rustc")

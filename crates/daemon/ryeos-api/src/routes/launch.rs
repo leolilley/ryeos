@@ -741,8 +741,8 @@ fn spawn_dispatch_launch_inner(
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     #[test]
@@ -824,10 +824,11 @@ mod tests {
         // test yields, so this exercises the same unpolled-abort boundary as
         // abort-registry refusal in `spawn_dispatch_launch_inner`.
         task.abort();
-        assert!(task
-            .await
-            .expect_err("task must be aborted before first poll")
-            .is_cancelled());
+        assert!(
+            task.await
+                .expect_err("task must be aborted before first poll")
+                .is_cancelled()
+        );
         assert!(dropped.load(Ordering::SeqCst));
     }
 

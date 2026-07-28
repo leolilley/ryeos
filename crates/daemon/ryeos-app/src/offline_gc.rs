@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::config::{Config, ConfigSources};
 use crate::runtime_db::{RuntimeDb, RuntimeThreadHistoryDiscardReport};
-use crate::state_lock::{default_lock_path, StateLock};
+use crate::state_lock::{StateLock, default_lock_path};
 
 #[derive(Debug, Clone, Default)]
 pub struct OfflineThreadHistoryGcOptions {

@@ -18,11 +18,11 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use lillux::crypto::{DecodePublicKey, VerifyingKey};
 
-use ryeos_engine::trust::{compute_fingerprint, pin_key, PublisherTrustDoc};
+use ryeos_engine::trust::{PublisherTrustDoc, compute_fingerprint, pin_key};
 
 // ── Pin from PUBLISHER_TRUST.toml ────────────────────────────────────
 

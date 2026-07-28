@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use serde::de::DeserializeOwned;
@@ -917,10 +917,12 @@ pem = """
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("content hash mismatch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("content hash mismatch")
+        );
     }
 
     #[test]
@@ -942,10 +944,12 @@ pem = """
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("signature verification failed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("signature verification failed")
+        );
     }
 
     #[test]

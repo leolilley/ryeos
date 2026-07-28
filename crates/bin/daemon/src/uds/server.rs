@@ -3,11 +3,11 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
-use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
+use serde_json::json;
 use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 
@@ -1501,7 +1501,7 @@ mod tests {
     use ryeos_app::callback_token::CallbackCapabilityStore;
     use ryeos_app::command_service::CommandService;
     use ryeos_app::event_store_service::EventStoreService;
-    use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+    use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
     use ryeos_app::identity::NodeIdentity;
     use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
@@ -1606,9 +1606,11 @@ mod tests {
                     .expect("claimed test launch exists")
             }
         };
-        assert!(state
-            .callback_tokens
-            .set_launch_owner(&capability.token, claim.claimed_by.clone()));
+        assert!(
+            state
+                .callback_tokens
+                .set_launch_owner(&capability.token, claim.claimed_by.clone())
+        );
         capability.launch_owner = Some(claim.claimed_by);
         capability
     }
@@ -2058,13 +2060,15 @@ mod tests {
 
         assert_eq!(response, json!({"inputs": []}));
         assert!(cognition_inputs(&state, thread_id).is_empty());
-        assert!(state
-            .state_store
-            .get_thread(thread_id)
-            .unwrap()
-            .unwrap()
-            .successor_thread_id
-            .is_none());
+        assert!(
+            state
+                .state_store
+                .get_thread(thread_id)
+                .unwrap()
+                .unwrap()
+                .successor_thread_id
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -2093,10 +2097,12 @@ mod tests {
         assert_eq!(response["delivery"], "submitted");
         assert_eq!(response["thread_id"].as_str(), Some(thread_id));
         assert_eq!(response["pending"].as_u64(), Some(1));
-        assert!(response["notice"]
-            .as_str()
-            .unwrap()
-            .contains("missing_pgid"));
+        assert!(
+            response["notice"]
+                .as_str()
+                .unwrap()
+                .contains("missing_pgid")
+        );
         let first = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
         let second = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
         assert_eq!(first["inputs"].as_array().unwrap().len(), 1);
@@ -2109,13 +2115,15 @@ mod tests {
             cognition_inputs(&state, thread_id),
             vec!["change course".to_string()]
         );
-        assert!(state
-            .state_store
-            .get_thread(thread_id)
-            .unwrap()
-            .unwrap()
-            .successor_thread_id
-            .is_none());
+        assert!(
+            state
+                .state_store
+                .get_thread(thread_id)
+                .unwrap()
+                .unwrap()
+                .successor_thread_id
+                .is_none()
+        );
     }
 
     fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {
@@ -4308,10 +4316,12 @@ mod tests {
                 limit: 100,
             })
             .unwrap();
-        assert!(!replay
-            .events
-            .iter()
-            .any(|event| event.event_type == "cognition_out"));
+        assert!(
+            !replay
+                .events
+                .iter()
+                .any(|event| event.event_type == "cognition_out")
+        );
     }
 
     #[tokio::test]

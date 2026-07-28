@@ -31,7 +31,7 @@ use crate::render_text;
 
 use primitives::draw_lines;
 use text::{display_width, truncate};
-use theme::{tone_style, BG, FG};
+use theme::{BG, FG, tone_style};
 
 pub struct RyeOsTerminalRenderer {
     prev: Option<TextSurface>,

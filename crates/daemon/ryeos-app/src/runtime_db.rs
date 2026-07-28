@@ -3,17 +3,17 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use rusqlite::{
-    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::launch_metadata::{RuntimeLaunchMetadata, LAUNCH_METADATA_SCHEMA_VERSION};
+use crate::launch_metadata::{LAUNCH_METADATA_SCHEMA_VERSION, RuntimeLaunchMetadata};
 use crate::process::{
-    validate_execution_process_identity_shape, ExecutionProcessIdentity,
-    PROCESS_IDENTITY_SCHEMA_VERSION,
+    ExecutionProcessIdentity, PROCESS_IDENTITY_SCHEMA_VERSION,
+    validate_execution_process_identity_shape,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5966,7 +5966,9 @@ impl RuntimeDb {
             || child.3 != child_chain_root_id
             || child.4 != sealed_root_request
         {
-            bail!("follow waiter {follow_key} child index {item_index} conflicts with persisted child/spec");
+            bail!(
+                "follow waiter {follow_key} child index {item_index} conflicts with persisted child/spec"
+            );
         }
         tx.commit()?;
         Ok(())
@@ -6133,7 +6135,9 @@ impl RuntimeDb {
                 || terminal_status.is_none()
                 || stored_envelope.is_none()
             {
-                bail!("follow child chain {child_chain_root_id} has a partial persisted terminal tuple");
+                bail!(
+                    "follow child chain {child_chain_root_id} has a partial persisted terminal tuple"
+                );
             }
             let same_envelope = stored_envelope
                 .as_deref()
@@ -6955,9 +6959,11 @@ mod tests {
                 &RuntimeLaunchMetadata::default(),
             )
             .unwrap_err();
-        assert!(attach_error
-            .to_string()
-            .contains("cannot attach an external process"));
+        assert!(
+            attach_error
+                .to_string()
+                .contains("cannot attach an external process")
+        );
 
         db.mark_in_process_handler_birth_running("T-service")
             .unwrap();
@@ -6974,33 +6980,38 @@ mod tests {
             .unwrap();
         assert_eq!(pins.in_process_handler_reservations, 1);
         assert!(!pins.is_empty());
-        assert!(db
-            .settle_in_process_handler_reservation("T-service")
-            .unwrap());
-        assert!(db
-            .settle_in_process_handler_reservation("T-service")
-            .unwrap());
+        assert!(
+            db.settle_in_process_handler_reservation("T-service")
+                .unwrap()
+        );
+        assert!(
+            db.settle_in_process_handler_reservation("T-service")
+                .unwrap()
+        );
         assert_eq!(
             db.in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
                 .unwrap()[0]
                 .phase,
             InProcessHandlerReservationPhase::TerminalConfirmed
         );
-        assert!(db
-            .delete_terminal_in_process_handler_reservation("T-service")
-            .unwrap());
-        assert!(db
-            .in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.delete_terminal_in_process_handler_reservation("T-service")
+                .unwrap()
+        );
+        assert!(
+            db.in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             db.get_runtime_info("T-service").unwrap().is_some(),
             "terminal settlement retains historical runtime diagnostics"
         );
-        assert!(db
-            .inspect_chain_recovery_pins("T-service", &["T-service".to_string()])
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.inspect_chain_recovery_pins("T-service", &["T-service".to_string()])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -7012,14 +7023,16 @@ mod tests {
             &in_process_launch_metadata(),
         )
         .unwrap();
-        assert!(db
-            .discard_pending_in_process_handler_birth("T-pending")
-            .unwrap());
+        assert!(
+            db.discard_pending_in_process_handler_birth("T-pending")
+                .unwrap()
+        );
         assert!(db.get_runtime_info("T-pending").unwrap().is_none());
-        assert!(db
-            .in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+                .unwrap()
+                .is_empty()
+        );
 
         db.reserve_in_process_handler_birth(
             "T-running",
@@ -7074,16 +7087,18 @@ mod tests {
             .set_launch_metadata("T-generic", &in_process_launch_metadata())
             .unwrap_err();
         assert!(error.to_string().contains("atomic birth reservation"));
-        assert!(db
-            .get_runtime_info("T-generic")
-            .unwrap()
-            .unwrap()
-            .launch_metadata
-            .is_none());
-        assert!(db
-            .in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.get_runtime_info("T-generic")
+                .unwrap()
+                .unwrap()
+                .launch_metadata
+                .is_none()
+        );
+        assert!(
+            db.in_process_handler_reservations_after(None, IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -7199,17 +7214,18 @@ mod tests {
             assert_eq!(persisted, state);
         }
 
-        assert!(db
-            .conn
-            .execute(
-                "INSERT INTO execution_workspace
+        assert!(
+            db.conn
+                .execute(
+                    "INSERT INTO execution_workspace
                      (workspace_id, lower_snapshot, root_path, state,
                       created_at_ms, updated_at_ms)
                  VALUES ('workspace-invalid', 'snapshot', '/tmp/workspace-invalid',
                          'invalid', 1, 1)",
-                [],
-            )
-            .is_err());
+                    [],
+                )
+                .is_err()
+        );
     }
 
     fn rewrite_as_recognized_runtime_predecessor(
@@ -7387,15 +7403,16 @@ mod tests {
             .unwrap(),
             "T-child-first"
         );
-        assert!(db
-            .reserve_detached_spawn_intent(
+        assert!(
+            db.reserve_detached_spawn_intent(
                 &operation_id,
                 "T-parent",
                 &"f".repeat(64),
                 "T-child-retry",
                 None,
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -7504,9 +7521,10 @@ mod tests {
             "thread": {"id": "T-hook", "status": "completed"},
             "result": {"accepted": false}
         });
-        assert!(db
-            .complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &divergent)
-            .is_err());
+        assert!(
+            db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &divergent)
+                .is_err()
+        );
     }
 
     #[test]
@@ -7514,20 +7532,22 @@ mod tests {
         let (_tmp, db) = fresh_db();
         let seed = hook_seed();
         db.reserve_hook_dispatch(&seed).unwrap();
-        assert!(db
-            .complete_hook_dispatch(
+        assert!(
+            db.complete_hook_dispatch(
                 &seed.dispatch_key,
                 &seed.request_hash,
                 &serde_json::json!({"result": {}}),
             )
-            .is_err());
+            .is_err()
+        );
         let oversize = serde_json::json!({
             "thread": {},
             "result": {"body": "x".repeat(MAX_HOOK_DISPATCH_RESPONSE_BYTES)}
         });
-        assert!(db
-            .complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &oversize)
-            .is_err());
+        assert!(
+            db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &oversize)
+                .is_err()
+        );
 
         let response = hook_response();
         db.complete_hook_dispatch(&seed.dispatch_key, &seed.request_hash, &response)
@@ -7738,9 +7758,11 @@ mod tests {
         // was not.
         let settled = db.settle_open_commands("t1", "cancelled").unwrap();
         assert_eq!(settled.len(), 2, "both open commands settled");
-        assert!(settled
-            .iter()
-            .all(|r| r.completed_at.is_some() && r.result.is_some()));
+        assert!(
+            settled
+                .iter()
+                .all(|r| r.completed_at.is_some() && r.result.is_some())
+        );
         assert_eq!(
             db.get_command(cancel.command_id).unwrap().unwrap().status,
             "completed",
@@ -7757,10 +7779,11 @@ mod tests {
             "pending"
         );
         // Idempotent: nothing open remains to settle.
-        assert!(db
-            .settle_open_commands("t1", "cancelled")
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.settle_open_commands("t1", "cancelled")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -7788,9 +7811,10 @@ mod tests {
                 params: None,
             })
             .unwrap();
-        assert!(db
-            .complete_command(command.command_id, "completed", Some(&oversized))
-            .is_err());
+        assert!(
+            db.complete_command(command.command_id, "completed", Some(&oversized))
+                .is_err()
+        );
         assert_eq!(
             db.get_command(command.command_id).unwrap().unwrap().status,
             "pending",
@@ -7812,14 +7836,15 @@ mod tests {
         }
 
         for command_type in ["", "pause", "Cancel", "continue "] {
-            assert!(db
-                .submit_command(&NewCommandRecord {
+            assert!(
+                db.submit_command(&NewCommandRecord {
                     thread_id: "invalid-command".to_string(),
                     command_type: command_type.to_string(),
                     requested_by: None,
                     params: None,
                 })
-                .is_err());
+                .is_err()
+            );
         }
         let invalid_count: i64 = db
             .conn
@@ -7853,9 +7878,10 @@ mod tests {
             .unwrap();
 
         let oversized_terminal_status = "x".repeat(MAX_COMMAND_RESULT_BYTES);
-        assert!(db
-            .settle_open_commands("settlement-bounds", &oversized_terminal_status)
-            .is_err());
+        assert!(
+            db.settle_open_commands("settlement-bounds", &oversized_terminal_status)
+                .is_err()
+        );
         for command_id in [first.command_id, second.command_id] {
             let command = db.get_command(command_id).unwrap().unwrap();
             assert_eq!(command.status, "pending");
@@ -7927,14 +7953,15 @@ mod tests {
             })
             .unwrap();
         }
-        assert!(db
-            .submit_command(&NewCommandRecord {
+        assert!(
+            db.submit_command(&NewCommandRecord {
                 thread_id: "bounded-thread".to_string(),
                 command_type: "cancel".to_string(),
                 requested_by: None,
                 params: None,
             })
-            .is_err());
+            .is_err()
+        );
         let open_count: i64 = db
             .conn
             .query_row(
@@ -8062,9 +8089,11 @@ mod tests {
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
-            assert!(columns
-                .iter()
-                .any(|column| column == "child_project_authority"));
+            assert!(
+                columns
+                    .iter()
+                    .any(|column| column == "child_project_authority")
+            );
         }
         drop(db);
         let reopened = RuntimeDb::open(&path).unwrap();
@@ -8086,10 +8115,11 @@ mod tests {
         );
         // Width 2 reached — the third member queues.
         db.launch_window_insert("c3", "P:gr:fan", 2, 3).unwrap();
-        assert!(db
-            .launch_window_admit("P:gr:fan", None, 3)
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.launch_window_admit("P:gr:fan", None, 3)
+                .unwrap()
+                .is_empty()
+        );
         assert!(db.launch_window_is_queued("c3").unwrap());
         assert!(db.launch_window_is_member("c3").unwrap());
         assert!(!db.launch_window_is_queued("c1").unwrap());
@@ -8100,10 +8130,11 @@ mod tests {
         assert!(!db.launch_window_is_queued("c3").unwrap());
 
         // Releasing a non-member is a no-op.
-        assert!(db
-            .launch_window_release("nope", None, 5)
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.launch_window_release("nope", None, 5)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -8116,10 +8147,11 @@ mod tests {
             db.launch_window_admit("P:one", Some(1), 3).unwrap(),
             vec!["a1"]
         );
-        assert!(db
-            .launch_window_admit("Q:two", Some(1), 4)
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.launch_window_admit("Q:two", Some(1), 4)
+                .unwrap()
+                .is_empty()
+        );
         // The release under the same ceiling hands the slot across windows
         // only via that window's own admit — the sweep drives other keys.
         assert_eq!(
@@ -8717,13 +8749,15 @@ mod tests {
             .unwrap();
         assert_eq!(stored.cancellation_mode, None);
 
-        assert!(db
-            .remove_seeded_continuation_runtime("T-next", "T-root", &initial)
-            .unwrap());
+        assert!(
+            db.remove_seeded_continuation_runtime("T-next", "T-root", &initial)
+                .unwrap()
+        );
         assert!(db.get_runtime_info("T-next").unwrap().is_none());
-        assert!(!db
-            .remove_seeded_continuation_runtime("T-next", "T-root", &initial)
-            .unwrap());
+        assert!(
+            !db.remove_seeded_continuation_runtime("T-next", "T-root", &initial)
+                .unwrap()
+        );
     }
 
     #[test]
@@ -8765,10 +8799,11 @@ mod tests {
         db.delete_chain_runtime("chain", &["root".to_string()])
             .unwrap();
         assert!(db.get_runtime_info("root").unwrap().is_none());
-        assert!(db
-            .get_runtime_info("orphan-runtime-member")
-            .unwrap()
-            .is_none());
+        assert!(
+            db.get_runtime_info("orphan-runtime-member")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -8799,10 +8834,11 @@ mod tests {
         assert!(!pins.is_empty());
 
         assert!(db.release_thread_launch_claim("t1", "claim-1").unwrap());
-        assert!(db
-            .inspect_chain_recovery_pins("c1", &["t1".to_string()])
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.inspect_chain_recovery_pins("c1", &["t1".to_string()])
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -9080,9 +9116,10 @@ mod tests {
         db.mark_follow_waiting("fk-cohort").unwrap();
 
         let envelope_1 = serde_json::json!({"success": true, "result": 1});
-        assert!(!db
-            .mark_follow_child_terminal("chain-1", "tail-1", "completed", &envelope_1)
-            .unwrap());
+        assert!(
+            !db.mark_follow_child_terminal("chain-1", "tail-1", "completed", &envelope_1)
+                .unwrap()
+        );
         assert_eq!(
             db.get_follow_waiter_by_key("fk-cohort")
                 .unwrap()
@@ -9092,9 +9129,10 @@ mod tests {
         );
 
         let envelope_0 = serde_json::json!({"success": true, "result": 0});
-        assert!(db
-            .mark_follow_child_terminal("chain-0", "tail-0", "completed", &envelope_0)
-            .unwrap());
+        assert!(
+            db.mark_follow_child_terminal("chain-0", "tail-0", "completed", &envelope_0)
+                .unwrap()
+        );
         let ready = db.get_follow_waiter_by_key("fk-cohort").unwrap().unwrap();
         assert_eq!(ready.phase, follow_phase::READY);
         assert_eq!(ready.children[0].item_index, 0);
@@ -9121,8 +9159,8 @@ mod tests {
             &sealed,
         )
         .unwrap();
-        assert!(db
-            .set_follow_child(
+        assert!(
+            db.set_follow_child(
                 "fk1",
                 0,
                 item_ref,
@@ -9131,7 +9169,8 @@ mod tests {
                 "chain-1",
                 &sealed,
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -9158,23 +9197,26 @@ mod tests {
         assert_eq!(by_succ.follow_key, "fk1");
 
         // Unrelated ids miss.
-        assert!(db
-            .get_follow_waiter_by_parent_thread("nope")
-            .unwrap()
-            .is_none());
+        assert!(
+            db.get_follow_waiter_by_parent_thread("nope")
+                .unwrap()
+                .is_none()
+        );
         assert!(db.get_follow_waiter_by_successor("nope").unwrap().is_none());
 
         // Cleared waiter is invisible to both accessors (terminal history moves
         // to the projection's continuation edge).
         db.clear_follow_waiter("fk1").unwrap();
-        assert!(db
-            .get_follow_waiter_by_parent_thread("parent-1")
-            .unwrap()
-            .is_none());
-        assert!(db
-            .get_follow_waiter_by_successor("succ-1")
-            .unwrap()
-            .is_none());
+        assert!(
+            db.get_follow_waiter_by_parent_thread("parent-1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.get_follow_waiter_by_successor("succ-1")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -9341,18 +9383,21 @@ mod tests {
         db.mark_follow_waiting("fk1").unwrap();
 
         let env_a = serde_json::json!({"success": true, "result": "A"});
-        assert!(db
-            .mark_follow_child_terminal("chain-1", "c-tail", "completed", &env_a)
-            .unwrap());
+        assert!(
+            db.mark_follow_child_terminal("chain-1", "c-tail", "completed", &env_a)
+                .unwrap()
+        );
         // Same data again: idempotent no-op (no error, no rewrite).
-        assert!(!db
-            .mark_follow_child_terminal("chain-1", "c-tail", "completed", &env_a)
-            .unwrap());
+        assert!(
+            !db.mark_follow_child_terminal("chain-1", "c-tail", "completed", &env_a)
+                .unwrap()
+        );
         // Conflicting terminal data is refused; the row keeps the first result.
         let env_b = serde_json::json!({"success": false, "result": "B"});
-        assert!(db
-            .mark_follow_child_terminal("chain-1", "c-other", "failed", &env_b)
-            .is_err());
+        assert!(
+            db.mark_follow_child_terminal("chain-1", "c-other", "failed", &env_b)
+                .is_err()
+        );
         let w = db.get_follow_waiter_by_key("fk1").unwrap().unwrap();
         assert_eq!(w.children[0].terminal_envelope, Some(env_a));
         assert_eq!(w.children[0].terminal_thread_id.as_deref(), Some("c-tail"));

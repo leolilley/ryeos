@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::callback::*;
 use crate::daemon_rpc::{DaemonRpcClient, RpcError};

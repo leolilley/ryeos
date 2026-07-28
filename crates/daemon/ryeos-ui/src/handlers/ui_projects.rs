@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
-use ryeos_app::handler_error::{parse_request, HandlerError};
+use ryeos_app::handler_error::{HandlerError, parse_request};
 use ryeos_app::principal::{
-    HostedPrincipalResolver, LockedPrincipalStore, PrincipalStore, LOCAL_PRINCIPAL_ID,
+    HostedPrincipalResolver, LOCAL_PRINCIPAL_ID, LockedPrincipalStore, PrincipalStore,
 };
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;
@@ -777,9 +777,10 @@ mod tests {
     #[test]
     fn unsupported_versions_are_rejected() {
         let err = ensure_version("projects.yaml", 2, 1).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("unsupported projects.yaml version 2"));
+        assert!(
+            err.to_string()
+                .contains("unsupported projects.yaml version 2")
+        );
     }
 
     #[test]

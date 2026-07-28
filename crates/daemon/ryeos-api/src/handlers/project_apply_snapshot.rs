@@ -19,7 +19,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use lillux::cas::CasStore;
 use serde_json::Value;
 
@@ -1172,14 +1172,18 @@ mod tests {
         assert!(project.path().join(".ai/directives/new.md").exists());
         assert!(!project.path().join(".ai/directives/old.md").exists());
         assert!(!project.path().join(".ai/tools").exists());
-        assert!(project
-            .path()
-            .join(".ai/config/schedules/new.yaml")
-            .exists());
-        assert!(!project
-            .path()
-            .join(".ai/config/schedules/old.yaml")
-            .exists());
+        assert!(
+            project
+                .path()
+                .join(".ai/config/schedules/new.yaml")
+                .exists()
+        );
+        assert!(
+            !project
+                .path()
+                .join(".ai/config/schedules/old.yaml")
+                .exists()
+        );
         assert_eq!(
             std::fs::read_to_string(project.path().join(".ai/node/schedules/runtime.yaml"))
                 .unwrap(),

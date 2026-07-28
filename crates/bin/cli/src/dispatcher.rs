@@ -475,7 +475,7 @@ fn stream_descriptor_path(response: &Value) -> Result<Option<(String, bool)>, Cl
                 detail: format!(
                     "unsupported stream follow mode '{other}' (expected 'thread' or 'chain')"
                 ),
-            })
+            });
         }
     };
     Ok(Some((path.to_string(), braid)))
@@ -900,7 +900,7 @@ fn strip_declared_control_flags(
                 Some(other) => {
                     return Err(CliError::Local {
                         detail: format!("invalid value for --{name}: {other}"),
-                    })
+                    });
                 }
             };
             if !on {
@@ -1388,12 +1388,12 @@ async fn post_to_daemon_streaming(
     match terminal {
         Some(Err(StreamTerminalFailure::Io(error))) => return Err(CliError::Io(error)),
         Some(Err(StreamTerminalFailure::Outcome(detail))) => {
-            return Err(CliError::Reported { detail })
+            return Err(CliError::Reported { detail });
         }
         None => {
             return Err(CliError::Local {
                 detail: "execute stream ended before a terminal event".into(),
-            })
+            });
         }
         Some(Ok(())) => {}
     }
@@ -1453,7 +1453,7 @@ fn print_result(
     match presenter.structured_result(&command, &payload, previous_lines)? {
         crate::presenter::StructuredPresentation::Rendered => return Ok(()),
         crate::presenter::StructuredPresentation::Failed(detail) => {
-            return Err(CliError::Local { detail })
+            return Err(CliError::Local { detail });
         }
         crate::presenter::StructuredPresentation::Machine => {}
     }
@@ -2219,9 +2219,10 @@ mod tests {
             out[0..4],
             s(&["remote", "bind-project", "--remote", "prod"])
         );
-        assert!(out
-            .windows(2)
-            .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy())
+        );
     }
 
     #[test]
@@ -2244,9 +2245,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
-        assert!(out
-            .windows(2)
-            .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy())
+        );
     }
 
     #[test]

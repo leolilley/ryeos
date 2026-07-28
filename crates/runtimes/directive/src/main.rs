@@ -21,7 +21,7 @@ mod runner;
 mod spend_verifier;
 mod startup_timing;
 
-use ryeos_directive_core::{ResolvedProviderSnapshot, PROVIDER_SNAPSHOT_KEY};
+use ryeos_directive_core::{PROVIDER_SNAPSHOT_KEY, ResolvedProviderSnapshot};
 use ryeos_runtime::envelope::{LaunchEnvelope, RuntimeResult, RuntimeResultStatus};
 use ryeos_runtime::events::RuntimeEventType;
 

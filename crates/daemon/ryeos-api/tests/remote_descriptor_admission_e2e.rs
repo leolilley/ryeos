@@ -1,15 +1,15 @@
 mod test_state;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use ryeos_api::handlers::{remote_admit, remote_bind_project, remote_configure};

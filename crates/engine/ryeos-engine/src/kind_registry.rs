@@ -2886,9 +2886,11 @@ composed_value_contract:
             .and_then(|execution| execution.history_policy.as_ref())
             .expect("history policy declaration");
         assert_eq!(declaration.composed_path, "history");
-        assert!(registry
-            .schema_content_hash("service")
-            .is_some_and(|hash| hash.len() == 64));
+        assert!(
+            registry
+                .schema_content_hash("service")
+                .is_some_and(|hash| hash.len() == 64)
+        );
     }
 
     #[test]

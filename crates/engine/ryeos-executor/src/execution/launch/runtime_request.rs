@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 

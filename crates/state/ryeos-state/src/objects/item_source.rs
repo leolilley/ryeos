@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A single file captured from a project snapshot.
 #[derive(Debug, Clone)]

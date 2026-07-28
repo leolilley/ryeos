@@ -552,29 +552,35 @@ mod tests {
     fn plain_or_tampered_manifest_ref_is_rejected() {
         let key = SigningKey::from_bytes(&[20; 32]);
         let hash = "ab".repeat(32);
-        assert!(verify_signed_executor_manifest_ref(
-            &format!("{hash}\n"),
-            trusted_key(&key),
-            TrustClass::TrustedBundle,
-        )
-        .is_err());
+        assert!(
+            verify_signed_executor_manifest_ref(
+                &format!("{hash}\n"),
+                trusted_key(&key),
+                TrustClass::TrustedBundle,
+            )
+            .is_err()
+        );
 
         let cross_protocol_signature =
             lillux::signature::sign_content(&format!("{hash}\n"), &key, "#", None);
-        assert!(verify_signed_executor_manifest_ref(
-            &cross_protocol_signature,
-            trusted_key(&key),
-            TrustClass::TrustedBundle,
-        )
-        .is_err());
+        assert!(
+            verify_signed_executor_manifest_ref(
+                &cross_protocol_signature,
+                trusted_key(&key),
+                TrustClass::TrustedBundle,
+            )
+            .is_err()
+        );
 
         let signed = sign_manifest_ref(&hash, &key).replace(&hash, &"cd".repeat(32));
-        assert!(verify_signed_executor_manifest_ref(
-            &signed,
-            trusted_key(&key),
-            TrustClass::TrustedBundle,
-        )
-        .is_err());
+        assert!(
+            verify_signed_executor_manifest_ref(
+                &signed,
+                trusted_key(&key),
+                TrustClass::TrustedBundle,
+            )
+            .is_err()
+        );
     }
 
     #[test]

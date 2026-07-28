@@ -672,12 +672,9 @@ fn compile_signed_payload_item(
                     &format!("{label} from=header only accepts `header`"),
                 ));
             }
-            let name = raw
-                .header
-                .as_ref()
-                .ok_or_else(|| {
-                    cfg_err(route_id, &format!("{label} from=header requires `header`"))
-                })?;
+            let name = raw.header.as_ref().ok_or_else(|| {
+                cfg_err(route_id, &format!("{label} from=header requires `header`"))
+            })?;
             let h = validate_header_name(route_id, &format!("{label}.header"), name)?;
             Ok(SignedPayloadItem::Header(h))
         }
@@ -726,9 +723,7 @@ fn compile_signed_payload_item(
                 )
             })?;
             validate_json_path(route_id, &format!("{label}.path"), path)?;
-            Ok(SignedPayloadItem::BodyJsonPath {
-                path: path.clone(),
-            })
+            Ok(SignedPayloadItem::BodyJsonPath { path: path.clone() })
         }
         "synthesized" => Err(cfg_err(
             route_id,
@@ -967,15 +962,17 @@ fn compile_value_extract(
                 parse_synthesized_template(route_id, &format!("{label}.template"), template)?;
             Ok(ValueExtract::Synthesized(parts))
         }
-        other => {
-            Err(cfg_err(
-                route_id,
-                &format!(
+        other => Err(cfg_err(
+            route_id,
+            &format!(
                 "{label} unknown `from` '{other}'; allowed: header, header_pair, body_json_path{}",
-                if allow_synthesized { ", synthesized" } else { "" }
+                if allow_synthesized {
+                    ", synthesized"
+                } else {
+                    ""
+                }
             ),
-            ))
-        }
+        )),
     }
 }
 

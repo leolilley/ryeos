@@ -22,10 +22,10 @@ use std::time::Instant;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::kind_registry::LaunchAugmentationDecl;
 use ryeos_engine::resolution::ResolutionOutput;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::compose_cache::{CacheLookup, CachedComposeProjection};
 use super::LaunchAugmentationError;
+use super::compose_cache::{CacheLookup, CachedComposeProjection};
 
 const AUGMENTATION_RUNTIME_TIMEOUT_SECS: u64 = 60;
 
@@ -815,17 +815,17 @@ pub async fn run(
         crate::dispatch::MethodFinalizeOutcome::AlreadyTerminal => {
             return Err(LaunchAugmentationError::Threads(format!(
                 "augmentation child {child_thread_id} became terminal before its validated projection was committed"
-            )))
+            )));
         }
         crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => {
             return Err(LaunchAugmentationError::Threads(format!(
                 "augmentation child {child_thread_id} completed after a durable stop won"
-            )))
+            )));
         }
         crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown => {
             return Err(LaunchAugmentationError::Threads(format!(
                 "augmentation child {child_thread_id} was preserved for daemon shutdown recovery"
-            )))
+            )));
         }
     }
     if let Some(fill) = cache_fill.take() {
@@ -1331,7 +1331,7 @@ fn extract_rendered_meta(
 mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
-    use std::sync::{mpsc, Arc};
+    use std::sync::{Arc, mpsc};
     #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
 

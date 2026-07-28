@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use serde_json::json;
 
-use crate::object_closure::{collect_object_closure_with_cas_and_limits, ObjectClosureLimits};
+use crate::object_closure::{ObjectClosureLimits, collect_object_closure_with_cas_and_limits};
 use crate::{
     AdmissionAttestationState, Attestation, CasEntryKind, CasEntryState,
     NewAdmissionAttestationRecord, NewCasEntryAttribution, Signer, StateDb,
@@ -439,9 +439,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("invalid admission policy"));
-        assert!(db
-            .list_admission_attestations_for_subject(&subject_hash, None)
-            .unwrap()
-            .is_empty());
+        assert!(
+            db.list_admission_attestations_for_subject(&subject_hash, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

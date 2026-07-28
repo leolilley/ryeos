@@ -14,13 +14,13 @@ pub mod types;
 
 pub use alias::AliasResolver;
 pub use context::ResolutionContext;
-pub use corpus::{resolve_item_for_corpus, CorpusItemProjection, CorpusReferenceEdge};
+pub use corpus::{CorpusItemProjection, CorpusReferenceEdge, resolve_item_for_corpus};
 pub use decl::ResolutionStepDecl;
 pub use types::{
-    effective_trust, AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode,
-    ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput,
-    ResolutionProvenance, ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName,
-    ResolvedAncestor, TrustClass,
+    AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode, ResolutionEdge,
+    ResolutionError, ResolutionFailureClass, ResolutionOutput, ResolutionProvenance,
+    ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName, ResolvedAncestor,
+    TrustClass, effective_trust,
 };
 
 use crate::canonical_ref::CanonicalRef;

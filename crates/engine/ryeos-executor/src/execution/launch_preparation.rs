@@ -19,7 +19,7 @@ use ryeos_handler_protocol::{
     LaunchDiagnosticScalarWire, LaunchPrepareError, LaunchPrepareErrorClass, LaunchPrepareRequest,
     LaunchPrepareResponse, LaunchPreparedItemWire, LaunchSecretOriginWire, TrustClassWire,
 };
-use ryeos_runtime::authorizer::{canonical_cap, AuthorizationPolicy};
+use ryeos_runtime::authorizer::{AuthorizationPolicy, canonical_cap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -590,7 +590,13 @@ fn validate_result(
     let expected: BTreeSet<_> = contract.required_runtime_data.iter().collect();
     let actual: BTreeSet<_> = result.runtime_data.keys().collect();
     if actual != expected {
-        return Err(preparation_error("launch_preparer_runtime_data_mismatch", format!("runtime_data keys do not match signed contract: expected {expected:?}, got {actual:?}"), LaunchPrepareErrorClass::Internal));
+        return Err(preparation_error(
+            "launch_preparer_runtime_data_mismatch",
+            format!(
+                "runtime_data keys do not match signed contract: expected {expected:?}, got {actual:?}"
+            ),
+            LaunchPrepareErrorClass::Internal,
+        ));
     }
     let mut aggregate = 0usize;
     for (name, value) in &result.runtime_data {
@@ -750,7 +756,13 @@ fn validate_secret_origin(
             if valid {
                 Ok(())
             } else {
-                Err(preparation_error("launch_secret_origin_invalid", format!("config origin `{name}/{canonical_id}` does not match its verified snapshot"), LaunchPrepareErrorClass::Internal))
+                Err(preparation_error(
+                    "launch_secret_origin_invalid",
+                    format!(
+                        "config origin `{name}/{canonical_id}` does not match its verified snapshot"
+                    ),
+                    LaunchPrepareErrorClass::Internal,
+                ))
             }
         }
     }

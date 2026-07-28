@@ -6,7 +6,7 @@
 //! the terminal event. Deliberately NOT the TUI timeline widget — this is a
 //! plain stdout log for the CLI.
 
-use ryeos_state::event_types::{thread_terminal_outcome, ThreadOutcomeKind};
+use ryeos_state::event_types::{ThreadOutcomeKind, thread_terminal_outcome};
 use serde_json::Value;
 
 use crate::transport::http::SseEvent;
@@ -371,16 +371,20 @@ mod tests {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         );
-        assert!(nonterminal_failure_detail("graph_step_completed", &payload)
-            .unwrap()
-            .ends_with("diagnostic-tail-marker"));
+        assert!(
+            nonterminal_failure_detail("graph_step_completed", &payload)
+                .unwrap()
+                .ends_with("diagnostic-tail-marker")
+        );
         payload
             .as_object_mut()
             .unwrap()
             .insert("status".to_string(), serde_json::json!("retry"));
-        assert!(nonterminal_failure_detail("graph_step_completed", &payload)
-            .unwrap()
-            .ends_with("diagnostic-tail-marker"));
+        assert!(
+            nonterminal_failure_detail("graph_step_completed", &payload)
+                .unwrap()
+                .ends_with("diagnostic-tail-marker")
+        );
         assert!(nonterminal_failure_detail("tool_call_result", &payload).is_none());
     }
 

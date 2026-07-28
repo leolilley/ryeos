@@ -54,7 +54,7 @@ use std::env::VarError;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 use ryeos_engine::roots;
 
@@ -65,10 +65,10 @@ use ryeos_engine::roots;
 // fixtures, dispatch) need so this module's surface is unchanged.
 pub use ryeos_vault::paths::default_sealed_store_path;
 pub use ryeos_vault::policy::{
+    BLOCKED_NAMES, INTERNAL_RUNTIME_VAULT_PREFIX, MAX_VAULT_ENTRIES, MAX_VAULT_ENVELOPE_BYTES,
+    MAX_VAULT_KEY_BYTES, MAX_VAULT_PLAINTEXT_BYTES, MAX_VAULT_VALUE_BYTES,
     is_internal_runtime_vault_key, validate_decrypted_keys, validate_key_name,
-    validate_secret_value, BLOCKED_NAMES, INTERNAL_RUNTIME_VAULT_PREFIX, MAX_VAULT_ENTRIES,
-    MAX_VAULT_ENVELOPE_BYTES, MAX_VAULT_KEY_BYTES, MAX_VAULT_PLAINTEXT_BYTES,
-    MAX_VAULT_VALUE_BYTES,
+    validate_secret_value,
 };
 pub use ryeos_vault::sealed::{recover_rewrap, with_store_lock, write_sealed_secrets};
 
@@ -426,7 +426,7 @@ pub fn read_required_secrets_with_authority(
                     return Err(VaultReadError::AuthorityViolation(
                         "projectless authority cannot carry a project environment overlay"
                             .to_string(),
-                    ))
+                    ));
                 }
             };
             let expected_authority_id = lillux::sha256_hex(

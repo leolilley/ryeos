@@ -1178,20 +1178,24 @@ mod tests {
         contradictory.admitted_project_authority =
             Some(ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS);
         let error = contradictory.validate().unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("contains subprocess-only authority"));
+        assert!(
+            error
+                .to_string()
+                .contains("contains subprocess-only authority")
+        );
     }
 
     #[test]
     fn in_process_handler_metadata_rejects_missing_or_recoverable_lifecycle_authority() {
         let missing = RuntimeLaunchMetadata::default()
             .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
-        assert!(missing
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("has no lifecycle authority"));
+        assert!(
+            missing
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("has no lifecycle authority")
+        );
 
         let recoverable = RuntimeLaunchMetadata::default()
             .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
@@ -1208,11 +1212,13 @@ mod tests {
         let no_driver = RuntimeLaunchMetadata::default().with_in_process_lifecycle_authority(
             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
         );
-        assert!(no_driver
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("requires the in-process handler launch driver"));
+        assert!(
+            no_driver
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("requires the in-process handler launch driver")
+        );
     }
 
     #[test]

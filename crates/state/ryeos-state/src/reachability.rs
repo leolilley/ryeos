@@ -10,8 +10,8 @@ use anyhow::Result;
 
 use crate::object_closure::collect_object_closure;
 use crate::refs::{
-    list_verified_deployed_project_refs, list_verified_generic_head_refs,
-    list_verified_project_head_refs, TrustStore,
+    TrustStore, list_verified_deployed_project_refs, list_verified_generic_head_refs,
+    list_verified_project_head_refs,
 };
 
 /// Complete set of reachable hashes from all signed heads.
@@ -245,8 +245,8 @@ fn merge_object_closure_with_cas(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::signer::TestSigner;
     use crate::Signer as _;
+    use crate::signer::TestSigner;
     use serde_json::Value;
     use std::fs;
     use std::path::PathBuf;

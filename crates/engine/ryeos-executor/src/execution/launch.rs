@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use anyhow::{Context as _, Result};
 use rand::Rng;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::arch_check;
 use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
@@ -26,16 +26,16 @@ use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_tt
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
+use ryeos_runtime::RuntimeJsonArrayBudget;
 use ryeos_runtime::checkpoint::{
-    checkpoint_shape_limits, validate_checkpoint_shape, FanoutItemStatus,
+    FanoutItemStatus, checkpoint_shape_limits, validate_checkpoint_shape,
 };
 use ryeos_runtime::events::RuntimeEventType;
-use ryeos_runtime::RuntimeJsonArrayBudget;
 
 mod runtime_request;
 mod terminal;
 
-use runtime_request::{spawn_runtime, SpawnRuntimeParams};
+use runtime_request::{SpawnRuntimeParams, spawn_runtime};
 use terminal::{
     fallback_finalization, is_thread_terminal_status, reconcile_terminal_finalization,
     runtime_terminal_status,
@@ -592,7 +592,7 @@ fn manifest_ref_probe(
                 return Err(MaterializationError::ManifestError(format!(
                     "failed to read signed bundle executor manifest ref {}: {error}",
                     ref_path.display()
-                )))
+                )));
             }
         };
         manifest_refs.push(ManifestRefProbe {
@@ -779,7 +779,7 @@ fn verify_native_executor_chain(
                 return Err(MaterializationError::ResolutionFailed {
                     executor_ref: bare.to_string(),
                     detail: error.to_string(),
-                })
+                });
             }
         }
     }
@@ -1186,7 +1186,7 @@ fn inspect_materialized_executor(
                 Err(error) => MaterializedArtifactInspection::Invalid(format!(
                     "content-addressed executor entry is malformed: {error}"
                 )),
-            }
+            };
         }
         Err(error) => {
             return MaterializedArtifactInspection::Invalid(format!(
@@ -1202,7 +1202,7 @@ fn inspect_materialized_executor(
         Ok(None) => {
             return MaterializedArtifactInspection::Invalid(
                 "materialized executor file is missing".to_string(),
-            )
+            );
         }
         Err(error) => {
             return MaterializedArtifactInspection::Invalid(format!(
@@ -1219,7 +1219,7 @@ fn inspect_materialized_executor(
             Err(error) => {
                 return MaterializedArtifactInspection::Invalid(format!(
                     "failed to stat materialized executor descriptor: {error}"
-                ))
+                ));
             }
         };
         let daemon_uid = unsafe { libc::geteuid() };
@@ -1551,7 +1551,7 @@ fn quarantine_materialized_executor(
             return Err(MaterializationError::MaterializationFailed {
                 executor_ref: executor_ref.to_string(),
                 detail: format!("failed to inspect corrupt executor cache entry: {error}"),
-            })
+            });
         }
     }
     let quarantine_name = format!(
@@ -1585,7 +1585,7 @@ fn quarantine_materialized_executor(
                 return Err(MaterializationError::MaterializationFailed {
                     executor_ref: executor_ref.to_string(),
                     detail: format!("failed to quarantine corrupt executor cache entry: {error}"),
-                })
+                });
             }
         }
         QuarantinedExecutorEntry::Directory {
@@ -1600,7 +1600,7 @@ fn quarantine_materialized_executor(
                 return Err(MaterializationError::MaterializationFailed {
                     executor_ref: executor_ref.to_string(),
                     detail: format!("failed to quarantine corrupt executor cache entry: {error}"),
-                })
+                });
             }
         }
         QuarantinedExecutorEntry::Other {
@@ -4831,7 +4831,7 @@ pub fn settle_recovery_preparation_refusal(
     let claim = match ThreadLaunchClaim::acquire(state, thread_id)? {
         ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
-            return Ok(RecoveryRefusalOutcome::AlreadyClaimed)
+            return Ok(RecoveryRefusalOutcome::AlreadyClaimed);
         }
     };
     let launch_owner = claim.canonical_owner()?;
@@ -7553,13 +7553,15 @@ mod tests {
         assert_eq!(out, caps(&["a", "b"]));
         // Drift (narrower OR wider) → rejected.
         let narrower = caps(&["a"]);
-        assert!(apply_policy(
-            &["a", "b"],
-            &[],
-            CapabilityPolicy::ExactPinned(&narrower),
-            ""
-        )
-        .is_err());
+        assert!(
+            apply_policy(
+                &["a", "b"],
+                &[],
+                CapabilityPolicy::ExactPinned(&narrower),
+                ""
+            )
+            .is_err()
+        );
         let wider = caps(&["a", "b", "c"]);
         assert!(apply_policy(&["a", "b"], &[], CapabilityPolicy::ExactPinned(&wider), "").is_err());
     }
@@ -7939,21 +7941,25 @@ mod tests {
         );
 
         let tampered = document.replace("directive", "graph");
-        assert!(verify_admitted_signed_descriptor_document(
-            &tampered,
-            &content_hash,
-            &fingerprint,
-            &trust,
-        )
-        .is_err());
+        assert!(
+            verify_admitted_signed_descriptor_document(
+                &tampered,
+                &content_hash,
+                &fingerprint,
+                &trust,
+            )
+            .is_err()
+        );
         let revoked = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
-        assert!(verify_admitted_signed_descriptor_document(
-            &document,
-            &content_hash,
-            &fingerprint,
-            &revoked,
-        )
-        .is_err());
+        assert!(
+            verify_admitted_signed_descriptor_document(
+                &document,
+                &content_hash,
+                &fingerprint,
+                &revoked,
+            )
+            .is_err()
+        );
     }
 
     #[test]

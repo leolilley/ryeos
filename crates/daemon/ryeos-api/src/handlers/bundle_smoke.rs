@@ -17,13 +17,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
-use ryeos_bundle::manifest::{validate_smoke_decls, BundleManifestSource, SmokeDecl};
+use ryeos_bundle::manifest::{BundleManifestSource, SmokeDecl, validate_smoke_decls};
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]

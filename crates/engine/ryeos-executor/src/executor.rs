@@ -15,12 +15,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use serde_json::Value;
 
 pub use ryeos_app::service_registry::ServiceAvailability;
-use ryeos_app::service_registry::{extract_endpoint, extract_required_caps, ServiceDescriptor};
+use ryeos_app::service_registry::{ServiceDescriptor, extract_endpoint, extract_required_caps};
 use ryeos_app::standalone_audit;
 use ryeos_app::state::AppState;
 
@@ -921,9 +921,11 @@ mod tests {
             "site:local",
         )
         .expect_err("session-local dispatch must not fall back to request identity");
-        assert!(error
-            .to_string()
-            .contains("requires a trusted local handler context"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires a trusted local handler context")
+        );
     }
 
     #[test]
@@ -975,9 +977,11 @@ mod tests {
             "site:local",
         )
         .expect_err("mismatched handler identity must fail closed");
-        assert!(error
-            .to_string()
-            .contains("differs from the sealed execution principal/scopes"));
+        assert!(
+            error
+                .to_string()
+                .contains("differs from the sealed execution principal/scopes")
+        );
     }
 
     #[test]

@@ -486,7 +486,7 @@ pub const RESERVED_CONTROL_KEYS: &[&str] = &[
 #[async_trait]
 pub trait RuntimeCallbackAPI: Send + Sync {
     async fn dispatch_action(&self, request: DispatchActionRequest)
-        -> Result<Value, CallbackError>;
+    -> Result<Value, CallbackError>;
 
     async fn attach_process(&self, thread_id: &str, pid: u32) -> Result<Value, CallbackError>;
 
@@ -858,18 +858,22 @@ mod tests {
         assert_eq!(wire["step"], 9);
         assert_eq!(occurrence.event(), "graph_step_completed");
 
-        assert!(serde_json::from_value::<HookDispatchOccurrence>(json!({
-            "kind": "graph_step_finished",
-            "graph_run_id": "graph-run-1",
-            "step": 9,
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<HookDispatchOccurrence>(json!({
-            "kind": "directive_after_step",
-            "turn": 2,
-            "legacy_event": "after_step",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<HookDispatchOccurrence>(json!({
+                "kind": "graph_step_finished",
+                "graph_run_id": "graph-run-1",
+                "step": 9,
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<HookDispatchOccurrence>(json!({
+                "kind": "directive_after_step",
+                "turn": 2,
+                "legacy_event": "after_step",
+            }))
+            .is_err()
+        );
     }
 
     #[test]

@@ -765,9 +765,11 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("fire projection became incomplete"));
+        assert!(
+            error
+                .to_string()
+                .contains("fire projection became incomplete")
+        );
     }
 
     /// A long-running scheduled job must not hold the timer or the

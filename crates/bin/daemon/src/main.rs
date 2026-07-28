@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, UnixListener};
 use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
-use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
 use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ThreadLifecycleService;
@@ -1668,7 +1668,7 @@ async fn dispatch_follow_actions(
     actions: Vec<reconcile::FollowReconcileAction>,
 ) -> Result<()> {
     for action in actions {
-        use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
+        use ryeos_executor::execution::launch::{SuccessorLaunchOutcome, launch_follow_child};
         let (label, target_thread_id, resume_follow_key, outcome) = match action {
             reconcile::FollowReconcileAction::Resume { follow_key } => {
                 let target_thread_id = state
@@ -2343,7 +2343,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         match signal(SignalKind::terminate()) {
             Ok(mut sigterm) => {
                 sigterm.recv().await;
@@ -2670,7 +2670,7 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod shutdown_mapping_tests {
-    use ryeos_app::process::{resolve_shutdown_action, ShutdownAction};
+    use ryeos_app::process::{ShutdownAction, resolve_shutdown_action};
     use ryeos_engine::contracts::CancellationMode;
     use std::time::Duration;
 

@@ -1,6 +1,6 @@
 //! Shared types for the scheduler module.
 
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -524,10 +524,12 @@ mod tests {
             groups.iter().map(|g| g.len()).collect::<Vec<_>>(),
             vec![8, 4, 4, 4, 12]
         );
-        assert!(groups
-            .iter()
-            .flat_map(|group| group.chars())
-            .all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            groups
+                .iter()
+                .flat_map(|group| group.chars())
+                .all(|c| c.is_ascii_hexdigit())
+        );
     }
 
     #[test]

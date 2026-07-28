@@ -756,8 +756,8 @@ fn run_author_item(
 
 fn run_snapshot(cmd: SnapshotCmd, stdin_json: bool) -> anyhow::Result<()> {
     use ryeos_core_tools::actions::snapshot::{
-        run_create, run_log, run_show, run_status, SnapshotCreateParams, SnapshotLogParams,
-        SnapshotShowParams, SnapshotStatusParams,
+        SnapshotCreateParams, SnapshotLogParams, SnapshotShowParams, SnapshotStatusParams,
+        run_create, run_log, run_show, run_status,
     };
 
     match cmd {
@@ -846,7 +846,7 @@ fn run_build(
     no_trust_doc: bool,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::publish::{run_publish, PublishOptions};
+    use ryeos_core_tools::actions::publish::{PublishOptions, run_publish};
     use ryeos_engine::roots;
 
     let (
@@ -1477,7 +1477,7 @@ fn run_sign(
     source: String,
     stdin_json: bool,
 ) -> anyhow::Result<()> {
-    use ryeos_core_tools::actions::sign::{run_sign, BatchReport, ItemOutcome, SignSource};
+    use ryeos_core_tools::actions::sign::{BatchReport, ItemOutcome, SignSource, run_sign};
 
     let (item_refs, project_arg, source_str) = if stdin_json {
         if !item_refs.is_empty() {
@@ -1678,7 +1678,7 @@ fn run_authorize_client(
 ) -> anyhow::Result<()> {
     use lillux::crypto::VerifyingKey;
     use ryeos_core_tools::actions::authorize::{
-        run_authorize_client as run, AuthorizeClientParams,
+        AuthorizeClientParams, run_authorize_client as run,
     };
 
     let params = if stdin_json {
@@ -1774,7 +1774,7 @@ fn run_admission_token(
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_core_tools::actions::authorize::{
-        run_mint_admission_token, MintAdmissionTokenParams,
+        MintAdmissionTokenParams, run_mint_admission_token,
     };
 
     let (app_root, scopes, label, ttl_secs) = if stdin_json {
@@ -1822,7 +1822,7 @@ fn run_remote_descriptor(
     stdin_json: bool,
 ) -> anyhow::Result<()> {
     use ryeos_core_tools::actions::remote_descriptor::{
-        run_export_remote_descriptor, ExportRemoteDescriptorParams,
+        ExportRemoteDescriptorParams, run_export_remote_descriptor,
     };
 
     let params = if stdin_json {

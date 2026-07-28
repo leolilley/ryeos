@@ -9,12 +9,13 @@ use serde_json::Value;
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    authenticated_execution_origin, CompiledRouteInvocation, PrincipalPolicy, RouteEventStream,
-    RouteInvocationContext, RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
+    CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContext,
+    RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
+    authenticated_execution_origin,
 };
 use crate::routes::response_modes::execute_mode::{
-    preauthorize_execution_policy, resolve_execution_contract, resolve_project_context_off_thread,
-    ProjectRootNormalization, ResolveProjectContextRequest,
+    ProjectRootNormalization, ResolveProjectContextRequest, preauthorize_execution_policy,
+    resolve_execution_contract, resolve_project_context_off_thread,
 };
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
@@ -1013,9 +1014,11 @@ mod tests {
         };
         assert_eq!(envelope.event_type, "stream_error");
         assert_eq!(envelope.payload["code"], "launch_task_failed");
-        assert!(envelope.payload["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("synthetic launch panic")));
+        assert!(
+            envelope.payload["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("synthetic launch panic"))
+        );
     }
 
     #[tokio::test]
@@ -1140,10 +1143,12 @@ mod tests {
         // Dropping the returned stream must still drop its captured ownership
         // guard and abort request-scoped launch work before handoff.
         drop(stream);
-        assert!(request_task
-            .await
-            .expect_err("stream drop must abort request-scoped launch")
-            .is_cancelled());
+        assert!(
+            request_task
+                .await
+                .expect_err("stream drop must abort request-scoped launch")
+                .is_cancelled()
+        );
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::execution_provenance::ExecutionProvenance;
@@ -601,9 +601,11 @@ mod tests {
             "0".repeat(64),
         );
         store.invalidate(&cap.token);
-        assert!(store
-            .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())
-            .is_err());
+        assert!(
+            store
+                .validate(&cap.token, "T-test", PathBuf::from("/p").as_path())
+                .is_err()
+        );
     }
 
     #[test]
@@ -626,12 +628,16 @@ mod tests {
             "0".repeat(64),
         );
         store.invalidate_for_thread("T-1");
-        assert!(store
-            .validate(&cap1.token, "T-1", PathBuf::from("/p").as_path())
-            .is_err());
-        assert!(store
-            .validate(&cap2.token, "T-2", PathBuf::from("/p").as_path())
-            .is_ok());
+        assert!(
+            store
+                .validate(&cap1.token, "T-1", PathBuf::from("/p").as_path())
+                .is_err()
+        );
+        assert!(
+            store
+                .validate(&cap2.token, "T-2", PathBuf::from("/p").as_path())
+                .is_ok()
+        );
     }
 
     #[test]

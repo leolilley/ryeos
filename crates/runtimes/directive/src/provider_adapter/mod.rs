@@ -4,11 +4,11 @@ pub mod prepared;
 pub mod streaming;
 pub mod tools;
 
-pub use prepared::{prepare_provider_request, PreparedProviderRequest};
-pub use streaming::send_prepared_streaming;
+pub use prepared::{PreparedProviderRequest, prepare_provider_request};
 pub use streaming::LocalOutputByteLimitError;
 pub use streaming::ProviderProtocolStreamError;
 pub use streaming::ProviderReportedStreamError;
 pub use streaming::ProviderStreamError;
 pub use streaming::StreamOutcome;
 pub use streaming::StreamingCallInput;
+pub use streaming::send_prepared_streaming;

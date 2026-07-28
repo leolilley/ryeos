@@ -253,11 +253,13 @@ mod tests {
             semantics: ComposerFieldSemantics::RootVerbatim,
         }])
         .unwrap();
-        assert!(validate_field_requirements(&[ComposerFieldRequirement {
-            field: "policy".into(),
-            semantics: ComposerFieldSemantics::InheritOrReplace,
-        }])
-        .is_err());
+        assert!(
+            validate_field_requirements(&[ComposerFieldRequirement {
+                field: "policy".into(),
+                semantics: ComposerFieldSemantics::InheritOrReplace,
+            }])
+            .is_err()
+        );
     }
 
     fn manifest(inner: Value) -> Value {

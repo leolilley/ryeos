@@ -956,11 +956,9 @@ fn finalize_streaming_success(
                 "streaming thread {thread_id} became terminal before its successful result was committed"
             )))
         }
-        crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => {
-            Err(DispatchError::Internal(anyhow::anyhow!(
-                "streaming thread {thread_id} completed after a durable stop won"
-            )))
-        }
+        crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => Err(DispatchError::Internal(
+            anyhow::anyhow!("streaming thread {thread_id} completed after a durable stop won"),
+        )),
         crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown => {
             Err(DispatchError::Internal(anyhow::anyhow!(
                 "streaming thread {thread_id} was interrupted by daemon shutdown and preserved for recovery"

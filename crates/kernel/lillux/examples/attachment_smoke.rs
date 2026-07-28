@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(target_os = "linux")]
-use lillux::{is_alive, spawn_awaiting_attachment, SubprocessRequest};
+use lillux::{SubprocessRequest, is_alive, spawn_awaiting_attachment};
 
 #[cfg(target_os = "linux")]
 fn shell_write(marker: &Path) -> SubprocessRequest {

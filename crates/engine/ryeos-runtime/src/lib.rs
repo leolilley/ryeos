@@ -25,13 +25,13 @@ pub mod verified_loader;
 
 pub use arg_binder::bind_argv;
 pub use authorizer::{
-    canonical_cap, cap_matches, AuthorizationError, AuthorizationPolicy, Authorizer, Capability,
-    CapabilityClause, CapabilityParseError,
+    AuthorizationError, AuthorizationPolicy, Authorizer, Capability, CapabilityClause,
+    CapabilityParseError, canonical_cap, cap_matches,
 };
 pub use callback::{
-    client_from_env, parse_hook_action, validate_runtime_thread_id, ActionPayload, CallbackError,
-    DispatchActionRequest, ReplayResponse, ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure,
-    RuntimeFailureDiagnosticLocator, TerminalCompletion, RUNTIME_FAILURE_KIND,
+    ActionPayload, CallbackError, DispatchActionRequest, RUNTIME_FAILURE_KIND, ReplayResponse,
+    ReplayedEventRecord, RuntimeCallbackAPI, RuntimeFailure, RuntimeFailureDiagnosticLocator,
+    TerminalCompletion, client_from_env, parse_hook_action, validate_runtime_thread_id,
 };
 pub use checkpoint::CheckpointWriter;
 pub use command::{
@@ -45,29 +45,29 @@ pub use command::{
     InvocationInputContract, InvocationInputField, InvocationInputType, MatchedCommand,
 };
 pub use compiled_template::{CompiledActionTemplate, CompiledJsonTemplate, CompiledTemplateError};
-pub use daemon_rpc::{resolve_daemon_socket_path, DaemonRpcClient, RpcError};
+pub use daemon_rpc::{DaemonRpcClient, RpcError, resolve_daemon_socket_path};
 pub use events::{
-    encode_cognition_in_payloads, CognitionInAssembler, CognitionInAssembly, CognitionInChunk,
-    RuntimeEventType, StorageClass, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
-    MAX_RUNTIME_EVENT_PAYLOAD_BYTES,
+    CognitionInAssembler, CognitionInAssembly, CognitionInChunk, MAX_RUNTIME_EVENT_BATCH_BYTES,
+    MAX_RUNTIME_EVENT_BATCH_ITEMS, MAX_RUNTIME_EVENT_PAYLOAD_BYTES, RuntimeEventType, StorageClass,
+    encode_cognition_in_payloads,
 };
 pub use expression::{
-    compile_and_render, compile_condition_for, compile_expression, compile_expression_for,
-    compile_template, compile_template_for, evaluate, evaluate_bool,
-    reject_removed_single_brace_interpolation, render_template, CompilationLimits,
-    CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext, EvaluationLimits,
-    EvaluationSession, ExpressionError, ExpressionValueType, Reference, ReferenceSegment,
-    ReferenceSet, RuntimeJsonArrayBudget, RuntimeJsonObjectBudget, SourceSpan, TemplatePart,
+    CompilationLimits, CompiledExpression, CompiledTemplate, ErrorPhase, EvaluationContext,
+    EvaluationLimits, EvaluationSession, ExpressionError, ExpressionValueType, Reference,
+    ReferenceSegment, ReferenceSet, RuntimeJsonArrayBudget, RuntimeJsonObjectBudget, SourceSpan,
+    TemplatePart, compile_and_render, compile_condition_for, compile_expression,
+    compile_expression_for, compile_template, compile_template_for, evaluate, evaluate_bool,
+    reject_removed_single_brace_interpolation, render_template,
 };
 pub use expression_condition::ExpressionCondition;
 pub use framing::{recv_frame, send_frame};
-pub use hooks_eval::{run_hooks, HookDispatcher, HookRunResult};
+pub use hooks_eval::{HookDispatcher, HookRunResult, run_hooks};
 pub use hooks_loader::{
-    compile_hooks, load_configured_hook_sources, CompiledHook, CompiledHookCondition,
-    HookCompilationError, HookContextSchema, HookDefinition, HookLayer, HookSources,
+    CompiledHook, CompiledHookCondition, HookCompilationError, HookContextSchema, HookDefinition,
+    HookLayer, HookSources, compile_hooks, load_configured_hook_sources,
 };
 pub use lillux::crypto::SigningKey;
 pub use paths::AI_DIR;
 pub use progress::{ProgressEvent, StatusEvent};
-pub use resolver::{resolve_command, ResolveError, ResolvedCommand};
+pub use resolver::{ResolveError, ResolvedCommand, resolve_command};
 pub use ryeos_engine::contracts::ThreadTerminalStatus;

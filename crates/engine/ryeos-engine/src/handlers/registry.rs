@@ -5,13 +5,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::AI_DIR;
 use crate::binary_resolver::resolve_bundle_binary_ref;
 use crate::error::EngineError;
-use crate::handlers::descriptor::{HandlerDescriptor, HandlerServes};
 use crate::handlers::SUPPORTED_HANDLER_ABI_VERSION;
+use crate::handlers::descriptor::{HandlerDescriptor, HandlerServes};
 use crate::resolution::TrustClass;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 /// A handler descriptor that has been loaded, signature-verified, and
 /// validated. Binary resolution is **optional** — user-tier handler

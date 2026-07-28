@@ -283,9 +283,9 @@ pub fn normalize_params_with_contract(
         serde_json::Value::Object(obj) => obj,
         other => {
             return Err(format!(
-            "invocation parameters must be an object when a schema contract is declared, got {}",
-            json_type(&other)
-        ))
+                "invocation parameters must be an object when a schema contract is declared, got {}",
+                json_type(&other)
+            ));
         }
     };
 
@@ -1027,9 +1027,11 @@ mod tests {
         );
 
         let result = bind_argv_with_command(&["tool:agent-kiwi/*".into()], Some(&command));
-        assert!(result
-            .unwrap_err()
-            .contains("do not match any positional form"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("do not match any positional form")
+        );
     }
 
     #[test]

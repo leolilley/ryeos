@@ -1875,9 +1875,11 @@ else:
         let captured = std::fs::read_to_string(capture_file).unwrap();
         let lines: Vec<&str> = captured.lines().collect();
         assert_eq!(lines[0], fixture.project_str());
-        assert!(lines[1..]
-            .windows(2)
-            .any(|pair| pair == ["--surface", "main"]));
+        assert!(
+            lines[1..]
+                .windows(2)
+                .any(|pair| pair == ["--surface", "main"])
+        );
         assert!(lines[1..].contains(&"--mock"));
     }
 

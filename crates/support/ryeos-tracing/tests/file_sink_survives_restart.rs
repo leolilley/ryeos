@@ -52,7 +52,9 @@ fn file_sink_survives_daemon_restart() {
     let exe = match cargo_exe() {
         Some(e) => e,
         None => {
-            eprintln!("skipping file_sink_survives_daemon_restart: ryeosd binary not found in target/debug/");
+            eprintln!(
+                "skipping file_sink_survives_daemon_restart: ryeosd binary not found in target/debug/"
+            );
             return;
         }
     };

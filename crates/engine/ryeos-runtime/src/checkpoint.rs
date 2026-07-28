@@ -26,7 +26,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -281,13 +281,15 @@ mod tests {
         let from = TempDir::new().unwrap();
         let to = TempDir::new().unwrap();
         // No source checkpoint → nothing spliced.
-        assert!(!CheckpointWriter::copy_latest_with_splice(
-            from.path(),
-            to.path(),
-            FOLLOW_RESULT_KEY,
-            json!({"ignored": true})
-        )
-        .unwrap());
+        assert!(
+            !CheckpointWriter::copy_latest_with_splice(
+                from.path(),
+                to.path(),
+                FOLLOW_RESULT_KEY,
+                json!({"ignored": true})
+            )
+            .unwrap()
+        );
 
         // The parent's checkpoint carries its own cursor; the splice adds the child
         // result under FOLLOW_RESULT_KEY without disturbing the rest.
@@ -295,13 +297,15 @@ mod tests {
             .write(&json!({"node": "await", "step": 7}))
             .unwrap();
         let child_env = json!({"success": true, "outputs": {"answer": 42}});
-        assert!(CheckpointWriter::copy_latest_with_splice(
-            from.path(),
-            to.path(),
-            FOLLOW_RESULT_KEY,
-            child_env.clone()
-        )
-        .unwrap());
+        assert!(
+            CheckpointWriter::copy_latest_with_splice(
+                from.path(),
+                to.path(),
+                FOLLOW_RESULT_KEY,
+                child_env.clone()
+            )
+            .unwrap()
+        );
 
         let resumed = CheckpointWriter::new(to.path())
             .load_latest()
@@ -311,12 +315,14 @@ mod tests {
         assert_eq!(resumed["step"], 7);
         assert_eq!(resumed[FOLLOW_RESULT_KEY], child_env);
         // The source is untouched — the splice only writes the destination.
-        assert!(CheckpointWriter::new(from.path())
-            .load_latest()
-            .unwrap()
-            .unwrap()
-            .get(FOLLOW_RESULT_KEY)
-            .is_none());
+        assert!(
+            CheckpointWriter::new(from.path())
+                .load_latest()
+                .unwrap()
+                .unwrap()
+                .get(FOLLOW_RESULT_KEY)
+                .is_none()
+        );
     }
 
     #[test]
@@ -328,13 +334,15 @@ mod tests {
             .unwrap();
         // A non-object payload has no top level to splice into — an error, not a
         // silent drop of the child result.
-        assert!(CheckpointWriter::copy_latest_with_splice(
-            from.path(),
-            to.path(),
-            FOLLOW_RESULT_KEY,
-            json!({})
-        )
-        .is_err());
+        assert!(
+            CheckpointWriter::copy_latest_with_splice(
+                from.path(),
+                to.path(),
+                FOLLOW_RESULT_KEY,
+                json!({})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -346,9 +354,11 @@ mod tests {
 
         let error = CheckpointWriter::new(tmp.path()).load_latest().unwrap_err();
         assert!(error.to_string().contains("maximum"));
-        assert!(error
-            .to_string()
-            .contains(&MAX_CHECKPOINT_FILE_BYTES.to_string()));
+        assert!(
+            error
+                .to_string()
+                .contains(&MAX_CHECKPOINT_FILE_BYTES.to_string())
+        );
     }
 
     #[test]

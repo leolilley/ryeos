@@ -19,9 +19,9 @@ use crate::bundle_events::{
 use crate::bundle_projection::BundleProjectionDb;
 use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
 use crate::head_cache::HeadCache;
-use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
+use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::operational::{
     AdmissionAttestationRecord, CasEntriesByStateSummary, CasEntryAttribution, CasEntryKind,
     CasEntryState, FinishSyncJobAttempt, NewAdmissionAttestationRecord, NewCasEntryAttribution,
@@ -29,8 +29,8 @@ use crate::operational::{
     SyncJobState, SyncJobUpdate,
 };
 use crate::projection::{
-    self, project_committed_chain, project_initial_root_committed_chain, ChainRetentionProjection,
-    DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+    self, ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+    project_committed_chain, project_initial_root_committed_chain,
 };
 use crate::queries;
 use crate::recovery::{
@@ -2514,7 +2514,7 @@ impl StateDb {
                     if pending.expected_previous_hash.as_deref()
                         == Some(cancelled.expected_previous_hash.as_str()) =>
                 {
-                    return Ok(())
+                    return Ok(());
                 }
                 HeadOperation::Set
                     if pending.phase == TransitionPhase::Prepared
@@ -5613,19 +5613,22 @@ mod tests {
         assert!(preview.chain_ref_artifacts >= 2);
         assert!(old_selected.is_file());
         assert!(obsolete_fixed.is_file());
-        assert!(db
-            .discard_authoritative_thread_history_admitted(&guard, false)
-            .unwrap_err()
-            .to_string()
-            .contains("intent was not durably published"));
+        assert!(
+            db.discard_authoritative_thread_history_admitted(&guard, false)
+                .unwrap_err()
+                .to_string()
+                .contains("intent was not durably published")
+        );
 
         db.begin_thread_history_discard_admitted(&guard).unwrap();
         let startup_error = StateDb::open(dir.path(), test_trust_store())
             .err()
             .expect("ordinary startup must refuse an incomplete discard");
-        assert!(startup_error
-            .to_string()
-            .contains("thread-history discard is incomplete"));
+        assert!(
+            startup_error
+                .to_string()
+                .contains("thread-history discard is incomplete")
+        );
 
         let report = db
             .discard_authoritative_thread_history_admitted(&guard, false)
@@ -5683,14 +5686,16 @@ mod tests {
                 .unwrap(),
             2
         );
-        assert!(db
-            .read_project_head(principal_key, &principal_project_hash)
-            .unwrap()
-            .is_none());
-        assert!(db
-            .read_deployed_project_ref(&deployed_project_hash)
-            .unwrap()
-            .is_none());
+        assert!(
+            db.read_project_head(principal_key, &principal_project_hash)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.read_deployed_project_ref(&deployed_project_hash)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -5718,9 +5723,11 @@ mod tests {
         let error = db
             .discard_authoritative_thread_history_admitted(&guard, true)
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("foreign and will not be removed"));
+        assert!(
+            error
+                .to_string()
+                .contains("foreign and will not be removed")
+        );
         assert!(foreign_path.is_file());
         assert!(dir.path().join("refs/generic/chains/T-root/head").is_file());
         assert!(!db.recovery.thread_history_discard_in_progress().unwrap());
@@ -6078,11 +6085,12 @@ mod tests {
             .unwrap();
         let error = db.delete_chain_projection("T-root", &lock).unwrap_err();
         assert!(error.to_string().contains("before durable head removal"));
-        assert!(db
-            .projection()
-            .get_projection_meta("T-root")
-            .unwrap()
-            .is_some());
+        assert!(
+            db.projection()
+                .get_projection_meta("T-root")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -6225,14 +6233,16 @@ mod tests {
             .unwrap()
             .expect("root snapshot should exist through authoritative head");
         assert_eq!(loaded.to_value(), snapshot.to_value());
-        assert!(db
-            .read_authoritative_thread_snapshot("T-root", "T-missing")
-            .unwrap()
-            .is_none());
-        assert!(db
-            .read_authoritative_thread_snapshot("T-missing", "T-missing")
-            .unwrap()
-            .is_none());
+        assert!(
+            db.read_authoritative_thread_snapshot("T-root", "T-missing")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.read_authoritative_thread_snapshot("T-missing", "T-missing")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -6769,12 +6779,14 @@ mod tests {
             .append_events(
                 "T-root",
                 "T-root",
-                vec![crate::objects::thread_event::NewEvent::new(
-                    "T-root",
-                    "T-root",
-                    "advanced_after_remove",
-                )
-                .build()],
+                vec![
+                    crate::objects::thread_event::NewEvent::new(
+                        "T-root",
+                        "T-root",
+                        "advanced_after_remove",
+                    )
+                    .build(),
+                ],
                 vec![],
                 &signer,
             )

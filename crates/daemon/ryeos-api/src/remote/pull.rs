@@ -1451,8 +1451,8 @@ fn materialize_recovered_base(
                             .open_regular(&recovered_name, false)?
                             .ok_or_else(|| {
                                 PullResultsError::RecoveryRequired(format!(
-                                "could not materialize recovered base for {rel_path}: {error:#}"
-                            ))
+                                    "could not materialize recovered base for {rel_path}: {error:#}"
+                                ))
                             })?;
                     validate_expected_content(
                         &existing,

@@ -5,8 +5,8 @@ use ryeos_runtime::ReferenceSegment;
 use serde_json::Value;
 
 use crate::model::{
-    EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType, MAX_GRAPH_SEGMENT_STEPS,
-    MAX_GRAPH_STEPS, MAX_RETRY_BACKOFF_MS,
+    EdgeSpec, GraphConfig, GraphDefinition, GraphNode, MAX_GRAPH_SEGMENT_STEPS, MAX_GRAPH_STEPS,
+    MAX_RETRY_BACKOFF_MS, NodeType,
 };
 
 const MAX_NODE_CONCURRENCY: usize = 256;
@@ -681,10 +681,12 @@ config:
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
         assert!(result.errors.is_empty());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.contains("orphan") && w.contains("unreachable")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("orphan") && w.contains("unreachable"))
+        );
     }
 
     #[test]
@@ -705,10 +707,12 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.contains("undef_key") && w.contains("never assigned")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("undef_key") && w.contains("never assigned"))
+        );
     }
 
     #[test]
@@ -722,10 +726,12 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.contains("config.nodes is empty")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("config.nodes is empty"))
+        );
     }
 
     #[test]
@@ -923,10 +929,12 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.contains("nonexistent") && e.contains("does not exist")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("nonexistent") && e.contains("does not exist"))
+        );
     }
 
     // R-D: foreach nodes MUST declare `as`.
@@ -1804,10 +1812,11 @@ config:
         let zero = validate_graph(&retry_graph(
             "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
-        assert!(zero
-            .errors
-            .iter()
-            .any(|e| e.contains("retry.attempts must be between 1 and 10")));
+        assert!(
+            zero.errors
+                .iter()
+                .any(|e| e.contains("retry.attempts must be between 1 and 10"))
+        );
     }
 
     #[test]
@@ -2022,10 +2031,11 @@ config:
 "#,
         );
         let result = validate_graph(&graph);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| { error.contains("parallel: true") && error.contains("with 'assign'") }));
+        assert!(
+            result.errors.iter().any(|error| {
+                error.contains("parallel: true") && error.contains("with 'assign'")
+            })
+        );
     }
 
     #[test]

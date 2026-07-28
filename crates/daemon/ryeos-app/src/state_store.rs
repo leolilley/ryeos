@@ -3,21 +3,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use ryeos_runtime::checkpoint::{checkpoint_shape_limits, validate_checkpoint_shape};
 use ryeos_runtime::RuntimeJsonArrayBudget;
-use ryeos_state::chain::{ChainLock, SnapshotUpdate};
-use ryeos_state::objects::thread_snapshot::{parse_canonical_timestamp, ThreadStatus};
-use ryeos_state::objects::ThreadSnapshot;
-use ryeos_state::objects::ThreadUsage;
-use ryeos_state::queries;
-use ryeos_state::signer::Signer;
+use ryeos_runtime::checkpoint::{checkpoint_shape_limits, validate_checkpoint_shape};
 use ryeos_state::CreateChainWithEventSuccessorRequest;
 use ryeos_state::StateDb;
 use ryeos_state::UsageSubject;
+use ryeos_state::chain::{ChainLock, SnapshotUpdate};
+use ryeos_state::objects::ThreadSnapshot;
+use ryeos_state::objects::ThreadUsage;
+use ryeos_state::objects::thread_snapshot::{ThreadStatus, parse_canonical_timestamp};
+use ryeos_state::queries;
+use ryeos_state::signer::Signer;
 
 use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
@@ -9520,10 +9520,12 @@ mod tests {
         let launch_id = store
             .reserve_launch_planning("T-planning", "fp:owner")
             .expect("reserve planning");
-        assert!(store
-            .get_thread("T-planning")
-            .expect("read absent authoritative row")
-            .is_none());
+        assert!(
+            store
+                .get_thread("T-planning")
+                .expect("read absent authoritative row")
+                .is_none()
+        );
         let task = tokio::spawn(std::future::pending::<()>());
         store
             .register_launch_task_abort("T-planning", task.abort_handle())
@@ -9539,10 +9541,12 @@ mod tests {
         store
             .settle_launch_planning_task_exit("T-planning")
             .expect("cancelled task exit must preserve cancelled outcome");
-        assert!(store
-            .get_thread("T-planning")
-            .expect("read absent authoritative row after cancel")
-            .is_none());
+        assert!(
+            store
+                .get_thread("T-planning")
+                .expect("read absent authoritative row after cancel")
+                .is_none()
+        );
         assert_eq!(
             store
                 .cancel_launch_planning(&launch_id, "fp:owner")
@@ -9588,10 +9592,12 @@ mod tests {
             store.register_launch_task_abort_bounded("T-capacity-two", refused.abort_handle(), 1,),
             Err(LaunchTaskAbortRegistrationError::CapacityExceeded)
         ));
-        assert!(refused
-            .await
-            .expect_err("capacity-refused task must be aborted")
-            .is_cancelled());
+        assert!(
+            refused
+                .await
+                .expect_err("capacity-refused task must be aborted")
+                .is_cancelled()
+        );
 
         store
             .settle_launch_planning_task_exit("T-capacity-two")
@@ -9606,10 +9612,12 @@ mod tests {
             })
         );
         first.abort();
-        assert!(first
-            .await
-            .expect_err("first task must be aborted during cleanup")
-            .is_cancelled());
+        assert!(
+            first
+                .await
+                .expect_err("first task must be aborted during cleanup")
+                .is_cancelled()
+        );
     }
 
     #[test]
@@ -9679,10 +9687,11 @@ mod tests {
             "binding must transfer cancellation to the durable thread rather than aborting its launch task"
         );
         task.abort();
-        assert!(task
-            .await
-            .expect_err("test cleanup must abort launch task")
-            .is_cancelled());
+        assert!(
+            task.await
+                .expect_err("test cleanup must abort launch task")
+                .is_cancelled()
+        );
         store
             .settle_launch_planning_task_exit("T-row-before-handoff")
             .expect("post-bind task exit must preserve thread binding");
@@ -9742,10 +9751,12 @@ mod tests {
             .settle_launch_planning_task_exit("T-pre-bind-task-exit")
             .expect("settle pre-bind task exit");
 
-        assert!(store
-            .get_thread("T-pre-bind-task-exit")
-            .expect("read absent authoritative row")
-            .is_none());
+        assert!(
+            store
+                .get_thread("T-pre-bind-task-exit")
+                .expect("read absent authoritative row")
+                .is_none()
+        );
         assert_eq!(
             store
                 .cancel_launch_planning(&launch_id, "fp:owner")
@@ -9786,11 +9797,12 @@ mod tests {
         assert_eq!(planning.launch_id, launch_id);
         assert_eq!(planning.state, "bound");
         assert_eq!(planning.bound_thread_id.as_deref(), Some(thread_id));
-        assert!(g
-            .state_db
-            .get_thread(thread_id)
-            .expect("read authoritative root directly")
-            .is_some());
+        assert!(
+            g.state_db
+                .get_thread(thread_id)
+                .expect("read authoritative root directly")
+                .is_some()
+        );
     }
 
     #[test]
@@ -9838,7 +9850,9 @@ mod tests {
                 );
             }
             (created, cancelled) => {
-                panic!("invalid cancel-vs-bind race outcome: created={created:?}, cancelled={cancelled:?}")
+                panic!(
+                    "invalid cancel-vs-bind race outcome: created={created:?}, cancelled={cancelled:?}"
+                )
             }
         }
     }
@@ -9891,11 +9905,12 @@ mod tests {
             planning.bound_thread_id.as_deref(),
             Some(successor_thread_id)
         );
-        assert!(g
-            .state_db
-            .get_thread(successor_thread_id)
-            .expect("read authoritative successor directly")
-            .is_some());
+        assert!(
+            g.state_db
+                .get_thread(successor_thread_id)
+                .expect("read authoritative successor directly")
+                .is_some()
+        );
         assert_eq!(
             queries::continuation_successor(g.state_db.projection(), source_thread_id)
                 .expect("read continuation edge directly")
@@ -9940,10 +9955,12 @@ mod tests {
                 .any(|cause| cause.is::<LaunchPlanningInactive>()),
             "continuation publication must retain typed planning inactivity: {error:#}"
         );
-        assert!(store
-            .get_thread(successor_thread_id)
-            .expect("read absent continuation successor")
-            .is_none());
+        assert!(
+            store
+                .get_thread(successor_thread_id)
+                .expect("read absent continuation successor")
+                .is_none()
+        );
         let source = store
             .get_thread(source_thread_id)
             .expect("read unchanged continuation source")
@@ -10008,10 +10025,12 @@ mod tests {
                     source.successor_thread_id.as_deref(),
                     Some(successor_thread_id)
                 );
-                assert!(store
-                    .get_thread(successor_thread_id)
-                    .expect("read published successor")
-                    .is_some());
+                assert!(
+                    store
+                        .get_thread(successor_thread_id)
+                        .expect("read published successor")
+                        .is_some()
+                );
             }
             (Err(error), LaunchCancellationResolution::Cancelled) => {
                 assert!(
@@ -10026,10 +10045,12 @@ mod tests {
                     .expect("continuation source");
                 assert_eq!(source.status, ThreadStatus::Created.as_str());
                 assert!(source.successor_thread_id.is_none());
-                assert!(store
-                    .get_thread(successor_thread_id)
-                    .expect("read absent successor")
-                    .is_none());
+                assert!(
+                    store
+                        .get_thread(successor_thread_id)
+                        .expect("read absent successor")
+                        .is_none()
+                );
             }
             (created, cancelled) => {
                 panic!(
@@ -10488,32 +10509,42 @@ mod tests {
                 &owner,
             )
             .expect_err("missing thread_started event must fail closed");
-        assert!(error
-            .to_string()
-            .contains("requires exactly one thread_started successor event"));
-        assert!(store
-            .get_thread(thread_id)
-            .expect("inspect rejected root")
-            .is_none());
+        assert!(
+            error
+                .to_string()
+                .contains("requires exactly one thread_started successor event")
+        );
+        assert!(
+            store
+                .get_thread(thread_id)
+                .expect("inspect rejected root")
+                .is_none()
+        );
         let inner = store.lock().expect("lock state store");
-        assert!(inner
-            .runtime_db
-            .get_runtime_info(thread_id)
-            .expect("inspect rejected runtime row")
-            .is_none());
-        assert!(inner
-            .runtime_db
-            .in_process_handler_reservations_after(
-                None,
-                runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-            )
-            .expect("inspect rejected reservation")
-            .is_empty());
-        assert!(inner
-            .state_db
-            .read_generic_head_ref("chains", thread_id)
-            .expect("inspect rejected chain head")
-            .is_none());
+        assert!(
+            inner
+                .runtime_db
+                .get_runtime_info(thread_id)
+                .expect("inspect rejected runtime row")
+                .is_none()
+        );
+        assert!(
+            inner
+                .runtime_db
+                .in_process_handler_reservations_after(
+                    None,
+                    runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+                )
+                .expect("inspect rejected reservation")
+                .is_empty()
+        );
+        assert!(
+            inner
+                .state_db
+                .read_generic_head_ref("chains", thread_id)
+                .expect("inspect rejected chain head")
+                .is_none()
+        );
     }
 
     #[test]
@@ -10538,9 +10569,11 @@ mod tests {
                 &stale,
             )
             .expect_err("unregistered owner must not publish an in-process root");
-        assert!(error
-            .to_string()
-            .contains("recorded in-process handler has no active daemon owner"));
+        assert!(
+            error
+                .to_string()
+                .contains("recorded in-process handler has no active daemon owner")
+        );
 
         let owner = store
             .register_in_process_handler(thread_id)
@@ -10554,10 +10587,12 @@ mod tests {
             )
             .expect_err("stale owner must not publish an in-process root");
         assert!(error.to_string().contains("stale in-process handler owner"));
-        assert!(store
-            .get_thread(thread_id)
-            .expect("inspect owner-rejected root")
-            .is_none());
+        assert!(
+            store
+                .get_thread(thread_id)
+                .expect("inspect owner-rejected root")
+                .is_none()
+        );
 
         store
             .create_in_process_root_with_events_and_launch_metadata(
@@ -10593,9 +10628,11 @@ mod tests {
             )
             .expect("publish original root");
         assert!(original_owner.has_committed_birth());
-        assert!(store
-            .unregister_in_process_handler(thread_id, &original_owner)
-            .expect("simulate loss of original volatile owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &original_owner)
+                .expect("simulate loss of original volatile owner")
+        );
         assert_eq!(
             original_owner.completion(),
             Some(InProcessHandlerCompletion::OwnerLostUnsettled)
@@ -10643,9 +10680,11 @@ mod tests {
             replayed_event_types(&store, thread_id),
             ["thread_created", "thread_started"]
         );
-        assert!(store
-            .unregister_in_process_handler(thread_id, &colliding_owner)
-            .expect("retire rejected colliding owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &colliding_owner)
+                .expect("retire rejected colliding owner")
+        );
         assert_eq!(
             colliding_owner.completion(),
             Some(InProcessHandlerCompletion::BirthAborted)
@@ -10719,34 +10758,44 @@ mod tests {
             .settle_ownerless_in_process_handler_reservation(thread_id)
             .expect_err("shutdown settlement must not steal from an active owner");
         assert!(error.to_string().contains("while its owner is active"));
-        assert!(store
-            .settle_in_process_handler_reservation_owned(thread_id, &owner)
-            .expect("exact owner settles terminal reservation"));
+        assert!(
+            store
+                .settle_in_process_handler_reservation_owned(thread_id, &owner)
+                .expect("exact owner settles terminal reservation")
+        );
         let error = store
             .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
             .expect_err("shutdown cleanup must not delete an active owner's reservation");
         assert!(error.to_string().contains("while its owner is active"));
         owner.mark_terminal_confirmed();
-        assert!(store
-            .unregister_in_process_handler(thread_id, &owner)
-            .expect("unregister exact owner"));
-        assert!(!store
-            .is_in_process_handler_active(thread_id)
-            .expect("inspect active owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &owner)
+                .expect("unregister exact owner")
+        );
+        assert!(
+            !store
+                .is_in_process_handler_active(thread_id)
+                .expect("inspect active owner")
+        );
         assert_eq!(
             owner.completion(),
             Some(InProcessHandlerCompletion::TerminalConfirmed)
         );
-        assert!(store
-            .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
-            .expect("ownerless shutdown cleanup deletes terminal reservation residue"));
-        assert!(store
-            .in_process_handler_reservations_after(
-                None,
-                runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-            )
-            .expect("list settled reservations")
-            .is_empty());
+        assert!(
+            store
+                .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
+                .expect("ownerless shutdown cleanup deletes terminal reservation residue")
+        );
+        assert!(
+            store
+                .in_process_handler_reservations_after(
+                    None,
+                    runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+                )
+                .expect("list settled reservations")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -10779,9 +10828,11 @@ mod tests {
             let error = store
                 .request_thread_stop(thread_id, intent)
                 .expect_err("active in-process owner has no admitted stop contract");
-            assert!(error
-                .to_string()
-                .contains("has no declared cancellation/drain contract"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("has no declared cancellation/drain contract")
+            );
             let detail = store
                 .get_thread(thread_id)
                 .expect("read stop-fenced root")
@@ -10795,9 +10846,11 @@ mod tests {
             ["thread_created", "thread_started"],
             "rejected stop requests must not append terminal or tombstone events"
         );
-        assert!(store
-            .unregister_in_process_handler(thread_id, &owner)
-            .expect("unregister in-process owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &owner)
+                .expect("unregister in-process owner")
+        );
     }
 
     #[test]
@@ -10811,10 +10864,12 @@ mod tests {
                 .expect("reserve fresh launch"),
             runtime_db::LaunchClaimOutcome::Claimed
         );
-        assert!(store
-            .get_thread(thread_id)
-            .expect("inspect unpublished thread")
-            .is_none());
+        assert!(
+            store
+                .get_thread(thread_id)
+                .expect("inspect unpublished thread")
+                .is_none()
+        );
 
         store
             .create_thread_for_test(&thread_record(thread_id, thread_id))
@@ -10824,9 +10879,11 @@ mod tests {
             .expect("read launch claim")
             .expect("claim remains attached after publication");
         assert_eq!(claim.claim_id, "claim-fresh");
-        assert!(store
-            .release_thread_launch_claim(thread_id, "claim-fresh")
-            .expect("release launch reservation"));
+        assert!(
+            store
+                .release_thread_launch_claim(thread_id, "claim-fresh")
+                .expect("release launch reservation")
+        );
     }
 
     #[test]
@@ -10839,10 +10896,12 @@ mod tests {
         let audit = launch_attempt_audit_events();
 
         // The runtime-authored boundary remains running-only.
-        assert!(store
-            .append_events_if_thread_running(thread_id, thread_id, &audit)
-            .expect("runtime append guard")
-            .is_none());
+        assert!(
+            store
+                .append_events_if_thread_running(thread_id, thread_id, &audit)
+                .expect("runtime append guard")
+                .is_none()
+        );
         assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
 
         assert_eq!(
@@ -10910,9 +10969,11 @@ mod tests {
         let wrong_storage_error = store
             .append_launch_attempt_audit(thread_id, thread_id, &wrong_storage)
             .expect_err("non-canonical audit storage must fail");
-        assert!(wrong_storage_error
-            .to_string()
-            .contains("canonical storage class"));
+        assert!(
+            wrong_storage_error
+                .to_string()
+                .contains("canonical storage class")
+        );
         assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
     }
 
@@ -10947,9 +11008,11 @@ mod tests {
         let terminal_error = terminal_store
             .append_launch_attempt_audit(terminal_id, terminal_id, &audit)
             .expect_err("terminal launch audit must fail");
-        assert!(terminal_error
-            .to_string()
-            .contains("requires a created or running thread"));
+        assert!(
+            terminal_error
+                .to_string()
+                .contains("requires a created or running thread")
+        );
         assert_eq!(
             replayed_event_types(&terminal_store, terminal_id),
             terminal_before
@@ -11299,22 +11362,28 @@ mod tests {
         let error = store
             .record_child_link(parent_id, child_id, "dispatch")
             .expect_err("active in-process child cannot inherit undeclared stop authority");
-        assert!(error
-            .to_string()
-            .contains("has no declared cancellation/drain contract"));
+        assert!(
+            error
+                .to_string()
+                .contains("has no declared cancellation/drain contract")
+        );
         let child = store
             .get_thread(child_id)
             .expect("read fenced child")
             .expect("fenced child row");
         assert_eq!(child.status, ThreadStatus::Running.as_str());
         assert_eq!(child.runtime.stop_intent, None);
-        assert!(store
-            .descendant_thread_ids(parent_id)
-            .expect("read parent descendants")
-            .is_empty());
-        assert!(store
-            .unregister_in_process_handler(child_id, &owner)
-            .expect("unregister in-process child owner"));
+        assert!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants")
+                .is_empty()
+        );
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
     }
 
     #[test]

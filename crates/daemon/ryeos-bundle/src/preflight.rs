@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -13,7 +13,7 @@ use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
 
 use crate::manifest::{
-    derive_provides_kinds, materialize_manifest, parse_current_manifest_body, BundleManifestSource,
+    BundleManifestSource, derive_provides_kinds, materialize_manifest, parse_current_manifest_body,
 };
 
 mod structure;

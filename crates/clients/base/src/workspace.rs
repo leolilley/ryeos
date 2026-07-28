@@ -6,7 +6,7 @@
 //! the center renders nothing and the backdrop scene shows behind it.
 
 use crate::ids::TileId;
-use crate::layout::{layout_rects, LayoutTree, Rect, SplitAxis};
+use crate::layout::{LayoutTree, Rect, SplitAxis, layout_rects};
 use crate::surface::{ArrangeSpec, InsertSpec, SideSpec, TilingModeSpec, TilingSpec};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

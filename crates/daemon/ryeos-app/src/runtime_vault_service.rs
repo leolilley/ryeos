@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::callback_token::CallbackCapability;
 use crate::vault::{
-    runtime_vault_ref, validate_runtime_vault_segment, validate_secret_value, NodeVault, VaultScope,
+    NodeVault, VaultScope, runtime_vault_ref, validate_runtime_vault_segment, validate_secret_value,
 };
 
 const VAULT_BUNDLE_REF_PREFIX: &str = "vault://bundle/";

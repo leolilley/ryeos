@@ -608,22 +608,21 @@ pub fn prepare_item_plan(
                 &resolved.plan_context.execution_hints,
             )
             .map_err(|e| anyhow!("plan build failed: {e}"))?;
-        let wrapper_source_identity = if resolved.resolved_item.source_space
-            == ryeos_engine::contracts::ItemSpace::Bundle
-        {
-            let ai = resolved
-                .resolved_item
-                .source_path
-                .ancestors()
-                .find(|path| {
-                    path.file_name()
-                        .is_some_and(|name| name == ryeos_engine::AI_DIR)
-                })
-                .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
-            let root = ai
-                .parent()
-                .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
-            let expected_name = engine
+        let wrapper_source_identity =
+            if resolved.resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Bundle {
+                let ai = resolved
+                    .resolved_item
+                    .source_path
+                    .ancestors()
+                    .find(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name == ryeos_engine::AI_DIR)
+                    })
+                    .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
+                let root = ai
+                    .parent()
+                    .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
+                let expected_name = engine
                 .registered_bundle_name_for_root(root)
                 .ok_or_else(|| {
                     anyhow!(
@@ -631,18 +630,18 @@ pub fn prepare_item_plan(
                         root.display()
                     )
                 })?;
-            let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
-                root,
-                expected_name,
-                &engine.node_trust_store,
-            )?;
-            ryeos_state::objects::DirectWrapperSourceIdentity::Bundle {
-                manifest_hash: identity.body_digest,
-                manifest_signer_fingerprint: identity.signer_fingerprint,
-            }
-        } else {
-            ryeos_state::objects::DirectWrapperSourceIdentity::Project
-        };
+                let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+                    root,
+                    expected_name,
+                    &engine.node_trust_store,
+                )?;
+                ryeos_state::objects::DirectWrapperSourceIdentity::Bundle {
+                    manifest_hash: identity.body_digest,
+                    manifest_signer_fingerprint: identity.signer_fingerprint,
+                }
+            } else {
+                ryeos_state::objects::DirectWrapperSourceIdentity::Project
+            };
         if lifecycle_authority.recovery
             == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
         {

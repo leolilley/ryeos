@@ -28,20 +28,20 @@
 //! not this handler's — it owns the happy-path ordering plus same-call
 //! idempotency, and provisions the launch entry point the sweep re-drives through.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_app::launch_metadata::{
     FollowLaunchWindow, PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
 };
-use ryeos_app::runtime_db::{follow_child_spec_hash, follow_phase, NewFollowWaiter};
+use ryeos_app::runtime_db::{NewFollowWaiter, follow_child_spec_hash, follow_phase};
 use ryeos_app::state::AppState;
 use ryeos_app::state_store::{NewEventRecord, NewThreadRecord};
-use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
+use ryeos_app::thread_lifecycle::{SealedRootExecutionRequest, new_thread_id};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
-use ryeos_runtime::authorizer::{canonical_cap, AuthorizationPolicy};
+use ryeos_runtime::authorizer::{AuthorizationPolicy, canonical_cap};
 
 /// Bound on A→B→C→… follow recursion, enforced ONLY here at admission by walking
 /// the server-side follow-waiter lineage (never a caller-supplied depth). Distinct
@@ -185,10 +185,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
             .is_err()
         {
             bail!(
-            "follow admission denied: parent lacks execute authority '{child_execute_cap}' over \
+                "follow admission denied: parent lacks execute authority '{child_execute_cap}' over \
              child '{}'",
-            child.item_ref
-        );
+                child.item_ref
+            );
         }
 
         for (binding_name, binding_ref) in &child.ref_bindings {
@@ -1513,8 +1513,10 @@ mod tests {
         .expect_err(
             "reserved repair must not combine the sealed slot context with reconstructed authority",
         );
-        assert!(error
-            .to_string()
-            .contains("sealed child project authority differs"));
+        assert!(
+            error
+                .to_string()
+                .contains("sealed child project authority differs")
+        );
     }
 }

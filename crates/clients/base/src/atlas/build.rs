@@ -5,7 +5,7 @@ use super::model::{
     AtlasRegionVm, AtlasScope, AtlasStackItemVm, AtlasUiStateVm, AtlasVisualStateVm,
     NamespaceAtlasVm,
 };
-use crate::radial_tree::{layout_paths, RadialTreeNode};
+use crate::radial_tree::{RadialTreeNode, layout_paths};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AtlasInput {
@@ -612,14 +612,18 @@ mod tests {
             }],
             ..AtlasInput::default()
         });
-        assert!(atlas
-            .nodes
-            .iter()
-            .any(|node| node.namespace_key == "ryeos/core/create_tool"));
-        assert!(!atlas
-            .nodes
-            .iter()
-            .any(|node| node.namespace_key == "ryeos/core/Create Tool"));
+        assert!(
+            atlas
+                .nodes
+                .iter()
+                .any(|node| node.namespace_key == "ryeos/core/create_tool")
+        );
+        assert!(
+            !atlas
+                .nodes
+                .iter()
+                .any(|node| node.namespace_key == "ryeos/core/Create Tool")
+        );
     }
 
     #[test]
@@ -677,9 +681,11 @@ mod tests {
             items: vec![item("knowledge:rye/v1.2/release.notes", "knowledge")],
             ..AtlasInput::default()
         });
-        assert!(atlas
-            .nodes
-            .iter()
-            .any(|node| node.namespace_key == "rye/v1.2/release.notes"));
+        assert!(
+            atlas
+                .nodes
+                .iter()
+                .any(|node| node.namespace_key == "rye/v1.2/release.notes")
+        );
     }
 }

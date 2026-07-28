@@ -12,7 +12,7 @@ use ryeos_api::routes::invocation::{
     RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
 };
 use ryeos_api::routes::response_modes::event_stream_mode::{
-    validate_and_extract_path_capture, EventStreamStrategy, StreamSourceCompiler,
+    EventStreamStrategy, StreamSourceCompiler, validate_and_extract_path_capture,
 };
 use ryeos_app::route_raw::RawRouteSpec;
 use tokio_stream::Stream;

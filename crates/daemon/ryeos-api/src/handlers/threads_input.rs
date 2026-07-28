@@ -22,13 +22,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::live_input_queue::{
-    serialized_live_input_bytes, EnqueueOutcome, MAX_LIVE_INPUT_SERIALIZED_BYTES,
+    EnqueueOutcome, MAX_LIVE_INPUT_SERIALIZED_BYTES, serialized_live_input_bytes,
 };
 use ryeos_app::state::AppState;
 use ryeos_executor::executor::ServiceAvailability;

@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
-use crate::routes::webhook_dedupe::WebhookDedupeStore;
 use crate::routes::RouteTable;
+use crate::routes::webhook_dedupe::WebhookDedupeStore;
 use ryeos_app::state::AppState;
 
 #[derive(Clone)]

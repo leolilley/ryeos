@@ -63,7 +63,7 @@ impl Journal {
         let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default())
+                return Ok(Self::default());
             }
             Err(error) => return Err(error).with_context(|| format!("inspect {}", path.display())),
         };

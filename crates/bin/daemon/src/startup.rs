@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -970,25 +970,33 @@ mod tests {
 
     #[test]
     fn startup_stage_rejects_phase_regression_and_reordering() {
-        assert!(advance_startup_stage(
-            StartupStage::InitialHeadReplay,
-            StartupPhase::OpeningProjection,
-        )
-        .is_err());
-        assert!(advance_startup_stage(
-            StartupStage::RecoveringSchedulerProjection,
-            StartupPhase::ReconcilingThreads,
-        )
-        .is_err());
-        assert!(advance_startup_stage(
-            StartupStage::ReconcilingFollow,
-            StartupPhase::ReconcilingThreads,
-        )
-        .is_err());
-        assert!(advance_startup_stage(
-            StartupStage::ReconcilingScheduler,
-            StartupPhase::ReplayingHeadChanges,
-        )
-        .is_err());
+        assert!(
+            advance_startup_stage(
+                StartupStage::InitialHeadReplay,
+                StartupPhase::OpeningProjection,
+            )
+            .is_err()
+        );
+        assert!(
+            advance_startup_stage(
+                StartupStage::RecoveringSchedulerProjection,
+                StartupPhase::ReconcilingThreads,
+            )
+            .is_err()
+        );
+        assert!(
+            advance_startup_stage(
+                StartupStage::ReconcilingFollow,
+                StartupPhase::ReconcilingThreads,
+            )
+            .is_err()
+        );
+        assert!(
+            advance_startup_stage(
+                StartupStage::ReconcilingScheduler,
+                StartupPhase::ReplayingHeadChanges,
+            )
+            .is_err()
+        );
     }
 }

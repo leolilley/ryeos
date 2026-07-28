@@ -23,7 +23,7 @@ use serde_json::json;
 
 use crate::canonical_ref::CanonicalRef;
 
-use crate::resolution::context::{ensure_canonical, field_as_string, ResolutionContext};
+use crate::resolution::context::{ResolutionContext, ensure_canonical, field_as_string};
 use crate::resolution::types::{
     ResolutionError, ResolutionFailureClass, ResolutionStepName, ResolvedAncestor,
 };

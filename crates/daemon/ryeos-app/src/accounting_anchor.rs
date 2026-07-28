@@ -36,7 +36,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 /// Filename of the anchor inside the runtime state directory.
@@ -671,9 +671,11 @@ mod tests {
         assert_eq!(anchor.read_valid().unwrap().financial_high_water, 2);
         // The delayed sequence-1 waiter observes the higher anchor and must
         // not overwrite it (regression refusal).
-        assert!(anchor
-            .compare_and_advance(SITE, EPOCH, 1, &digest_of("c1"))
-            .is_err());
+        assert!(
+            anchor
+                .compare_and_advance(SITE, EPOCH, 1, &digest_of("c1"))
+                .is_err()
+        );
     }
 
     #[test]

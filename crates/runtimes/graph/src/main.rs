@@ -21,7 +21,7 @@ use std::io::Read;
 use std::path::PathBuf;
 
 use clap::Parser;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::checkpoint::CheckpointWriter;
@@ -567,10 +567,12 @@ mod tests {
         let mut params = json!({"inputs": {"count": "not a number"}});
         let result = normalize_inputs_against_schema(&mut params, &schema);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("expected type 'integer'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected type 'integer'")
+        );
     }
 
     #[test]

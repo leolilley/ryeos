@@ -2,11 +2,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
+use ryeos_engine::AI_DIR;
 use ryeos_engine::engine::Engine;
 use ryeos_engine::trust::TrustStore;
-use ryeos_engine::AI_DIR;
 
 use crate::config::Config;
 use ryeos_app::identity::NodeIdentity;

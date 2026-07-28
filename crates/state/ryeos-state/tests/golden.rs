@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn test_vectors_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

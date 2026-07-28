@@ -854,27 +854,33 @@ mod tests {
             facets: None,
             launch_window: None,
         };
-        assert!(validate_hook_identity_authority(
-            &hook,
-            &action,
-            "directive:test/fixture",
-            &"a".repeat(64),
-        )
-        .is_ok());
-        assert!(validate_hook_identity_authority(
-            &hook,
-            &action,
-            "directive:test/other",
-            &"a".repeat(64),
-        )
-        .is_err());
-        assert!(validate_hook_identity_authority(
-            &hook,
-            &action,
-            "directive:test/fixture",
-            &"c".repeat(64),
-        )
-        .is_err());
+        assert!(
+            validate_hook_identity_authority(
+                &hook,
+                &action,
+                "directive:test/fixture",
+                &"a".repeat(64),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_hook_identity_authority(
+                &hook,
+                &action,
+                "directive:test/other",
+                &"a".repeat(64),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_hook_identity_authority(
+                &hook,
+                &action,
+                "directive:test/fixture",
+                &"c".repeat(64),
+            )
+            .is_err()
+        );
     }
 
     #[test]

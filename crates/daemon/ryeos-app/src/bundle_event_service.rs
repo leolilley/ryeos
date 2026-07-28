@@ -537,13 +537,15 @@ mod tests {
             std::fs::read(project.path().join("models/restored/checkpoint.bin")).unwrap(),
             b"restored"
         );
-        assert!(materialize_project_relative_file(
-            project.path(),
-            "models/restored/checkpoint.bin",
-            b"replaced",
-            false,
-        )
-        .is_err());
+        assert!(
+            materialize_project_relative_file(
+                project.path(),
+                "models/restored/checkpoint.bin",
+                b"replaced",
+                false,
+            )
+            .is_err()
+        );
         materialize_project_relative_file(
             project.path(),
             "models/restored/checkpoint.bin",

@@ -12,7 +12,7 @@
 use std::path::Path;
 
 use ryeos_engine::AI_DIR;
-use ryeos_state::project_sync::{classify_project_ai_path, ProjectAiPathClass};
+use ryeos_state::project_sync::{ProjectAiPathClass, classify_project_ai_path};
 
 /// True when a `.ai/`-relative path is node runtime state or a signing secret,
 /// and therefore never a signable authoring source.

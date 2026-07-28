@@ -5,8 +5,8 @@ use serde_json::json;
 
 use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
 use ryeos_app::process::{
-    execution_group_liveness, execution_identity_is_current_boot, execution_liveness,
-    kill_by_action, resolve_shutdown_action, IdentityLiveness,
+    IdentityLiveness, execution_group_liveness, execution_identity_is_current_boot,
+    execution_liveness, kill_by_action, resolve_shutdown_action,
 };
 use ryeos_app::runtime_db::WorkspaceState;
 use ryeos_app::state::AppState;
@@ -1562,13 +1562,14 @@ async fn reconcile_active_threads_inner(
                         now_ms.saturating_add(PROJECT_AUTHORITY_WAIT_MS),
                     )?;
                     if now_ms >= wait.deadline_at_ms {
-                        let outcome = ryeos_executor::execution::launch::settle_recovery_preparation_refusal(
-                            state,
-                            &thread.thread_id,
-                            "project_authority_unavailable",
-                            "live_project_authority_wait",
-                            "the admitted live project authority did not become available before its recovery deadline",
-                        )?;
+                        let outcome =
+                            ryeos_executor::execution::launch::settle_recovery_preparation_refusal(
+                                state,
+                                &thread.thread_id,
+                                "project_authority_unavailable",
+                                "live_project_authority_wait",
+                                "the admitted live project authority did not become available before its recovery deadline",
+                            )?;
                         if matches!(
                             outcome,
                             ryeos_executor::execution::launch::RecoveryRefusalOutcome::Finalized

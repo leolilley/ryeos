@@ -616,14 +616,14 @@ pub fn verify_bundle_executor_manifest_ref_identity(
             return Err(bundle_executor_error(
                 bundle_root,
                 format!("{} must be a regular directory", bin_root.display()),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => {
             return Err(bundle_executor_error(
                 bundle_root,
                 format!("stat {}: {error}", bin_root.display()),
-            ))
+            ));
         }
     };
     let manifest_ref_exists = match std::fs::symlink_metadata(&manifest_ref_path) {
@@ -632,14 +632,14 @@ pub fn verify_bundle_executor_manifest_ref_identity(
             return Err(bundle_executor_error(
                 bundle_root,
                 format!("{} must be a regular file", manifest_ref_path.display()),
-            ))
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => {
             return Err(bundle_executor_error(
                 bundle_root,
                 format!("stat {}: {error}", manifest_ref_path.display()),
-            ))
+            ));
         }
     };
     if !bin_exists && !manifest_ref_exists {
@@ -1895,9 +1895,11 @@ mod tests {
         .expect("placeholder triple ref must resolve");
 
         let triple = env!("RYEOS_ENGINE_HOST_TRIPLE");
-        assert!(resolved
-            .absolute_path
-            .ends_with(format!("{}/bin/{triple}/demo", crate::AI_DIR)));
+        assert!(
+            resolved
+                .absolute_path
+                .ends_with(format!("{}/bin/{triple}/demo", crate::AI_DIR))
+        );
         assert_eq!(resolved.signer_fingerprint, fp);
     }
 
@@ -1953,9 +1955,11 @@ mod tests {
         )
         .expect("qualified core binary ref should resolve");
 
-        assert!(resolved
-            .absolute_path
-            .starts_with(target.join(crate::AI_DIR).join("bin")));
+        assert!(
+            resolved
+                .absolute_path
+                .starts_with(target.join(crate::AI_DIR).join("bin"))
+        );
         assert_eq!(resolved.signer_fingerprint, fp);
     }
 
@@ -2070,9 +2074,11 @@ mod tests {
             TrustClass::TrustedBundle,
         )
         .expect("unqualified ref resolves in the wrapper's own bundle");
-        assert!(resolved
-            .absolute_path
-            .starts_with(source.join(crate::AI_DIR).join("bin")));
+        assert!(
+            resolved
+                .absolute_path
+                .starts_with(source.join(crate::AI_DIR).join("bin"))
+        );
     }
 
     #[test]
@@ -2153,9 +2159,11 @@ mod tests {
             TrustClass::TrustedBundle,
         )
         .expect("full-shape signed manifests must still resolve");
-        assert!(resolved
-            .absolute_path
-            .starts_with(target.join(crate::AI_DIR).join("bin")));
+        assert!(
+            resolved
+                .absolute_path
+                .starts_with(target.join(crate::AI_DIR).join("bin"))
+        );
     }
 
     /// Like `write_signed_bundle_manifest` but includes `description` and a

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_engine::resolution::ResolutionOutput;
 use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, TrustClass, VerifiedItem};

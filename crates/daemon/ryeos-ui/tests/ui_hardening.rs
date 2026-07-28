@@ -95,10 +95,12 @@ async fn browser_boot_sequence_endpoints_accept_same_session() {
     .expect("item inspect should succeed");
     assert_eq!(inspection["schema_version"], "ryeos.ui.item.inspect.v1");
     assert_eq!(inspection["item"]["canonical_ref"], "surface:ryeos/ui/base");
-    assert!(inspection["raw"]["content"]
-        .as_str()
-        .unwrap()
-        .contains("ryeos-ui-base"));
+    assert!(
+        inspection["raw"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("ryeos-ui-base")
+    );
     assert_eq!(
         inspection["effective"]["composed_value"]["name"],
         "ryeos-ui-base"

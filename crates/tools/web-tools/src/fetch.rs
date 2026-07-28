@@ -5,7 +5,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use scraper::Html;

@@ -659,10 +659,12 @@ mod tests {
         // message rather than injecting an empty stimulus.
         let blank: DirectiveHeader = serde_yaml::from_str("return_nudge: \"  \"").unwrap();
         assert!(blank.return_nudge.enabled());
-        assert!(blank
-            .return_nudge
-            .message(&outs)
-            .contains("directive_return"));
+        assert!(
+            blank
+                .return_nudge
+                .message(&outs)
+                .contains("directive_return")
+        );
     }
 
     #[test]

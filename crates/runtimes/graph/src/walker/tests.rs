@@ -1346,10 +1346,12 @@ config:
     let result = walker.execute(json!({}), None).await;
 
     assert_eq!(result.status, GraphRunStatus::Error);
-    assert!(result
-        .error
-        .as_deref()
-        .is_some_and(|error| error.contains("invalid cost")));
+    assert!(
+        result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid cost"))
+    );
     let events = recorder.recorded_events();
     let (_, _, payload, _) = events
         .iter()
@@ -1390,10 +1392,12 @@ config:
             .await;
 
         assert_eq!(result.status, GraphRunStatus::Error, "parallel={parallel}");
-        assert!(result
-            .error
-            .as_deref()
-            .is_some_and(|error| error.contains("integrity failed")));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("integrity failed"))
+        );
         let events = recorder.recorded_events();
         let (_, _, payload, _) = events
             .iter()
@@ -1900,9 +1904,11 @@ config:
         .await;
     assert!(result.success);
     assert_eq!(result.errors_suppressed, Some(1));
-    assert!(result.errors.unwrap()[0]
-        .error
-        .contains("expression evaluation"));
+    assert!(
+        result.errors.unwrap()[0]
+            .error
+            .contains("expression evaluation")
+    );
     assert_no_raw_template(&result.state);
 }
 
@@ -2938,10 +2944,12 @@ async fn deterministic_leaf_failure_does_not_consume_retry_budget() {
         .await;
     assert_eq!(result.status, GraphRunStatus::Error);
     assert_eq!(recorder.dispatch_count(), 1);
-    assert!(recorder
-        .recorded_events()
-        .iter()
-        .all(|(_, event_type, _, _)| event_type != "graph_node_retry"));
+    assert!(
+        recorder
+            .recorded_events()
+            .iter()
+            .all(|(_, event_type, _, _)| event_type != "graph_node_retry")
+    );
 }
 
 // ── §B2 graph hooks ──────────────────────────────────────────────
@@ -3059,10 +3067,11 @@ async fn failed_hook_cost_is_retained_while_failure_remains_a_warning() {
     );
     assert_eq!(result.cost.unwrap().input_tokens, 7);
     assert_eq!(result.hook_costs.len(), 1);
-    assert!(w
-        .take_warnings()
-        .iter()
-        .any(|warning| warning.contains("graph hook") && warning.contains("hook_child_failed")));
+    assert!(
+        w.take_warnings()
+            .iter()
+            .any(|warning| warning.contains("graph hook") && warning.contains("hook_child_failed"))
+    );
 }
 
 #[tokio::test]
@@ -3576,11 +3585,13 @@ async fn single_follow_redrive_rejects_rendered_item_ref_drift() {
     let result = walker.execute(resume, Some("gr-resume".to_string())).await;
 
     assert_eq!(result.status, GraphRunStatus::Error, "{result:?}");
-    assert!(result
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("checkpoint records `directive:other`"));
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("checkpoint records `directive:other`")
+    );
     assert!(recorder.recorded_follow_requests().is_empty());
     assert_eq!(recorder.dispatch_count(), 0);
 }
@@ -3724,10 +3735,11 @@ async fn follow_bare_marker_resuspends() {
     assert_eq!(reqs[0].graph_run_id, "gr-resume");
     assert_eq!(reqs[0].follow_node, "fetch");
     assert_eq!(reqs[0].step_count, 0);
-    assert!(rec
-        .recorded_events()
-        .into_iter()
-        .any(|(_, et, _, _)| et == "graph_follow_suspended"));
+    assert!(
+        rec.recorded_events()
+            .into_iter()
+            .any(|(_, et, _, _)| et == "graph_follow_suspended")
+    );
 }
 
 #[tokio::test]
@@ -4085,11 +4097,13 @@ async fn follow_fanout_redrive_rejects_ordered_item_ref_drift() {
     let result = walker.execute(params, Some("gr-fan".into())).await;
 
     assert_eq!(result.status, GraphRunStatus::Error, "{result:?}");
-    assert!(result
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("differ from its checkpointed ordered item_refs"));
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("differ from its checkpointed ordered item_refs")
+    );
     assert!(recorder.recorded_follow_requests().is_empty());
     assert_eq!(recorder.dispatch_count(), 0);
 }
@@ -4250,11 +4264,13 @@ async fn follow_fanout_malformed_wrapper_fails_loudly() {
     let params = unchecked_fanout_resume(&graph, snapshot, bad);
     let (w, _) = make_recording_walker(graph, vec![], None);
     let result = w.execute(params, Some("gr-fan".into())).await;
-    assert!(result
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("cardinality"));
+    assert!(
+        result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("cardinality")
+    );
 }
 
 #[tokio::test]
@@ -4676,8 +4692,10 @@ config:
         .iter()
         .filter(|&&t| t == "graph_foreach_iteration")
         .count();
-    assert_eq!(iteration_count, 3,
-        "foreach must emit exactly 3 graph_foreach_iteration events for 3 items, got {iteration_count}");
+    assert_eq!(
+        iteration_count, 3,
+        "foreach must emit exactly 3 graph_foreach_iteration events for 3 items, got {iteration_count}"
+    );
 
     // Both the foreach and the terminal return are nodes and emit the complete
     // step lifecycle.
@@ -4816,9 +4834,11 @@ config:
         Some("gr-hard-error-receipt")
     );
     assert_eq!(receipt["node_result_hash"], Value::Null);
-    assert!(receipt["error"]
-        .as_str()
-        .is_some_and(|err| err.contains("env preflight failed")));
+    assert!(
+        receipt["error"]
+            .as_str()
+            .is_some_and(|err| err.contains("env preflight failed"))
+    );
 }
 
 #[tokio::test]

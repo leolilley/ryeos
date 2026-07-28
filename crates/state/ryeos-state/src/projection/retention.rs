@@ -4,8 +4,8 @@ use rusqlite::OptionalExtension;
 
 use super::ProjectionDb;
 use crate::objects::{
-    parse_canonical_timestamp, CapturedThreadHistoryPolicy, ThreadHistoryRetention,
-    MAX_TERMINAL_DURATION_SECONDS,
+    CapturedThreadHistoryPolicy, MAX_TERMINAL_DURATION_SECONDS, ThreadHistoryRetention,
+    parse_canonical_timestamp,
 };
 
 const TERMINAL_STATUSES_SQL: &str =
@@ -290,12 +290,13 @@ mod tests {
         .updated_at("2026-01-01T00:02:00Z".to_string())
         .build();
         crate::projection::project_thread_snapshot(&db, &running_child, "T-root").unwrap();
-        assert!(db
-            .chain_retention_projection("T-root")
-            .unwrap()
-            .unwrap()
-            .retire_after
-            .is_none());
+        assert!(
+            db.chain_retention_projection("T-root")
+                .unwrap()
+                .unwrap()
+                .retire_after
+                .is_none()
+        );
 
         let terminal_child = ThreadSnapshotBuilder::new(
             "T-child",
@@ -328,9 +329,11 @@ mod tests {
             &ThreadHistoryRetention::Durable,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("invalid canonical retention timestamp"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid canonical retention timestamp")
+        );
     }
 
     #[test]
@@ -344,9 +347,11 @@ mod tests {
                 &ThreadHistoryRetention::TerminalFor { seconds: 60 },
             )
             .unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("invalid canonical retention timestamp"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("invalid canonical retention timestamp")
+            );
         }
     }
 }

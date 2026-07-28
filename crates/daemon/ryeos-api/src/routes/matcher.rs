@@ -281,9 +281,11 @@ mod tests {
     fn capture_wrong_segment_count() {
         let routes = vec![make_route("r1", "/users/{id}", &["GET"])];
         let matcher = PathMatcher::new(routes).unwrap();
-        assert!(matcher
-            .match_request(&Method::GET, "/users/42/extra")
-            .is_none());
+        assert!(
+            matcher
+                .match_request(&Method::GET, "/users/42/extra")
+                .is_none()
+        );
     }
 
     #[test]

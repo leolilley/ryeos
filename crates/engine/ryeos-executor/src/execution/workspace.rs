@@ -35,7 +35,7 @@ impl WorkspaceLayout {
             }
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("reserve execution workspace {}", root.display()))
+                    .with_context(|| format!("reserve execution workspace {}", root.display()));
             }
         }
         let layout = Self::from_root(root);
@@ -51,7 +51,7 @@ impl WorkspaceLayout {
                 }
                 Err(error) => {
                     return Err(error)
-                        .with_context(|| format!("create workspace directory {}", path.display()))
+                        .with_context(|| format!("create workspace directory {}", path.display()));
                 }
             }
         }

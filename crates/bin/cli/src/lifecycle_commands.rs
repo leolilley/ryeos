@@ -1772,9 +1772,11 @@ mod tests {
         assert!(error.contains("unknown field"), "{error}");
 
         std::fs::write(&policy, isolation_policy("enforce", None)).unwrap();
-        assert!(inspect_isolation_policy(temp.path())
-            .unwrap_err()
-            .to_string()
-            .contains("isolation bundle"));
+        assert!(
+            inspect_isolation_policy(temp.path())
+                .unwrap_err()
+                .to_string()
+                .contains("isolation bundle")
+        );
     }
 }

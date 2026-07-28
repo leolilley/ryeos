@@ -210,8 +210,8 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
 /// target, and that target blocks at the final backend boundary until the
 /// parent releases the writer retained in [`SupervisedProcessStatus`].
 #[cfg(target_os = "linux")]
-pub fn supervised_launcher_attachment_status_pipe(
-) -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
+pub fn supervised_launcher_attachment_status_pipe()
+-> Result<SupervisedLauncherAttachmentStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
     let mut status_fds = [-1; 2];
@@ -257,8 +257,8 @@ pub fn supervised_launcher_attachment_status_pipe(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn supervised_launcher_attachment_status_pipe(
-) -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
+pub fn supervised_launcher_attachment_status_pipe()
+-> Result<SupervisedLauncherAttachmentStatusPipe, String> {
     Err("supervised-launcher attachment boundaries are supported only on Linux".to_string())
 }
 

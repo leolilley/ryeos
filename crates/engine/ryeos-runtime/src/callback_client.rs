@@ -1278,9 +1278,11 @@ mod tests {
 
         let events = recorder.events.lock().unwrap();
         assert!(events.len() > 1);
-        assert!(events
-            .iter()
-            .all(|(event_type, _)| event_type == "cognition_in"));
+        assert!(
+            events
+                .iter()
+                .all(|(event_type, _)| event_type == "cognition_in")
+        );
         let mut assembler = crate::events::CognitionInAssembler::default();
         let mut recovered = None;
         for (_, payload) in events.iter() {

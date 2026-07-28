@@ -37,21 +37,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use ryeos_accounting::{
-    transition_id, AttemptBudgetState, AuthorityHealth, BillableDimension, ChargeBasis,
-    ChargeReconciliationAuthority, HexDigest, MoneyError, ProviderAccountingAuthority,
+    AttemptBudgetState, AuthorityHealth, BillableDimension, ChargeBasis,
+    ChargeReconciliationAuthority, HexDigest, MAX_RAW_DECIMAL_LEN, MoneyError,
+    PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION, ProviderAccountingAuthority,
     ProviderAttemptBudgetRecord, ProviderAttemptBudgetTransitionV1, ReconciliationReason,
     SpendAccounting, SpendBoundAuthority, SpendBoundCertificate, SpendTariffDocument,
-    TokenAccounting, UsdNanos, VerifiedPreparedSpendBound, MAX_RAW_DECIMAL_LEN,
-    PROVIDER_ATTEMPT_BUDGET_TRANSITION_VERSION,
+    TokenAccounting, UsdNanos, VerifiedPreparedSpendBound, transition_id,
 };
 use ryeos_state::sqlite_schema;
 
-use crate::accounting_anchor::{genesis_chain_digest, AccountingAnchor, AnchorAgreement};
+use crate::accounting_anchor::{AccountingAnchor, AnchorAgreement, genesis_chain_digest};
 
 /// RYAC = 0x5259_4143 ("RY" + "AC" for accounting).
 const ACCOUNTING_APP_ID: i32 = 0x5259_4143;
@@ -4973,8 +4973,8 @@ fn establish_site_identity(conn: &Connection, path: &Path) -> Result<(String, u6
 mod tests {
     use super::*;
     use ryeos_accounting::{
-        ClosedBillableDimensionSet, Currency, FinalityContract, SpendBoundCommitments, UnitCount,
-        SPEND_TARIFF_SCHEMA_VERSION,
+        ClosedBillableDimensionSet, Currency, FinalityContract, SPEND_TARIFF_SCHEMA_VERSION,
+        SpendBoundCommitments, UnitCount,
     };
 
     const NOW: i64 = 1_000_000;
@@ -5321,22 +5321,26 @@ mod tests {
         db.create_directive_account_prepared(EXEC, DIRECTIVE, Some(usd("10")))
             .unwrap();
         // A contradictory birth is an integrity error.
-        assert!(db
-            .create_execution_account_prepared(EXEC, "root-chain", Some(usd("11")))
-            .is_err());
-        assert!(db
-            .create_execution_account_prepared(EXEC, "other-root", Some(usd("10")))
-            .is_err());
+        assert!(
+            db.create_execution_account_prepared(EXEC, "root-chain", Some(usd("11")))
+                .is_err()
+        );
+        assert!(
+            db.create_execution_account_prepared(EXEC, "other-root", Some(usd("10")))
+                .is_err()
+        );
         // Activating a missing account never re-mints it.
-        assert!(db
-            .activate_account("B-missing", "execution", "B-missing")
-            .is_err());
-        assert!(db
-            .create_directive_account_prepared("B-missing", "D-x", None)
-            .is_err());
+        assert!(
+            db.activate_account("B-missing", "execution", "B-missing")
+                .is_err()
+        );
+        assert!(
+            db.create_directive_account_prepared("B-missing", "D-x", None)
+                .is_err()
+        );
         open_gate(&db, THREAD, GENERATION, EXEC);
         open_gate(&db, THREAD, GENERATION, EXEC); // idempotent repeat
-                                                  // Reserve without a gate for the generation fails closed.
+        // Reserve without a gate for the generation fails closed.
         let authority = tariff_authority("a", "0.5", None, &tariff_io());
         let error =
             reserve(&db, THREAD, "G-other", 1, 1, "h1", &authority, EXEC, None).unwrap_err();
@@ -5601,14 +5605,16 @@ mod tests {
             }
         );
         // Settlement of a never-issued attempt is illegal.
-        assert!(settle(
-            &db,
-            &attempt_id,
-            "h1",
-            SpendAccounting::ExplicitlyFree,
-            &authority
-        )
-        .is_err());
+        assert!(
+            settle(
+                &db,
+                &attempt_id,
+                "h1",
+                SpendAccounting::ExplicitlyFree,
+                &authority
+            )
+            .is_err()
+        );
         assert_healthy_verify(&db);
     }
 
@@ -5924,10 +5930,11 @@ mod tests {
             &reserve(&db, THREAD, GENERATION, 1, 1, "h1", &authority, EXEC, None).unwrap(),
         );
         issue(&db, &attempt_id, "h1").unwrap();
-        assert!(db
-            .get_provider_attempt(THREAD, &attempt_id)
-            .unwrap()
-            .is_some());
+        assert!(
+            db.get_provider_attempt(THREAD, &attempt_id)
+                .unwrap()
+                .is_some()
+        );
         // Once hard admission is disabled, the recovery read must not
         // acknowledge the recorded Issued state — it would be a side door
         // around the anchor-coverage bail.
@@ -6096,10 +6103,12 @@ mod tests {
         let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
         let report = db.startup_verify().unwrap();
         assert!(!report.hard_admission_enabled);
-        assert!(report
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("unrepresentable authoritative actual")));
+        assert!(
+            report
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("unrepresentable authoritative actual"))
+        );
 
         let exec2 = "B-exec-2";
         birth(&db, exec2, None, Some("10"));
@@ -6189,8 +6198,8 @@ mod tests {
         assert_eq!(state, AttemptBudgetState::ReleasedUnissued);
         assert!(replayed);
         // A contradictory reason is a different request digest: conflict.
-        assert!(db
-            .release_provider_attempt_unissued(
+        assert!(
+            db.release_provider_attempt_unissued(
                 THREAD,
                 GENERATION,
                 &attempt_id,
@@ -6198,7 +6207,8 @@ mod tests {
                 ReconciliationReason::CredentialUnavailableBeforeIssue,
                 NOW + 7,
             )
-            .is_err());
+            .is_err()
+        );
         // Issue after release fails via the recorded operation conflict.
         assert!(issue(&db, &attempt_id, "h1").is_err());
         assert_healthy_verify(&db);
@@ -6290,9 +6300,10 @@ mod tests {
         let error =
             reserve(&db, THREAD, GENERATION, 3, 1, "h3", &authority, EXEC, None).unwrap_err();
         assert!(format!("{error:#}").contains("fenced"));
-        assert!(db
-            .open_launch_gate(THREAD, GENERATION, EXEC, "audit-chain")
-            .is_err());
+        assert!(
+            db.open_launch_gate(THREAD, GENERATION, EXEC, "audit-chain")
+                .is_err()
+        );
         // Fencing again is an idempotent no-op.
         let replay = db
             .fence_launch_gate_and_close_attempts(
@@ -6436,16 +6447,23 @@ mod tests {
         let db = AccountingDb::open_at_runtime_state_dir(dir.path()).unwrap();
         let report = db.startup_verify().unwrap();
         assert!(!report.hard_admission_enabled);
-        assert!(report
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("chain digest mismatch")));
+        assert!(
+            report
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("chain digest mismatch"))
+        );
         // Hard admission stays closed for fresh reservations.
         birth(&db, "B-exec-2", None, Some("10"));
         db.open_launch_gate("T-2", GENERATION, "B-exec-2", "audit-chain")
             .unwrap();
         let authority = tariff_authority("b", "0.5", None, &tariff_io());
-        assert!(reserve(&db, "T-2", GENERATION, 1, 1, "h2", &authority, "B-exec-2", None).is_err());
+        assert!(
+            reserve(
+                &db, "T-2", GENERATION, 1, 1, "h2", &authority, "B-exec-2", None
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Transactional outbox helpers for bundle event projections.
 
 use anyhow::Context;
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 use crate::bundle_events::BundleEventRecord;
 use crate::objects::validate_bundle_identifier;
@@ -336,7 +336,7 @@ fn select_outbox_message(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
+    use crate::bundle_events::{BundleEventAppendRequest, append_bundle_event};
     use crate::signer::{Signer, TestSigner};
 
     fn append_request(chain_id: &str) -> BundleEventAppendRequest {
@@ -418,13 +418,10 @@ mod tests {
         assert_eq!(claimed[0].attempts, 1);
         assert_eq!(claimed[0].event_hash, appended.event_hash);
 
-        assert!(mark_bundle_outbox_delivered(
-            &conn,
-            claimed[0].id,
-            "worker_1",
-            claimed[0].attempts
-        )
-        .unwrap());
+        assert!(
+            mark_bundle_outbox_delivered(&conn, claimed[0].id, "worker_1", claimed[0].attempts)
+                .unwrap()
+        );
         let delivered = get_bundle_outbox_message(&conn, claimed[0].id)
             .unwrap()
             .unwrap();
@@ -475,16 +472,18 @@ mod tests {
         )
         .unwrap();
 
-        assert!(mark_bundle_outbox_failed(
-            &conn,
-            claimed[0].id,
-            "worker_1",
-            claimed[0].attempts,
-            Some("0000-01-01T00:00:00Z"),
-            Some("smtp unavailable"),
-            None,
-        )
-        .unwrap());
+        assert!(
+            mark_bundle_outbox_failed(
+                &conn,
+                claimed[0].id,
+                "worker_1",
+                claimed[0].attempts,
+                Some("0000-01-01T00:00:00Z"),
+                Some("smtp unavailable"),
+                None,
+            )
+            .unwrap()
+        );
         let retried = claim_bundle_outbox_messages(
             &mut conn,
             "ryeos-email",
@@ -555,20 +554,24 @@ mod tests {
         .unwrap();
 
         assert_eq!(second_claim.len(), 1);
-        assert!(!mark_bundle_outbox_delivered(
-            &conn,
-            first_claim[0].id,
-            "worker_1",
-            first_claim[0].attempts
-        )
-        .unwrap());
-        assert!(mark_bundle_outbox_delivered(
-            &conn,
-            second_claim[0].id,
-            "worker_2",
-            second_claim[0].attempts
-        )
-        .unwrap());
+        assert!(
+            !mark_bundle_outbox_delivered(
+                &conn,
+                first_claim[0].id,
+                "worker_1",
+                first_claim[0].attempts
+            )
+            .unwrap()
+        );
+        assert!(
+            mark_bundle_outbox_delivered(
+                &conn,
+                second_claim[0].id,
+                "worker_2",
+                second_claim[0].attempts
+            )
+            .unwrap()
+        );
     }
 
     #[test]
@@ -614,16 +617,18 @@ mod tests {
         )
         .unwrap();
 
-        assert!(mark_bundle_outbox_failed(
-            &conn,
-            claimed[0].id,
-            "worker_1",
-            claimed[0].attempts,
-            Some("0000-01-01T00:00:00Z"),
-            Some("smtp unavailable"),
-            Some(1),
-        )
-        .unwrap());
+        assert!(
+            mark_bundle_outbox_failed(
+                &conn,
+                claimed[0].id,
+                "worker_1",
+                claimed[0].attempts,
+                Some("0000-01-01T00:00:00Z"),
+                Some("smtp unavailable"),
+                Some(1),
+            )
+            .unwrap()
+        );
         let failed = get_bundle_outbox_message(&conn, claimed[0].id)
             .unwrap()
             .unwrap();

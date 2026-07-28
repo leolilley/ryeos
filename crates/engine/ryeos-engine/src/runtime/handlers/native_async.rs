@@ -42,7 +42,7 @@ use crate::config_loading::ConfigLoadContext;
 use crate::contracts::{CancellationMode, NativeAsyncSpec};
 use crate::error::EngineError;
 use crate::execution_policy::{
-    value_has_execution_policy_shape, ExecutionPolicyResolver, PolicySourceKind,
+    ExecutionPolicyResolver, PolicySourceKind, value_has_execution_policy_shape,
 };
 use crate::runtime::{CompileContext, RuntimeHandler};
 

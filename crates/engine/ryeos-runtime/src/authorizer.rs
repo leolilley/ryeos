@@ -700,22 +700,25 @@ mod tests {
     fn prefix_wildcard_grant() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
-        assert!(auth
-            .authorize(&["ryeos.execute.service.*".to_string()], &policy)
-            .is_ok());
+        assert!(
+            auth.authorize(&["ryeos.execute.service.*".to_string()], &policy)
+                .is_ok()
+        );
     }
 
     #[test]
     fn path_prefix_wildcard_grant() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
-        assert!(auth
-            .authorize(&["ryeos.execute.service.bundle/*".to_string()], &policy)
-            .is_ok());
+        assert!(
+            auth.authorize(&["ryeos.execute.service.bundle/*".to_string()], &policy)
+                .is_ok()
+        );
         // Legacy dot-form grant satisfies nothing.
-        assert!(auth
-            .authorize(&["ryeos.execute.service.bundle.*".to_string()], &policy)
-            .is_err());
+        assert!(
+            auth.authorize(&["ryeos.execute.service.bundle.*".to_string()], &policy)
+                .is_err()
+        );
     }
 
     // ── Authorizer: required-side wildcard semantics ──────────────
@@ -724,12 +727,14 @@ mod tests {
     fn rye_wildcard_required_satisfied_by_any_rye_grant() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("ryeos.*");
-        assert!(auth
-            .authorize(&["ryeos.execute.service.x".to_string()], &policy)
-            .is_ok());
-        assert!(auth
-            .authorize(&["ryeos.fetch.tool.y".to_string()], &policy)
-            .is_ok());
+        assert!(
+            auth.authorize(&["ryeos.execute.service.x".to_string()], &policy)
+                .is_ok()
+        );
+        assert!(
+            auth.authorize(&["ryeos.fetch.tool.y".to_string()], &policy)
+                .is_ok()
+        );
         assert!(auth.authorize(&["ryeos.*".to_string()], &policy).is_ok());
         assert!(auth.authorize(&["*".to_string()], &policy).is_ok());
     }
@@ -738,30 +743,35 @@ mod tests {
     fn verb_wildcard_required_satisfied_by_concrete_grant() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("ryeos.execute.*");
-        assert!(auth
-            .authorize(&["ryeos.execute.service.x".to_string()], &policy)
-            .is_ok());
-        assert!(auth
-            .authorize(&["ryeos.execute.tool.y".to_string()], &policy)
-            .is_ok());
-        assert!(auth
-            .authorize(&["ryeos.fetch.service.x".to_string()], &policy)
-            .is_err());
+        assert!(
+            auth.authorize(&["ryeos.execute.service.x".to_string()], &policy)
+                .is_ok()
+        );
+        assert!(
+            auth.authorize(&["ryeos.execute.tool.y".to_string()], &policy)
+                .is_ok()
+        );
+        assert!(
+            auth.authorize(&["ryeos.fetch.service.x".to_string()], &policy)
+                .is_err()
+        );
     }
 
     #[test]
     fn subject_wildcard_required_satisfied_by_concrete_grant() {
         let auth = test_authorizer();
         let policy = AuthorizationPolicy::require("ryeos.execute.service.*");
-        assert!(auth
-            .authorize(
+        assert!(
+            auth.authorize(
                 &["ryeos.execute.service.bundle/install".to_string()],
                 &policy
             )
-            .is_ok());
-        assert!(auth
-            .authorize(&["ryeos.execute.service.threads/get".to_string()], &policy)
-            .is_ok());
+            .is_ok()
+        );
+        assert!(
+            auth.authorize(&["ryeos.execute.service.threads/get".to_string()], &policy)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -769,9 +779,10 @@ mod tests {
         let auth = test_authorizer();
         // Without implication, each verb is checked independently
         let policy = AuthorizationPolicy::require("ryeos.execute.service.bundle/install");
-        assert!(auth
-            .authorize(&["ryeos.fetch.service.*".to_string()], &policy)
-            .is_err());
+        assert!(
+            auth.authorize(&["ryeos.fetch.service.*".to_string()], &policy)
+                .is_err()
+        );
     }
 
     // ── Authorizer: policy semantics ──────────────────────────────
@@ -811,9 +822,10 @@ mod tests {
             "ryeos.execute.service.a",
             "ryeos.execute.service.b",
         ]);
-        assert!(auth
-            .authorize(&["ryeos.execute.service.a".to_string()], &policy)
-            .is_err());
+        assert!(
+            auth.authorize(&["ryeos.execute.service.a".to_string()], &policy)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1006,10 +1018,10 @@ mod validate_scope_pattern_tests {
         assert!(validate_scope_pattern("ryeos.execute.service.bundle/install").is_ok());
         assert!(validate_scope_pattern("ryeos.execute.service.remote/admin").is_ok());
         assert!(validate_scope_pattern("ryeos.fetch.tool.ryeos/file-system/read").is_ok());
-        assert!(validate_scope_pattern(
-            "ryeos.append.bundle-events.example-bundle/oauth_token_event"
-        )
-        .is_ok());
+        assert!(
+            validate_scope_pattern("ryeos.append.bundle-events.example-bundle/oauth_token_event")
+                .is_ok()
+        );
     }
 
     #[test]

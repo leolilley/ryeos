@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
@@ -87,11 +87,13 @@ mod tests {
 
     #[test]
     fn request_rejects_caller_selected_ownership_fields() {
-        assert!(serde_json::from_value::<Request>(json!({
-            "launch_id": "L-opaque",
-            "requested_by": "fp:other",
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<Request>(json!({
+                "launch_id": "L-opaque",
+                "requested_by": "fp:other",
+            }))
+            .is_err()
+        );
     }
 
     #[test]

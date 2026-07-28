@@ -10,9 +10,9 @@
 #![cfg(unix)]
 
 use lillux::{
-    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
-    sealed_memfd, spawn, spawn_detached, supervised_launcher_status_pipe,
-    validate_subprocess_limits, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
+    OutputLimitExceeded, SubprocessLimits, SubprocessRequest, configure_subprocess_limits,
+    is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd, sealed_memfd, spawn,
+    spawn_detached, supervised_launcher_status_pipe, validate_subprocess_limits,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an

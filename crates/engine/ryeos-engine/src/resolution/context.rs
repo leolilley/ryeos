@@ -23,8 +23,8 @@ use crate::trust::TrustStore;
 use super::alias::AliasResolver;
 use super::decl::ResolutionStepDecl;
 use super::types::{
-    effective_trust, ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput,
-    ResolutionStepName, ResolvedAncestor, TrustClass,
+    ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput, ResolutionStepName,
+    ResolvedAncestor, TrustClass, effective_trust,
 };
 
 /// Result of loading an item: identity / trust / raw bytes (as a

@@ -1,10 +1,10 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::evaluation::validate_runtime_shape;
 use crate::model::ErrorRecord;
 use ryeos_runtime::checkpoint::CheckpointWriter;
 
-use super::{follow_keys, Walker, EXPRESSION_LANGUAGE, GRAPH_CHECKPOINT_SCHEMA_VERSION};
+use super::{EXPRESSION_LANGUAGE, GRAPH_CHECKPOINT_SCHEMA_VERSION, Walker, follow_keys};
 
 struct CheckpointCursor<'a> {
     definition_ref: &'a str,
@@ -348,9 +348,11 @@ mod tests {
                 "item_refs": ["directive:test/child"],
             })
         );
-        assert!(payload[follow_keys::PENDING_FOLLOW]
-            .get("child_thread_id")
-            .is_none());
+        assert!(
+            payload[follow_keys::PENDING_FOLLOW]
+                .get("child_thread_id")
+                .is_none()
+        );
     }
 
     #[test]

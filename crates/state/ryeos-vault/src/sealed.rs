@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
-use crate::policy::{validate_decrypted_keys, MAX_VAULT_ENVELOPE_BYTES, MAX_VAULT_PLAINTEXT_BYTES};
+use crate::policy::{MAX_VAULT_ENVELOPE_BYTES, MAX_VAULT_PLAINTEXT_BYTES, validate_decrypted_keys};
 pub use lillux::vault::MAX_VAULT_KEY_FILE_BYTES;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]

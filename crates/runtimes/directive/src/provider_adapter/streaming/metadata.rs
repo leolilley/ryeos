@@ -517,10 +517,12 @@ mod tests {
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, Some(10));
         assert_eq!(usage.output_tokens, Some(9));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("regressed")));
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("regressed"))
+        );
         assert_eq!(finish.as_deref(), Some("stop"));
     }
 
@@ -617,10 +619,12 @@ mod tests {
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, Some(10));
         assert_eq!(usage.output_tokens, Some(9));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("regressed")));
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("regressed"))
+        );
         assert_eq!(usage.reported_cost_usd, Some(0.5));
     }
 
@@ -646,10 +650,12 @@ mod tests {
         );
 
         let usage = usage.unwrap();
-        assert!(usage
-            .spend_anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("regressed")));
+        assert!(
+            usage
+                .spend_anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("regressed"))
+        );
         assert_eq!(usage.reported_cost_usd_raw.as_deref(), Some("9000000000"));
     }
 
@@ -676,22 +682,30 @@ mod tests {
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, Some(5));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("prompt_tokens is not a u64")));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("reasoning tokens 7 exceed")));
-        assert!(usage
-            .metadata_anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("cost is negative")));
-        assert!(usage
-            .metadata_anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("is_byok is not a boolean")));
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("prompt_tokens is not a u64"))
+        );
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("reasoning tokens 7 exceed"))
+        );
+        assert!(
+            usage
+                .metadata_anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("cost is negative"))
+        );
+        assert!(
+            usage
+                .metadata_anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("is_byok is not a boolean"))
+        );
     }
 
     #[test]

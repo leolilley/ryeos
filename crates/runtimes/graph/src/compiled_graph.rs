@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{
-    compile_condition_for, compile_hooks, compile_template_for, CompilationLimits,
-    CompiledActionTemplate, CompiledExpression, CompiledHook, CompiledJsonTemplate,
-    CompiledTemplate, ExpressionCondition, HookContextSchema, HookSources, Reference,
-    ReferenceSegment, ReferenceSet,
+    CompilationLimits, CompiledActionTemplate, CompiledExpression, CompiledHook,
+    CompiledJsonTemplate, CompiledTemplate, ExpressionCondition, HookContextSchema, HookSources,
+    Reference, ReferenceSegment, ReferenceSet, compile_condition_for, compile_hooks,
+    compile_template_for,
 };
 
 use crate::model::{EdgeSpec, GraphConfig, GraphNode, NodeType};
@@ -301,7 +301,9 @@ impl CompiledEdgeSpec {
                     let condition = match &branch.when {
                         ExpressionCondition::Absent => {
                             if default_seen {
-                                bail!("{field}: conditional edge contains more than one default branch");
+                                bail!(
+                                    "{field}: conditional edge contains more than one default branch"
+                                );
                             }
                             default_seen = true;
                             CompiledCondition::Default

@@ -786,9 +786,11 @@ mod tests {
         );
         let secrets = v["never_deploy_secrets"].as_sequence().unwrap();
         assert!(secrets.iter().any(|x| x.as_str() == Some(".env")));
-        assert!(secrets
-            .iter()
-            .any(|x| x.as_str() == Some(".ai/node/identity")));
+        assert!(
+            secrets
+                .iter()
+                .any(|x| x.as_str() == Some(".ai/node/identity"))
+        );
         let node_owned = v["node_owned"].as_sequence().unwrap();
         assert!(node_owned.iter().any(|x| x.as_str() == Some(".ai/state")));
         assert_eq!(

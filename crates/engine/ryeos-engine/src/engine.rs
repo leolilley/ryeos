@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::AI_DIR;
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
 use crate::contracts::{
@@ -18,7 +19,6 @@ use crate::parsers::ParserDispatcher;
 use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 /// Request for an effective, composed item value.
 #[derive(Debug, Clone)]
@@ -1284,10 +1284,12 @@ formats:
         let engine = test_engine().with_operator_ai_root(PathBuf::from("/operator/.ai"));
         let ordinary = engine.resolution_roots(Some(PathBuf::from("/project")));
         assert_eq!(ordinary.ordered.len(), engine.bundle_roots.len() + 1);
-        assert!(!ordinary
-            .ordered
-            .iter()
-            .any(|root| root.ai_root == Path::new("/operator/.ai")));
+        assert!(
+            !ordinary
+                .ordered
+                .iter()
+                .any(|root| root.ai_root == Path::new("/operator/.ai"))
+        );
 
         let launch = engine.launch_config_roots(&ordinary);
         assert_eq!(launch.ordered[0].label, "project");

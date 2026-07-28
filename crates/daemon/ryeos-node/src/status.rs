@@ -5,10 +5,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::init_check::{init_state, InitDiagnostics, InitState};
+use crate::LocalLifecycleEnv;
+use crate::init_check::{InitDiagnostics, InitState, init_state};
 use crate::lifecycle_wire::{LifecycleResponse, LifecycleWireState, StartupSnapshot};
 use crate::metadata::DaemonMetadata;
-use crate::LocalLifecycleEnv;
 
 /// The daemon records its running marker immediately before publishing the
 /// startup control listener. Beyond this grace period, a live marker without a
@@ -307,8 +307,8 @@ pub fn is_running(status: &LifecycleStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle_wire::StartupPhase;
     use crate::NodeConfig;
+    use crate::lifecycle_wire::StartupPhase;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -883,9 +883,11 @@ mod tests {
             panic!("a mismatched live UDS identity must block replacement: {status:?}")
         };
         assert_eq!(metadata.uds_path, Some(config.uds_path.clone()));
-        assert!(diagnostics
-            .message
-            .contains("mismatched lifecycle UDS identity"));
+        assert!(
+            diagnostics
+                .message
+                .contains("mismatched lifecycle UDS identity")
+        );
     }
 
     #[tokio::test]

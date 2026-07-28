@@ -159,29 +159,37 @@ mod params_tests {
         assert_eq!(params.seat_lease_grace_seconds, Some(600));
         assert_eq!(params.durable_cas_upload_max_age_seconds, Some(1_234));
 
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "schedule_fire_max_count": -1
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "sync_job_retention_days": "14"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "runtime_retention_days": 14
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "schedule_fire_max_count": -1
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "sync_job_retention_days": "14"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "runtime_retention_days": 14
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn compaction_requires_a_complete_nested_policy() {
         let missing: GcParams = serde_json::from_value(json!({ "compact": true })).unwrap();
         assert!(missing.validate().is_err());
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "compact": true,
-            "policy": { "manual_pushes": 10 }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "compact": true,
+                "policy": { "manual_pushes": 10 }
+            }))
+            .is_err()
+        );
 
         let complete: GcParams = serde_json::from_value(json!({
             "compact": true,
@@ -916,9 +924,9 @@ mod tests {
     /// then runs a full GC. The removed snapshots should be swept as unreachable.
     #[test]
     fn compact_then_sweep_cleans_victims() {
+        use crate::Signer as _;
         use crate::refs;
         use crate::signer::TestSigner;
-        use crate::Signer as _;
         use std::fs;
 
         let tmp = tempfile::tempdir().unwrap();

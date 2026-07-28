@@ -10,8 +10,8 @@ use ryeos_client_base::ui::view_model::{RyeOsTableRowVm, RyeOsTone};
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, truncate};
 use super::super::theme::{
-    active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
-    tone_style, ACCENT,
+    ACCENT, active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
+    tone_style,
 };
 use super::rows::draw_detail;
 
@@ -183,11 +183,7 @@ fn draw_row(
         tone_style(row.tone)
     };
     let glyph = if row.expandable {
-        if row.expanded {
-            "▾"
-        } else {
-            "▸"
-        }
+        if row.expanded { "▾" } else { "▸" }
     } else {
         tone_glyph(row.tone)
     };
@@ -248,11 +244,7 @@ fn hierarchy_prefix(tree: &ryeos_client_base::ui::view_model::RyeOsTableHierarch
         prefix.push_str(if tree.is_last { "└─" } else { "├─" });
     }
     prefix.push_str(if tree.has_children {
-        if tree.collapsed {
-            "▸ "
-        } else {
-            "▾ "
-        }
+        if tree.collapsed { "▸ " } else { "▾ " }
     } else {
         "· "
     });

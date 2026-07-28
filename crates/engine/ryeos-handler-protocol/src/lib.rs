@@ -658,8 +658,10 @@ mod tests {
         let response = HandlerResponse::ValidateComposerOk {
             field_requirements: requirements,
         };
-        assert!(serde_json::to_string(&response)
-            .unwrap()
-            .contains("validate_composer_ok"));
+        assert!(
+            serde_json::to_string(&response)
+                .unwrap()
+                .contains("validate_composer_ok")
+        );
     }
 }

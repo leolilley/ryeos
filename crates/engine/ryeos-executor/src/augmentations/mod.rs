@@ -101,7 +101,9 @@ impl From<LaunchAugmentationError> for DispatchError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchAugmentationError {
-    #[error("position `{position}` value `{bad_ref}` is not a canonical ref (must start with `{expected_prefix}`)")]
+    #[error(
+        "position `{position}` value `{bad_ref}` is not a canonical ref (must start with `{expected_prefix}`)"
+    )]
     BadRef {
         position: String,
         bad_ref: String,

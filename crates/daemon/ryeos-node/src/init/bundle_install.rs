@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 /// Verify that an existing bundle directory has the expected `.ai/` structure.
 pub(super) fn verify_bundle_structure(target: &Path) -> Result<()> {

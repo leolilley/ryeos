@@ -596,13 +596,15 @@ mod tests {
             attestation: value,
         };
 
-        assert!(verify_remote_attestation_record(
-            &record,
-            &subject,
-            policy,
-            &issuer,
-            &wrong_signer.verifying_key(),
-        )
-        .is_err());
+        assert!(
+            verify_remote_attestation_record(
+                &record,
+                &subject,
+                policy,
+                &issuer,
+                &wrong_signer.verifying_key(),
+            )
+            .is_err()
+        );
     }
 }
