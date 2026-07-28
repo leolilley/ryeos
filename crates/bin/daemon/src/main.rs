@@ -300,9 +300,6 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             })?;
     }
 
-    std::env::set_var("RYEOSD_SOCKET_PATH", &config.uds_path);
-    std::env::set_var("RYEOSD_URL", format!("http://{}", actual_bind));
-
     // daemon.json is an early discovery hint.  Live lifecycle truth always
     // comes from the UDS, and started_at is process start (never ready time).
     let build = ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION"));

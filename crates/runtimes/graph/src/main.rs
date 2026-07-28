@@ -18,6 +18,7 @@ mod walker;
 
 use std::collections::HashSet;
 use std::io::Read;
+use std::path::PathBuf;
 
 use clap::Parser;
 use serde_json::{json, Value};
@@ -33,7 +34,7 @@ struct Cli {
     graph_run_id: Option<String>,
 
     #[arg(long)]
-    daemon_socket: Option<String>,
+    daemon_socket: Option<PathBuf>,
 
     #[arg(long, env = "RYEOS_THREAD_ID", default_value = "graph-default")]
     thread_id: String,
@@ -191,11 +192,10 @@ fn main() -> anyhow::Result<()> {
             &thread_auth_token,
         ),
         None => {
-            if let Some(ref socket) = cli.daemon_socket {
-                std::env::set_var("RYEOSD_SOCKET_PATH", socket);
-            }
             let cb_env = EnvelopeCallback {
-                socket_path: ryeos_runtime::resolve_daemon_socket_path(None),
+                socket_path: ryeos_runtime::resolve_daemon_socket_path(
+                    cli.daemon_socket.as_deref(),
+                ),
                 token: std::env::var("RYEOSD_CALLBACK_TOKEN")
                     .expect("RYEOSD_CALLBACK_TOKEN must be set by daemon"),
             };
@@ -661,6 +661,10 @@ mod tests {
             "/tmp/daemon.sock",
         ]);
         assert!(cli.is_ok(), "graph CLI must accept all daemon flags");
+        assert_eq!(
+            cli.unwrap().daemon_socket.as_deref(),
+            Some(std::path::Path::new("/tmp/daemon.sock"))
+        );
     }
 
     #[test]
