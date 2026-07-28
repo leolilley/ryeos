@@ -134,7 +134,7 @@ wait_ready() {
 }
 
 thread_json() {
-  bounded ryeos thread get --thread-id "$1" --json
+  bounded ryeos thread get --thread-id "$1"
 }
 
 wait_thread_active() {
@@ -207,7 +207,7 @@ AFTER_CHAIN="$(printf '%s' "$AFTER_JSON" | json_value chain_root_id:first)"
   exit 1
 }
 
-PROOF_JSON="$(bounded ryeos thread chain --thread-id "$THREAD_ID" --json)"
+PROOF_JSON="$(bounded ryeos thread chain --thread-id "$THREAD_ID")"
 if ! grep -Fq "$THREAD_ID" <<<"$PROOF_JSON" || ! grep -Fq "$CHAIN_ROOT" <<<"$PROOF_JSON"; then
   ryeos_term_fail "chain proof does not contain durable identities"
   printf '%s\n' "$PROOF_JSON" >&2
