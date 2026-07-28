@@ -477,27 +477,26 @@ pub(crate) fn timeline_entries_indented(
             // straight from the raw event so a binding that only projects `turn`
             // can't drop it to raw JSON. The bare turn marker carries no content
             // and falls through to its boundary separator below.
-            if feed_event_type(&record) == Some(FeedEventType::CognitionIn) {
-                if let Some(content) = stimulus
+            if feed_event_type(&record) == Some(FeedEventType::CognitionIn)
+                && let Some(content) = stimulus
                     .by_record
                     .get(&timeline_entry_key(&record.raw, record_index))
                     .map(String::as_str)
-                {
-                    flush_flow(&mut pending_flow, &mut entries, &mut sources);
-                    push_entry(
-                        &mut entries,
-                        &mut sources,
-                        RyeOsTimelineEntryVm::Line {
-                            primary: content.to_string(),
-                            meta: None,
-                            tone: RyeOsTone::Accent,
-                            intent: None,
-                            secondary_intent: None,
-                        },
-                        Some(&record),
-                    );
-                    break 'record;
-                }
+            {
+                flush_flow(&mut pending_flow, &mut entries, &mut sources);
+                push_entry(
+                    &mut entries,
+                    &mut sources,
+                    RyeOsTimelineEntryVm::Line {
+                        primary: content.to_string(),
+                        meta: None,
+                        tone: RyeOsTone::Accent,
+                        intent: None,
+                        secondary_intent: None,
+                    },
+                    Some(&record),
+                );
+                break 'record;
             }
             // A `cognition_out` cut short by a live interrupt: render whatever partial
             // content it produced (normal tone — it is real, if truncated, cognition),
@@ -630,13 +629,14 @@ pub(crate) fn append_live_delta(core: &RyeOsCore, entries: &mut Vec<RyeOsTimelin
 pub(crate) fn live_delta_entry(core: &RyeOsCore) -> Option<RyeOsTimelineEntryVm> {
     let head = core.seat.fold().input_route().thread?;
     // Streaming output for the head thread → render it with a trailing cursor.
-    if let Some(buf) = core.data.live_delta.as_ref() {
-        if !buf.text.is_empty() && buf.thread == head {
-            return Some(RyeOsTimelineEntryVm::Block {
-                text: format!("{}▍", buf.text),
-                tone: RyeOsTone::Accent,
-            });
-        }
+    if let Some(buf) = core.data.live_delta.as_ref()
+        && !buf.text.is_empty()
+        && buf.thread == head
+    {
+        return Some(RyeOsTimelineEntryVm::Block {
+            text: format!("{}▍", buf.text),
+            tone: RyeOsTone::Accent,
+        });
     }
     // No streaming tail yet, but the head thread is still running → a quiet
     // working indicator so the feed reads as alive (just launched and awaiting

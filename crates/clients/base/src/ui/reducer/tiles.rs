@@ -291,26 +291,25 @@ impl RyeOsCore {
         // single lens, never from arranging panes.
         if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
             && !self.workspace.center_is_empty()
+            && let Some(tile_id) = self.workspace.replace_focused_view(view.clone())
         {
-            if let Some(tile_id) = self.workspace.replace_focused_view(view.clone()) {
-                let key = tile_id.0.to_string();
-                self.data.sources.remove(&key);
-                self.data.source_errors.remove(&key);
-                self.data.source_epoch.remove(&key);
-                self.data.source_stored_epoch.remove(&key);
-                self.data.timeline_sources.remove(&key);
-                let section_prefix = format!("{key}#section");
-                self.deferred_source_fetches
-                    .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
-                self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
-                self.bump_generation();
-                let effects = self.effects_for_view(&view);
-                // The lens swapped subjects: eviction alone would let an
-                // in-flight response for the OLD lens land into the empty
-                // store — the floor refuses it outright.
-                self.floor_source_fetches(&effects, true);
-                return effects;
-            }
+            let key = tile_id.0.to_string();
+            self.data.sources.remove(&key);
+            self.data.source_errors.remove(&key);
+            self.data.source_epoch.remove(&key);
+            self.data.source_stored_epoch.remove(&key);
+            self.data.timeline_sources.remove(&key);
+            let section_prefix = format!("{key}#section");
+            self.deferred_source_fetches
+                .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
+            self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
+            self.bump_generation();
+            let effects = self.effects_for_view(&view);
+            // The lens swapped subjects: eviction alone would let an
+            // in-flight response for the OLD lens land into the empty
+            // store — the floor refuses it outright.
+            self.floor_source_fetches(&effects, true);
+            return effects;
         }
 
         let effects = self.add_center_tile(view);

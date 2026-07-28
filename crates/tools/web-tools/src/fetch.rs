@@ -399,13 +399,13 @@ fn write_inline(node: &scraper::ElementRef<'_>, out: &mut String) {
                 let Some(child_ref) = scraper::ElementRef::wrap(child) else {
                     continue;
                 };
-                if el.name() == "a" {
-                    if let Some(href) = el.attr("href") {
-                        let label = normalized_text(&child_ref);
-                        if !label.is_empty() {
-                            out.push_str(&format!(" [{label}]({href}) "));
-                            continue;
-                        }
+                if el.name() == "a"
+                    && let Some(href) = el.attr("href")
+                {
+                    let label = normalized_text(&child_ref);
+                    if !label.is_empty() {
+                        out.push_str(&format!(" [{label}]({href}) "));
+                        continue;
                     }
                 }
                 write_inline(&child_ref, out);

@@ -402,11 +402,11 @@ impl RyeOsCore {
                                 )
                             })
                     };
-                if let Some((text, cursor)) = completed {
-                    if let Some(buffer) = self.focused_input_buffer_mut() {
-                        buffer.set_text(text, cursor);
-                        self.bump_generation();
-                    }
+                if let Some((text, cursor)) = completed
+                    && let Some(buffer) = self.focused_input_buffer_mut()
+                {
+                    buffer.set_text(text, cursor);
+                    self.bump_generation();
                 }
                 Vec::new()
             }

@@ -1223,14 +1223,14 @@ fn bound_view_vm_keyed(
         .as_ref()
         .or_else(|| core.data.sources.get(source_key));
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
-    if binding.widget == "text" {
-        if let Some(lines) = static_text_lines(binding) {
-            return RyeOsViewVm::Text {
-                title,
-                lines,
-                position: text_position(binding),
-            };
-        }
+    if binding.widget == "text"
+        && let Some(lines) = static_text_lines(binding)
+    {
+        return RyeOsViewVm::Text {
+            title,
+            lines,
+            position: text_position(binding),
+        };
     }
     match (binding.widget.as_str(), response) {
         // A feed with no chain root is empty, not loading — it would spin
@@ -1867,18 +1867,18 @@ fn input_completion(
 ) -> Vec<String> {
     // Inline @-mention: when the cursor is in an @-token, the hint lists
     // matching refs from the declared mentions source.
-    if let Some(mentions) = input.mentions.as_ref() {
-        if super::tokenize::active_mention(text, cursor).is_some() {
-            let records = core
-                .data
-                .sources
-                .get(&super::content::mention_source_key(view_ref, &input.id))
-                .map(|response| super::content::project_mentions(mentions, response))
-                .unwrap_or_default();
-            return super::tokenize::mention_hint(&records, text, cursor)
-                .into_iter()
-                .collect();
-        }
+    if let Some(mentions) = input.mentions.as_ref()
+        && super::tokenize::active_mention(text, cursor).is_some()
+    {
+        let records = core
+            .data
+            .sources
+            .get(&super::content::mention_source_key(view_ref, &input.id))
+            .map(|response| super::content::project_mentions(mentions, response))
+            .unwrap_or_default();
+        return super::tokenize::mention_hint(&records, text, cursor)
+            .into_iter()
+            .collect();
     }
     let Some(completion) = input.completion.as_ref() else {
         return Vec::new();
@@ -2174,10 +2174,10 @@ pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec
 fn collect_required_facet_refs(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(s) => {
-            if let Some(rest) = s.strip_prefix("@facet:") {
-                if !rest.contains('|') {
-                    out.push(rest.to_string());
-                }
+            if let Some(rest) = s.strip_prefix("@facet:")
+                && !rest.contains('|')
+            {
+                out.push(rest.to_string());
             }
         }
         serde_json::Value::Object(map) => {

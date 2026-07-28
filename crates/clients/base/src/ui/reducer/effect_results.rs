@@ -157,17 +157,16 @@ impl RyeOsCore {
             success_notice,
             ..
         } = expected
+            && outcome.delivery.is_none()
         {
-            if outcome.delivery.is_none() {
-                let notice = match success_notice {
-                    Some(template) => render_result_notice(template, data),
-                    None => effect_success_notice(expected, data),
-                };
-                self.notice(notice, RyeOsTone::Good);
-                let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
-                effects.extend(self.effects_for_hint("thread"));
-                return effects;
-            }
+            let notice = match success_notice {
+                Some(template) => render_result_notice(template, data),
+                None => effect_success_notice(expected, data),
+            };
+            self.notice(notice, RyeOsTone::Good);
+            let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
+            effects.extend(self.effects_for_hint("thread"));
+            return effects;
         }
         if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
             // A refused delivery (non-continuation target, settled

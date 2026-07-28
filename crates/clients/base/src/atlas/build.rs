@@ -450,10 +450,10 @@ fn path_from_source_path(source_path: &str) -> Option<Vec<String>> {
     }) {
         parts = parts.split_off(index + 1);
     }
-    if let Some(last) = parts.last_mut() {
-        if let Some((stem, _)) = last.rsplit_once('.') {
-            *last = stem.to_string();
-        }
+    if let Some(last) = parts.last_mut()
+        && let Some((stem, _)) = last.rsplit_once('.')
+    {
+        *last = stem.to_string();
     }
     let path: Vec<_> = parts
         .into_iter()
