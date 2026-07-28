@@ -237,14 +237,14 @@ impl ProviderAccountingAuthority {
         if self.provider_id.is_empty() || self.model_name.is_empty() {
             return Err("authority attribution fields must be non-empty".to_string());
         }
-        if let SpendBoundAuthority::Paid { maximum, .. } = &self.spend_bound {
-            if maximum.is_zero() {
-                return Err(
-                    "paid spend bound must have a positive maximum; zero cost requires an \
-                     explicitly-free contract"
-                        .to_string(),
-                );
-            }
+        if let SpendBoundAuthority::Paid { maximum, .. } = &self.spend_bound
+            && maximum.is_zero()
+        {
+            return Err(
+                "paid spend bound must have a positive maximum; zero cost requires an \
+                 explicitly-free contract"
+                    .to_string(),
+            );
         }
         if let ChargeReconciliationAuthority::DeterministicTariff { tariff } = &self.reconciliation
         {
