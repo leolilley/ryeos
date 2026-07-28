@@ -203,20 +203,20 @@ impl Walker {
         // Env preflight — skipped when consuming a stored follow result (the child
         // already ran). Still enforced for first-run follow suspend, bare-marker
         // re-suspend, and normal dispatches.
-        if resumed_follow_envelope.is_none() {
-            if let Err(env_err) = env_preflight::check_env_requires(
+        if resumed_follow_envelope.is_none()
+            && let Err(env_err) = env_preflight::check_env_requires(
                 &self.graph.config.env_requires,
                 &node.env_requires,
-            ) {
-                let err_msg = format!("env preflight failed: {env_err}");
-                return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
-                    item_id: Some(dispatched_item_id),
-                    error: err_msg,
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: elapsed,
-                    cost: None,
-                });
-            }
+            )
+        {
+            let err_msg = format!("env preflight failed: {env_err}");
+            return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                item_id: Some(dispatched_item_id),
+                error: err_msg,
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: elapsed,
+                cost: None,
+            });
         }
 
         // A follow node with no stored result does not dispatch inline: hand the
@@ -370,20 +370,20 @@ impl Walker {
             Err(dispatch_error) => {
                 // A transport/dispatch failure with retry attempts remaining
                 // reschedules a fresh-step re-dispatch; exhausted → on_error.
-                if dispatch_error.retryable {
-                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                        let rc = node.retry.as_ref().expect("retry present when scheduling");
-                        return StepOutcome::RetryScheduled(RetryScheduledOutcome {
-                            item_id: dispatched_item_id,
-                            error: dispatch_error.diagnostic,
-                            failed_attempt,
-                            total_attempts: rc.attempts,
-                            delay_ms: rc.delay_ms(failed_attempt),
-                            elapsed_ms: elapsed,
-                            // Transport failed before the child returned — no cost.
-                            cost: None,
-                        });
-                    }
+                if dispatch_error.retryable
+                    && let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt)
+                {
+                    let rc = node.retry.as_ref().expect("retry present when scheduling");
+                    return StepOutcome::RetryScheduled(RetryScheduledOutcome {
+                        item_id: dispatched_item_id,
+                        error: dispatch_error.diagnostic,
+                        failed_attempt,
+                        total_attempts: rc.attempts,
+                        delay_ms: rc.delay_ms(failed_attempt),
+                        elapsed_ms: elapsed,
+                        // Transport failed before the child returned — no cost.
+                        cost: None,
+                    });
                 }
                 StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: Some(dispatched_item_id),
@@ -409,19 +409,19 @@ impl Walker {
                 }
                 // Authored retry is an attempt budget, not blanket permission.
                 // Only a failure explicitly classified retryable may consume it.
-                if failure.retryable {
-                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                        let rc = node.retry.as_ref().expect("retry present when scheduling");
-                        return StepOutcome::RetryScheduled(RetryScheduledOutcome {
-                            item_id: dispatched_item_id,
-                            error: failure.diagnostic,
-                            failed_attempt,
-                            total_attempts: rc.attempts,
-                            delay_ms: rc.delay_ms(failed_attempt),
-                            elapsed_ms: elapsed,
-                            cost: failure.cost,
-                        });
-                    }
+                if failure.retryable
+                    && let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt)
+                {
+                    let rc = node.retry.as_ref().expect("retry present when scheduling");
+                    return StepOutcome::RetryScheduled(RetryScheduledOutcome {
+                        item_id: dispatched_item_id,
+                        error: failure.diagnostic,
+                        failed_attempt,
+                        total_attempts: rc.attempts,
+                        delay_ms: rc.delay_ms(failed_attempt),
+                        elapsed_ms: elapsed,
+                        cost: failure.cost,
+                    });
                 }
                 let observation = DispatchObservation::child_only(
                     dispatched_item_id.clone(),

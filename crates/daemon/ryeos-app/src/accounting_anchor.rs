@@ -605,10 +605,10 @@ mod tests {
             let slot: [u8; SLOT_SIZE] = bytes[index * SLOT_SIZE..(index + 1) * SLOT_SIZE]
                 .try_into()
                 .unwrap();
-            if let Some(record) = decode_slot(&slot) {
-                if record.financial_high_water == 3 {
-                    newest = Some(index);
-                }
+            if let Some(record) = decode_slot(&slot)
+                && record.financial_high_water == 3
+            {
+                newest = Some(index);
             }
         }
         let newest = newest.expect("advanced slot present");

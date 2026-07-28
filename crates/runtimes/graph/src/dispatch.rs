@@ -559,17 +559,17 @@ fn classify_follow_envelope_with_projection(
     } else {
         let structured_failure = parse_runtime_failure(&result);
         let mut runtime_failure_contract_error = runtime_failure_contract_error(&result);
-        if let Some(failure) = structured_failure.as_ref() {
-            if failure.diagnostic_locator.thread_id != envelope_child_thread_id {
-                let mismatch = format!(
-                    "RuntimeFailure diagnostic thread `{}` does not match follow child `{}`",
-                    failure.diagnostic_locator.thread_id, envelope_child_thread_id
-                );
-                runtime_failure_contract_error = Some(match runtime_failure_contract_error {
-                    Some(error) => format!("{error}; {mismatch}"),
-                    None => mismatch,
-                });
-            }
+        if let Some(failure) = structured_failure.as_ref()
+            && failure.diagnostic_locator.thread_id != envelope_child_thread_id
+        {
+            let mismatch = format!(
+                "RuntimeFailure diagnostic thread `{}` does not match follow child `{}`",
+                failure.diagnostic_locator.thread_id, envelope_child_thread_id
+            );
+            runtime_failure_contract_error = Some(match runtime_failure_contract_error {
+                Some(error) => format!("{error}; {mismatch}"),
+                None => mismatch,
+            });
         }
         let child_thread_id = Some(envelope_child_thread_id);
         let mut diagnostic = format!("child runtime failed (status: {})", status.as_str());

@@ -144,15 +144,15 @@ impl ResolutionCache {
         let mut guard = self.inner.lock().expect("resolution cache mutex poisoned");
         let seq = guard.next_seq;
         guard.next_seq += 1;
-        if guard.slots.len() >= self.capacity && !guard.slots.contains_key(&key) {
-            if let Some(oldest) = guard
+        if guard.slots.len() >= self.capacity
+            && !guard.slots.contains_key(&key)
+            && let Some(oldest) = guard
                 .slots
                 .iter()
                 .min_by_key(|(_, entry)| entry.seq)
                 .map(|(k, _)| k.clone())
-            {
-                guard.slots.remove(&oldest);
-            }
+        {
+            guard.slots.remove(&oldest);
         }
         guard.slots.insert(
             key,

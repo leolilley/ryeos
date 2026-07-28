@@ -113,13 +113,12 @@ impl CommandService {
             );
         }
 
-        if matches!(params.command_type.as_str(), "cancel" | "kill") {
-            if let Some(refusal) = self
+        if matches!(params.command_type.as_str(), "cancel" | "kill")
+            && let Some(refusal) = self
                 .state_store
                 .in_process_handler_stop_refusal(&params.thread_id)?
-            {
-                bail!("{}", refusal.message(&params.thread_id));
-            }
+        {
+            bail!("{}", refusal.message(&params.thread_id));
         }
 
         // AUTHZ NOTE: per-thread ownership is enforced upstream in

@@ -683,13 +683,13 @@ fn validate_continued_completion(completion: &ryeos_runtime::TerminalCompletion)
     if completion.error.is_some() {
         bail!("continued completion must not carry a terminal error");
     }
-    if let Some(outcome_code) = completion.outcome_code.as_deref() {
-        if outcome_code != ThreadTerminalStatus::Continued.as_str() {
-            bail!(
-                "continued completion outcome_code must be `{}`, received `{outcome_code}`",
-                ThreadTerminalStatus::Continued.as_str()
-            );
-        }
+    if let Some(outcome_code) = completion.outcome_code.as_deref()
+        && outcome_code != ThreadTerminalStatus::Continued.as_str()
+    {
+        bail!(
+            "continued completion outcome_code must be `{}`, received `{outcome_code}`",
+            ThreadTerminalStatus::Continued.as_str()
+        );
     }
 
     let runtime_cost = completion
@@ -982,16 +982,13 @@ impl AdmittedProjectBinding {
                     workspace_lifeline,
                 },
             ) => {
-                if let (Some(path), Some(lifeline)) = (effective_path, workspace_lifeline) {
-                    if !lifeline
+                if let (Some(path), Some(lifeline)) = (effective_path, workspace_lifeline)
+                    && !lifeline
                         .path()
                         .as_deref()
                         .is_some_and(|root| admitted_workspace_owns_effective_path(root, path))
-                    {
-                        bail!(
-                            "projectless materialization lifeline does not own its effective path"
-                        );
-                    }
+                {
+                    bail!("projectless materialization lifeline does not own its effective path");
                 }
             }
             (
@@ -1007,14 +1004,12 @@ impl AdmittedProjectBinding {
                 if canonical_root != path || canonical_root != materialized_root {
                     bail!("live project authority contradicts its planning materialization");
                 }
-                if let Some(lifeline) = workspace_lifeline {
-                    if !lifeline.path().as_deref().is_some_and(|root| {
+                if let Some(lifeline) = workspace_lifeline
+                    && !lifeline.path().as_deref().is_some_and(|root| {
                         admitted_workspace_owns_effective_path(root, canonical_root)
-                    }) {
-                        bail!(
-                            "live project materialization lifeline does not own its canonical root"
-                        );
-                    }
+                    })
+                {
+                    bail!("live project materialization lifeline does not own its canonical root");
                 }
             }
             (
@@ -2932,35 +2927,33 @@ impl ThreadLifecycleService {
         if matches!(
             ThreadStatus::from_str_lossy(terminal_status),
             Some(ThreadStatus::Failed | ThreadStatus::Killed)
-        ) {
-            if let Some(stderr_tail) = effective
+        ) && let Some(stderr_tail) = effective
+            .error_json
+            .as_ref()
+            .and_then(|e| e.get("stderr"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let exit_code = effective
                 .error_json
                 .as_ref()
-                .and_then(|e| e.get("stderr"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                let exit_code = effective
-                    .error_json
-                    .as_ref()
-                    .and_then(|e| e.get("exit_code"))
-                    .and_then(Value::as_i64);
-                let soft_failure = effective
-                    .error_json
-                    .as_ref()
-                    .and_then(|e| e.get("soft_failure"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                tracing::error!(
-                    thread_id,
-                    outcome_code = outcome_code.unwrap_or(""),
-                    exit_code,
-                    soft_failure,
-                    stderr_tail = %stderr_tail,
-                    "thread failed; tool stderr tail follows"
-                );
-            }
+                .and_then(|e| e.get("exit_code"))
+                .and_then(Value::as_i64);
+            let soft_failure = effective
+                .error_json
+                .as_ref()
+                .and_then(|e| e.get("soft_failure"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            tracing::error!(
+                thread_id,
+                outcome_code = outcome_code.unwrap_or(""),
+                exit_code,
+                soft_failure,
+                stderr_tail = %stderr_tail,
+                "thread failed; tool stderr tail follows"
+            );
         }
 
         self.update_scheduler_fire_on_thread_terminal(
@@ -3670,34 +3663,34 @@ impl ThreadLifecycleService {
             .and_then(|guard| guard.clone());
         let app_root = self.app_root.read().ok().and_then(|guard| guard.clone());
         let scheduler = (db, app_root);
-        if let (Some(db), Some(app_root)) = scheduler {
-            if let Ok(Some(fire)) = db.find_fire_by_thread(thread_id) {
-                let fire_status = ryeos_scheduler::fire_status_for_thread_status(terminal_status);
-                let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
-                let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
-                    terminal_status,
-                    result_outcome.as_ref(),
-                    outcome_code,
-                );
-                let now = lillux::time::timestamp_millis();
-                let completed_fired_at = fire.fired_at.unwrap_or(now);
+        if let (Some(db), Some(app_root)) = scheduler
+            && let Ok(Some(fire)) = db.find_fire_by_thread(thread_id)
+        {
+            let fire_status = ryeos_scheduler::fire_status_for_thread_status(terminal_status);
+            let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
+            let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
+                terminal_status,
+                result_outcome.as_ref(),
+                outcome_code,
+            );
+            let now = lillux::time::timestamp_millis();
+            let completed_fired_at = fire.fired_at.unwrap_or(now);
 
-                let updated = ryeos_scheduler::types::FireRecord {
-                    status: fire_status.to_string(),
-                    outcome: Some(outcome_str.to_string()),
-                    fired_at: Some(completed_fired_at),
-                    completed_at: Some(now),
-                    ..fire
-                };
-                if let Err(e) =
-                    ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &updated)
-                {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        error = %e,
-                        "scheduler: failed to update fire status on thread completion"
-                    );
-                }
+            let updated = ryeos_scheduler::types::FireRecord {
+                status: fire_status.to_string(),
+                outcome: Some(outcome_str.to_string()),
+                fired_at: Some(completed_fired_at),
+                completed_at: Some(now),
+                ..fire
+            };
+            if let Err(e) =
+                ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &updated)
+            {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    error = %e,
+                    "scheduler: failed to update fire status on thread completion"
+                );
             }
         }
     }
@@ -3763,24 +3756,22 @@ impl ThreadLifecycleService {
         status: &str,
         upstream_thread_id: Option<&str>,
     ) -> Result<Option<FollowFact>> {
-        if status == ThreadStatus::Continued.as_str() {
-            if let Some(w) = self
+        if status == ThreadStatus::Continued.as_str()
+            && let Some(w) = self
                 .state_store
                 .get_follow_waiter_by_parent_thread(thread_id)?
-            {
-                return Ok(Some(FollowFact::suspended_parent(&w)));
-            }
+        {
+            return Ok(Some(FollowFact::suspended_parent(&w)));
         }
         if let Some(w) = self.state_store.get_follow_waiter_by_successor(thread_id)? {
             return Ok(Some(FollowFact::resume_successor_live(&w)));
         }
-        if let Some(upstream) = upstream_thread_id {
-            if self
+        if let Some(upstream) = upstream_thread_id
+            && self
                 .state_store
                 .is_follow_resume_successor(upstream, thread_id)?
-            {
-                return Ok(Some(FollowFact::resume_successor_durable(thread_id)));
-            }
+        {
+            return Ok(Some(FollowFact::resume_successor_durable(thread_id)));
         }
         Ok(None)
     }
@@ -3905,29 +3896,28 @@ impl ThreadLifecycleService {
         filter: &ryeos_state::queries::ThreadListFilter,
         facets: &std::collections::HashMap<String, Vec<(String, String)>>,
     ) -> bool {
-        if let Some(principal) = &filter.principal {
-            if item.requested_by.as_deref() != Some(principal.as_str()) {
-                return false;
-            }
+        if let Some(principal) = &filter.principal
+            && item.requested_by.as_deref() != Some(principal.as_str())
+        {
+            return false;
         }
-        if let Some(status) = &filter.status {
-            if !item.status.contains(status) {
-                return false;
-            }
+        if let Some(status) = &filter.status
+            && !item.status.contains(status)
+        {
+            return false;
         }
-        if let Some(kind) = &filter.kind {
-            if !item.kind.contains(kind) {
-                return false;
-            }
+        if let Some(kind) = &filter.kind
+            && !item.kind.contains(kind)
+        {
+            return false;
         }
-        if let Some(requested_by) = &filter.requested_by {
-            if !item
+        if let Some(requested_by) = &filter.requested_by
+            && !item
                 .requested_by
                 .as_deref()
                 .is_some_and(|value| value.contains(requested_by))
-            {
-                return false;
-            }
+        {
+            return false;
         }
         if filter
             .exclude_item_prefixes
@@ -3936,10 +3926,10 @@ impl ThreadLifecycleService {
         {
             return false;
         }
-        if let Some(project_root) = &filter.project_root {
-            if item.project_root.as_deref().map(Path::new) != Some(project_root.as_path()) {
-                return false;
-            }
+        if let Some(project_root) = &filter.project_root
+            && item.project_root.as_deref().map(Path::new) != Some(project_root.as_path())
+        {
+            return false;
         }
         if let Some((key, value)) = &filter.facet {
             let has_facet = facets

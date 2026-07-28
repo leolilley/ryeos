@@ -397,10 +397,8 @@ pub fn observe_child_callback(thread_id: &str) {
     }
     drop(registry);
 
-    if recorded {
-        if let Some(timing) = timing {
-            timing.emit("first_child_callback_received");
-        }
+    if recorded && let Some(timing) = timing {
+        timing.emit("first_child_callback_received");
     }
 }
 

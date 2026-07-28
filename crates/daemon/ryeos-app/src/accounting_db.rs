@@ -1317,6 +1317,8 @@ impl AccountingDb {
                            AND state = 'open'",
                     )
                     .context("prepare superseded gate scan")?;
+                // Preserve statement/query temporary drop order under Edition 2024.
+                #[allow(clippy::let_and_return)]
                 let generations = stmt
                     .query_map(
                         rusqlite::params![
@@ -1849,14 +1851,14 @@ impl AccountingDb {
                                  but the sealed certificate is `{pricing_generation}`"
                             );
                         }
-                        if let Some(expires_at_ms) = expires_at_ms {
-                            if *expires_at_ms <= args.now_ms {
-                                bail!(
-                                    "spend bound certificate expired at {expires_at_ms}ms; \
-                                     refusing reservation at {}ms",
-                                    args.now_ms
-                                );
-                            }
+                        if let Some(expires_at_ms) = expires_at_ms
+                            && *expires_at_ms <= args.now_ms
+                        {
+                            bail!(
+                                "spend bound certificate expired at {expires_at_ms}ms; \
+                                 refusing reservation at {}ms",
+                                args.now_ms
+                            );
                         }
                         // When the sealed authority embeds its tariff, the
                         // committed unit bounds must reproduce the sealed
@@ -1934,13 +1936,13 @@ impl AccountingDb {
             }
         }
         let authority_digest = authority.authority_digest.as_str();
-        if let Some(state) = self.authority_health_state(conn, authority_digest)? {
-            if state != "healthy" {
-                bail!(
-                    "accounting authority {authority_digest} is {state}; reservations under a \
-                     quarantined or violated authority fail closed"
-                );
-            }
+        if let Some(state) = self.authority_health_state(conn, authority_digest)?
+            && state != "healthy"
+        {
+            bail!(
+                "accounting authority {authority_digest} is {state}; reservations under a \
+                 quarantined or violated authority fail closed"
+            );
         }
 
         // Gate: the exact (thread, generation) must be open.
@@ -3792,19 +3794,16 @@ impl AccountingDb {
                                      cannot replace acknowledged transitions"
                                 ));
                             } else {
-                                match self.anchor.compare_and_advance(
+                                if let Err(error) = self.anchor.compare_and_advance(
                                     &self.site_id,
                                     self.epoch,
                                     high_water as u64,
                                     &stored_digest,
                                 ) {
-                                    Err(error) => {
-                                        reasons.push(format!(
-                                            "anchor was behind the database (sequence \
-                                             {anchor_sequence}) and could not be advanced: {error:#}"
-                                        ));
-                                    }
-                                    Ok(_) => {}
+                                    reasons.push(format!(
+                                        "anchor was behind the database (sequence \
+                                         {anchor_sequence}) and could not be advanced: {error:#}"
+                                    ));
                                 }
                             }
                         }

@@ -184,14 +184,13 @@ impl Config {
         if let Some(path) = file_cfg
             .as_ref()
             .and_then(|cfg| cfg.operator_signing_key_path.as_ref())
+            && path != &canonical_operator_key_path
         {
-            if path != &canonical_operator_key_path {
-                bail!(
-                    "operator_signing_key_path must be {}; got {}",
-                    canonical_operator_key_path.display(),
-                    path.display()
-                );
-            }
+            bail!(
+                "operator_signing_key_path must be {}; got {}",
+                canonical_operator_key_path.display(),
+                path.display()
+            );
         }
 
         let cfg = Self {

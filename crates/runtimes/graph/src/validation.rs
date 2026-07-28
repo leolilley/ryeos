@@ -189,27 +189,27 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             // collected results under `collect`, then removes the
             // iteration variable `as` from state — if they share a name
             // the collected results are removed too (silent data loss).
-            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as) {
-                if collect == as_var {
-                    result.errors.push(format!(
-                        "foreach node '{name}' uses '{collect}' for both 'collect' and 'as' — \
-                         the collected results would be removed with the iteration variable"
-                    ));
-                }
+            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as)
+                && collect == as_var
+            {
+                result.errors.push(format!(
+                    "foreach node '{name}' uses '{collect}' for both 'collect' and 'as' — \
+                     the collected results would be removed with the iteration variable"
+                ));
             }
-            if let Some(as_var) = &node.r#as {
-                if assign_keys.contains(as_var.as_str()) {
-                    result.errors.push(format!(
-                        "foreach node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
-                    ));
-                }
+            if let Some(as_var) = &node.r#as
+                && assign_keys.contains(as_var.as_str())
+            {
+                result.errors.push(format!(
+                    "foreach node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
+                ));
             }
-            if let Some(collect) = &node.collect {
-                if assign_keys.contains(collect.as_str()) {
-                    result.errors.push(format!(
-                        "foreach node '{name}' uses '{collect}' as both its collect key and an assign key"
-                    ));
-                }
+            if let Some(collect) = &node.collect
+                && assign_keys.contains(collect.as_str())
+            {
+                result.errors.push(format!(
+                    "foreach node '{name}' uses '{collect}' as both its collect key and an assign key"
+                ));
             }
         }
         NodeType::Gate => {
@@ -278,26 +278,26 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                     "follow fanout node '{name}' must set 'parallel: true'"
                 ));
             }
-            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as) {
-                if collect == as_var {
-                    result.errors.push(format!(
-                        "follow fanout node '{name}' uses '{collect}' for both 'collect' and 'as'"
-                    ));
-                }
+            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as)
+                && collect == as_var
+            {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' uses '{collect}' for both 'collect' and 'as'"
+                ));
             }
-            if let Some(as_var) = &node.r#as {
-                if assign_keys.contains(as_var.as_str()) {
-                    result.errors.push(format!(
-                        "follow fanout node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
-                    ));
-                }
+            if let Some(as_var) = &node.r#as
+                && assign_keys.contains(as_var.as_str())
+            {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
+                ));
             }
-            if let Some(collect) = &node.collect {
-                if assign_keys.contains(collect.as_str()) {
-                    result.errors.push(format!(
-                        "follow fanout node '{name}' uses '{collect}' as both its collect key and an assign key"
-                    ));
-                }
+            if let Some(collect) = &node.collect
+                && assign_keys.contains(collect.as_str())
+            {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' uses '{collect}' as both its collect key and an assign key"
+                ));
             }
         }
         if node.is_cacheable() {
@@ -429,12 +429,12 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         validate_edges(name, next, cfg, result);
     }
 
-    if let Some(ref on_err) = node.on_error {
-        if !cfg.nodes.contains_key(on_err) {
-            result.errors.push(format!(
-                "on_error target '{on_err}' in node '{name}' does not exist"
-            ));
-        }
+    if let Some(ref on_err) = node.on_error
+        && !cfg.nodes.contains_key(on_err)
+    {
+        result.errors.push(format!(
+            "on_error target '{on_err}' in node '{name}' does not exist"
+        ));
     }
 }
 
@@ -634,10 +634,10 @@ fn bfs_reachable(start: &str, nodes: &HashMap<String, GraphNode>) -> HashSet<Str
                     }
                 }
             }
-            if let Some(ref on_err) = node.on_error {
-                if !visited.contains(on_err) {
-                    queue.push(on_err.clone());
-                }
+            if let Some(ref on_err) = node.on_error
+                && !visited.contains(on_err)
+            {
+                queue.push(on_err.clone());
             }
         }
     }

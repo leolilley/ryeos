@@ -308,15 +308,15 @@ fn main() -> anyhow::Result<()> {
         params["resume_state"] = serde_json::to_value(rs)?;
     }
 
-    if let Some(ref schema) = graph.config.config_schema {
-        if let Err(err) = normalize_inputs_against_schema(&mut params, schema) {
-            let runtime_result = make_error_runtime_result(
-                &resolved.thread_id,
-                &format!("input validation failed: {err}"),
-            );
-            println!("{}", serde_json::to_string(&runtime_result)?);
-            std::process::exit(0);
-        }
+    if let Some(ref schema) = graph.config.config_schema
+        && let Err(err) = normalize_inputs_against_schema(&mut params, schema)
+    {
+        let runtime_result = make_error_runtime_result(
+            &resolved.thread_id,
+            &format!("input validation failed: {err}"),
+        );
+        println!("{}", serde_json::to_string(&runtime_result)?);
+        std::process::exit(0);
     }
 
     // Cooperative cancel: SIGTERM sets a flag the walker checks at each node
@@ -445,10 +445,10 @@ fn normalize_inputs_against_schema(params: &mut Value, schema: &Value) -> anyhow
     // 1. Enforce required
     if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
         for field in required {
-            if let Some(name) = field.as_str() {
-                if input_obj.get(name).is_none() {
-                    anyhow::bail!("missing required input: {name}");
-                }
+            if let Some(name) = field.as_str()
+                && input_obj.get(name).is_none()
+            {
+                anyhow::bail!("missing required input: {name}");
             }
         }
     }

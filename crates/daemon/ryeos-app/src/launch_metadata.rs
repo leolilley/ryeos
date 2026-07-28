@@ -667,10 +667,10 @@ impl RuntimeLaunchMetadata {
         where
             T: Clone + Serialize,
         {
-            if let (Some(authoritative), Some(attempt)) = (authoritative, attempt) {
-                if serde_json::to_value(authoritative)? != serde_json::to_value(attempt)? {
-                    anyhow::bail!("process attach changed admitted {label}");
-                }
+            if let (Some(authoritative), Some(attempt)) = (authoritative, attempt)
+                && serde_json::to_value(authoritative)? != serde_json::to_value(attempt)?
+            {
+                anyhow::bail!("process attach changed admitted {label}");
             }
             Ok(authoritative.clone().or_else(|| attempt.clone()))
         }

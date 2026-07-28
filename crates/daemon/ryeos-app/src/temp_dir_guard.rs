@@ -119,10 +119,10 @@ impl Drop for TempDirGuard {
                     path = %p.display(),
                     "backend workspace guard dropped while still armed; preserving for journal reconciliation"
                 );
-            } else if self.remove_on_drop {
-                if let Err(error) = std::fs::remove_dir_all(&p) {
-                    tracing::warn!(path = %p.display(), %error, "temporary directory cleanup failed");
-                }
+            } else if self.remove_on_drop
+                && let Err(error) = std::fs::remove_dir_all(&p)
+            {
+                tracing::warn!(path = %p.display(), %error, "temporary directory cleanup failed");
             }
         }
     }

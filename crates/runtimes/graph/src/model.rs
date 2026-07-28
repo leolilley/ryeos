@@ -397,12 +397,12 @@ impl GraphDefinition {
             std::borrow::Cow::Owned(lillux::signature::strip_signature_lines(raw))
         };
         let definition_hash = lillux::cas::sha256_hex(definition_content.as_bytes());
-        if let Some((_, expected_digest)) = verified_identity {
-            if definition_hash != expected_digest {
-                anyhow::bail!(
-                    "verified graph content digest mismatch: envelope={expected_digest}, runtime={definition_hash}"
-                );
-            }
+        if let Some((_, expected_digest)) = verified_identity
+            && definition_hash != expected_digest
+        {
+            anyhow::bail!(
+                "verified graph content digest mismatch: envelope={expected_digest}, runtime={definition_hash}"
+            );
         }
         let mut file: GraphFile = serde_yaml::from_str(definition_content.as_ref())?;
         let runtime_capability_requirements = match file.requires {

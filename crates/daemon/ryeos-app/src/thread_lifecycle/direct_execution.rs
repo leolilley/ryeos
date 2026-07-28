@@ -790,28 +790,28 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
     // build), so it never reaches here.
     if let Some(ts_dir) = thread_state_dir {
         for node in &plan.nodes {
-            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
-                if spec.execution.native_resume.is_some() {
-                    let ckpt = ts_dir.join(crate::launch_metadata::CHECKPOINTS_SUBDIR);
-                    std::fs::create_dir_all(&ckpt).map_err(|e| {
-                        anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
-                    })?;
-                    let mut bindings = vec![EnvBinding::new(
-                        "RYEOS_CHECKPOINT_DIR",
-                        ckpt.display().to_string(),
+            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node
+                && spec.execution.native_resume.is_some()
+            {
+                let ckpt = ts_dir.join(crate::launch_metadata::CHECKPOINTS_SUBDIR);
+                std::fs::create_dir_all(&ckpt).map_err(|e| {
+                    anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
+                })?;
+                let mut bindings = vec![EnvBinding::new(
+                    "RYEOS_CHECKPOINT_DIR",
+                    ckpt.display().to_string(),
+                    EnvSourceDetail::DaemonResume,
+                )];
+                if is_resume {
+                    bindings.push(EnvBinding::new(
+                        "RYEOS_RESUME",
+                        "1",
                         EnvSourceDetail::DaemonResume,
-                    )];
-                    if is_resume {
-                        bindings.push(EnvBinding::new(
-                            "RYEOS_RESUME",
-                            "1",
-                            EnvSourceDetail::DaemonResume,
-                        ));
-                    }
-                    allocated_checkpoint_dir = Some(ckpt);
-                    resume_env_for_first_native_resume = Some(bindings);
-                    break; // first DispatchSubprocess wins, mirrors FirstWins
+                    ));
                 }
+                allocated_checkpoint_dir = Some(ckpt);
+                resume_env_for_first_native_resume = Some(bindings);
+                break; // first DispatchSubprocess wins, mirrors FirstWins
             }
         }
     }
@@ -863,10 +863,10 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
 
             builder = builder.with_typed_bindings(protocol_env_bindings.iter().cloned())?;
 
-            if spec.execution.native_resume.is_some() {
-                if let Some(resume_bindings) = resume_env_for_first_native_resume.take() {
-                    builder = builder.with_typed_bindings(resume_bindings)?;
-                }
+            if spec.execution.native_resume.is_some()
+                && let Some(resume_bindings) = resume_env_for_first_native_resume.take()
+            {
+                builder = builder.with_typed_bindings(resume_bindings)?;
             }
 
             spec.env = builder.build().into_iter().collect();

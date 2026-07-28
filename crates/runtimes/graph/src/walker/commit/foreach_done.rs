@@ -51,10 +51,10 @@ impl Walker {
         }
 
         // Merge foreach results into state.
-        if let Some(key) = collect_key {
-            if let Some(obj) = state.as_object_mut() {
-                obj.insert(key.clone(), Value::Array(results.clone()));
-            }
+        if let Some(key) = collect_key
+            && let Some(obj) = state.as_object_mut()
+        {
+            obj.insert(key.clone(), Value::Array(results.clone()));
         }
         // Commit accumulated foreach `assign` mutations.
         merge_into(state, assign_delta);

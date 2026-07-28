@@ -2079,6 +2079,8 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
              SELECT 'detached_spawn_intent', operation_id, launch_metadata
                FROM detached_spawn_intent WHERE launch_metadata IS NOT NULL",
         )?;
+        // Preserve statement/query temporary drop order under Edition 2024.
+        #[allow(clippy::let_and_return)]
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -2115,6 +2117,8 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
                  ON runtime.thread_id = reservation.thread_id
               ORDER BY reservation.thread_id",
         )?;
+        // Preserve statement/query temporary drop order under Edition 2024.
+        #[allow(clippy::let_and_return)]
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -2149,6 +2153,8 @@ fn validate_current_runtime_store(conn: &Connection, path: &Path) -> Result<()> 
              SELECT 'follow_waiter', follow_key, child_project_authority
                FROM follow_waiter WHERE child_project_authority IS NOT NULL",
         )?;
+        // Preserve statement/query temporary drop order under Edition 2024.
+        #[allow(clippy::let_and_return)]
         let rows = statement
             .query_map([], |row| {
                 Ok((
@@ -3428,20 +3434,17 @@ impl RuntimeDb {
         if created {
             initialize_current_runtime_schema(&conn, path)?;
         } else {
-            match validate_current_runtime_store(&conn, path) {
-                Err(error) => {
-                    if !explicit_history_reset {
-                        return Err(error).context(format!(
-                            "runtime database requires the explicit no-backcompat reset; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting ({})",
-                            path.display()
-                        ));
-                    }
-                    // Do not mutate yet. Offline GC first publishes the authoritative
-                    // cross-store discard intent; only then may it call
-                    // `apply_explicit_history_reset` on this pinned handle.
-                    reset_required = true;
+            if let Err(error) = validate_current_runtime_store(&conn, path) {
+                if !explicit_history_reset {
+                    return Err(error).context(format!(
+                        "runtime database requires the explicit no-backcompat reset; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting ({})",
+                        path.display()
+                    ));
                 }
-                Ok(_) => {}
+                // Do not mutate yet. Offline GC first publishes the authoritative
+                // cross-store discard intent; only then may it call
+                // `apply_explicit_history_reset` on this pinned handle.
+                reset_required = true;
             }
         }
         if reset_required {
@@ -5540,6 +5543,8 @@ impl RuntimeDb {
                  ORDER BY command_id ASC LIMIT ?5"
             );
             let mut stmt = transaction.prepare(&sql)?;
+            // Preserve statement/query temporary drop order under Edition 2024.
+            #[allow(clippy::let_and_return)]
             let rows = stmt
                 .query_map(
                     params![
@@ -6544,10 +6549,10 @@ impl RuntimeDb {
             if self.launch_window_live_count(window_key)? >= width {
                 break;
             }
-            if let Some(cap) = global_live_limit {
-                if self.launch_window_live_total()? >= cap {
-                    break;
-                }
+            if let Some(cap) = global_live_limit
+                && self.launch_window_live_total()? >= cap
+            {
+                break;
             }
             self.conn.execute(
                 "UPDATE launch_window SET launched_at_ms = ?2 WHERE child_chain_root_id = ?1",

@@ -3417,12 +3417,11 @@ impl StateStore {
             bail!("thread creation is closed for daemon shutdown");
         }
         let launch_planning = g.runtime_db.launch_planning_by_thread(&thread.thread_id)?;
-        if let Some(planning) = launch_planning.as_ref() {
-            if planning.state != "planning"
-                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
-            {
-                return Err(LaunchPlanningInactive.into());
-            }
+        if let Some(planning) = launch_planning.as_ref()
+            && (planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id())
+        {
+            return Err(LaunchPlanningInactive.into());
         }
         // Initial facet events are subject to the same collection/key/value
         // limits as ordinary appends. The new thread is not projected yet, so
@@ -3493,14 +3492,13 @@ impl StateStore {
         } else {
             g.runtime_db
                 .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
-            if let Some(launch_metadata) = launch_metadata {
-                if let Err(error) = g
+            if let Some(launch_metadata) = launch_metadata
+                && let Err(error) = g
                     .runtime_db
                     .set_launch_metadata(&thread.thread_id, launch_metadata)
-                {
-                    let _ = g.runtime_db.delete_thread_runtime(&thread.thread_id);
-                    return Err(error);
-                }
+            {
+                let _ = g.runtime_db.delete_thread_runtime(&thread.thread_id);
+                return Err(error);
             }
         }
         let committed = match event_successor_snapshot {
@@ -3870,14 +3868,14 @@ impl StateStore {
                 .project_authority
                 .base_snapshot_projection()
                 .map(str::to_owned);
-            if let Some(requested_base) = base_project_snapshot_hash {
-                if Some(requested_base) != authoritative_base.as_deref() {
-                    bail!(
-                        "mark_running project snapshot mismatch for {thread_id}: authoritative {:?}, requested {:?}",
-                        authoritative_base,
-                        requested_base,
-                    );
-                }
+            if let Some(requested_base) = base_project_snapshot_hash
+                && Some(requested_base) != authoritative_base.as_deref()
+            {
+                bail!(
+                    "mark_running project snapshot mismatch for {thread_id}: authoritative {:?}, requested {:?}",
+                    authoritative_base,
+                    requested_base,
+                );
             }
 
             let now = lillux::time::iso8601_now();
@@ -4461,10 +4459,10 @@ impl StateStore {
             "has_error": update.error_json.is_some(),
             "artifact_count": update.artifacts.len(),
         });
-        if let Some(err) = &update.error_json {
-            if let Some(map) = terminal_payload.as_object_mut() {
-                map.insert("error".to_string(), err.clone());
-            }
+        if let Some(err) = &update.error_json
+            && let Some(map) = terminal_payload.as_object_mut()
+        {
+            map.insert("error".to_string(), err.clone());
         }
         events_to_append.push(NewEventRecord {
             event_type: terminal_event_type(&update.status)?.to_string(),
@@ -4512,12 +4510,11 @@ impl StateStore {
         let launch_planning = g
             .runtime_db
             .launch_planning_by_thread(&successor.thread_id)?;
-        if let Some(planning) = launch_planning.as_ref() {
-            if planning.state != "planning"
-                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
-            {
-                return Err(LaunchPlanningInactive.into());
-            }
+        if let Some(planning) = launch_planning.as_ref()
+            && (planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id())
+        {
+            return Err(LaunchPlanningInactive.into());
         }
         validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
         if !self
@@ -4591,14 +4588,13 @@ impl StateStore {
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-            if let Some(launch_metadata) = launch_metadata {
-                if let Err(error) = g
+            if let Some(launch_metadata) = launch_metadata
+                && let Err(error) = g
                     .runtime_db
                     .set_launch_metadata(&successor.thread_id, launch_metadata)
-                {
-                    let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                    return Err(error);
-                }
+            {
+                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+                return Err(error);
             }
         }
 
@@ -5119,15 +5115,14 @@ impl StateStore {
         // settle. If the seed fails, only an orphan runtime row exists — no
         // state-db successor edge, source untouched and still running.
         {
-            if let Some(prepared) = successor_launch_metadata {
-                if prepared.native_resume != source_launch_metadata.native_resume
+            if let Some(prepared) = successor_launch_metadata
+                && (prepared.native_resume != source_launch_metadata.native_resume
                     || prepared.cancellation_mode != source_launch_metadata.cancellation_mode
-                    || prepared.launch_driver != source_launch_metadata.launch_driver
-                {
-                    bail!(
-                        "prepared successor execution policy differs from its source launch metadata"
-                    );
-                }
+                    || prepared.launch_driver != source_launch_metadata.launch_driver)
+            {
+                bail!(
+                    "prepared successor execution policy differs from its source launch metadata"
+                );
             }
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
@@ -5166,18 +5161,17 @@ impl StateStore {
             continued_snapshot_from_authoritative(source_snapshot_before.clone(), &now);
         source_snapshot_after.result_project_snapshot_hash =
             source_result_snapshot_hash.map(ToOwned::to_owned);
-        if let Some(result_hash) = source_result_snapshot_hash {
-            if successor_with_upstream
+        if let Some(result_hash) = source_result_snapshot_hash
+            && successor_with_upstream
                 .base_project_snapshot_hash
                 .as_deref()
                 != Some(result_hash)
-            {
-                bail!(
-                    "continuation successor {} base snapshot does not match frozen source result {}",
-                    successor.thread_id,
-                    result_hash
-                );
-            }
+        {
+            bail!(
+                "continuation successor {} base snapshot does not match frozen source result {}",
+                successor.thread_id,
+                result_hash
+            );
         }
         let edge_reason: Option<&str> = match &kind {
             RunningContinuationKind::Machine { sanitized_reason } => *sanitized_reason,
@@ -5438,11 +5432,11 @@ impl StateStore {
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
 
             // Seed the operator launch context before the successor is visible.
-            if let Some(meta) = effective_launch_metadata.as_ref() {
-                if let Err(error) = g.runtime_db.set_launch_metadata(&successor.thread_id, meta) {
-                    let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                    return Err(error);
-                }
+            if let Some(meta) = effective_launch_metadata.as_ref()
+                && let Err(error) = g.runtime_db.set_launch_metadata(&successor.thread_id, meta)
+            {
+                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+                return Err(error);
             }
         }
 

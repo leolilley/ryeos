@@ -232,16 +232,16 @@ impl RuntimeItemAuthorService {
                 target.display()
             );
         }
-        if params.mode == AuthorMode::Upsert {
-            if let Some(expected) = params.expected_digest.as_deref() {
-                enforce_expected_digest_from_file(
-                    incumbent.as_mut(),
-                    &target,
-                    expected,
-                    &source_format.signature.prefix,
-                    source_format.signature.suffix.as_deref(),
-                )?;
-            }
+        if params.mode == AuthorMode::Upsert
+            && let Some(expected) = params.expected_digest.as_deref()
+        {
+            enforce_expected_digest_from_file(
+                incumbent.as_mut(),
+                &target,
+                expected,
+                &source_format.signature.prefix,
+                source_format.signature.suffix.as_deref(),
+            )?;
         }
 
         write_atomic(
