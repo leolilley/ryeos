@@ -139,6 +139,7 @@ fn atomic_write_batch_unix(
         }
     }
     let durability = sync_write_batch(first_directory);
+    #[allow(clippy::let_and_return)]
     let outcome = match (publication_error, durability) {
         (None, Ok(())) => Ok(()),
         (Some(error), Ok(())) => Err(error).context("publish immutable CAS batch entries"),
@@ -981,6 +982,7 @@ fn store_exact_entry(
     }
 
     let publication = parent.atomic_write_if_same(&name, None, bytes, 0o644);
+    #[allow(clippy::let_and_return)]
     let outcome = match publication {
         Ok(()) => Ok(true),
         Err(publication_error) => match parent.open_regular(&name, false) {

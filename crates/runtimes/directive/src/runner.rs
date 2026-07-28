@@ -1848,6 +1848,7 @@ impl Runner {
                                             }
                                         }
                                     } else {
+                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
@@ -1916,6 +1917,7 @@ impl Runner {
                                         let (input_tokens, output_tokens) = usage
                                             .complete_token_counts()
                                             .expect("valid provider usage has complete token counts");
+                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
@@ -2027,6 +2029,7 @@ impl Runner {
                                 let mut detail = protocol_error.to_string();
                                 if let Some(usage) = protocol_error.usage.as_ref() {
                                     if usage.is_valid() {
+                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {

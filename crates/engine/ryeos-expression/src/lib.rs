@@ -647,19 +647,19 @@ pub fn compile_condition_for(
 fn require_boolean_condition(
     expression: CompiledExpression,
 ) -> Result<CompiledExpression, ExpressionError> {
-    if let Some(kind) = expression.static_result_type() {
-        if kind != ExpressionValueType::Bool {
-            return Err(ExpressionError::new(
-                ErrorPhase::Parse,
-                expression.field.clone(),
-                expression.source.clone(),
-                expression.root.span,
-                format!(
-                    "condition expression is statically {}; expected bool",
-                    kind.as_str()
-                ),
-            ));
-        }
+    if let Some(kind) = expression.static_result_type()
+        && kind != ExpressionValueType::Bool
+    {
+        return Err(ExpressionError::new(
+            ErrorPhase::Parse,
+            expression.field.clone(),
+            expression.source.clone(),
+            expression.root.span,
+            format!(
+                "condition expression is statically {}; expected bool",
+                kind.as_str()
+            ),
+        ));
     }
     Ok(expression)
 }

@@ -504,7 +504,7 @@ fn topological_sort_kept(all_snapshots: &[SnapshotInfo], keep: &HashSet<String>)
     // Kahn's algorithm: start with nodes that have no kept parents (roots)
     let mut queue: Vec<String> = in_degree
         .iter()
-        .filter(|(_, &deg)| deg == 0)
+        .filter(|&(_, &deg)| deg == 0)
         .map(|(h, _)| h.clone())
         .collect();
     queue.sort(); // deterministic ordering for nodes at same level

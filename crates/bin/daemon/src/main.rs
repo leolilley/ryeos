@@ -1479,6 +1479,7 @@ async fn dispatch_resume_intents(
                 continue;
             }
         };
+        #[allow(clippy::let_and_return)]
         let outcome = match intent.kind {
             reconcile::ResumeKind::AdmittedRoot => {
                 let result = ryeos_executor::execution::runner::run_existing_admitted_root(

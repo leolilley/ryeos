@@ -346,13 +346,13 @@ pub fn open_envelope(
         ));
     }
 
-    if let Some(ref top_recipient) = envelope.recipient {
-        if *top_recipient != envelope.aad_fields.recipient {
-            return Err(format!(
-                "recipient field mismatch: top-level is {}, but aad_fields says {}",
-                top_recipient, envelope.aad_fields.recipient
-            ));
-        }
+    if let Some(top_recipient) = envelope.recipient.as_ref()
+        && *top_recipient != envelope.aad_fields.recipient
+    {
+        return Err(format!(
+            "recipient field mismatch: top-level is {}, but aad_fields says {}",
+            top_recipient, envelope.aad_fields.recipient
+        ));
     }
 
     // Decode ephemeral public key
@@ -553,23 +553,22 @@ pub fn inspect_envelope(raw: &serde_json::Value) -> InspectResult {
         well_formed = false;
     }
 
-    if let Some(bytes) = enc_bytes {
-        if bytes != 32 {
-            warnings.push(format!("enc decoded to {} bytes, expected 32", bytes));
-            well_formed = false;
-        }
+    if let Some(bytes) = enc_bytes
+        && bytes != 32
+    {
+        warnings.push(format!("enc decoded to {} bytes, expected 32", bytes));
+        well_formed = false;
     }
 
     // Check top-level vs AAD recipient mismatch
-    if let Some(ref top_recipient) = raw.get("recipient").and_then(|r| r.as_str()) {
-        if let Some(ref aad_recipient) = declared_recipient {
-            if *top_recipient != aad_recipient.as_str() {
-                warnings.push(format!(
-                    "recipient mismatch: top-level is {}, but aad_fields says {}",
-                    top_recipient, aad_recipient
-                ));
-            }
-        }
+    if let Some(top_recipient) = raw.get("recipient").and_then(|r| r.as_str())
+        && let Some(aad_recipient) = declared_recipient.as_deref()
+        && top_recipient != aad_recipient
+    {
+        warnings.push(format!(
+            "recipient mismatch: top-level is {}, but aad_fields says {}",
+            top_recipient, aad_recipient
+        ));
     }
 
     InspectResult {
