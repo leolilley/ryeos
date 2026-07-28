@@ -15,6 +15,7 @@ BUNDLE_SOURCE="${RYEOS_SMOKE_BUNDLE_SOURCE:-/usr/share/ryeos}"
 READY_TIMEOUT="${RYEOS_SMOKE_READY_TIMEOUT:-60}"
 STATE_TIMEOUT="${RYEOS_SMOKE_STATE_TIMEOUT:-30}"
 COMMAND_TIMEOUT="${RYEOS_SMOKE_COMMAND_TIMEOUT:-45}"
+INIT_TIMEOUT="${RYEOS_SMOKE_INIT_TIMEOUT:-120}"
 KEEP="${RYEOS_SMOKE_KEEP:-0}"
 TRUST_FILE="${RYEOS_SMOKE_TRUST_FILE:-}"
 
@@ -48,8 +49,23 @@ smoke_exit() {
 }
 trap 'smoke_exit "$?"' EXIT
 
+bounded_for() {
+  local seconds="$1"
+  shift
+  local status
+  if timeout "$seconds" "$@"; then
+    return 0
+  else
+    status="$?"
+  fi
+  if [[ "$status" == "124" ]]; then
+    ryeos_term_fail "command timed out after ${seconds}s: $*"
+  fi
+  return "$status"
+}
+
 bounded() {
-  timeout "$COMMAND_TIMEOUT" "$@"
+  bounded_for "$COMMAND_TIMEOUT" "$@"
 }
 
 mkdir -p "$PROJECT_ROOT/.ai/tools/smoke" "$PROJECT_ROOT/.ai/graphs/smoke"
@@ -149,7 +165,7 @@ if [[ -n "$TRUST_FILE" ]]; then
   }
   init_args+=(--trust-file "$TRUST_FILE")
 fi
-bounded ryeos "${init_args[@]}"
+bounded_for "$INIT_TIMEOUT" ryeos "${init_args[@]}"
 bounded ryeos start
 wait_ready
 
