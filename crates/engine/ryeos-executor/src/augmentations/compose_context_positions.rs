@@ -1649,25 +1649,22 @@ mod tests {
                     .threads
                     .get_thread(thread_id)
                     .expect("read augmentation child")
+                    && let (Some(identity), Some(persisted_pgid)) =
+                        (thread.runtime.process_identity, thread.runtime.pgid)
                 {
-                    if let (Some(identity), Some(persisted_pgid)) = (
-                        thread.runtime.process_identity,
-                        thread.runtime.pgid,
-                    ) {
-                        let pid = u32::try_from(identity.target_pid).expect("positive child pid");
-                        if let Ok(encoded) = std::fs::read_to_string(&descendant_pid_path) {
-                            if let Ok(descendant_pid) = encoded.trim().parse::<u32>() {
-                                let actual_pgid = process_group(pid);
-                                if descendant_pid != pid
-                                    && lillux::is_alive(descendant_pid)
-                                    && actual_pgid == Some(persisted_pgid)
-                                    && process_group(descendant_pid) == actual_pgid
-                                    && std::fs::read_link(format!("/proc/{pid}/exe"))
-                                        .is_ok_and(|executable| executable == expected_executable)
-                                {
-                                    break (pid, descendant_pid);
-                                }
-                            }
+                    let pid = u32::try_from(identity.target_pid).expect("positive child pid");
+                    if let Ok(encoded) = std::fs::read_to_string(&descendant_pid_path)
+                        && let Ok(descendant_pid) = encoded.trim().parse::<u32>()
+                    {
+                        let actual_pgid = process_group(pid);
+                        if descendant_pid != pid
+                            && lillux::is_alive(descendant_pid)
+                            && actual_pgid == Some(persisted_pgid)
+                            && process_group(descendant_pid) == actual_pgid
+                            && std::fs::read_link(format!("/proc/{pid}/exe"))
+                                .is_ok_and(|executable| executable == expected_executable)
+                        {
+                            break (pid, descendant_pid);
                         }
                     }
                 }

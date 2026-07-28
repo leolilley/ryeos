@@ -131,14 +131,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // the traversal while making the ancestry predicate trivially true.
     let ancestry_target = expected_deployed_hash.unwrap_or(&req.snapshot_hash);
     let contains_expected = snapshot_history_contains(&cas, &req.snapshot_hash, ancestry_target)?;
-    if let Some(expected) = expected_deployed_hash {
-        if !contains_expected {
-            anyhow::bail!(
-                "project.apply-snapshot ancestry conflict: target {} does not descend from expected deployed snapshot {}",
-                req.snapshot_hash,
-                expected
-            );
-        }
+    if let Some(expected) = expected_deployed_hash
+        && !contains_expected
+    {
+        anyhow::bail!(
+            "project.apply-snapshot ancestry conflict: target {} does not descend from expected deployed snapshot {}",
+            req.snapshot_hash,
+            expected
+        );
     }
     if previous_deployed_hash.as_deref() == Some(req.snapshot_hash.as_str()) {
         return Ok(serde_json::json!({

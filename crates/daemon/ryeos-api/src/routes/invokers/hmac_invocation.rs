@@ -356,10 +356,10 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
                 let mut out = Vec::new();
                 for part in raw_header_value.split(',') {
                     let part = part.trim();
-                    if let Some((k, v)) = part.split_once('=') {
-                        if k == key {
-                            out.push(v);
-                        }
+                    if let Some((k, v)) = part.split_once('=')
+                        && k == key
+                    {
+                        out.push(v);
                     }
                 }
                 if out.is_empty() {
@@ -465,10 +465,10 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
             metadata.insert("delivery_id".into(), did);
         }
         for name in &self.forwarded_headers {
-            if let Some(v) = headers.get(name) {
-                if let Ok(s) = v.to_str() {
-                    metadata.insert(format!("header.{}", name.as_str()), s.into());
-                }
+            if let Some(v) = headers.get(name)
+                && let Ok(s) = v.to_str()
+            {
+                metadata.insert(format!("header.{}", name.as_str()), s.into());
             }
         }
 
@@ -1130,10 +1130,10 @@ fn read_header<'a>(
 fn extract_pair_value<'a>(header_value: &'a str, key: &str) -> Option<&'a str> {
     for part in header_value.split(',') {
         let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k == key {
-                return Some(v);
-            }
+        if let Some((k, v)) = part.split_once('=')
+            && k == key
+        {
+            return Some(v);
         }
     }
     None

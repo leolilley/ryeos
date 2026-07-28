@@ -72,13 +72,13 @@ pub async fn handle(
             req.provider_id, validation.r#ref
         )));
     }
-    if let Some(model) = req.model.as_deref() {
-        if !setup.models.iter().any(|declared| declared.name == model) {
-            return Err(HandlerError::BadRequest(format!(
-                "provider '{}' does not declare model '{}' for setup",
-                req.provider_id, model
-            )));
-        }
+    if let Some(model) = req.model.as_deref()
+        && !setup.models.iter().any(|declared| declared.name == model)
+    {
+        return Err(HandlerError::BadRequest(format!(
+            "provider '{}' does not declare model '{}' for setup",
+            req.provider_id, model
+        )));
     }
     let runtime_provider = req
         .model

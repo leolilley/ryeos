@@ -23,10 +23,10 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     {
         anyhow::bail!("invalid admission subject hash: {}", req.subject_hash);
     }
-    if let Some(policy) = req.policy.as_deref() {
-        if policy.is_empty() {
-            anyhow::bail!("admission policy must not be empty");
-        }
+    if let Some(policy) = req.policy.as_deref()
+        && policy.is_empty()
+    {
+        anyhow::bail!("admission policy must not be empty");
     }
     let cas_read = state.acquire_cas_read()?;
     let attestations = state.state_store.with_state_db(|db| {

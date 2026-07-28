@@ -163,14 +163,12 @@ pub async fn handle(
     // Keep the state root whenever it may still be wanted: explicit request
     // or anything failed (the transcripts under it are the diagnostics).
     let keep = req.keep_state || !success;
-    if !keep {
-        if let Err(e) = std::fs::remove_dir_all(&state_root) {
-            tracing::warn!(
-                state_root = %state_root.display(),
-                error = %e,
-                "smoke state-root cleanup failed"
-            );
-        }
+    if !keep && let Err(e) = std::fs::remove_dir_all(&state_root) {
+        tracing::warn!(
+            state_root = %state_root.display(),
+            error = %e,
+            "smoke state-root cleanup failed"
+        );
     }
 
     Ok(json!({

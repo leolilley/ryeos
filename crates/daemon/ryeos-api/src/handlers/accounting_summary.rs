@@ -332,19 +332,19 @@ fn effective_window(gte: Option<i64>, lt: Option<i64>) -> Result<(i64, i64), Han
 }
 
 fn validate_request(req: &Request) -> Result<(), HandlerError> {
-    if let Some(limit) = req.limit {
-        if !(1..=MAX_LIMIT).contains(&limit) {
-            return Err(HandlerError::BadRequest(format!(
-                "limit must be between 1 and {MAX_LIMIT}"
-            )));
-        }
+    if let Some(limit) = req.limit
+        && !(1..=MAX_LIMIT).contains(&limit)
+    {
+        return Err(HandlerError::BadRequest(format!(
+            "limit must be between 1 and {MAX_LIMIT}"
+        )));
     }
-    if let Some(transition) = req.transition.as_deref() {
-        if ryeos_accounting::AttemptBudgetState::parse(transition).is_none() {
-            return Err(HandlerError::BadRequest(
-                "transition is not a provider-attempt budget state".to_string(),
-            ));
-        }
+    if let Some(transition) = req.transition.as_deref()
+        && ryeos_accounting::AttemptBudgetState::parse(transition).is_none()
+    {
+        return Err(HandlerError::BadRequest(
+            "transition is not a provider-attempt budget state".to_string(),
+        ));
     }
     if req.cursor.is_some() && !req.detail {
         return Err(HandlerError::BadRequest(

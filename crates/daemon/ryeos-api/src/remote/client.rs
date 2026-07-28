@@ -2479,14 +2479,14 @@ impl AdmissionAttestationsForSubjectResponse {
                     attestation.subject_hash
                 );
             }
-            if let Some(policy) = policy {
-                if attestation.policy != policy {
-                    anyhow::bail!(
-                        "admission attestation policy mismatch: expected {}, got {}",
-                        policy,
-                        attestation.policy
-                    );
-                }
+            if let Some(policy) = policy
+                && attestation.policy != policy
+            {
+                anyhow::bail!(
+                    "admission attestation policy mismatch: expected {}, got {}",
+                    policy,
+                    attestation.policy
+                );
             }
         }
         Ok(())

@@ -1664,16 +1664,16 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 // Execution diagnostics: with a state-root override in play,
                 // both selected roots ride on the response so the caller can
                 // see exactly where source resolution and runtime state went.
-                if let Some(sr) = &state_root {
-                    if let Some(obj) = value.as_object_mut() {
-                        obj.insert(
-                            "execution".to_string(),
-                            json!({
-                                "source_root": project_ctx.effective_path,
-                                "state_root": sr,
-                            }),
-                        );
-                    }
+                if let Some(sr) = &state_root
+                    && let Some(obj) = value.as_object_mut()
+                {
+                    obj.insert(
+                        "execution".to_string(),
+                        json!({
+                            "source_root": project_ctx.effective_path,
+                            "state_root": sr,
+                        }),
+                    );
                 }
                 Ok(axum::Json(value).into_response())
             }

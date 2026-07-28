@@ -409,26 +409,26 @@ pub fn validate_and_extract_path_capture(
     }
 
     // Extract the capture name.
-    if let Some(rest) = trimmed.strip_prefix(prefix) {
-        if let Some(name) = rest.strip_suffix(suffix) {
-            let declared_captures = extract_path_captures(route_path);
-            if !declared_captures.contains(name) {
-                return Err(RouteConfigError::InvalidSourceConfig {
-                    id: route_id.into(),
-                    src: source_name.into(),
-                    reason: format!(
-                        "{field} references undeclared path capture '{name}'; \
-                         route path declares: [{declared}]",
-                        declared = declared_captures
-                            .iter()
-                            .map(|c| format!("'{c}'"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                });
-            }
-            return Ok(name.to_string());
+    if let Some(rest) = trimmed.strip_prefix(prefix)
+        && let Some(name) = rest.strip_suffix(suffix)
+    {
+        let declared_captures = extract_path_captures(route_path);
+        if !declared_captures.contains(name) {
+            return Err(RouteConfigError::InvalidSourceConfig {
+                id: route_id.into(),
+                src: source_name.into(),
+                reason: format!(
+                    "{field} references undeclared path capture '{name}'; \
+                     route path declares: [{declared}]",
+                    declared = declared_captures
+                        .iter()
+                        .map(|c| format!("'{c}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
         }
+        return Ok(name.to_string());
     }
 
     Err(RouteConfigError::InvalidSourceConfig {

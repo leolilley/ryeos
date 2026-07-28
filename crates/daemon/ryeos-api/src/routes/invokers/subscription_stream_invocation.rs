@@ -149,13 +149,11 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
                         }
                     }
 
-                    if !yielded_any_replay_event {
-                        let detail = state_store_clone.get_thread(&thread_id);
-                        if let Ok(Some(d)) = &detail {
-                            if is_terminal_status(&d.status) {
-                                return;
-                            }
-                        }
+                    if !yielded_any_replay_event
+                        && let Ok(Some(d)) = state_store_clone.get_thread(&thread_id)
+                        && is_terminal_status(&d.status)
+                    {
+                        return;
                     }
 
                     let mut current_max = max_seq;
@@ -220,10 +218,10 @@ impl CompiledRouteInvocation for CompiledSubscriptionStreamInvocation {
 
                                 if let Some(err_msg) = lag_error {
                                     let thread = state_store_clone.get_thread(&thread_id);
-                                    if let Ok(Some(detail)) = thread {
-                                        if is_terminal_status(&detail.status) {
-                                            return;
-                                        }
+                                    if let Ok(Some(detail)) = thread
+                                        && is_terminal_status(&detail.status)
+                                    {
+                                        return;
                                     }
                                     yield Ok(error_envelope("replay_failed", &err_msg));
                                     return;

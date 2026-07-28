@@ -800,7 +800,7 @@ fn extract_signature_line(content: &str, prefix: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::{EncodePrivateKey, SigningKey};
+    use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
 
     #[test]

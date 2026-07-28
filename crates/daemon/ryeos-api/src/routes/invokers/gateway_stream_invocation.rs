@@ -687,10 +687,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
                                 if let Some(err_msg) = lag_error {
                                     let thread = state_store_clone.get_thread(&thread_id_for_stream);
-                                    if let Ok(Some(detail)) = thread {
-                                        if is_terminal_status(&detail.status) {
-                                            return;
-                                        }
+                                    if let Ok(Some(detail)) = thread
+                                        && is_terminal_status(&detail.status)
+                                    {
+                                        return;
                                     }
                                     yield Ok(error_envelope("replay_failed", &err_msg));
                                     return;
@@ -775,10 +775,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                     }
                                 }
                                 let detail = state_store_clone.get_thread(&thread_id_for_stream);
-                                if let Ok(Some(d)) = detail {
-                                    if is_terminal_status(&d.status) {
-                                        return;
-                                    }
+                                if let Ok(Some(d)) = detail
+                                    && is_terminal_status(&d.status)
+                                {
+                                    return;
                                 }
                                 yield Ok(error_envelope("thread_not_terminal", "launch completed but thread is not terminal"));
                                 return;
