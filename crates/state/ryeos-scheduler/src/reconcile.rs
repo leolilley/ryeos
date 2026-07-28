@@ -133,10 +133,12 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
     for fire in &inflight {
         match &fire.thread_id {
             Some(thread_id) => {
-                match ctx.get_thread_status(thread_id) {
+                let thread_status = ctx.get_thread_status(thread_id);
+                match thread_status {
                     Ok(Some(status)) if crate::thread_status_is_terminal(&status) => {
                         let result_outcome = if status == "completed" {
-                            match ctx.get_thread_result_outcome(thread_id) {
+                            let thread_result = ctx.get_thread_result_outcome(thread_id);
+                            match thread_result {
                                 Ok(outcome) => outcome,
                                 Err(e) => {
                                     tracing::warn!(

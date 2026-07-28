@@ -293,7 +293,8 @@ pub fn purge_runtime_state_in_directory(
 
     if params.deep || params.purge_cache {
         let cache_name = std::ffi::OsStr::new("cache");
-        if let Some(cache_directory) = runtime_directory.open_child_directory(cache_name)? {
+        let cache_directory = runtime_directory.open_child_directory(cache_name)?;
+        if let Some(cache_directory) = cache_directory {
             remove_rebuildable_cache_directory(&cache_directory, params.dry_run, result)?;
         } else if !params.dry_run {
             runtime_directory
@@ -630,9 +631,10 @@ fn sweep_sharded_directory(
                 if is_incomplete_batch_temp(filename) || atomic_staging_hash.is_some() {
                     let file_size = file.metadata()?.len();
                     if dry_run {
+                        let staging_path = shard2.path().join(&file_name);
                         tracing::info!(
                             namespace,
-                            path = %shard2.path().join(&file_name).display(),
+                            path = %staging_path.display(),
                             size = file_size,
                             "would delete incomplete CAS batch temp"
                         );
@@ -760,7 +762,8 @@ fn remove_directory_contents(
     result: &mut GcResult,
 ) -> Result<()> {
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
                 if !dry_run {
@@ -816,7 +819,8 @@ fn remove_rebuildable_cache_directory(
         ) {
             continue;
         }
-        match cache_directory.open_entry(&name, false)? {
+        let entry = cache_directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
                 if !dry_run && !cache_directory.remove_empty_child_if_same(&name, &child)? {

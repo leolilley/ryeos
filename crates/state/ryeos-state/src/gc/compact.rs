@@ -78,14 +78,13 @@ pub fn compact_projects(
     let refs_directory = runtime
         .open_child_directory(std::ffi::OsStr::new("refs"))?
         .ok_or_else(|| anyhow::anyhow!("refs root is absent"))?;
-    compact_projects_pinned(
-        &lillux::CasStore::from_pinned_root(cas_directory),
-        &refs_directory,
-        trust_store,
-        signer,
-        policy,
-        dry_run,
-    )
+    let outcome = {
+        let cas = lillux::CasStore::from_pinned_root(cas_directory);
+        let result =
+            compact_projects_pinned(&cas, &refs_directory, trust_store, signer, policy, dry_run);
+        result
+    };
+    outcome
 }
 
 /// Compact project history from one descriptor-bound refs/CAS authority.

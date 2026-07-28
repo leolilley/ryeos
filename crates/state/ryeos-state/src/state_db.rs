@@ -714,7 +714,8 @@ fn count_pinned_files_named(
 ) -> anyhow::Result<usize> {
     let mut count = 0usize;
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 count = count
                     .checked_add(count_pinned_files_named(&child, target)?)
@@ -743,7 +744,8 @@ fn remove_pinned_directory_contents_tracking_heads(
 ) -> anyhow::Result<usize> {
     let mut removed = 0usize;
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 removed = removed
                     .checked_add(remove_pinned_directory_contents_tracking_heads(
