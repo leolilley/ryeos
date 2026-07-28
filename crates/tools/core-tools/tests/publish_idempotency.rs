@@ -79,10 +79,10 @@ fn walk_files(dir: &Path, out: &mut BTreeMap<String, String>, base: &Path) {
             // Per-triple and per-binary sidecars are generated as part of
             // CAS rebuild. Do not skip binaries themselves — accidental
             // binary rewrites should be visible to this test.
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name == "MANIFEST.json" || name.ends_with(".item_source.json") {
-                    continue;
-                }
+            if let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && (name == "MANIFEST.json" || name.ends_with(".item_source.json"))
+            {
+                continue;
             }
             let rel = path
                 .strip_prefix(base)

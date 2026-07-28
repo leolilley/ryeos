@@ -661,13 +661,13 @@ fn run_init_internal(
         }
     })
     .with_context(|| format!("initialize vault key {}", vault_secret_path.display()))?;
-    if let Ok(metadata) = fs::symlink_metadata(&vault_public_path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!(
-                "refusing unsafe vault public key path {}",
-                vault_public_path.display()
-            );
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&vault_public_path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        bail!(
+            "refusing unsafe vault public key path {}",
+            vault_public_path.display()
+        );
     }
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
@@ -1548,10 +1548,8 @@ fn ensure_operator_genesis_locked(
     {
         document["identity_statement"] = serde_json::Value::String(statement);
     }
-    if key_created {
-        if let Some(digest) = contribution_digest {
-            document["contribution_digest"] = serde_json::Value::String(digest.to_string());
-        }
+    if key_created && let Some(digest) = contribution_digest {
+        document["contribution_digest"] = serde_json::Value::String(digest.to_string());
     }
     let canonical = lillux::canonical_json(&document)
         .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;

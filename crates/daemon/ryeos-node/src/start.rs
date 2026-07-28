@@ -344,12 +344,12 @@ fn flock_exclusive_nb(_file: &File) -> io::Result<()> {
 }
 
 fn resolve_ryeosd() -> PathBuf {
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let sibling = dir.join("ryeosd");
-            if sibling.exists() {
-                return sibling;
-            }
+    if let Ok(current) = std::env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let sibling = dir.join("ryeosd");
+        if sibling.exists() {
+            return sibling;
         }
     }
     PathBuf::from("ryeosd")

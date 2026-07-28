@@ -193,10 +193,10 @@ impl LocalLifecycleEnv {
     /// second read.
     pub fn uds_candidates_from_hint(&self, hint: Option<&DaemonMetadata>) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = Vec::with_capacity(2);
-        if let Some(meta) = hint {
-            if let Some(uds) = &meta.uds_path {
-                out.push(uds.clone());
-            }
+        if let Some(meta) = hint
+            && let Some(uds) = &meta.uds_path
+        {
+            out.push(uds.clone());
         }
         if !out.iter().any(|p| p == &self.config.uds_path) {
             out.push(self.config.uds_path.clone());
