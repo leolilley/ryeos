@@ -777,7 +777,7 @@ fn validate_field(
             element_type,
         } => {
             // Check enum constraint.
-            if let Some(ref allowed) = enum_values {
+            if let Some(allowed) = enum_values {
                 if let Some(s) = value.as_str() {
                     if !allowed.contains(&s.to_string()) {
                         report.errors.push(InstanceViolation {
@@ -820,12 +820,12 @@ fn validate_field(
             }
 
             // Recurse into nested contract.
-            if let Some(ref contract) = nested_contract {
+            if let Some(contract) = nested_contract {
                 validate_value(contract, value, &[field_path.as_str()], report);
             }
 
             // Validate sequence elements.
-            if let Some(ref elem_ft) = element_type {
+            if let Some(elem_ft) = element_type {
                 if let Some(arr) = value.as_array() {
                     for (i, elem) in arr.iter().enumerate() {
                         let elem_name = format!("{}[{}]", field_name, i);
@@ -1382,7 +1382,7 @@ required:
         let shape: ValueShape = serde_yaml::from_str(yaml).expect("enum field parses");
         let mode = shape.required.get("mode").unwrap();
         if let FieldType::Single {
-            enum_values: Some(ref vals),
+            enum_values: Some(vals),
             ..
         } = mode
         {
@@ -1405,7 +1405,7 @@ optional:
         let shape: ValueShape = serde_yaml::from_str(yaml).expect("typed sequence parses");
         let items = shape.optional.get("items").unwrap();
         if let FieldType::Single {
-            element_type: Some(ref elem),
+            element_type: Some(elem),
             ..
         } = items
         {
@@ -1717,7 +1717,7 @@ required:
         // Spot-check: launch has a nested contract with mode enum.
         let launch = shape.required.get("launch").unwrap();
         if let FieldType::Single {
-            nested_contract: Some(ref contract),
+            nested_contract: Some(contract),
             ..
         } = launch
         {
@@ -1727,19 +1727,19 @@ required:
             // config is optional with its own nested contract.
             let config = contract.optional.get("config").unwrap();
             if let FieldType::Single {
-                nested_contract: Some(ref cfg_contract),
+                nested_contract: Some(cfg_contract),
                 ..
             } = config
             {
                 let env = cfg_contract.optional.get("env").unwrap();
                 if let FieldType::Single {
-                    element_type: Some(ref elem),
+                    element_type: Some(elem),
                     ..
                 } = env
                 {
                     // Element type is a mapping with key+value required.
                     if let FieldType::Single {
-                        nested_contract: Some(ref env_contract),
+                        nested_contract: Some(env_contract),
                         ..
                     } = elem.as_ref()
                     {

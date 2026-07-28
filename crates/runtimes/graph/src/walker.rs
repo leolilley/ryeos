@@ -1738,7 +1738,7 @@ impl Walker {
 }
 
 fn merge_into(target: &mut Value, source: &Value) {
-    if let (Value::Object(ref mut t_map), Value::Object(ref s_map)) = (target, source) {
+    if let (Value::Object(t_map), Value::Object(s_map)) = (target, source) {
         for (k, v) in s_map {
             t_map.insert(k.clone(), v.clone());
         }

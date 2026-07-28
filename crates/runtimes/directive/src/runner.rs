@@ -1178,14 +1178,14 @@ impl Runner {
                                     if let Some((_, _, _, usage, _, _, _)) =
                                         mid_stream_attempt.as_ref()
                                     {
-                                        if let Err(settlement_error) = self
+                                        let settlement_result = self
                                             .settle_available_attempt_accounting(
                                                 turn,
                                                 usage.as_ref(),
                                                 turn_start.elapsed().as_millis() as u64,
                                             )
-                                            .await
-                                        {
+                                            .await;
+                                        if let Err(settlement_error) = settlement_result {
                                             break Err(anyhow::anyhow!(
                                                 "provider attempt accounting settlement failed before retry: {settlement_error:#}"
                                             ));
@@ -1498,7 +1498,8 @@ impl Runner {
                                     source: PricingSource::ProviderReported,
                                 }
                             } else {
-                                match self.compute_cost_for_usage(valid_usage) {
+                                let cost_result = self.compute_cost_for_usage(valid_usage);
+                                match cost_result {
                                     Ok(cost) => cost,
                                     Err(error) => {
                                         state = State::Errored {
@@ -1577,15 +1578,15 @@ impl Runner {
                             }
 
                             if let Some(usage) = valid_usage {
-                                if let Err(e) = self
+                                let settlement_result = self
                                     .settle_provider_usage(
                                         turn,
                                         usage,
                                         usd,
                                         turn_start.elapsed().as_millis() as u64,
                                     )
-                                    .await
-                                {
+                                    .await;
+                                if let Err(e) = settlement_result {
                                     state = State::Errored {
                                         error: format!("provider usage settlement failed: {e:#}"),
                                     };
@@ -1832,14 +1833,14 @@ impl Runner {
                                              settled as zero",
                                         );
                                         if let Some(reported_cost_usd) = usage.reported_cost_usd {
-                                            if let Err(settlement_error) = self
+                                            let settlement_result = self
                                                 .settle_provider_spend_only(
                                                     turn,
                                                     reported_cost_usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
-                                            {
+                                                .await;
+                                            if let Err(settlement_error) = settlement_result {
                                                 detail.push_str(&format!(
                                                     "; reported-spend settlement also failed: {settlement_error:#}"
                                                 ));
@@ -1849,13 +1850,15 @@ impl Runner {
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
-                                                self.settle_provider_usage(
+                                                let settlement_result = self
+                                                    .settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
+                                                .await;
+                                                settlement_result
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -1895,14 +1898,14 @@ impl Runner {
                                              settled as zero",
                                         );
                                         if let Some(reported_cost_usd) = usage.reported_cost_usd {
-                                            if let Err(settlement_error) = self
+                                            let settlement_result = self
                                                 .settle_provider_spend_only(
                                                     turn,
                                                     reported_cost_usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
-                                            {
+                                                .await;
+                                            if let Err(settlement_error) = settlement_result {
                                                 detail.push_str(&format!(
                                                     "; reported-spend settlement also failed: {settlement_error:#}"
                                                 ));
@@ -1928,13 +1931,15 @@ impl Runner {
                                                         self.model_name
                                                     ));
                                                 }
-                                                self.settle_provider_usage(
+                                                let settlement_result = self
+                                                    .settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
+                                                .await;
+                                                settlement_result
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -2024,13 +2029,15 @@ impl Runner {
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
-                                                self.settle_provider_usage(
+                                                let settlement_result = self
+                                                    .settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
+                                                .await;
+                                                settlement_result
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -2042,14 +2049,14 @@ impl Runner {
                                     } else if let Some(reported_cost_usd) =
                                         usage.reported_cost_usd
                                     {
-                                        if let Err(settlement_error) = self
+                                        let settlement_result = self
                                             .settle_provider_spend_only(
                                                 turn,
                                                 reported_cost_usd,
                                                 turn_start.elapsed().as_millis() as u64,
                                             )
-                                            .await
-                                        {
+                                            .await;
+                                        if let Err(settlement_error) = settlement_result {
                                             detail.push_str(&format!(
                                                 "; reported-spend settlement also failed: {settlement_error:#}"
                                             ));
@@ -2416,7 +2423,8 @@ impl Runner {
                                     tracing::Span::current(),
                                 ));
                             }
-                            match join.join_next().await {
+                            let joined = join.join_next().await;
+                            match joined {
                                 Some(Ok((index, result))) => {
                                     outcomes.insert(index, result);
                                 }
@@ -3433,7 +3441,8 @@ impl Runner {
     ) -> anyhow::Result<ProviderAttemptReserveResponse> {
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self.callback.provider_attempt_reserve(params).await {
+            let reserve_result = self.callback.provider_attempt_reserve(params).await;
+            match reserve_result {
                 Ok(response) => {
                     if response.replayed {
                         tracing::warn!(
@@ -3472,7 +3481,8 @@ impl Runner {
     ) -> anyhow::Result<AttemptBudgetState> {
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self.callback.provider_attempt_mark_issued(params).await {
+            let mark_result = self.callback.provider_attempt_mark_issued(params).await;
+            match mark_result {
                 Ok(response) => {
                     if response.replayed {
                         tracing::warn!(
@@ -3557,7 +3567,8 @@ impl Runner {
         };
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self.callback.provider_attempt_settle(&params).await {
+            let settlement_result = self.callback.provider_attempt_settle(&params).await;
+            match settlement_result {
                 Ok(response) => {
                     if !response.state.is_terminal() {
                         anyhow::bail!(
@@ -3639,11 +3650,11 @@ impl Runner {
         };
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self
+            let release_result = self
                 .callback
                 .provider_attempt_release_unissued(&params)
-                .await
-            {
+                .await;
+            match release_result {
                 Ok(response) => {
                     if response.state != AttemptBudgetState::ReleasedUnissued {
                         anyhow::bail!(

@@ -1234,13 +1234,14 @@ fn inspect_materialized_executor(
             ));
         }
     }
-    match verify_opened_executor_file(
+    let verification = verify_opened_executor_file(
         file,
         &verified.key.blob_hash,
         verified.key.blob_len,
         verified.key.mode,
         bare,
-    ) {
+    );
+    match verification {
         Ok(opened) => MaterializedArtifactInspection::Valid(opened),
         Err(detail) => MaterializedArtifactInspection::Invalid(detail),
     }
@@ -1556,7 +1557,7 @@ fn quarantine_materialized_executor(
     let quarantine_name = format!(
         ".quarantine.{blob_hash}.{}.{}",
         std::process::id(),
-        rand::thread_rng().gen::<u64>()
+        rand::thread_rng().r#gen::<u64>()
     );
     let destination = layout
         .executors
@@ -1639,7 +1640,7 @@ fn publish_verified_executor_blob(
         ".staging.{}.{}.{}",
         verified.key.blob_hash,
         std::process::id(),
-        rand::thread_rng().gen::<u64>()
+        rand::thread_rng().r#gen::<u64>()
     );
     let staging = layout
         .executors
@@ -1702,11 +1703,12 @@ fn publish_verified_executor_blob(
             detail: format!("failed to sync staged executor tree: {error}"),
         })?;
 
-    match layout.executors.rename_child_directory_noreplace(
+    let publication = layout.executors.rename_child_directory_noreplace(
         OsStr::new(&staging_name),
         OsStr::new(&executor_cache_entry_key(&verified.key.blob_hash, bare)),
         &staging,
-    ) {
+    );
+    match publication {
         // The staged file was fully hashed through its open descriptor, and
         // this primitive proves the same pinned staging-directory inode was
         // moved without replacement. No second target-path read is needed on
@@ -3572,13 +3574,15 @@ pub async fn build_and_launch(
     }
     drop(authority.pending_project_snapshot.take());
     drop(authority.pending_executor_blob.take());
-    run_claimed_thread_row_with_authority(
+    let result = run_claimed_thread_row_with_authority(
         params,
         thread,
         authority,
         LaunchAuditDisposition::CommittedAtBirth,
     )
-    .await
+    .await;
+    drop(_launch_claim);
+    result
 }
 
 fn map_launch_planning_check_error(
@@ -5912,7 +5916,7 @@ async fn launch_claimed_native_resume(
     )?;
     let project_path = params.provenance.effective_path().to_path_buf();
 
-    run_claimed_thread_row(
+    let result = run_claimed_thread_row(
         BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
@@ -5937,7 +5941,9 @@ async fn launch_claimed_native_resume(
         },
         thread,
     )
-    .await
+    .await;
+    drop(params);
+    result
 }
 
 fn attached_identity_launch_blocker(
@@ -6053,7 +6059,8 @@ pub fn prepare_and_spawn_admitted_root_recovery(
             }
         };
         let launch_state = state.clone();
-        match launch_admitted_root_with_claim(state, &thread_id, claim).await {
+        let launch_result = launch_admitted_root_with_claim(state, &thread_id, claim).await;
+        match launch_result {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
             Ok(SuccessorLaunchOutcome::Skipped(reason)) => tracing::debug!(
                 thread_id = %thread_id,
@@ -6772,21 +6779,25 @@ pub fn sweep_launch_windows(state: &AppState) {
     match state.state_store.launch_window_launched_members() {
         Ok(members) => {
             for chain in members {
-                match chain_tip_hard_terminal(state, &chain) {
-                    Ok(true) => match state.state_store.launch_window_release(
-                        &chain,
-                        global_live_fanout_limit(),
-                        now_ms,
-                    ) {
-                        Ok(admitted) => {
-                            for id in admitted {
-                                launch_admitted_window_member(state, &id);
+                let terminal = chain_tip_hard_terminal(state, &chain);
+                match terminal {
+                    Ok(true) => {
+                        let release = state.state_store.launch_window_release(
+                            &chain,
+                            global_live_fanout_limit(),
+                            now_ms,
+                        );
+                        match release {
+                            Ok(admitted) => {
+                                for id in admitted {
+                                    launch_admitted_window_member(state, &id);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep release failed")
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep release failed")
-                        }
-                    },
+                    }
                     Ok(false) => {}
                     Err(e) => {
                         tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep terminal check failed")
@@ -6799,11 +6810,11 @@ pub fn sweep_launch_windows(state: &AppState) {
     match state.state_store.launch_window_keys_with_queue() {
         Ok(keys) => {
             for key in keys {
-                match state.state_store.launch_window_admit(
-                    &key,
-                    global_live_fanout_limit(),
-                    now_ms,
-                ) {
+                let admission =
+                    state
+                        .state_store
+                        .launch_window_admit(&key, global_live_fanout_limit(), now_ms);
+                match admission {
                     Ok(admitted) => {
                         for id in admitted {
                             tracing::info!(

@@ -390,11 +390,11 @@ fn finalize_recorded_service_exact(
         match confirm_recorded_service_terminal(state, params) {
             Ok(()) => {
                 if !postcommit_complete {
-                    if let Err(postcommit_error) = state
+                    let repair_result = state
                         .threads
                         .repair_recorded_service_terminal_postcommit(params)
-                        .context("repair exact recorded-service terminal postcommit")
-                    {
+                        .context("repair exact recorded-service terminal postcommit");
+                    if let Err(postcommit_error) = repair_result {
                         attempt_diagnostics.push(format!(
                             "attempt {attempt}: {finalize_diagnostic}; terminal confirmed but postcommit repair failed: {postcommit_error}"
                         ));
@@ -731,7 +731,9 @@ pub async fn execute_service_verified(
                         anyhow::anyhow!("service handler '{}' not registered", task_endpoint)
                     })?
                     .clone();
-                handler(task_params.clone(), hctx, Arc::new(task_state.clone())).await
+                let result = handler(task_params.clone(), hctx, Arc::new(task_state.clone())).await;
+                drop(handler);
+                result
             }
             .await;
 
@@ -810,7 +812,8 @@ pub async fn execute_service_verified(
             dispatch_result
         });
 
-        match task.await {
+        let joined = task.await;
+        match joined {
             Ok(result) => result,
             Err(join_error) => {
                 return Err(recording_integrity(format!(
@@ -834,7 +837,9 @@ pub async fn execute_service_verified(
             .get(&endpoint)
             .ok_or_else(|| anyhow::anyhow!("service handler '{}' not registered", endpoint))?
             .clone();
-        handler(params, hctx, Arc::new(state.clone())).await
+        let result = handler(params, hctx, Arc::new(state.clone())).await;
+        drop(handler);
+        result
     };
 
     let value = dispatch_result.map_err(|e| {

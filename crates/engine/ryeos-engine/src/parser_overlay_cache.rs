@@ -260,11 +260,14 @@ fn insert_entry(
         }
     }
 
-    if let Some(replaced) = state.entries.remove(key) {
-        state.total_bytes = state.total_bytes.saturating_sub(replaced.estimated_bytes);
-        touch_lru(&mut state.lru, key);
-    } else {
-        state.lru.push_back(key.clone());
+    match state.entries.remove(key) {
+        Some(replaced) => {
+            state.total_bytes = state.total_bytes.saturating_sub(replaced.estimated_bytes);
+            touch_lru(&mut state.lru, key);
+        }
+        None => {
+            state.lru.push_back(key.clone());
+        }
     }
     state.total_bytes = state.total_bytes.saturating_add(estimated_bytes);
     state.entries.insert(

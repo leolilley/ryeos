@@ -40,9 +40,11 @@ pub async fn run_graph_hooks(
         return Ok(None);
     }
     let dispatcher = build_dispatcher(callback.clone(), thread_id.to_string());
-    run_hooks(occurrence, context, hooks, project_path, &dispatcher)
+    let result = run_hooks(occurrence, context, hooks, project_path, &dispatcher)
         .await
-        .map(|result| result.cost)
+        .map(|result| result.cost);
+    drop(dispatcher);
+    result
 }
 
 /// Build a [`HookDispatcher`] that routes a hook action through the runtime

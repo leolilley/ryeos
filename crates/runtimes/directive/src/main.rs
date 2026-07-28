@@ -591,7 +591,8 @@ async fn run_with_envelope(mut envelope: LaunchEnvelope) -> Result<RuntimeResult
                 .into_owned(),
         })
     };
-    Ok(runner_inst.run().await)
+    let result = runner_inst.run().await;
+    Ok(result)
 }
 
 #[cfg(test)]

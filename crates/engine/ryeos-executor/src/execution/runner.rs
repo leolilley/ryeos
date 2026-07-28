@@ -473,7 +473,8 @@ pub(crate) fn stop_owner_dropped_execution_tree(
             break;
         }
         for thread_id in new_descendants {
-            match stop_owner_dropped_thread(state, &thread_id) {
+            let stop_outcome = stop_owner_dropped_thread(state, &thread_id);
+            match stop_outcome {
                 Ok(OwnerDropThreadOutcome::Settled | OwnerDropThreadOutcome::AlreadyTerminal) => {}
                 Ok(OwnerDropThreadOutcome::PreservedForShutdown) => {
                     tracing::info!(
@@ -3705,7 +3706,7 @@ fn fail_thread_static_owned(
 
 /// Revoke a callback token. Called on every exit path of the background task.
 fn revoke_token(state: &AppState, thread_id: &str, token: &Option<String>) {
-    if let Some(ref t) = token {
+    if let Some(t) = token {
         state.callback_tokens.invalidate(t);
     }
     state.callback_tokens.invalidate_for_thread(thread_id);
@@ -3752,7 +3753,7 @@ fn defer_cb_token_revocation(
 /// Credential-bearing protocols scope each fresh token to the background task;
 /// callback-free protocols install this guard with `None`.
 fn revoke_tat_token(state: &AppState, thread_id: &str, token: &Option<String>) {
-    if let Some(ref t) = token {
+    if let Some(t) = token {
         state.thread_auth.invalidate(t);
     }
     state.thread_auth.invalidate_for_thread(thread_id);

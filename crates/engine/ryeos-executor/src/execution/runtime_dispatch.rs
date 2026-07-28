@@ -98,7 +98,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
-    handle_execute(
+    let result = handle_execute(
         params,
         state,
         &thread_auth,
@@ -106,7 +106,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &caller_thread.chain_root_id,
         child_provenance,
     )
-    .await
+    .await;
+    drop(caller_thread);
+    drop(thread_auth);
+    result
 }
 
 fn hook_integrity(detail: impl Into<String>) -> anyhow::Error {

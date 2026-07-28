@@ -51,7 +51,7 @@ impl Walker {
         }
 
         // Merge foreach results into state.
-        if let Some(ref key) = collect_key {
+        if let Some(key) = collect_key {
             if let Some(obj) = state.as_object_mut() {
                 obj.insert(key.clone(), Value::Array(results.clone()));
             }

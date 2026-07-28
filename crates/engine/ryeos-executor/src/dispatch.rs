@@ -2668,7 +2668,7 @@ async fn dispatch_via_method_executor(
     // Re-enter the shared dispatch loop on the target ref. Boxed: this closes
     // the recursion cycle while preserving accepted-launch handoff authority
     // through an inert method wrapper to the actual method-runtime leaf.
-    Box::pin(dispatch_inner(
+    let result = Box::pin(dispatch_inner(
         &target_ref,
         None,
         None,
@@ -2677,7 +2677,10 @@ async fn dispatch_via_method_executor(
         state,
         launch_handoff,
     ))
-    .await
+    .await;
+    drop(dispatch_req);
+    drop(exec_ctx);
+    result
 }
 
 /// Mint the manifest-backed callback caps an item is entitled to.
@@ -3196,10 +3199,14 @@ pub fn dispatch_daemon_owned(
             root_admission,
             parent_execution_context,
         };
-        Box::pin(dispatch_inner(
+        let result = Box::pin(dispatch_inner(
             &item_ref, None, None, &request, &ctx, &state, None,
         ))
-        .await
+        .await;
+        drop(request);
+        drop(ctx);
+        drop(state);
+        result
     })
 }
 

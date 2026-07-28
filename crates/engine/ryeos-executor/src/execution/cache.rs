@@ -659,7 +659,8 @@ impl MaterializationCache {
                     }
                     let lock_path = second.path().join(".build.lock");
                     let _lock = if dry_run {
-                        match try_existing_exclusive_lock(&lock_path)? {
+                        let existing_lock = try_existing_exclusive_lock(&lock_path)?;
+                        match existing_lock {
                             ExistingLock::Busy => continue,
                             ExistingLock::Absent => None,
                             ExistingLock::Acquired(file) => Some(file),

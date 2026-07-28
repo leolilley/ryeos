@@ -510,27 +510,28 @@ impl VerifiedArtifactStore {
             )));
         }
 
-        let file = if let Some(file) = self
+        let file = match self
             .root
             .open_regular(name.as_ref(), false)
             .map_err(|error| refused(format!("verified artifact cannot be opened: {error}")))?
         {
-            let (existing, _) = read_regular_file_handle_limited(
-                "verified artifact",
-                &artifact,
-                file.try_clone()
-                    .map_err(|error| refused(error.to_string()))?,
-                self.max_file_bytes,
-            )?;
-            if existing != content || lillux::cas::sha256_hex(&existing) != expected_hash {
-                return Err(refused(format!(
-                    "verified artifact {} exists with unexpected content",
-                    artifact.display()
-                )));
+            Some(file) => {
+                let (existing, _) = read_regular_file_handle_limited(
+                    "verified artifact",
+                    &artifact,
+                    file.try_clone()
+                        .map_err(|error| refused(error.to_string()))?,
+                    self.max_file_bytes,
+                )?;
+                if existing != content || lillux::cas::sha256_hex(&existing) != expected_hash {
+                    return Err(refused(format!(
+                        "verified artifact {} exists with unexpected content",
+                        artifact.display()
+                    )));
+                }
+                file
             }
-            file
-        } else {
-            match self
+            None => match self
                 .root
                 .atomic_create_regular(name.as_ref(), content, 0o500)
                 .map_err(|error| {
@@ -586,7 +587,7 @@ impl VerifiedArtifactStore {
                     }
                     file
                 }
-            }
+            },
         };
         protect_verified_artifact(&file, &artifact)?;
         let (captured, _) = read_regular_file_handle_limited(

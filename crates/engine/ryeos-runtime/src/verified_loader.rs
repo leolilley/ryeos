@@ -89,21 +89,24 @@ impl TrustStore {
             if !dir.is_dir() {
                 continue;
             }
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                        continue;
-                    }
-                    if let Ok(key) = Self::parse_trusted_key_toml(&path) {
-                        tracing::info!(
-                            fingerprint = %key.fingerprint,
-                            owner = %key.owner,
-                            "loaded trusted key"
-                        );
-                        keys.entry(key.fingerprint.clone()).or_insert(key);
+            match fs::read_dir(dir) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                            continue;
+                        }
+                        if let Ok(key) = Self::parse_trusted_key_toml(&path) {
+                            tracing::info!(
+                                fingerprint = %key.fingerprint,
+                                owner = %key.owner,
+                                "loaded trusted key"
+                            );
+                            keys.entry(key.fingerprint.clone()).or_insert(key);
+                        }
                     }
                 }
+                Err(_) => {}
             }
         }
 

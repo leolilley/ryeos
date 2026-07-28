@@ -170,7 +170,8 @@ pub async fn run(
         &runtime_config_snapshot,
     )?;
     loop {
-        match super::compose_cache::cache().begin(&cache_key) {
+        let cache_lookup = super::compose_cache::cache().begin(&cache_key);
+        match cache_lookup {
             CacheLookup::Hit {
                 projection,
                 entry_bytes,

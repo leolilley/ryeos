@@ -729,7 +729,8 @@ mod tests {
         let mut tampered = CognitionInAssembler::default();
         let mut error = None;
         for payload in &payloads {
-            match tampered.push(payload) {
+            let push_result = tampered.push(payload);
+            match push_result {
                 Ok(_) => {}
                 Err(observed) => {
                     error = Some(observed);
