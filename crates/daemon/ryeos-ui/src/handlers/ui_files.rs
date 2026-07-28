@@ -118,10 +118,10 @@ pub async fn handle_files_list(
 
         if let Some(meta) = metadata {
             entry_val["size"] = serde_json::json!(meta.len());
-            if let Ok(modified) = meta.modified() {
-                if let Some(modified) = modified_epoch_ms(modified) {
-                    entry_val["modified"] = serde_json::json!(modified);
-                }
+            if let Ok(modified) = meta.modified()
+                && let Some(modified) = modified_epoch_ms(modified)
+            {
+                entry_val["modified"] = serde_json::json!(modified);
             }
         }
 

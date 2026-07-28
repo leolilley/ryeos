@@ -439,25 +439,25 @@ fn add_kind_schema_node_and_edges(
         "structural",
     );
 
-    if let Some(exec) = schema.execution() {
-        if let Some(delegate) = &exec.delegate {
-            let DelegationVia::RuntimeRegistry { serves_kind } = &delegate.via;
-            let served_kind = serves_kind.as_deref().unwrap_or(kind);
-            if let Ok(runtime) = state.engine.runtimes.lookup_for(served_kind) {
-                let runtime_ref = runtime.canonical_ref.to_string();
-                builder.add_ref_node(&runtime_ref, "runtime");
-                builder.add_edge(
-                    kind_node_id,
-                    runtime_ref,
-                    "uses_runtime",
-                    "runtime",
-                    Some(EdgeSource {
-                        field: Some("execution.delegate".into()),
-                        path: None,
-                    }),
-                    "structural",
-                );
-            }
+    if let Some(exec) = schema.execution()
+        && let Some(delegate) = &exec.delegate
+    {
+        let DelegationVia::RuntimeRegistry { serves_kind } = &delegate.via;
+        let served_kind = serves_kind.as_deref().unwrap_or(kind);
+        if let Ok(runtime) = state.engine.runtimes.lookup_for(served_kind) {
+            let runtime_ref = runtime.canonical_ref.to_string();
+            builder.add_ref_node(&runtime_ref, "runtime");
+            builder.add_edge(
+                kind_node_id,
+                runtime_ref,
+                "uses_runtime",
+                "runtime",
+                Some(EdgeSource {
+                    field: Some("execution.delegate".into()),
+                    path: None,
+                }),
+                "structural",
+            );
         }
     }
 }

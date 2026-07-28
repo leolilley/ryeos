@@ -193,12 +193,12 @@ fn target_session_id(req: &Request, ctx: &HandlerContext) -> Result<String, Hand
                 "browser-session UI intents must not target `seat_id`".into(),
             ));
         }
-        if let Some(target_session_id) = &req.target_session_id {
-            if target_session_id != &caller_session_id {
-                return Err(HandlerError::Forbidden(
-                    "browser-session UI intents may target only the caller session".into(),
-                ));
-            }
+        if let Some(target_session_id) = &req.target_session_id
+            && target_session_id != &caller_session_id
+        {
+            return Err(HandlerError::Forbidden(
+                "browser-session UI intents may target only the caller session".into(),
+            ));
         }
         return Ok(caller_session_id);
     }

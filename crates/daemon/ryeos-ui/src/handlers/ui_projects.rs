@@ -154,23 +154,22 @@ pub async fn handle_projects_list(
     let store = resolve_principal_store(&ctx, &state)?;
     let projects = store.load_projects()?;
     let mut rows = projects.projects;
-    if let Some(current) = current_project {
-        if !rows
+    if let Some(current) = current_project
+        && !rows
             .iter()
             .any(|project| same_existing_dir(current, &project.root))
-        {
-            let root = PathBuf::from(current);
-            rows.insert(
-                0,
-                ProjectEntry {
-                    local_id: "current".to_string(),
-                    name: inferred_project_name(&root),
-                    root: current.to_string(),
-                    added_at: String::new(),
-                    tags: Vec::new(),
-                },
-            );
-        }
+    {
+        let root = PathBuf::from(current);
+        rows.insert(
+            0,
+            ProjectEntry {
+                local_id: "current".to_string(),
+                name: inferred_project_name(&root),
+                root: current.to_string(),
+                added_at: String::new(),
+                tags: Vec::new(),
+            },
+        );
     }
     Ok(json!({
         "version": projects.version,
