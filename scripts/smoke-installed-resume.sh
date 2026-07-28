@@ -87,7 +87,7 @@ config:
   start: wait
   nodes:
     wait:
-      action: {item_id: "tool:smoke/resume"}
+      action: {item_id: "tool:smoke/resume", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
