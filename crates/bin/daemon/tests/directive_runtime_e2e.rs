@@ -1276,9 +1276,9 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
     let markers = tempfile::tempdir().expect("marker tempdir");
 
     // Sleeps chosen so COMPLETION order (2, 3, 1) differs from CALL order,
-    // and so three-way overlap is provable: admission stagger is far below
-    // the shortest sleep.
-    let (status, body) = run_sleepy_batch(&mock_url, markers.path(), [1.6, 0.6, 1.1], None).await;
+    // while leaving enough headroom for process-admission jitter on loaded CI
+    // runners before the shortest-lived tool exits.
+    let (status, body) = run_sleepy_batch(&mock_url, markers.path(), [6.0, 3.5, 4.8], None).await;
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     let result = body.get("result").cloned().expect("result envelope");
     assert_eq!(
