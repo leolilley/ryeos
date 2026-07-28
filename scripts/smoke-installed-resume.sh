@@ -83,6 +83,10 @@ cat >"$PROJECT_ROOT/.ai/graphs/smoke/resume.yaml" <<'YAML'
 version: "1.0.0"
 category: smoke
 description: Native-resume graph wrapping the deterministic long-running fixture
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.smoke/resume
 config:
   start: wait
   nodes:
