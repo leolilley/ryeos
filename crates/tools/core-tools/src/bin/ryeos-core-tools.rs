@@ -1502,7 +1502,8 @@ fn run_sign(
     let mut batch = BatchReport::default();
     let batch_mode = item_refs.len() > 1;
     for item_ref in item_refs {
-        match run_sign(&item_ref, project.as_deref(), source) {
+        let signed = run_sign(&item_ref, project.as_deref(), source);
+        match signed {
             Ok(report) => batch.extend(report),
             Err(e) if batch_mode => batch.failed.push(ItemOutcome {
                 item_ref,

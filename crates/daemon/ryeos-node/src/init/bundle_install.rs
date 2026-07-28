@@ -199,7 +199,8 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             // can invert that relationship on the installed tree — a
             // millisecond of copy-order skew then reads as a stale manifest.
             if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                if let Ok(file) = fs::File::options().write(true).open(&to) {
+                let destination = fs::File::options().write(true).open(&to);
+                if let Ok(file) = destination {
                     let _ = file.set_modified(modified);
                 }
             }

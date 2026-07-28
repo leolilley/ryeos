@@ -201,7 +201,8 @@ async fn pin_live_daemon(env: &LocalLifecycleEnv) -> Result<LiveDaemonTarget> {
         else {
             continue;
         };
-        if let Ok(target) = pin_verified_ryeosd_peer(&stream, pid as u32) {
+        let pinned = pin_verified_ryeosd_peer(&stream, pid as u32);
+        if let Ok(target) = pinned {
             return Ok(target);
         }
     }

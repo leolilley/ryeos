@@ -1038,7 +1038,8 @@ impl ScheduleReconcileTx {
             match &backup.yaml_bytes {
                 Some(bytes) => {
                     if let Some(name) = yaml_path.file_name() {
-                        if let Ok(expected) = self.directory.open_regular(name, false) {
+                        let opened = self.directory.open_regular(name, false);
+                        if let Ok(expected) = opened {
                             let _ = self.directory.atomic_write_if_same(
                                 name,
                                 expected.as_ref(),
@@ -1050,7 +1051,8 @@ impl ScheduleReconcileTx {
                 }
                 None => {
                     if let Some(name) = yaml_path.file_name() {
-                        if let Ok(Some(file)) = self.directory.open_regular(name, false) {
+                        let opened = self.directory.open_regular(name, false);
+                        if let Ok(Some(file)) = opened {
                             let _ = self.directory.remove_if_same(name, &file);
                         }
                     }

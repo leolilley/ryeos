@@ -220,7 +220,8 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         let watch_thread_id = thread_id.clone();
         tokio::spawn(async move {
             let _guard = span.enter();
-            match handle.await {
+            let outcome = handle.await;
+            match outcome {
                 Ok(Ok(())) => {
                     tracing::debug!(
                         route_id = %watch_route_id,

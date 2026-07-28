@@ -73,7 +73,10 @@ pub(super) async fn handle_connection(
         let request_owner = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 let _frame_permit = frame_permit;
-                super::routing::dispatch_dynamic(request, &request_state, peer.as_ref()).await
+                let response =
+                    super::routing::dispatch_dynamic(request, &request_state, peer.as_ref()).await;
+                drop(_frame_permit);
+                response
             },
             span,
         ));

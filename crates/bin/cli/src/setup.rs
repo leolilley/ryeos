@@ -232,12 +232,14 @@ impl LocalSetupClient {
         let headers = self
             .signer
             .sign("POST", path, body.as_slice(), &self.audience)?;
-        crate::transport::http::post_json(
+        let result = crate::transport::http::post_json(
             &format!("{}{}", self.base_url, path),
             &headers,
             body.as_slice(),
         )
         .await
-        .map_err(CliError::from)
+        .map_err(CliError::from);
+        drop(body);
+        result
     }
 }

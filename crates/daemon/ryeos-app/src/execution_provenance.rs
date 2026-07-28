@@ -1312,7 +1312,8 @@ mod tests {
         )
         .unwrap();
 
-        match root.clone_for_borrowed_child() {
+        let child = root.clone_for_borrowed_child();
+        match child {
             ExecutionProvenance::ChildPinnedGeneration { .. } => {}
             other => panic!("expected ChildPinnedGeneration, got {other:?}"),
         }

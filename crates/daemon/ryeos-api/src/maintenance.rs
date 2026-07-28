@@ -231,7 +231,8 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
             return Err(error);
         }
         let _ = guard_ready_tx.send(Ok(()));
-        match command_rx.recv() {
+        let command = command_rx.recv();
+        match command {
             Ok(GcWorkerCommand::Run(_write_barrier_resume)) => run_gc_and_log(GcRunInput {
                 state_authority: &state_authority,
                 cas_guard: &cas_guard,

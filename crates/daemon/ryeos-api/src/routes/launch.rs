@@ -658,11 +658,12 @@ fn spawn_dispatch_launch_inner(
                                 plan_context: exec_ctx.plan_ctx.clone(),
                                 root_admission: Some(root_admission.clone()),
                             };
-                        match state_clone.threads.create_root_thread_with_id(
+                        let creation = state_clone.threads.create_root_thread_with_id(
                             &pre_minted_thread_id,
                             &failure_request,
                             dispatch_req.provenance.project_authority().clone(),
-                        ) {
+                        );
+                        match creation {
                             Ok(_) => state_clone
                                 .threads
                                 .get_thread(&pre_minted_thread_id)
@@ -707,10 +708,10 @@ fn spawn_dispatch_launch_inner(
             }
         }
     });
-    match registration_state
+    let registration = registration_state
         .state_store
-        .register_launch_task_abort(&registration_thread_id, task.abort_handle())
-    {
+        .register_launch_task_abort(&registration_thread_id, task.abort_handle());
+    match registration {
         Ok(()) => task,
         Err(ryeos_app::state_store::LaunchTaskAbortRegistrationError::CapacityExceeded) => {
             tracing::warn!(

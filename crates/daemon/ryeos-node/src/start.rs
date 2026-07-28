@@ -80,7 +80,8 @@ pub async fn start_with_progress(
     }
 
     let _start_lock = loop {
-        match env.try_acquire_start_lock() {
+        let lock_attempt = env.try_acquire_start_lock();
+        match lock_attempt {
             Ok(lock) => break lock,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 // Another `ryeos start` is in flight; let it converge.

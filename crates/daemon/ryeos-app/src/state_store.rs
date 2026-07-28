@@ -2305,7 +2305,8 @@ impl ThreadRuntimeAuthority {
         let current_threads = self
             .app_root
             .open_child_directory(std::ffi::OsStr::new("threads"))?;
-        match (&self.threads_root, current_threads) {
+        let bindings = (&self.threads_root, current_threads);
+        match bindings {
             (Some(expected), Some(current)) if expected.is_same_directory(&current)? => Ok(()),
             (None, None) => Ok(()),
             _ => bail!(
@@ -2374,7 +2375,8 @@ fn inspect_thread_runtime_files(
 fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) -> Result<usize> {
     let mut deleted = 0usize;
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 deleted = deleted
                     .checked_add(delete_runtime_tree_contents(&child)?)
@@ -5130,10 +5132,10 @@ impl StateStore {
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-            if let Err(error) = g
+            let metadata_result = g
                 .runtime_db
-                .set_launch_metadata(&successor.thread_id, &successor_meta)
-            {
+                .set_launch_metadata(&successor.thread_id, &successor_meta);
+            if let Err(error) = metadata_result {
                 let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
                 return Err(error);
             }
@@ -7109,18 +7111,24 @@ impl StateStore {
         deadline_at_ms: i64,
     ) -> Result<runtime_db::RecoveryWaitDisposition> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.wait_for_project_authority(
+        let g = self.lock()?;
+        let result = g.runtime_db.wait_for_project_authority(
             thread_id,
             reason,
             detail,
             now_ms,
             deadline_at_ms,
-        )
+        );
+        drop(g);
+        result
     }
 
     pub fn clear_recovery_wait(&self, thread_id: &str) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.clear_recovery_wait(thread_id)
+        let g = self.lock()?;
+        let result = g.runtime_db.clear_recovery_wait(thread_id);
+        drop(g);
+        result
     }
 
     pub fn authoritative_result_project_snapshot(&self, thread_id: &str) -> Result<Option<String>> {
@@ -8246,9 +8254,12 @@ impl StateStore {
 
     pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        let g = self.lock()?;
+        let result = g
             .runtime_db
-            .abort_unsealed_detached_spawn_intent(operation_id)
+            .abort_unsealed_detached_spawn_intent(operation_id);
+        drop(g);
+        result
     }
 
     pub fn get_detached_spawn_intent(
@@ -8266,9 +8277,12 @@ impl StateStore {
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        let g = self.lock()?;
+        let result = g
             .runtime_db
-            .bind_detached_spawn_project_authority(operation_id, child_project_authority)
+            .bind_detached_spawn_project_authority(operation_id, child_project_authority);
+        drop(g);
+        result
     }
 
     pub fn seal_detached_spawn_intent(
@@ -8297,13 +8311,16 @@ impl StateStore {
                 "detached admitted capsule hash mismatch: expected {expected_capsule_hash}, stored {admitted_launch_capsule_hash}"
             );
         }
-        self.lock()?.runtime_db.seal_detached_spawn_intent(
+        let g = self.lock()?;
+        let result = g.runtime_db.seal_detached_spawn_intent(
             operation_id,
             child_project_authority,
             &admitted_launch_capsule_hash,
             launch_metadata,
             initial_events,
-        )
+        );
+        drop(g);
+        result
     }
 
     // ── Follow waiters ───────────────────────────────────────────────────
@@ -8327,9 +8344,12 @@ impl StateStore {
         authority: &ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        let g = self.lock()?;
+        let result = g
             .runtime_db
-            .bind_follow_project_authority(follow_key, authority)
+            .bind_follow_project_authority(follow_key, authority);
+        drop(g);
+        result
     }
 
     // Slot identity, item/spec identity, child lineage, and sealed authority
@@ -9804,7 +9824,8 @@ mod tests {
             .expect("canceller thread")
             .expect("cancel resolution")
             .expect("owned planning record");
-        match (created, cancelled) {
+        let outcomes = (created, cancelled);
+        match outcomes {
             (Ok(_), LaunchCancellationResolution::Bound { thread_id }) => {
                 assert_eq!(thread_id, "T-bind-race")
             }
@@ -9974,7 +9995,8 @@ mod tests {
             .expect("canceller thread")
             .expect("cancel resolution")
             .expect("owned planning record");
-        match (created, cancelled) {
+        let outcomes = (created, cancelled);
+        match outcomes {
             (Ok(_), LaunchCancellationResolution::Bound { thread_id }) => {
                 assert_eq!(thread_id, successor_thread_id);
                 let source = store

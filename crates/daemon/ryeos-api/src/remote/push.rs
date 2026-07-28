@@ -406,7 +406,8 @@ pub(crate) fn finish_staged_roots<T>(
 ) -> Result<T> {
     let guard = authority.acquire_shared_guard()?;
     let finish = staged_roots.finish_admitted(&guard);
-    match (operation, finish) {
+    let outcomes = (operation, finish);
+    match outcomes {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),

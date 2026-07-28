@@ -3791,16 +3791,21 @@ impl AccountingDb {
                                      digest at sequence {anchor_sequence}: divergent history \
                                      cannot replace acknowledged transitions"
                                 ));
-                            } else if let Err(error) = self.anchor.compare_and_advance(
-                                &self.site_id,
-                                self.epoch,
-                                high_water as u64,
-                                &stored_digest,
-                            ) {
-                                reasons.push(format!(
-                                    "anchor was behind the database (sequence \
-                                     {anchor_sequence}) and could not be advanced: {error:#}"
-                                ));
+                            } else {
+                                match self.anchor.compare_and_advance(
+                                    &self.site_id,
+                                    self.epoch,
+                                    high_water as u64,
+                                    &stored_digest,
+                                ) {
+                                    Err(error) => {
+                                        reasons.push(format!(
+                                            "anchor was behind the database (sequence \
+                                             {anchor_sequence}) and could not be advanced: {error:#}"
+                                        ));
+                                    }
+                                    Ok(_) => {}
+                                }
                             }
                         }
                         AnchorAgreement::AnchorAhead {
@@ -4702,8 +4707,9 @@ fn load_or_create_credential_binding_key(
         // under the old key will release fail-closed at issue time — say
         // so loudly instead of letting it surface as scattered
         // per-attempt credential releases.
+        let key_path = directory.path().join(CREDENTIAL_BINDING_KEY_FILENAME);
         tracing::warn!(
-            path = %directory.path().join(CREDENTIAL_BINDING_KEY_FILENAME).display(),
+            path = %key_path.display(),
             "credential-binding key regenerated under an established accounting epoch; \
              launch gates bound under the previous key will release before issue"
         );

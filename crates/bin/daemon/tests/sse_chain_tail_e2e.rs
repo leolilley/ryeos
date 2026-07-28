@@ -196,7 +196,9 @@ async fn read_until_terminal(mut resp: reqwest::Response, deadline: Duration) ->
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining.min(Duration::from_secs(2)), resp.chunk()).await {
+        let next_chunk =
+            tokio::time::timeout(remaining.min(Duration::from_secs(2)), resp.chunk()).await;
+        match next_chunk {
             Ok(Ok(Some(chunk))) => {
                 buf.extend_from_slice(&chunk);
                 let events = parse_sse_bytes(&buf);

@@ -3427,17 +3427,22 @@ impl RuntimeDb {
         let mut reset_required = false;
         if created {
             initialize_current_runtime_schema(&conn, path)?;
-        } else if let Err(error) = validate_current_runtime_store(&conn, path) {
-            if !explicit_history_reset {
-                return Err(error).context(format!(
-                    "runtime database requires the explicit no-backcompat reset; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting ({})",
-                    path.display()
-                ));
+        } else {
+            match validate_current_runtime_store(&conn, path) {
+                Err(error) => {
+                    if !explicit_history_reset {
+                        return Err(error).context(format!(
+                            "runtime database requires the explicit no-backcompat reset; stop the daemon and run `ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads` before restarting ({})",
+                            path.display()
+                        ));
+                    }
+                    // Do not mutate yet. Offline GC first publishes the authoritative
+                    // cross-store discard intent; only then may it call
+                    // `apply_explicit_history_reset` on this pinned handle.
+                    reset_required = true;
+                }
+                Ok(_) => {}
             }
-            // Do not mutate yet. Offline GC first publishes the authoritative
-            // cross-store discard intent; only then may it call
-            // `apply_explicit_history_reset` on this pinned handle.
-            reset_required = true;
         }
         if reset_required {
             let integrity: String = conn

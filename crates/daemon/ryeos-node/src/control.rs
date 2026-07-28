@@ -138,7 +138,7 @@ async fn call_inner(uds_path: &Path, method: &str, params: Value) -> Result<Valu
         })
     })?;
 
-    call_connected(&mut stream, method, params)
+    let result = call_connected(&mut stream, method, params)
         .await
         .map_err(|error| {
             anyhow::Error::new(ControlLivePeerError {
@@ -146,7 +146,9 @@ async fn call_inner(uds_path: &Path, method: &str, params: Value) -> Result<Valu
                 uds_path: uds_path.to_path_buf(),
                 detail: format!("{error:#}"),
             })
-        })
+        });
+    drop(stream);
+    result
 }
 
 async fn call_connected(stream: &mut UnixStream, method: &str, params: Value) -> Result<Value> {

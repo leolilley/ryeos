@@ -256,10 +256,12 @@ async fn post_execute_stream(
         req = req.header(k.as_str(), v.as_str());
     }
 
-    tokio::time::timeout(Duration::from_secs(timeout_secs), req.send())
+    let response = tokio::time::timeout(Duration::from_secs(timeout_secs), req.send())
         .await
         .expect("POST /execute/stream timed out")
-        .expect("POST /execute/stream send failed")
+        .expect("POST /execute/stream send failed");
+    drop(client);
+    response
 }
 
 async fn assert_pre_admission_rejection(resp: reqwest::Response, expected_message: &str) {

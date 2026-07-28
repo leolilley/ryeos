@@ -241,12 +241,14 @@ async fn application_dispatch(State(state): State<DynamicHttpState>, request: Re
         // protects the invariant if a future caller violates that ordering.
         return unavailable_response(&lifecycle);
     };
-    ryeos_api::routes::dispatcher::route_dispatcher_from_ingress(
+    let response = ryeos_api::routes::dispatcher::route_dispatcher_from_ingress(
         State((*application).clone()),
         request,
         ingress_started_at,
     )
-    .await
+    .await;
+    drop(application);
+    response
 }
 
 fn unavailable_response(lifecycle: &LifecycleResponse) -> Response {
@@ -862,7 +864,8 @@ pub async fn progress_ticker(coordinator: StartupCoordinator) {
         if !coordinator.is_starting() {
             return;
         }
-        if let Err(error) = coordinator.refresh() {
+        let refresh_result = coordinator.refresh();
+        if let Err(error) = refresh_result {
             tracing::warn!(%error, "failed to refresh startup lifecycle progress");
             return;
         }

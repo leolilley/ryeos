@@ -3667,7 +3667,8 @@ impl ThreadLifecycleService {
             .ok()
             .and_then(|guard| guard.clone());
         let app_root = self.app_root.read().ok().and_then(|guard| guard.clone());
-        if let (Some(db), Some(app_root)) = (db, app_root) {
+        let scheduler = (db, app_root);
+        if let (Some(db), Some(app_root)) = scheduler {
             if let Ok(Some(fire)) = db.find_fire_by_thread(thread_id) {
                 let fire_status = ryeos_scheduler::fire_status_for_thread_status(terminal_status);
                 let result_outcome = result.map(ryeos_scheduler::classify_result_payload);

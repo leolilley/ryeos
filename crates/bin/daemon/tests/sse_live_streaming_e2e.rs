@@ -253,7 +253,9 @@ async fn read_timed_until_terminal(
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining.min(Duration::from_secs(2)), resp.chunk()).await {
+        let next_chunk =
+            tokio::time::timeout(remaining.min(Duration::from_secs(2)), resp.chunk()).await;
+        match next_chunk {
             Ok(Ok(Some(chunk))) => {
                 buf.extend_from_slice(&chunk);
                 // Re-parse the whole buffer, but keep each already-seen event's
@@ -373,7 +375,8 @@ async fn open_gateway_stream(
             Instant::now() < deadline,
             "gateway did not emit stream_started + thread_created before deadline"
         );
-        match tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await {
+        let next_chunk = tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await;
+        match next_chunk {
             Ok(Ok(Some(chunk))) => {
                 buf.extend_from_slice(&chunk);
                 let events = parse_complete_events(&buf, Instant::now());
@@ -505,7 +508,12 @@ async fn chain_tail_attached_before_terminal_receives_terminal_live() {
     let (gw_resp, thread_id) = open_gateway_stream(&h, &user_sk, &node_fp, &project_path).await;
     let drain = tokio::spawn(async move {
         let mut resp = gw_resp;
-        while let Ok(Some(_)) = resp.chunk().await {}
+        loop {
+            let next_chunk = resp.chunk().await;
+            if !matches!(next_chunk, Ok(Some(_))) {
+                break;
+            }
+        }
     });
 
     // For a root thread, chain_root_id == thread_id. Attach the chain tail now,

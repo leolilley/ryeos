@@ -359,7 +359,8 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
     };
     for (thread_id, generation) in ledger.gates_with_publication_due()? {
         if is_terminal(&thread_id)? {
-            if let Err(error) = ledger.confirm_terminal_publication(&thread_id, &generation) {
+            let confirmation = ledger.confirm_terminal_publication(&thread_id, &generation);
+            if let Err(error) = confirmation {
                 tracing::warn!(thread_id, %error, "terminal publication repair failed");
             }
         }
@@ -372,7 +373,7 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
                 state = attempt_state.as_str(),
                 "terminal thread left a nonterminal provider attempt; fencing"
             );
-            if let Err(error) = ledger.fence_launch_gate_and_close_attempts(
+            let fence_result = ledger.fence_launch_gate_and_close_attempts(
                 &thread_id,
                 &generation,
                 ryeos_accounting::ReconciliationReason::OwnerGenerationFenced,
@@ -380,7 +381,8 @@ fn reconcile_accounting(state: &AppState) -> Result<()> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|elapsed| elapsed.as_millis() as i64)
                     .unwrap_or(0),
-            ) {
+            );
+            if let Err(error) = fence_result {
                 tracing::error!(thread_id, attempt_id, %error, "accounting fence failed");
             }
         }
@@ -1007,7 +1009,7 @@ fn finalize_recovered_stop(
         );
         return;
     }
-    if let Err(error) = state.threads.finalize_thread(&ThreadFinalizeParams {
+    match state.threads.finalize_thread(&ThreadFinalizeParams {
         thread_id: thread_id.to_string(),
         status: terminal_status.to_string(),
         outcome_code: Some(terminal_status.to_string()),
@@ -1022,9 +1024,12 @@ fn finalize_recovered_stop(
         final_cost: None,
         summary_json: None,
     }) {
-        tracing::warn!(thread_id, error = %error, "failed to finalize recovered stop request");
-    } else {
-        *reconciled += 1;
+        Err(error) => {
+            tracing::warn!(thread_id, error = %error, "failed to finalize recovered stop request");
+        }
+        Ok(_) => {
+            *reconciled += 1;
+        }
     }
 }
 
@@ -1234,10 +1239,10 @@ async fn reconcile_active_threads_inner(
                 && identity.is_none()
             {
                 if let Some(upstream_id) = thread.upstream_thread_id.as_deref() {
-                    match state
+                    let follow_status = state
                         .state_store
-                        .is_follow_resume_successor(upstream_id, &thread.thread_id)
-                    {
+                        .is_follow_resume_successor(upstream_id, &thread.thread_id);
+                    match follow_status {
                         Ok(true) => {
                             tracing::debug!(
                                 thread_id = %thread.thread_id,
@@ -1297,10 +1302,10 @@ async fn reconcile_active_threads_inner(
                 } else if !dead_identity_safe_to_clear(identity, &thread.thread_id) {
                     continue;
                 }
-                match state
+                let cleared = state
                     .state_store
-                    .clear_thread_process_if_matches(&thread.thread_id, identity)
-                {
+                    .clear_thread_process_if_matches(&thread.thread_id, identity);
+                match cleared {
                     Ok(true) => {}
                     Ok(false) => {
                         tracing::warn!(
@@ -1418,10 +1423,10 @@ async fn reconcile_active_threads_inner(
                     continue;
                 }
             }
-            match state
+            let cleared = state
                 .state_store
-                .clear_thread_process_if_matches(&thread.thread_id, identity)
-            {
+                .clear_thread_process_if_matches(&thread.thread_id, identity);
+            match cleared {
                 Ok(true) => {}
                 Ok(false) => {
                     tracing::warn!(

@@ -1091,7 +1091,10 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             ));
             tracing::info!("scheduler: timer loop started after readiness publication");
 
-            supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await
+            let result =
+                supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await;
+            drop(recovery_execution_release);
+            result
         };
         tokio::pin!(daemon_work);
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1478,24 +1481,26 @@ async fn dispatch_resume_intents(
         };
         let outcome = match intent.kind {
             reconcile::ResumeKind::AdmittedRoot => {
-                ryeos_executor::execution::runner::run_existing_admitted_root(
+                let result = ryeos_executor::execution::runner::run_existing_admitted_root(
                     state.clone(),
                     thread_id.clone(),
                     intent.chain_root_id,
                     params,
                     intent.prior_status,
                 )
-                .await
+                .await;
+                result
             }
             reconcile::ResumeKind::NativeResume => {
-                ryeos_executor::execution::runner::run_existing_detached(
+                let result = ryeos_executor::execution::runner::run_existing_detached(
                     state.clone(),
                     thread_id.clone(),
                     intent.chain_root_id,
                     params,
                     intent.prior_status,
                 )
-                .await
+                .await;
+                result
             }
             reconcile::ResumeKind::Continuation | reconcile::ResumeKind::OperatorContinuation => {
                 unreachable!("continuation kinds handled above")
@@ -1769,7 +1774,8 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             _ = tick.tick() => {}
         }
 
-        if let Err(error) = run_periodic_recovery_pass(&state).await {
+        let pass_result = run_periodic_recovery_pass(&state).await;
+        if let Err(error) = pass_result {
             tracing::error!(
                 error = %error,
                 "periodic recovery pass failed; durable recovery state preserved and daemon remains available"
@@ -1949,7 +1955,11 @@ async fn supervise_background_tasks(
     // for that bounded journal-replay unit to finish before state is drained.
     ryeosd::request_shutdown();
     let mut drain_error = None;
-    while let Some(joined) = tasks.join_next().await {
+    loop {
+        let joined = tasks.join_next().await;
+        let Some(joined) = joined else {
+            break;
+        };
         match joined {
             Ok((_, Ok(()))) => {}
             Ok((name, Err(error))) => {
@@ -2081,7 +2091,8 @@ async fn drain_running_threads(state: &AppState) -> bool {
             ),
         }
         if !ryeos_app::state_store::is_terminal_status(&status) {
-            if let Err(error) = state.state_store.reset_resume_attempts(&thread_id) {
+            let reset_result = state.state_store.reset_resume_attempts(&thread_id);
+            if let Err(error) = reset_result {
                 tracing::warn!(
                     thread_id,
                     error = %error,
@@ -2094,7 +2105,8 @@ async fn drain_running_threads(state: &AppState) -> bool {
     let mut in_process_completion_clean = true;
     for (thread_id, control) in in_process_handlers {
         let remaining = drain_deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, control.wait_completed()).await {
+        let completion = tokio::time::timeout(remaining, control.wait_completed()).await;
+        match completion {
             Ok(
                 ryeos_app::state_store::InProcessHandlerCompletion::TerminalConfirmed
                 | ryeos_app::state_store::InProcessHandlerCompletion::BirthAborted,
@@ -2263,10 +2275,10 @@ fn audit_ownerless_in_process_reservations(state: &AppState) -> anyhow::Result<b
                             }
                         };
                     if settled {
-                        match state
+                        let deletion = state
                             .state_store
-                            .delete_ownerless_terminal_in_process_handler_reservation(&thread_id)
-                        {
+                            .delete_ownerless_terminal_in_process_handler_reservation(&thread_id);
+                        match deletion {
                             Ok(true) => {}
                             Ok(false) => {
                                 clean = false;
@@ -2344,10 +2356,13 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     let lifecycle_shutdown = async {
-        if let Some(mut rx) = ryeosd::subscribe_shutdown() {
-            let _ = rx.recv().await;
-        } else {
-            std::future::pending::<()>().await;
+        match ryeosd::subscribe_shutdown() {
+            Some(mut rx) => {
+                let _ = rx.recv().await;
+            }
+            None => {
+                std::future::pending::<()>().await;
+            }
         }
     };
 

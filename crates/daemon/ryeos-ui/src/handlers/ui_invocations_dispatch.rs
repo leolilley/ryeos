@@ -397,7 +397,7 @@ async fn execute_prepared_item_ref(
         parent_execution_context: None,
     };
 
-    ryeos_executor::dispatch::dispatch_verified_with_handler_context(
+    let result = ryeos_executor::dispatch::dispatch_verified_with_handler_context(
         item_ref,
         verified,
         local_handler_context,
@@ -407,7 +407,9 @@ async fn execute_prepared_item_ref(
     )
     .await
     .map_err(dispatch_error_to_handler)
-    .map_err(Into::into)
+    .map_err(Into::into);
+    drop(dispatch_req);
+    result
 }
 
 fn map_dispatch_error(error: anyhow::Error) -> HandlerError {

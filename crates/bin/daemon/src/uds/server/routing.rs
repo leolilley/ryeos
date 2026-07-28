@@ -17,7 +17,9 @@ pub(super) async fn dispatch_dynamic(
 ) -> RpcResponse {
     let lifecycle = state.lifecycle();
     let application = state.application();
-    dispatch_with_state(request, application.as_deref(), &lifecycle, peer).await
+    let response = dispatch_with_state(request, application.as_deref(), &lifecycle, peer).await;
+    drop(application);
+    response
 }
 
 async fn dispatch_with_state(

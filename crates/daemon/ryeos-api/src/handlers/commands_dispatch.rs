@@ -153,9 +153,12 @@ pub async fn handle(
         parent_execution_context: None,
     };
 
-    ryeos_executor::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state)
+    let result = ryeos_executor::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state)
         .await
-        .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")))
+        .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")));
+    drop(dispatch_req);
+    drop(exec_ctx);
+    result
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

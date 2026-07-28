@@ -385,7 +385,8 @@ fn finish_pull_staged_roots<T>(
     let finish = staged_roots
         .finish_admitted(&guard)
         .map_err(PullResultsError::Other);
-    match (operation, finish) {
+    let outcomes = (operation, finish);
+    match outcomes {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
@@ -912,21 +913,24 @@ fn rollback_pinned_changes(
                 .ok_or_else(|| anyhow::anyhow!("rollback parent could not be opened"))?;
             live_parent.ensure_path_binding()?;
             let artifact = scratch_artifact_name(rel_path);
-            if let Some(saved) = backup.open_regular(&artifact, false)? {
-                live_parent
-                    .replace_regular_from_if_matches_atomic(
-                        &live_name,
-                        Some(&applied.installed),
-                        |_| Ok(()),
-                        backup,
-                        &artifact,
-                        &saved,
-                    )
-                    .map_err(anyhow::Error::from)?;
-            } else {
-                live_parent
-                    .remove_if_same_atomic(&live_name, &applied.installed)
-                    .map_err(anyhow::Error::from)?;
+            match backup.open_regular(&artifact, false)? {
+                Some(saved) => {
+                    live_parent
+                        .replace_regular_from_if_matches_atomic(
+                            &live_name,
+                            Some(&applied.installed),
+                            |_| Ok(()),
+                            backup,
+                            &artifact,
+                            &saved,
+                        )
+                        .map_err(anyhow::Error::from)?;
+                }
+                None => {
+                    live_parent
+                        .remove_if_same_atomic(&live_name, &applied.installed)
+                        .map_err(anyhow::Error::from)?;
+                }
             }
             Ok(())
         })();
@@ -1424,35 +1428,39 @@ fn materialize_recovered_base(
         ".ryeos-recovered-base-{}",
         lillux::sha256_hex(format!("{transaction_id}\0{rel_path}").as_bytes())
     ));
-    if let Some(existing) = parent.open_regular(&recovered_name, false)? {
-        validate_expected_content(
-            &existing,
-            rel_path,
-            Some(base.blob_hash.as_str()),
-            Some(base.normalized_mode),
-        )?;
-    } else {
-        let recovered_path = parent.descriptor_child_path(&recovered_name)?;
-        match cas.materialize_blob_to_new_file(
-            &base.blob_hash,
-            &recovered_path,
-            base.normalized_mode,
-        ) {
-            Ok(_) => {}
-            Err(error) => {
-                let existing = parent
-                    .open_regular(&recovered_name, false)?
-                    .ok_or_else(|| {
-                        PullResultsError::RecoveryRequired(format!(
-                            "could not materialize recovered base for {rel_path}: {error:#}"
-                        ))
-                    })?;
-                validate_expected_content(
-                    &existing,
-                    rel_path,
-                    Some(base.blob_hash.as_str()),
-                    Some(base.normalized_mode),
-                )?;
+    match parent.open_regular(&recovered_name, false)? {
+        Some(existing) => {
+            validate_expected_content(
+                &existing,
+                rel_path,
+                Some(base.blob_hash.as_str()),
+                Some(base.normalized_mode),
+            )?;
+        }
+        None => {
+            let recovered_path = parent.descriptor_child_path(&recovered_name)?;
+            match cas.materialize_blob_to_new_file(
+                &base.blob_hash,
+                &recovered_path,
+                base.normalized_mode,
+            ) {
+                Ok(_) => {}
+                Err(error) => {
+                    let existing =
+                        parent
+                            .open_regular(&recovered_name, false)?
+                            .ok_or_else(|| {
+                                PullResultsError::RecoveryRequired(format!(
+                                "could not materialize recovered base for {rel_path}: {error:#}"
+                            ))
+                            })?;
+                    validate_expected_content(
+                        &existing,
+                        rel_path,
+                        Some(base.blob_hash.as_str()),
+                        Some(base.normalized_mode),
+                    )?;
+                }
             }
         }
     }
@@ -1486,8 +1494,9 @@ impl PinnedScratchDirectory {
 
     fn preserve(&mut self) {
         self.cleanup_on_drop = false;
+        let recovery_path = self.parent.path().join(&self.name);
         tracing::error!(
-            path = %self.parent.path().join(&self.name).display(),
+            path = %recovery_path.display(),
             "preserving remote result recovery artifacts"
         );
     }
@@ -1656,7 +1665,8 @@ fn recover_interrupted_pull_apply(
         cleanup_recovery_directory(project_root, &backup_name, &backup)?;
         let staging_name =
             std::ffi::OsString::from(format!(".ryeos-pull-staging-{}", journal.transaction_id));
-        if let Some(staging) = project_root.open_child_directory(&staging_name)? {
+        let staging = project_root.open_child_directory(&staging_name)?;
+        if let Some(staging) = staging {
             cleanup_recovery_directory(project_root, &staging_name, &staging)?;
         }
     }
@@ -1838,8 +1848,9 @@ fn surface_quarantined_files(
             {
                 return Err(PullResultsError::Other(error.into()));
             }
+            let recovered_path = parent.path().join(&recovered_name);
             tracing::warn!(
-                path = %parent.path().join(&recovered_name).display(),
+                path = %recovered_path.display(),
                 %error,
                 "quarantine preservation committed but directory durability was uncertain"
             );

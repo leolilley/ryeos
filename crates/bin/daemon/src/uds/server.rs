@@ -157,7 +157,9 @@ pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) ->
                 let frame_bytes = Arc::clone(&frame_bytes);
                 connections.spawn(async move {
                     let _connection_permit = connection_permit;
-                    transport::handle_connection(stream, state, frame_bytes).await
+                    let result = transport::handle_connection(stream, state, frame_bytes).await;
+                    drop(_connection_permit);
+                    result
                 });
             }
             joined = connections.join_next(), if !connections.is_empty() => {
@@ -171,7 +173,11 @@ pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) ->
     // No connection may outlive the supervised UDS listener. In particular,
     // shutdown must cancel frames already blocked in reads or runtime dispatch.
     connections.abort_all();
-    while let Some(joined) = connections.join_next().await {
+    loop {
+        let joined = connections.join_next().await;
+        let Some(joined) = joined else {
+            break;
+        };
         report_connection_exit(joined);
     }
 

@@ -1445,7 +1445,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
             tokio::spawn(async move {
                 let _workspace_guard = workspace_guard;
-                match handle.await {
+                let outcome = handle.await;
+                match outcome {
                     Ok(Ok(())) => {
                         tracing::debug!(thread_id = %thread_id, "accepted execute background dispatch completed");
                     }
@@ -1554,13 +1555,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     remote_ignore: &remote_ignore,
                     call: None,
                 };
-                match crate::remote::forward::execute_unary_forward(
-                    &state_arc,
-                    &client,
-                    forward_req,
-                )
-                .await
-                {
+                let forwarded =
+                    crate::remote::forward::execute_unary_forward(&state_arc, &client, forward_req)
+                        .await;
+                match forwarded {
                     Ok(result) => {
                         // The remote executed successfully and pull-back
                         // completed. Return the remote result in the normal

@@ -647,8 +647,10 @@ async fn poll_thread(
 ) -> Option<ryeos_state::queries::ThreadRow> {
     for _ in 0..120 {
         if projection_path.exists() {
-            if let Ok(db) = ryeos_state::projection::ProjectionDb::open(projection_path) {
-                if let Ok(threads) = ryeos_state::queries::list_threads(&db, 200) {
+            let database = ryeos_state::projection::ProjectionDb::open(projection_path);
+            if let Ok(db) = database {
+                let listed = ryeos_state::queries::list_threads(&db, 200);
+                if let Ok(threads) = listed {
                     if let Some(t) = threads.into_iter().find(|t| pred(t)) {
                         let terminal = matches!(
                             t.status.as_str(),

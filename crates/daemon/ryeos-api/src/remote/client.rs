@@ -111,11 +111,14 @@ async fn read_json_checked_with_limit(
             .min(body_limit),
     );
     let mut truncated = false;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .with_context(|| format!("{method} {url}: failed to read response body"))?
-    {
+    loop {
+        let next_chunk = resp
+            .chunk()
+            .await
+            .with_context(|| format!("{method} {url}: failed to read response body"))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         let remaining = body_limit.saturating_sub(body.len());
         if chunk.len() > remaining {
             if success {
@@ -993,7 +996,7 @@ impl RemoteClient {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let nonce_bytes = rand::Rng::gen::<[u8; 16]>(&mut rand::thread_rng());
+        let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
         let token_hash = admission_token_hash(token);
         let claim = admission_claim_string(
@@ -1176,7 +1179,7 @@ impl RemoteClient {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let nonce_bytes = rand::Rng::gen::<[u8; 16]>(&mut rand::thread_rng());
+        let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
 
         let body_hash = lillux::cas::sha256_hex(body);
