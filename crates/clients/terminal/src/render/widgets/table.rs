@@ -209,21 +209,21 @@ fn draw_row(
             style_muted()
         };
         let cell_x = left + GUTTER + i * col_w;
-        if i == 0 {
-            if let Some(tree) = &row.hierarchy {
-                let prefix = hierarchy_prefix(tree);
-                let prefix_width = display_width(&prefix).min(cell_w);
-                surface.draw_text(cell_x, y, &truncate(&prefix, cell_w), cell_style);
-                if prefix_width < cell_w {
-                    surface.draw_text(
-                        cell_x + prefix_width,
-                        y,
-                        &truncate(cell, cell_w - prefix_width),
-                        cell_style,
-                    );
-                }
-                continue;
+        if i == 0
+            && let Some(tree) = &row.hierarchy
+        {
+            let prefix = hierarchy_prefix(tree);
+            let prefix_width = display_width(&prefix).min(cell_w);
+            surface.draw_text(cell_x, y, &truncate(&prefix, cell_w), cell_style);
+            if prefix_width < cell_w {
+                surface.draw_text(
+                    cell_x + prefix_width,
+                    y,
+                    &truncate(cell, cell_w - prefix_width),
+                    cell_style,
+                );
             }
+            continue;
         }
         surface.draw_text(cell_x, y, &truncate(cell, cell_w), cell_style);
     }

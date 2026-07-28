@@ -89,10 +89,8 @@ fn build_surface(vm: &RyeOsViewModel, width: usize, height: usize) -> TextSurfac
             .opacity
             .is_some_and(|opacity| opacity > 0.0 && opacity < 1.0);
     if let Some(root) = &vm.workspace.root {
-        if draw_backdrop_underlay {
-            if let Some(backdrop) = &vm.workspace.backdrop {
-                widgets::scene::draw_scene(&mut surface, center, backdrop);
-            }
+        if draw_backdrop_underlay && let Some(backdrop) = &vm.workspace.backdrop {
+            widgets::scene::draw_scene(&mut surface, center, backdrop);
         }
         let border = theme::border_for(&vm.presentation.chrome.border);
         draw_layout_node(

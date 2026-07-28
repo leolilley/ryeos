@@ -276,21 +276,21 @@ pub fn draw_tile(
         );
     }
     // Provenance (left) + affordance hints (right) in the bottom border.
-    if w > 6 {
-        if let Some((provenance, affordances)) = view_chrome(view) {
-            let by = y + h - 1;
-            surface.draw_text(
-                x + 2,
-                by,
-                &truncate(&format!(" {provenance} "), w.saturating_sub(4)),
-                style_muted(),
-            );
-            if !affordances.is_empty() && w > 16 {
-                let right = format!(" {} ", affordances.join(" · "));
-                let right = truncate(&right, w / 2);
-                let right_w = display_width(&right);
-                surface.draw_text(x + w.saturating_sub(right_w + 2), by, &right, style_muted());
-            }
+    if w > 6
+        && let Some((provenance, affordances)) = view_chrome(view)
+    {
+        let by = y + h - 1;
+        surface.draw_text(
+            x + 2,
+            by,
+            &truncate(&format!(" {provenance} "), w.saturating_sub(4)),
+            style_muted(),
+        );
+        if !affordances.is_empty() && w > 16 {
+            let right = format!(" {} ", affordances.join(" · "));
+            let right = truncate(&right, w / 2);
+            let right_w = display_width(&right);
+            surface.draw_text(x + w.saturating_sub(right_w + 2), by, &right, style_muted());
         }
     }
     // Content fills the interior between the top and bottom borders.
