@@ -2729,15 +2729,15 @@ impl Runner {
                         Ok(result) => result.cost.as_ref(),
                         Err(error) => error.cost.as_ref(),
                     };
-                    if let Some(cost) = hook_cost {
-                        if let Err(error) = self.budget.accumulate(cost) {
-                            state = State::Errored {
-                                error: format!(
-                                    "hook event `{event}` cost violates accounting bounds: {error}"
-                                ),
-                            };
-                            continue;
-                        }
+                    if let Some(cost) = hook_cost
+                        && let Err(error) = self.budget.accumulate(cost)
+                    {
+                        state = State::Errored {
+                            error: format!(
+                                "hook event `{event}` cost violates accounting bounds: {error}"
+                            ),
+                        };
+                        continue;
                     }
 
                     match hook_run {
@@ -3362,15 +3362,15 @@ impl Runner {
                 authority.authority_digest.as_str()
             );
         }
-        if let Some(scope) = &self.accounting_scope {
-            if response.execution_budget_id != scope.execution_budget_id {
-                anyhow::bail!(
-                    "daemon reservation execution budget `{}` contradicts the sealed launch \
-                     scope `{}`",
-                    response.execution_budget_id,
-                    scope.execution_budget_id
-                );
-            }
+        if let Some(scope) = &self.accounting_scope
+            && response.execution_budget_id != scope.execution_budget_id
+        {
+            anyhow::bail!(
+                "daemon reservation execution budget `{}` contradicts the sealed launch \
+                 scope `{}`",
+                response.execution_budget_id,
+                scope.execution_budget_id
+            );
         }
         let ledger = LedgerAttempt {
             attempt_id: response.attempt_id,

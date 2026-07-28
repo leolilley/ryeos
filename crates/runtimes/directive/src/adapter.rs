@@ -37,12 +37,11 @@ fn repair_json_string_values(value: Value) -> Value {
     match value {
         Value::String(s) => {
             let trimmed = s.trim();
-            if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-                || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+            if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+                || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+                && let Ok(parsed) = serde_json::from_str::<Value>(trimmed)
             {
-                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
-                    return repair_json_string_values(parsed);
-                }
+                return repair_json_string_values(parsed);
             }
             Value::String(s)
         }

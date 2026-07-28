@@ -607,35 +607,34 @@ fn parse_event_typed(
                         }
                     }
                     "input_json_delta" => {
-                        if let Some(input) = delta.get("partial_json").and_then(|j| j.as_str()) {
-                            if tool_call_state.contains_key("current_tool_id")
-                                && tool_call_state.contains_key("current_tool_name")
-                            {
-                                let total_len = tool_call_state
-                                    .entry("current_tool_args".to_string())
-                                    .and_modify(|e| e.push_str(input))
-                                    .or_insert_with(|| input.to_string())
-                                    .len();
-                                let id = tool_call_state
-                                    .get("current_tool_id")
-                                    .cloned()
-                                    .filter(|s| !s.is_empty());
-                                let name = tool_call_state
-                                    .get("current_tool_name")
-                                    .cloned()
-                                    .unwrap_or_default();
-                                let stream_key = tool_call_state
-                                    .get("current_tool_stream_key")
-                                    .cloned()
-                                    .unwrap_or_else(|| "event_typed:unknown".to_string());
-                                events.push(StreamEvent::ToolUsePartial {
-                                    id,
-                                    name,
-                                    stream_key,
-                                    delta: input.to_string(),
-                                    total_len,
-                                });
-                            }
+                        if let Some(input) = delta.get("partial_json").and_then(|j| j.as_str())
+                            && tool_call_state.contains_key("current_tool_id")
+                            && tool_call_state.contains_key("current_tool_name")
+                        {
+                            let total_len = tool_call_state
+                                .entry("current_tool_args".to_string())
+                                .and_modify(|e| e.push_str(input))
+                                .or_insert_with(|| input.to_string())
+                                .len();
+                            let id = tool_call_state
+                                .get("current_tool_id")
+                                .cloned()
+                                .filter(|s| !s.is_empty());
+                            let name = tool_call_state
+                                .get("current_tool_name")
+                                .cloned()
+                                .unwrap_or_default();
+                            let stream_key = tool_call_state
+                                .get("current_tool_stream_key")
+                                .cloned()
+                                .unwrap_or_else(|| "event_typed:unknown".to_string());
+                            events.push(StreamEvent::ToolUsePartial {
+                                id,
+                                name,
+                                stream_key,
+                                delta: input.to_string(),
+                                total_len,
+                            });
                         }
                     }
                     other => {
@@ -650,49 +649,49 @@ fn parse_event_typed(
             }
         }
         "content_block_start" => {
-            if let Some(content_block) = parsed.get("content_block") {
-                if let Some("tool_use") = content_block.get("type").and_then(|t| t.as_str()) {
-                    let id = content_block
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = content_block
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if id.is_empty() || name.is_empty() {
-                        tracing::warn!(
-                            id = id,
-                            name = name,
-                            "SSE event_typed: content_block_start tool_use missing id or name, skipping"
-                        );
-                    } else {
-                        let sequence =
-                            parsed
-                                .get("index")
-                                .and_then(Value::as_u64)
-                                .unwrap_or_else(|| {
-                                    let next = tool_call_state
-                                        .get("event_typed_next_sequence")
-                                        .and_then(|value| value.parse::<u64>().ok())
-                                        .unwrap_or(0);
-                                    tool_call_state.insert(
-                                        "event_typed_next_sequence".to_string(),
-                                        next.saturating_add(1).to_string(),
-                                    );
-                                    next
-                                });
-                        tool_call_state.insert("current_tool_id".to_string(), id);
-                        tool_call_state.insert("current_tool_name".to_string(), name);
-                        tool_call_state.insert(
-                            "current_tool_stream_key".to_string(),
-                            format!("event_typed:{sequence}"),
-                        );
-                    }
-                    tool_call_state.remove("current_tool_args");
+            if let Some(content_block) = parsed.get("content_block")
+                && let Some("tool_use") = content_block.get("type").and_then(|t| t.as_str())
+            {
+                let id = content_block
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let name = content_block
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if id.is_empty() || name.is_empty() {
+                    tracing::warn!(
+                        id = id,
+                        name = name,
+                        "SSE event_typed: content_block_start tool_use missing id or name, skipping"
+                    );
+                } else {
+                    let sequence =
+                        parsed
+                            .get("index")
+                            .and_then(Value::as_u64)
+                            .unwrap_or_else(|| {
+                                let next = tool_call_state
+                                    .get("event_typed_next_sequence")
+                                    .and_then(|value| value.parse::<u64>().ok())
+                                    .unwrap_or(0);
+                                tool_call_state.insert(
+                                    "event_typed_next_sequence".to_string(),
+                                    next.saturating_add(1).to_string(),
+                                );
+                                next
+                            });
+                    tool_call_state.insert("current_tool_id".to_string(), id);
+                    tool_call_state.insert("current_tool_name".to_string(), name);
+                    tool_call_state.insert(
+                        "current_tool_stream_key".to_string(),
+                        format!("event_typed:{sequence}"),
+                    );
                 }
+                tool_call_state.remove("current_tool_args");
             }
         }
         "content_block_stop" if tool_call_state.contains_key("current_tool_id") => {
@@ -729,10 +728,10 @@ fn parse_event_typed(
         }
         "message_delta" => {
             // Capture stop_reason for use when message_stop arrives.
-            if let Some(delta) = parsed.get("delta") {
-                if let Some(sr) = delta.get("stop_reason").and_then(|v| v.as_str()) {
-                    tool_call_state.insert("last_stop_reason".to_string(), sr.to_string());
-                }
+            if let Some(delta) = parsed.get("delta")
+                && let Some(sr) = delta.get("stop_reason").and_then(|v| v.as_str())
+            {
+                tool_call_state.insert("last_stop_reason".to_string(), sr.to_string());
             }
             // Emit usage update from message_delta.usage (cumulative).
             if let Some(usage_obj) = parsed.get("usage") {
@@ -793,126 +792,125 @@ fn parse_delta_merge(
     events: &mut Vec<StreamEvent>,
     tool_call_state: &mut HashMap<String, String>,
 ) {
-    if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array()) {
-        if let Some(choice) = choices.first() {
-            if let Some(content) = choice
-                .get("delta")
-                .and_then(|d| d.get("content"))
-                .and_then(|c| c.as_str())
-            {
-                events.push(StreamEvent::Delta(content.to_string()));
-            }
+    if let Some(choices) = parsed.get("choices").and_then(|c| c.as_array())
+        && let Some(choice) = choices.first()
+    {
+        if let Some(content) = choice
+            .get("delta")
+            .and_then(|d| d.get("content"))
+            .and_then(|c| c.as_str())
+        {
+            events.push(StreamEvent::Delta(content.to_string()));
+        }
 
-            if let Some(reasoning) = choice
-                .get("delta")
-                .and_then(|d| {
-                    d.get("reasoning_content")
-                        .or_else(|| d.get("reasoning"))
-                        .or_else(|| d.get("thinking"))
-                })
-                .and_then(|r| r.as_str())
-            {
-                events.push(StreamEvent::ReasoningDelta(reasoning.to_string()));
-            }
+        if let Some(reasoning) = choice
+            .get("delta")
+            .and_then(|d| {
+                d.get("reasoning_content")
+                    .or_else(|| d.get("reasoning"))
+                    .or_else(|| d.get("thinking"))
+            })
+            .and_then(|r| r.as_str())
+        {
+            events.push(StreamEvent::ReasoningDelta(reasoning.to_string()));
+        }
 
-            if let Some(tool_calls) = choice
-                .get("delta")
-                .and_then(|d| d.get("tool_calls"))
-                .and_then(|tc| tc.as_array())
-            {
-                for tc in tool_calls {
-                    let index = tc
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0)
-                        .to_string();
+        if let Some(tool_calls) = choice
+            .get("delta")
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+        {
+            for tc in tool_calls {
+                let index = tc
+                    .get("index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0)
+                    .to_string();
 
-                    if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
-                        tool_call_state.insert(format!("tool_id_{}", index), id.to_string());
-                    }
-                    if let Some(func) = tc.get("function") {
-                        if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
-                            tool_call_state
-                                .insert(format!("tool_name_{}", index), name.to_string());
-                        }
-                        if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-                            let total_len = tool_call_state
-                                .entry(format!("tool_args_{}", index))
-                                .and_modify(|e| e.push_str(args))
-                                .or_insert_with(|| args.to_string())
-                                .len();
-                            let id = tool_call_state
-                                .get(&format!("tool_id_{}", index))
-                                .cloned()
-                                .filter(|value| !value.is_empty());
-                            let name = tool_call_state
-                                .get(&format!("tool_name_{}", index))
-                                .cloned()
-                                .unwrap_or_default();
-                            events.push(StreamEvent::ToolUsePartial {
-                                id,
-                                name,
-                                stream_key: format!("delta_merge:{index}"),
-                                delta: args.to_string(),
-                                total_len,
-                            });
-                        }
-                    }
+                if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
+                    tool_call_state.insert(format!("tool_id_{}", index), id.to_string());
                 }
-            }
-
-            let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
-            let is_terminal = finish_reason.map(|r| !r.is_empty()).unwrap_or(false);
-
-            if is_terminal {
-                // Flush accumulated tool calls BEFORE emitting Done.
-                // OpenAI sends finish_reason="tool_calls" when the model
-                // wants tools dispatched; the old code only flushed on
-                // "stop", which meant streamed tool calls never fired.
-                let mut indices: Vec<u64> = Vec::new();
-                for (key, _) in tool_call_state.iter() {
-                    if let Some(idx) = key.strip_prefix("tool_id_") {
-                        if let Ok(n) = idx.parse::<u64>() {
-                            indices.push(n);
-                        }
+                if let Some(func) = tc.get("function") {
+                    if let Some(name) = func.get("name").and_then(|v| v.as_str()) {
+                        tool_call_state.insert(format!("tool_name_{}", index), name.to_string());
+                    }
+                    if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
+                        let total_len = tool_call_state
+                            .entry(format!("tool_args_{}", index))
+                            .and_modify(|e| e.push_str(args))
+                            .or_insert_with(|| args.to_string())
+                            .len();
+                        let id = tool_call_state
+                            .get(&format!("tool_id_{}", index))
+                            .cloned()
+                            .filter(|value| !value.is_empty());
+                        let name = tool_call_state
+                            .get(&format!("tool_name_{}", index))
+                            .cloned()
+                            .unwrap_or_default();
+                        events.push(StreamEvent::ToolUsePartial {
+                            id,
+                            name,
+                            stream_key: format!("delta_merge:{index}"),
+                            delta: args.to_string(),
+                            total_len,
+                        });
                     }
                 }
-                indices.sort();
-                for idx in indices.iter() {
-                    let id = tool_call_state
-                        .get(&format!("tool_id_{}", idx))
-                        .cloned()
-                        .unwrap_or_default();
-                    let name = tool_call_state
-                        .get(&format!("tool_name_{}", idx))
-                        .cloned()
-                        .unwrap_or_default();
-                    let arguments = tool_call_state
-                        .get(&format!("tool_args_{}", idx))
-                        .cloned()
-                        .unwrap_or_else(|| "{}".to_string());
-                    let (args_value, malformed_args) = parse_tool_arguments(&name, &arguments);
-                    let id_opt = if id.is_empty() { None } else { Some(id) };
-                    events.push(StreamEvent::ToolUse {
-                        id: id_opt,
-                        name,
-                        stream_key: format!("delta_merge:{idx}"),
-                        argument_bytes: arguments.len(),
-                        arguments: args_value,
-                        malformed_args,
-                    });
+            }
+        }
+
+        let finish_reason = choice.get("finish_reason").and_then(|f| f.as_str());
+        let is_terminal = finish_reason.map(|r| !r.is_empty()).unwrap_or(false);
+
+        if is_terminal {
+            // Flush accumulated tool calls BEFORE emitting Done.
+            // OpenAI sends finish_reason="tool_calls" when the model
+            // wants tools dispatched; the old code only flushed on
+            // "stop", which meant streamed tool calls never fired.
+            let mut indices: Vec<u64> = Vec::new();
+            for (key, _) in tool_call_state.iter() {
+                if let Some(idx) = key.strip_prefix("tool_id_")
+                    && let Ok(n) = idx.parse::<u64>()
+                {
+                    indices.push(n);
                 }
-                for idx in indices.iter() {
-                    let idx_s = idx.to_string();
-                    tool_call_state.remove(&format!("tool_id_{}", idx_s));
-                    tool_call_state.remove(&format!("tool_name_{}", idx_s));
-                    tool_call_state.remove(&format!("tool_args_{}", idx_s));
-                }
-                events.push(StreamEvent::Finish {
-                    reason: normalize_finish_reason(finish_reason),
-                    raw: finish_reason.map(|s| s.to_string()),
+            }
+            indices.sort();
+            for idx in indices.iter() {
+                let id = tool_call_state
+                    .get(&format!("tool_id_{}", idx))
+                    .cloned()
+                    .unwrap_or_default();
+                let name = tool_call_state
+                    .get(&format!("tool_name_{}", idx))
+                    .cloned()
+                    .unwrap_or_default();
+                let arguments = tool_call_state
+                    .get(&format!("tool_args_{}", idx))
+                    .cloned()
+                    .unwrap_or_else(|| "{}".to_string());
+                let (args_value, malformed_args) = parse_tool_arguments(&name, &arguments);
+                let id_opt = if id.is_empty() { None } else { Some(id) };
+                events.push(StreamEvent::ToolUse {
+                    id: id_opt,
+                    name,
+                    stream_key: format!("delta_merge:{idx}"),
+                    argument_bytes: arguments.len(),
+                    arguments: args_value,
+                    malformed_args,
                 });
             }
+            for idx in indices.iter() {
+                let idx_s = idx.to_string();
+                tool_call_state.remove(&format!("tool_id_{}", idx_s));
+                tool_call_state.remove(&format!("tool_name_{}", idx_s));
+                tool_call_state.remove(&format!("tool_args_{}", idx_s));
+            }
+            events.push(StreamEvent::Finish {
+                reason: normalize_finish_reason(finish_reason),
+                raw: finish_reason.map(|s| s.to_string()),
+            });
         }
     }
 
@@ -983,76 +981,73 @@ fn parse_complete_chunks(
 
     for block in blocks {
         // Tool-call detection takes precedence over text.
-        if let Some(ref tc_field) = p.tool_call_field {
-            if block.get(tc_field).is_some() {
-                if let (Some(name_path), Some(args_path)) =
-                    (&p.tool_call_name_path, &p.tool_call_args_path)
-                {
-                    let name = resolve_path(block, name_path)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let args = resolve_path(block, args_path)
-                        .cloned()
-                        .unwrap_or(Value::Object(Default::default()));
-                    if name.is_empty() {
-                        tracing::warn!("complete_chunks: tool_call block missing name; skipping");
-                        continue;
-                    }
-                    // Deduplicate: Gemini sends cumulative frames, so the
-                    // same tool call may appear in multiple chunks. Use
-                    // (name + arguments) as a dedupe key.
-                    let arguments =
-                        serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
-                    let dedupe_key = format!("seen_tc_{}:{}", name, arguments);
-                    if tool_call_state.contains_key(&dedupe_key) {
-                        continue; // already emitted this tool call
-                    }
-                    tool_call_state.insert(dedupe_key, "1".to_string());
-
-                    // Gemini does not assign tool_call ids; synthesize a
-                    // stream-local sequential id. Counter lives in the
-                    // tool_call_state map keyed `gemini_tc_seq`. IDs are
-                    // stable within a stream (no clock dependency).
-                    let seq: u64 = tool_call_state
-                        .get("gemini_tc_seq")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let id = format!("gemini_tc_{}", seq);
-                    tool_call_state.insert("gemini_tc_seq".to_string(), (seq + 1).to_string());
-                    events.push(StreamEvent::ToolUse {
-                        id: Some(id.clone()),
-                        name,
-                        stream_key: format!("complete_chunks:{id}"),
-                        argument_bytes: arguments.len(),
-                        // Gemini arguments arrive as a parsed JSON value, not a
-                        // streamed string, so there is no upstream-corruption
-                        // recovery path to flag here.
-                        arguments: args,
-                        malformed_args: None,
-                    });
-                    continue;
-                }
+        if let Some(ref tc_field) = p.tool_call_field
+            && block.get(tc_field).is_some()
+            && let (Some(name_path), Some(args_path)) =
+                (&p.tool_call_name_path, &p.tool_call_args_path)
+        {
+            let name = resolve_path(block, name_path)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let args = resolve_path(block, args_path)
+                .cloned()
+                .unwrap_or(Value::Object(Default::default()));
+            if name.is_empty() {
+                tracing::warn!("complete_chunks: tool_call block missing name; skipping");
+                continue;
             }
+            // Deduplicate: Gemini sends cumulative frames, so the
+            // same tool call may appear in multiple chunks. Use
+            // (name + arguments) as a dedupe key.
+            let arguments = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+            let dedupe_key = format!("seen_tc_{}:{}", name, arguments);
+            if tool_call_state.contains_key(&dedupe_key) {
+                continue; // already emitted this tool call
+            }
+            tool_call_state.insert(dedupe_key, "1".to_string());
+
+            // Gemini does not assign tool_call ids; synthesize a
+            // stream-local sequential id. Counter lives in the
+            // tool_call_state map keyed `gemini_tc_seq`. IDs are
+            // stable within a stream (no clock dependency).
+            let seq: u64 = tool_call_state
+                .get("gemini_tc_seq")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let id = format!("gemini_tc_{}", seq);
+            tool_call_state.insert("gemini_tc_seq".to_string(), (seq + 1).to_string());
+            events.push(StreamEvent::ToolUse {
+                id: Some(id.clone()),
+                name,
+                stream_key: format!("complete_chunks:{id}"),
+                argument_bytes: arguments.len(),
+                // Gemini arguments arrive as a parsed JSON value, not a
+                // streamed string, so there is no upstream-corruption
+                // recovery path to flag here.
+                arguments: args,
+                malformed_args: None,
+            });
+            continue;
         }
 
         // Thinking blocks: emit as ReasoningDelta (not visible deltas).
-        if let Some(ref thought_field) = p.thought_field {
-            if block.get(thought_field).and_then(|v| v.as_bool()) == Some(true) {
-                if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        frame_reasoning.push_str(text);
-                    }
-                }
-                continue;
+        if let Some(ref thought_field) = p.thought_field
+            && block.get(thought_field).and_then(|v| v.as_bool()) == Some(true)
+        {
+            if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str())
+                && !text.is_empty()
+            {
+                frame_reasoning.push_str(text);
             }
+            continue;
         }
 
         // Collect visible text from this block for per-frame aggregation.
-        if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str()) {
-            if !text.is_empty() {
-                frame_text.push_str(text);
-            }
+        if let Some(text) = block.get(&p.text_field).and_then(|v| v.as_str())
+            && !text.is_empty()
+        {
+            frame_text.push_str(text);
         }
     }
 
@@ -1080,40 +1075,39 @@ fn parse_complete_chunks(
     );
 
     // Usage from usageMetadata (Gemini path).
-    if let Some(ref usage_path) = p.usage_path {
-        if let Some(usage_md) = resolve_path(parsed, usage_path) {
-            let mut update = UsageUpdate::default();
-            if !usage_md.is_object() {
-                update
-                    .anomalies
-                    .push(format!("{usage_path} is not an object"));
-            }
-            update.input_tokens =
-                protocol_usage_u64(usage_md, "promptTokenCount", &mut update.anomalies);
-            update.output_tokens =
-                protocol_usage_u64(usage_md, "candidatesTokenCount", &mut update.anomalies);
-            update.reasoning_tokens =
-                protocol_usage_u64(usage_md, "thoughtsTokenCount", &mut update.anomalies);
-            if update.input_tokens.is_some()
-                || update.output_tokens.is_some()
-                || update.reasoning_tokens.is_some()
-                || !update.anomalies.is_empty()
-            {
-                events.push(StreamEvent::Usage(update));
-            }
+    if let Some(ref usage_path) = p.usage_path
+        && let Some(usage_md) = resolve_path(parsed, usage_path)
+    {
+        let mut update = UsageUpdate::default();
+        if !usage_md.is_object() {
+            update
+                .anomalies
+                .push(format!("{usage_path} is not an object"));
+        }
+        update.input_tokens =
+            protocol_usage_u64(usage_md, "promptTokenCount", &mut update.anomalies);
+        update.output_tokens =
+            protocol_usage_u64(usage_md, "candidatesTokenCount", &mut update.anomalies);
+        update.reasoning_tokens =
+            protocol_usage_u64(usage_md, "thoughtsTokenCount", &mut update.anomalies);
+        if update.input_tokens.is_some()
+            || update.output_tokens.is_some()
+            || update.reasoning_tokens.is_some()
+            || !update.anomalies.is_empty()
+        {
+            events.push(StreamEvent::Usage(update));
         }
     }
 
     // Finish reason → emit Finish.
-    if let Some(ref fr_path) = p.finish_reason_path {
-        if let Some(reason) = resolve_path(parsed, fr_path).and_then(|v| v.as_str()) {
-            if !reason.is_empty() {
-                events.push(StreamEvent::Finish {
-                    reason: normalize_finish_reason(Some(reason)),
-                    raw: Some(reason.to_string()),
-                });
-            }
-        }
+    if let Some(ref fr_path) = p.finish_reason_path
+        && let Some(reason) = resolve_path(parsed, fr_path).and_then(|v| v.as_str())
+        && !reason.is_empty()
+    {
+        events.push(StreamEvent::Finish {
+            reason: normalize_finish_reason(Some(reason)),
+            raw: Some(reason.to_string()),
+        });
     }
 }
 
@@ -1640,19 +1634,16 @@ async fn send_prepared_streaming_inner(
             )?;
 
             for ev in new_events {
-                if !metadata_usage_declared {
-                    if let StreamEvent::Usage(update) = &ev {
-                        merge_stream_usage_update(&mut last_usage, update);
-                        validate_usage_against_requested_limit(
-                            last_usage.as_mut(),
-                            requested_output_tokens,
-                        );
-                    }
+                if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {
+                    merge_stream_usage_update(&mut last_usage, update);
+                    validate_usage_against_requested_limit(
+                        last_usage.as_mut(),
+                        requested_output_tokens,
+                    );
                 }
-                if !metadata_finish_declared {
-                    if let StreamEvent::Finish { raw: Some(raw), .. } = &ev {
-                        last_finish = Some(raw.clone());
-                    }
+                if !metadata_finish_declared && let StreamEvent::Finish { raw: Some(raw), .. } = &ev
+                {
+                    last_finish = Some(raw.clone());
                 }
                 output_meter
                     .accept(&ev, max_stream_output_bytes, live_output_events_emitted)
@@ -1864,19 +1855,15 @@ async fn send_prepared_streaming_inner(
             requested_output_tokens,
         )?;
         for ev in final_events {
-            if !metadata_usage_declared {
-                if let StreamEvent::Usage(update) = &ev {
-                    merge_stream_usage_update(&mut last_usage, update);
-                    validate_usage_against_requested_limit(
-                        last_usage.as_mut(),
-                        requested_output_tokens,
-                    );
-                }
+            if !metadata_usage_declared && let StreamEvent::Usage(update) = &ev {
+                merge_stream_usage_update(&mut last_usage, update);
+                validate_usage_against_requested_limit(
+                    last_usage.as_mut(),
+                    requested_output_tokens,
+                );
             }
-            if !metadata_finish_declared {
-                if let StreamEvent::Finish { raw: Some(raw), .. } = &ev {
-                    last_finish = Some(raw.clone());
-                }
+            if !metadata_finish_declared && let StreamEvent::Finish { raw: Some(raw), .. } = &ev {
+                last_finish = Some(raw.clone());
             }
             output_meter
                 .accept(&ev, max_stream_output_bytes, live_output_events_emitted)
@@ -2307,15 +2294,15 @@ pub(crate) fn inject_sampling(
 ) {
     if let Some(s) = sampling {
         let caps = family_capabilities(family);
-        if caps.supports_temperature {
-            if let Some(temp) = s.temperature {
-                body["temperature"] = json!(temp);
-            }
+        if caps.supports_temperature
+            && let Some(temp) = s.temperature
+        {
+            body["temperature"] = json!(temp);
         }
-        if caps.supports_seed {
-            if let Some(seed) = s.seed {
-                body["seed"] = json!(seed);
-            }
+        if caps.supports_seed
+            && let Some(seed) = s.seed
+        {
+            body["seed"] = json!(seed);
         }
     }
 }
@@ -2576,12 +2563,12 @@ fn merge_stream_usage_counter(
     let Some(update) = update else {
         return;
     };
-    if let Some(previous) = *current {
-        if update < previous {
-            anomalies.push(format!(
-                "{label} regressed from {previous} to {update} in streamed usage metadata"
-            ));
-        }
+    if let Some(previous) = *current
+        && update < previous
+    {
+        anomalies.push(format!(
+            "{label} regressed from {previous} to {update} in streamed usage metadata"
+        ));
     }
     *current = Some(update);
 }

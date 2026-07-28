@@ -611,26 +611,24 @@ fn verify_manifest_signature_inner(
             .with_context(|| format!("read {}", publisher_trust_path.display()))?;
         let trust_doc = ryeos_engine::trust::PublisherTrustDoc::parse(&raw_trust_doc)
             .map_err(|err| anyhow::anyhow!("invalid {}: {err}", publisher_trust_path.display()))?;
-        if trust_doc.fingerprint == sig_header.signer_fingerprint {
-            if let Some(store_owner) = trust_store
+        if trust_doc.fingerprint == sig_header.signer_fingerprint
+            && let Some(store_owner) = trust_store
                 .get(&sig_header.signer_fingerprint)
                 .and_then(|signer| signer.label.as_deref())
-            {
-                if store_owner != trust_doc.owner {
-                    // The owner label is informational — the trust anchor is the
-                    // fingerprint, which is already verified as trusted above and
-                    // checked cryptographically below. A label rename (e.g.
-                    // `official-publisher` -> `ryeos-official`) must not brick a
-                    // node whose pinned key still matches. Warn, don't fail.
-                    tracing::warn!(
-                        fingerprint = %sig_header.signer_fingerprint,
-                        bundle_owner = %trust_doc.owner,
-                        store_owner = %store_owner,
-                        "publisher trust owner label differs from the pinned trust doc \
-                         (informational only — the key fingerprint is what's trusted)"
-                    );
-                }
-            }
+            && store_owner != trust_doc.owner
+        {
+            // The owner label is informational — the trust anchor is the
+            // fingerprint, which is already verified as trusted above and
+            // checked cryptographically below. A label rename (e.g.
+            // `official-publisher` -> `ryeos-official`) must not brick a
+            // node whose pinned key still matches. Warn, don't fail.
+            tracing::warn!(
+                fingerprint = %sig_header.signer_fingerprint,
+                bundle_owner = %trust_doc.owner,
+                store_owner = %store_owner,
+                "publisher trust owner label differs from the pinned trust doc \
+                 (informational only — the key fingerprint is what's trusted)"
+            );
         }
     }
 
@@ -646,15 +644,15 @@ fn verify_manifest_signature_inner(
         )
     })?;
 
-    if let Some(expected_bundle_name) = expected_bundle_name {
-        if manifest.name != expected_bundle_name {
-            bail!(
-                "manifest identity mismatch: manifest.yaml name is '{}' but \
-                 expected bundle identity is '{}' — the manifest must be regenerated",
-                manifest.name,
-                expected_bundle_name
-            );
-        }
+    if let Some(expected_bundle_name) = expected_bundle_name
+        && manifest.name != expected_bundle_name
+    {
+        bail!(
+            "manifest identity mismatch: manifest.yaml name is '{}' but \
+             expected bundle identity is '{}' — the manifest must be regenerated",
+            manifest.name,
+            expected_bundle_name
+        );
     }
     let effective_bundle_name = expected_bundle_name.unwrap_or(&manifest.name);
 
@@ -1348,10 +1346,10 @@ fn validate_node_route_record(body: &serde_json::Value) -> Result<()> {
     // the route compiler / `ResponseModeRegistry`, so preflight only performs
     // mode-independent structural validation here and must not parse the value
     // as a canonical ref.
-    if let Some(source) = record.response.source.as_deref() {
-        if source.trim().is_empty() {
-            bail!("route response source must be non-empty when present");
-        }
+    if let Some(source) = record.response.source.as_deref()
+        && source.trim().is_empty()
+    {
+        bail!("route response source must be non-empty when present");
     }
     if let Some(execute) = &record.execute {
         ryeos_engine::canonical_ref::CanonicalRef::parse(&execute.item_ref)

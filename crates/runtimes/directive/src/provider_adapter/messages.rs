@@ -45,10 +45,10 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
             if let Some(ref id) = msg.tool_call_id {
                 obj["tool_call_id"] = json!(id);
             }
-            if msg.role == "assistant" {
-                if let Some(ref reasoning) = msg.reasoning_content {
-                    obj["reasoning_content"] = json!(reasoning);
-                }
+            if msg.role == "assistant"
+                && let Some(ref reasoning) = msg.reasoning_content
+            {
+                obj["reasoning_content"] = json!(reasoning);
             }
             obj
         })
@@ -144,10 +144,10 @@ fn convert_with_schemas(
 
         let mut obj = json!({ "role": mapped_role });
 
-        if msg.role == "assistant" {
-            if let Some(ref reasoning) = msg.reasoning_content {
-                obj["reasoning_content"] = json!(reasoning);
-            }
+        if msg.role == "assistant"
+            && let Some(ref reasoning) = msg.reasoning_content
+        {
+            obj["reasoning_content"] = json!(reasoning);
         }
 
         if msg.role == "system" && system_mode == SystemMessageMode::MessageRole {

@@ -106,10 +106,10 @@ impl ReturnNudge {
     /// header carries a non-empty string, else the built-in message naming
     /// the declared outputs.
     pub fn message(&self, declared_outputs: &[String]) -> String {
-        if let ReturnNudge::Message(text) = self {
-            if !text.trim().is_empty() {
-                return text.clone();
-            }
+        if let ReturnNudge::Message(text) = self
+            && !text.trim().is_empty()
+        {
+            return text.clone();
         }
         format!(
             "This directive declares structured outputs ({}) that have not been \
