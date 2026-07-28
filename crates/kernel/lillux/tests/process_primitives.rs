@@ -165,10 +165,7 @@ fn run_env_is_authoritative_no_parent_leak() {
     with_env.envs = vec![("HOME".to_string(), "explicit".to_string())];
     let explicit = run(with_env);
     assert!(
-        explicit
-            .stdout
-            .lines()
-            .any(|line| line == "HOME=explicit"),
+        explicit.stdout.lines().any(|line| line == "HOME=explicit"),
         "an explicitly-passed env var must reach the child: {}",
         explicit.stdout
     );
