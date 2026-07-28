@@ -166,6 +166,8 @@ if [[ -n "$TRUST_FILE" ]]; then
   init_args+=(--trust-file "$TRUST_FILE")
 fi
 bounded_for "$INIT_TIMEOUT" ryeos "${init_args[@]}"
+ryeos_term_info "signing resumable fixture"
+bounded ryeos --project "$PROJECT_ROOT" sign tool:smoke/resume graph:smoke/resume
 bounded ryeos start
 wait_ready
 
