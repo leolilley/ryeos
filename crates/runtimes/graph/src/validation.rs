@@ -492,6 +492,16 @@ pub fn analyze_graph(def: &GraphDefinition) -> ValidationResult {
     let mut referenced_state: HashSet<String> = HashSet::new();
     let mut referenced_inputs: HashSet<String> = HashSet::new();
 
+    // Graph-level `config.state` seeds keys into state before the walk starts,
+    // so they are assigned from step 0 even if no node's `assign`/`collect`
+    // ever touches them. Without this, a key that is only initialized (and then
+    // read) draws a false "referenced but never assigned" warning.
+    if let Some(Value::Object(map)) = cfg.state.as_ref() {
+        for k in map.keys() {
+            assigned_keys.insert(k.clone());
+        }
+    }
+
     for node in cfg.nodes.values() {
         if let Some(Value::Object(map)) = node.assign.as_ref() {
             for k in map.keys() {
@@ -709,6 +719,36 @@ config:
             .warnings
             .iter()
             .any(|w| w.contains("undef_key") && w.contains("never assigned")));
+    }
+
+    #[test]
+    fn config_state_seeded_keys_are_treated_as_assigned() {
+        // Keys declared only in graph-level `config.state` are present from
+        // step 0; referencing them must not draw a "never assigned" warning.
+        let yaml = r#"
+version: "1.0.0"
+category: test
+config:
+  start: step1
+  state:
+    empty: ""
+    empty_path: ""
+  nodes:
+    step1:
+      assign: {out: "${state.empty}${state.empty_path}"}
+      next:
+        type: unconditional
+        to: done
+    done:
+      node_type: return
+"#;
+        let graph = make_graph(yaml);
+        let result = analyze_graph(&graph);
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("never assigned")),
+            "unexpected never-assigned warning: {:?}",
+            result.warnings
+        );
     }
 
     #[test]
