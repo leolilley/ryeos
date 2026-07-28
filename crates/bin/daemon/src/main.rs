@@ -1007,17 +1007,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             prepare_follow_recovery_actions(&app_state, follow_actions)?;
 
-            if !projection_health.is_current() {
-                if let Some(generation) = projection_health.begin_repair() {
-                    let repair_store = app_state.state_store.clone();
-                    let repaired = tokio::task::spawn_blocking(move || {
-                        repair_store.repair_thread_projection()
-                    })
-                    .await
-                    .context("recovery projection repair task failed")?;
-                    projection_health.finish_repair(generation, &repaired);
-                    repaired.context("recovery projection repair failed")?;
-                }
+            if !projection_health.is_current()
+                && let Some(generation) = projection_health.begin_repair()
+            {
+                let repair_store = app_state.state_store.clone();
+                let repaired =
+                    tokio::task::spawn_blocking(move || repair_store.repair_thread_projection())
+                        .await
+                        .context("recovery projection repair task failed")?;
+                projection_health.finish_repair(generation, &repaired);
+                repaired.context("recovery projection repair failed")?;
             }
             let pre_scheduler_projection = projection_health.snapshot();
             if pre_scheduler_projection.status
@@ -1053,17 +1052,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             // Scheduler recovery can itself create/project thread state. Take the
             // readiness snapshot only after every recovered fire has crossed its durable
             // dispatch boundary, repairing any journal work produced along the way.
-            if !projection_health.is_current() {
-                if let Some(generation) = projection_health.begin_repair() {
-                    let repair_store = app_state.state_store.clone();
-                    let repaired = tokio::task::spawn_blocking(move || {
-                        repair_store.repair_thread_projection()
-                    })
-                    .await
-                    .context("final recovery projection repair task failed")?;
-                    projection_health.finish_repair(generation, &repaired);
-                    repaired.context("final recovery projection repair failed")?;
-                }
+            if !projection_health.is_current()
+                && let Some(generation) = projection_health.begin_repair()
+            {
+                let repair_store = app_state.state_store.clone();
+                let repaired =
+                    tokio::task::spawn_blocking(move || repair_store.repair_thread_projection())
+                        .await
+                        .context("final recovery projection repair task failed")?;
+                projection_health.finish_repair(generation, &repaired);
+                repaired.context("final recovery projection repair failed")?;
             }
             let projection_snapshot = projection_health.snapshot();
             if projection_snapshot.status
@@ -1163,22 +1161,22 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
         progress_task.abort();
         let _ = progress_task.await;
 
-        if first_exit != FirstExit::HttpListener {
-            if let Err(error) = settle_http_listener(&mut http_task).await {
-                if result.is_ok() {
-                    result = Err(error);
-                } else {
-                    tracing::error!(%error, "HTTP listener also failed during daemon shutdown");
-                }
+        if first_exit != FirstExit::HttpListener
+            && let Err(error) = settle_http_listener(&mut http_task).await
+        {
+            if result.is_ok() {
+                result = Err(error);
+            } else {
+                tracing::error!(%error, "HTTP listener also failed during daemon shutdown");
             }
         }
-        if first_exit != FirstExit::UdsListener {
-            if let Err(error) = settle_uds_listener(&mut uds_task).await {
-                if result.is_ok() {
-                    result = Err(error);
-                } else {
-                    tracing::error!(%error, "UDS listener also failed during daemon shutdown");
-                }
+        if first_exit != FirstExit::UdsListener
+            && let Err(error) = settle_uds_listener(&mut uds_task).await
+        {
+            if result.is_ok() {
+                result = Err(error);
+            } else {
+                tracing::error!(%error, "UDS listener also failed during daemon shutdown");
             }
         }
 
@@ -1188,12 +1186,13 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 .expect("shutdown drain state mutex poisoned");
             guard.take()
         };
-        if let Some(state) = shutdown_state {
-            if !drain_running_threads(&state).await && result.is_ok() {
-                result = Err(anyhow::anyhow!(
-                    "shutdown could not prove every attached process terminated"
-                ));
-            }
+        if let Some(state) = shutdown_state
+            && !drain_running_threads(&state).await
+            && result.is_ok()
+        {
+            result = Err(anyhow::anyhow!(
+                "shutdown could not prove every attached process terminated"
+            ));
         }
 
         (result, startup_cancelled, startup_failed)
@@ -1727,18 +1726,17 @@ async fn dispatch_follow_actions(
                     })
                     .is_some_and(|status| status.is_terminal());
                 if terminal {
-                    if let Some(follow_key) = resume_follow_key.as_deref() {
-                        if state
+                    if let Some(follow_key) = resume_follow_key.as_deref()
+                        && state
                             .state_store
                             .get_follow_waiter_by_key(follow_key)?
                             .is_some()
-                        {
-                            return Err(anyhow::anyhow!(error)).with_context(|| {
-                                format!(
-                                    "periodic follow recovery {label} terminalized its successor but did not retire waiter {follow_key}"
-                                )
-                            });
-                        }
+                    {
+                        return Err(anyhow::anyhow!(error)).with_context(|| {
+                            format!(
+                                "periodic follow recovery {label} terminalized its successor but did not retire waiter {follow_key}"
+                            )
+                        });
                     }
                     tracing::warn!(
                         action = %label,

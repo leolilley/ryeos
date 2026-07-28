@@ -785,10 +785,10 @@ fn validate_progress_transition(previous: &StartupSnapshot, next: &StartupSnapsh
     if next.elapsed_ms < previous.elapsed_ms {
         anyhow::bail!("startup elapsed time cannot move backwards");
     }
-    if let (Some(done), Some(total)) = (next.chains_done, next.chains_total) {
-        if done > total {
-            anyhow::bail!("startup chains_done cannot exceed chains_total");
-        }
+    if let (Some(done), Some(total)) = (next.chains_done, next.chains_total)
+        && done > total
+    {
+        anyhow::bail!("startup chains_done cannot exceed chains_total");
     }
     if next.phase != previous.phase {
         return Ok(());
