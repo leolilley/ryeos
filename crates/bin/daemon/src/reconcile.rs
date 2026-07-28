@@ -1237,23 +1237,22 @@ async fn reconcile_active_threads_inner(
             // sweep must leave it to the follow coordinator.
             if thread.status == ryeos_state::objects::ThreadStatus::Created.as_str()
                 && identity.is_none()
+                && let Some(upstream_id) = thread.upstream_thread_id.as_deref()
             {
-                if let Some(upstream_id) = thread.upstream_thread_id.as_deref() {
-                    let follow_status = state
-                        .state_store
-                        .is_follow_resume_successor(upstream_id, &thread.thread_id);
-                    match follow_status {
-                        Ok(true) => {
-                            tracing::debug!(
-                                thread_id = %thread.thread_id,
-                                upstream_thread_id = %upstream_id,
-                                "live follow-resume successor remains owned by the follow coordinator"
-                            );
-                            continue;
-                        }
-                        Ok(false) => {}
-                        Err(error) => return Err(error),
+                let follow_status = state
+                    .state_store
+                    .is_follow_resume_successor(upstream_id, &thread.thread_id);
+                match follow_status {
+                    Ok(true) => {
+                        tracing::debug!(
+                            thread_id = %thread.thread_id,
+                            upstream_thread_id = %upstream_id,
+                            "live follow-resume successor remains owned by the follow coordinator"
+                        );
+                        continue;
                     }
+                    Ok(false) => {}
+                    Err(error) => return Err(error),
                 }
             }
         }
@@ -1450,17 +1449,16 @@ async fn reconcile_active_threads_inner(
         // surviving exact claim is an abandoned pre-attach/attach owner from a
         // cancelled task or prior daemon generation. Revoke only that claim;
         // never delete another epoch wholesale.
-        if let Some(claim) = launch_claim.as_ref() {
-            if state
+        if let Some(claim) = launch_claim.as_ref()
+            && state
                 .state_store
                 .release_thread_launch_claim(&thread.thread_id, &claim.claim_id)?
-            {
-                tracing::info!(
-                    thread_id = %thread.thread_id,
-                    claim_id = %claim.claim_id,
-                    "revoked abandoned exact launch claim during reconciliation"
-                );
-            }
+        {
+            tracing::info!(
+                thread_id = %thread.thread_id,
+                claim_id = %claim.claim_id,
+                "revoked abandoned exact launch claim during reconciliation"
+            );
         }
 
         // Unsupported launch authority is history, not current recovery
@@ -2333,12 +2331,11 @@ fn cleanup_dead_execution_workspace(
         .launch_owner
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("workspace has no launch owner"))?;
-    if let Some(claim) = state.state_store.get_launch_claim(thread_id)? {
-        if claim.claimed_by == launch_owner
-            && state.state_store.is_launch_owner_active(&claim.claimed_by)
-        {
-            anyhow::bail!("workspace launch owner is still active in this daemon");
-        }
+    if let Some(claim) = state.state_store.get_launch_claim(thread_id)?
+        && claim.claimed_by == launch_owner
+        && state.state_store.is_launch_owner_active(&claim.claimed_by)
+    {
+        anyhow::bail!("workspace launch owner is still active in this daemon");
     }
     let root = std::path::PathBuf::from(&workspace.root_path);
     let layout = ryeos_executor::execution::workspace::WorkspaceLayout::from_root(root.clone());
@@ -2672,18 +2669,17 @@ fn waiting_follow_action(
             ),
         }
     }
-    if resume {
-        if let Some(reloaded) = state.state_store.get_follow_waiter_by_key(&w.follow_key)? {
-            if matches!(
-                reloaded.phase.as_str(),
-                ryeos_app::runtime_db::follow_phase::READY
-                    | ryeos_app::runtime_db::follow_phase::RESUMING
-            ) {
-                actions.push(FollowReconcileAction::Resume {
-                    follow_key: w.follow_key.clone(),
-                });
-            }
-        }
+    if resume
+        && let Some(reloaded) = state.state_store.get_follow_waiter_by_key(&w.follow_key)?
+        && matches!(
+            reloaded.phase.as_str(),
+            ryeos_app::runtime_db::follow_phase::READY
+                | ryeos_app::runtime_db::follow_phase::RESUMING
+        )
+    {
+        actions.push(FollowReconcileAction::Resume {
+            follow_key: w.follow_key.clone(),
+        });
     }
     Ok(actions)
 }
@@ -2728,17 +2724,15 @@ fn converge_reserved_follow(
     }
     // Adopt the parent's follow-resume successor if step 3 created it but did not
     // record it on the waiter.
-    if w.parent_successor_thread_id.is_none() {
-        if let Some(successor_id) = parent.successor_thread_id {
-            if state
-                .state_store
-                .is_follow_resume_successor(&w.parent_thread_id, &successor_id)?
-            {
-                state
-                    .state_store
-                    .set_follow_parent_successor(&w.follow_key, &successor_id)?;
-            }
-        }
+    if w.parent_successor_thread_id.is_none()
+        && let Some(successor_id) = parent.successor_thread_id
+        && state
+            .state_store
+            .is_follow_resume_successor(&w.parent_thread_id, &successor_id)?
+    {
+        state
+            .state_store
+            .set_follow_parent_successor(&w.follow_key, &successor_id)?;
     }
     let phase = state.state_store.mark_follow_waiting(&w.follow_key)?;
     if phase == ryeos_app::runtime_db::follow_phase::READY {

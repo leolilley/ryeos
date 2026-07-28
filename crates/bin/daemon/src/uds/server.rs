@@ -702,21 +702,20 @@ async fn handle_attach_process(
     let attached = match state.threads.attach_process_owned(&params, launch_owner) {
         Ok(thread) => thread,
         Err(error) => {
-            if let Some(identity) = params.process_identity.clone() {
-                if let Err(join_error) = tokio::task::spawn_blocking(move || {
+            if let Some(identity) = params.process_identity.clone()
+                && let Err(join_error) = tokio::task::spawn_blocking(move || {
                     ryeos_app::process::kill_by_action(
                         &identity,
                         ryeos_app::process::ShutdownAction::Hard,
                     )
                 })
                 .await
-                {
-                    tracing::warn!(
-                        thread_id = %params.thread_id,
-                        error = %join_error,
-                        "runtime.attach_process cleanup worker failed"
-                    );
-                }
+            {
+                tracing::warn!(
+                    thread_id = %params.thread_id,
+                    error = %join_error,
+                    "runtime.attach_process cleanup worker failed"
+                );
             }
             return Err(error)
                 .context("runtime.attach_process refused; spawned process-group kill attempted");
