@@ -218,13 +218,13 @@ fn run_node_auth_reset_command(argv: &[String], console: &crate::tty::Console) -
         .parent()
         .ok_or_else(|| anyhow::anyhow!("authorized-key namespace has no parent directory"))?;
     fs::create_dir_all(parent)?;
-    if let Ok(metadata) = fs::symlink_metadata(&config.authorized_keys_dir) {
-        if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-            anyhow::bail!(
-                "authorized-key namespace is not a regular directory: {}",
-                config.authorized_keys_dir.display()
-            );
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&config.authorized_keys_dir)
+        && (metadata.file_type().is_symlink() || !metadata.file_type().is_dir())
+    {
+        anyhow::bail!(
+            "authorized-key namespace is not a regular directory: {}",
+            config.authorized_keys_dir.display()
+        );
     }
     let nonce = std::process::id();
     let staging = parent.join(format!(".authorized_keys.reset-{nonce}"));

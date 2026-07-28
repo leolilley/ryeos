@@ -1356,13 +1356,13 @@ async fn post_to_daemon_streaming(
         0,
     )?;
     crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
-        if ev.event == "stream_started" {
-            if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                thread_id = v
-                    .get("thread_id")
-                    .and_then(|t| t.as_str())
-                    .map(String::from);
-            }
+        if ev.event == "stream_started"
+            && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
+        {
+            thread_id = v
+                .get("thread_id")
+                .and_then(|t| t.as_str())
+                .map(String::from);
         }
         let outcome = match presenter.stream_event(ev) {
             Ok(outcome) => outcome,
@@ -1461,16 +1461,16 @@ fn print_result(
     // A state-root override echoes both roots as top-level `execution`
     // diagnostics; surface them on stderr so stdout stays the bare result
     // for scripts.
-    if let Some(execution) = payload.get("execution") {
-        if let (Some(source), Some(state)) = (
+    if let Some(execution) = payload.get("execution")
+        && let (Some(source), Some(state)) = (
             execution.get("source_root").and_then(|v| v.as_str()),
             execution.get("state_root").and_then(|v| v.as_str()),
-        ) {
-            crate::tty::write_machine_diagnostics(&[
-                format!("source_root: {source}"),
-                format!("state_root:  {state}"),
-            ])?;
-        }
+        )
+    {
+        crate::tty::write_machine_diagnostics(&[
+            format!("source_root: {source}"),
+            format!("state_root:  {state}"),
+        ])?;
     }
     let result = payload.get("result").cloned().unwrap_or(payload);
     crate::tty::write_json(&result)?;

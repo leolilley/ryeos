@@ -217,18 +217,18 @@ async fn read_sse_stream(
         // frame.
         while let Some(end) = find_event_end(&buf) {
             let block: Vec<u8> = buf.drain(..end).collect();
-            if let Some(ev) = parse_sse_block(&block) {
-                if on_event(&ev) {
-                    return Ok(());
-                }
+            if let Some(ev) = parse_sse_block(&block)
+                && on_event(&ev)
+            {
+                return Ok(());
             }
         }
     }
     // Tolerate a final event not terminated by a blank line at EOF.
-    if !buf.is_empty() {
-        if let Some(ev) = parse_sse_block(&buf) {
-            on_event(&ev);
-        }
+    if !buf.is_empty()
+        && let Some(ev) = parse_sse_block(&buf)
+    {
+        on_event(&ev);
     }
     Ok(())
 }

@@ -713,30 +713,30 @@ fn build_installed_command_help(
     }
 
     // Parameter passing, from the command's declared `parameter_binding`.
-    if let Some(binding) = &command_descriptor.command.parameter_binding {
-        if !matches!(
+    if let Some(binding) = &command_descriptor.command.parameter_binding
+        && !matches!(
             binding.mode,
             ryeos_runtime::CommandParameterBindingMode::None
-        ) {
-            let mut section = crate::tty::Section::named("parameters");
-            if let Some(input_flag) = &binding.input_flag {
-                section.rows.push(crate::tty::Row::key_value(
-                    format!("--{input_flag} <file>"),
-                    "Read JSON parameters from a file (or - for stdin)",
-                ));
-            }
+        )
+    {
+        let mut section = crate::tty::Section::named("parameters");
+        if let Some(input_flag) = &binding.input_flag {
             section.rows.push(crate::tty::Row::key_value(
-                "--<key> <value>",
-                "Set parameter <key> (repeatable)",
+                format!("--{input_flag} <file>"),
+                "Read JSON parameters from a file (or - for stdin)",
             ));
-            if binding.single_json_object_arg {
-                section.rows.push(crate::tty::Row::key_value(
-                    "'<json>'",
-                    "A single JSON object of parameters",
-                ));
-            }
-            document.sections.push(section);
         }
+        section.rows.push(crate::tty::Row::key_value(
+            "--<key> <value>",
+            "Set parameter <key> (repeatable)",
+        ));
+        if binding.single_json_object_arg {
+            section.rows.push(crate::tty::Row::key_value(
+                "'<json>'",
+                "A single JSON object of parameters",
+            ));
+        }
+        document.sections.push(section);
     }
 
     let project_resolution = command_descriptor

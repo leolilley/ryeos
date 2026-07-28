@@ -890,12 +890,12 @@ fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError>
 }
 
 fn resolve_ryeosd_binary() -> PathBuf {
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
-            let sibling = parent.join("ryeosd");
-            if sibling.exists() {
-                return sibling;
-            }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let sibling = parent.join("ryeosd");
+        if sibling.exists() {
+            return sibling;
         }
     }
     PathBuf::from("ryeosd")

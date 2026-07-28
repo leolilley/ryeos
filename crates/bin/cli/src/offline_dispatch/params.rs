@@ -119,10 +119,11 @@ fn normalize_project_param(
         return params;
     };
 
-    if service_schema.contains_key("project_path") && !service_schema.contains_key("project") {
-        if let Some(project) = obj.remove("project") {
-            obj.entry("project_path".to_string()).or_insert(project);
-        }
+    if service_schema.contains_key("project_path")
+        && !service_schema.contains_key("project")
+        && let Some(project) = obj.remove("project")
+    {
+        obj.entry("project_path".to_string()).or_insert(project);
     }
 
     if !obj.contains_key("project")
