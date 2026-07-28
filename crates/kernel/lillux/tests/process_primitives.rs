@@ -575,11 +575,11 @@ fn spawn_detached_writes_to_log_file() {
     // Poll briefly for the detached child to run and flush into the log.
     let mut content = String::new();
     for _ in 0..50 {
-        if let Ok(s) = std::fs::read_to_string(&log) {
-            if !s.is_empty() {
-                content = s;
-                break;
-            }
+        if let Ok(s) = std::fs::read_to_string(&log)
+            && !s.is_empty()
+        {
+            content = s;
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
