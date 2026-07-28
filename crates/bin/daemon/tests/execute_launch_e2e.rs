@@ -72,12 +72,10 @@ async fn wait_for_terminal_thread(h: &DaemonHarness, thread_id: &str) -> Value {
             .get("thread")
             .and_then(|t| t.get("status"))
             .and_then(Value::as_str)
-        {
-            if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
+            && ryeos_state::objects::ThreadStatus::from_str_lossy(status)
                 .is_some_and(|s| s.is_terminal())
-            {
-                return result;
-            }
+        {
+            return result;
         }
         assert!(
             Instant::now() < deadline,
