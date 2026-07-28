@@ -700,7 +700,7 @@ fn sign_in_place_with_key(
 
     let signed = lillux::signature::sign_content_with_options(
         &stripped,
-        &signing_key,
+        signing_key,
         &envelope.prefix,
         envelope.suffix.as_deref(),
         envelope.after_shebang,
