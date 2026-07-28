@@ -222,15 +222,15 @@ pub fn run_mint_admission_token(
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
     }
-    if let Some(policy) = load_hosted_policy(&params.app_root)? {
-        if params.ttl_secs > policy.admission.token_ttl_secs {
-            bail!(
-                "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
-                params.ttl_secs,
-                policy.admission.token_ttl_secs,
-                policy.source_file.display()
-            );
-        }
+    if let Some(policy) = load_hosted_policy(&params.app_root)?
+        && params.ttl_secs > policy.admission.token_ttl_secs
+    {
+        bail!(
+            "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
+            params.ttl_secs,
+            policy.admission.token_ttl_secs,
+            policy.source_file.display()
+        );
     }
 
     let mut scopes = params

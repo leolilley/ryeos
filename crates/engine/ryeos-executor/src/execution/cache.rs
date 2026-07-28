@@ -727,12 +727,10 @@ impl MaterializationCache {
                     entry.file_name().to_str(),
                     Some(".complete" | ".files" | ".leases" | ".locks")
                 )
+                && let Some(name) = entry.file_name().to_str()
+                && !name.contains(".staging.")
             {
-                if let Some(name) = entry.file_name().to_str() {
-                    if !name.contains(".staging.") {
-                        entries.push(name.to_string());
-                    }
-                }
+                entries.push(name.to_string());
             }
         }
         Ok(entries)

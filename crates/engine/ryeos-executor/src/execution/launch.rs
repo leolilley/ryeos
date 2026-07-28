@@ -416,10 +416,10 @@ fn remove_cached_probe(
     state: &mut ExecutorVerificationCacheState,
     probe: &ExecutorVerificationProbe,
 ) {
-    if let Some(key) = state.by_probe.remove(probe) {
-        if let Some(entry) = state.entries.remove(&key) {
-            state.metadata_bytes = state.metadata_bytes.saturating_sub(entry.metadata_bytes);
-        }
+    if let Some(key) = state.by_probe.remove(probe)
+        && let Some(entry) = state.entries.remove(&key)
+    {
+        state.metadata_bytes = state.metadata_bytes.saturating_sub(entry.metadata_bytes);
     }
 }
 
@@ -2992,32 +2992,33 @@ async fn prepare_managed_launch_authority(
                         params.resolved.resolved_item.kind
                     ))
                 })?;
-            if let Some(exec) = launching_kind_schema.execution() {
-                if !exec.launch_augmentations.is_empty() {
-                    let augmentation_timer = params.launch_timings.as_ref().map(|timings| {
-                        timings.nested("background_dispatch", "launch_augmentation")
-                    });
-                    let audits = crate::augmentations::run_augmentations(
-                        exec,
-                        &mut resolution,
-                        thread_id,
-                        params.project_path,
-                        engine,
-                        params.provenance,
-                        &params.resolved.plan_context,
-                        params.acting_principal,
-                        params.state,
-                        params.launch_timings.as_ref(),
-                    )
-                    .await
-                    .map_err(|error| {
-                        BuildAndLaunchError::Internal(anyhow::anyhow!(
-                            "launch augmentation failed: {error}"
-                        ))
-                    })?;
-                    drop(augmentation_timer);
-                    return Ok(audits);
-                }
+            if let Some(exec) = launching_kind_schema.execution()
+                && !exec.launch_augmentations.is_empty()
+            {
+                let augmentation_timer = params
+                    .launch_timings
+                    .as_ref()
+                    .map(|timings| timings.nested("background_dispatch", "launch_augmentation"));
+                let audits = crate::augmentations::run_augmentations(
+                    exec,
+                    &mut resolution,
+                    thread_id,
+                    params.project_path,
+                    engine,
+                    params.provenance,
+                    &params.resolved.plan_context,
+                    params.acting_principal,
+                    params.state,
+                    params.launch_timings.as_ref(),
+                )
+                .await
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "launch augmentation failed: {error}"
+                    ))
+                })?;
+                drop(augmentation_timer);
+                return Ok(audits);
             }
         }
         Ok::<Vec<crate::augmentations::LaunchAugmentationAudit>, BuildAndLaunchError>(Vec::new())
@@ -3146,14 +3147,13 @@ async fn prepare_managed_launch_authority(
             .state_store
             .verify_admitted_artifact_identity(thread_id, &admitted_artifact_identity)
             .map_err(BuildAndLaunchError::Internal)?;
-    } else if let Some(persisted) = metadata_template {
-        if let Some(expected) = persisted.admitted_artifact_identity.as_ref() {
-            if expected != &admitted_artifact_identity {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "installed runtime/protocol/executor identity no longer matches the admitted launch capsule: admitted={expected:?}, installed={admitted_artifact_identity:?}"
-                )));
-            }
-        }
+    } else if let Some(persisted) = metadata_template
+        && let Some(expected) = persisted.admitted_artifact_identity.as_ref()
+        && expected != &admitted_artifact_identity
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "installed runtime/protocol/executor identity no longer matches the admitted launch capsule: admitted={expected:?}, installed={admitted_artifact_identity:?}"
+        )));
     }
     let (executor_blob_hash, pending_executor_blob) =
         if let Some(capsule) = admitted_capsule.as_ref() {
@@ -4113,16 +4113,16 @@ async fn run_claimed_thread_row_inner(
         // non-paying runtime (graph/knowledge) may carry a finite limit that
         // its paid descendants enforce through the shared execution account —
         // each descendant's own admission re-checks eligibility.
-        if let Some(authority) = prepared_launch.financial_authority.as_ref() {
-            if !authority.spend_bound.hard_spend_eligible() {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "hard spend limit {} requires a mechanically proven spend bound; this \
-                     route's sealed financial authority is `{}` and is ineligible for hard \
-                     spend",
-                    hard_limits.spend_usd.to_canonical_string(),
-                    authority.spend_bound.as_str()
-                )));
-            }
+        if let Some(authority) = prepared_launch.financial_authority.as_ref()
+            && !authority.spend_bound.hard_spend_eligible()
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "hard spend limit {} requires a mechanically proven spend bound; this \
+                 route's sealed financial authority is `{}` and is ineligible for hard \
+                 spend",
+                hard_limits.spend_usd.to_canonical_string(),
+                authority.spend_bound.as_str()
+            )));
         }
         if accounting_scope.is_none() || state.accounting.is_none() {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -7023,13 +7023,12 @@ pub fn prepare_and_spawn_follow_resume_recovery(
             // provably the right successor and it already advanced, the owning
             // launcher has durably consumed the waiter even though we did not
             // win its claim.
-            if let Some(successor) = state.threads.get_thread(&successor_id)? {
-                if follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &successor)
+            if let Some(successor) = state.threads.get_thread(&successor_id)?
+                && follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &successor)
                     .is_none()
-                    && successor.status != ryeos_state::objects::ThreadStatus::Created.as_str()
-                {
-                    let _ = state.state_store.clear_follow_waiter(follow_key);
-                }
+                && successor.status != ryeos_state::objects::ThreadStatus::Created.as_str()
+            {
+                let _ = state.state_store.clear_follow_waiter(follow_key);
             }
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }

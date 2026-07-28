@@ -486,13 +486,13 @@ fn resolve_dispatch_hop_with_verified(
     // would surface as a 400 "resolution failed" instead of the
     // contractual 501. The schema is the source of truth for
     // executability — resolve only matters once we know we'd dispatch.
-    if let Some(schema) = ctx.engine.kinds.get(&current_ref.kind) {
-        if schema.execution().is_none() {
-            return Err(DispatchError::NotRootExecutable {
-                kind: current_ref.kind.clone(),
-                detail: "schema has no `execution:` block".into(),
-            });
-        }
+    if let Some(schema) = ctx.engine.kinds.get(&current_ref.kind)
+        && schema.execution().is_none()
+    {
+        return Err(DispatchError::NotRootExecutable {
+            kind: current_ref.kind.clone(),
+            detail: "schema has no `execution:` block".into(),
+        });
     }
 
     // **P1.3 + P1.4**: per-hop resolve AND verify. No special-case
@@ -840,31 +840,29 @@ fn validate_arg_value(
     }
 
     // 2. enum (applies to string values).
-    if let Some(allowed) = &decl.enum_values {
-        if let Some(s) = val.as_str() {
-            if !allowed.iter().any(|a| a == s) {
-                return Err(err(format!(
-                    "arg '{name}' must be one of {allowed:?}, got {s:?}"
-                )));
-            }
-        }
+    if let Some(allowed) = &decl.enum_values
+        && let Some(s) = val.as_str()
+        && !allowed.iter().any(|a| a == s)
+    {
+        return Err(err(format!(
+            "arg '{name}' must be one of {allowed:?}, got {s:?}"
+        )));
     }
 
     // 3. min (applies to integer values).
-    if let Some(min) = decl.min {
-        if let Some(n) = val.as_i64() {
-            if n < min {
-                return Err(err(format!("arg '{name}' must be >= {min}, got {n}")));
-            }
-        }
+    if let Some(min) = decl.min
+        && let Some(n) = val.as_i64()
+        && n < min
+    {
+        return Err(err(format!("arg '{name}' must be >= {min}, got {n}")));
     }
 
     // 4. Array element type, when declared via `items`.
-    if matches!(decl.ty, ArgType::Array) {
-        if let (Some(items_decl), Some(arr)) = (&decl.items, val.as_array()) {
-            for (i, el) in arr.iter().enumerate() {
-                validate_arg_value(el, items_decl, &format!("{name}[{i}]"), method_name)?;
-            }
+    if matches!(decl.ty, ArgType::Array)
+        && let (Some(items_decl), Some(arr)) = (&decl.items, val.as_array())
+    {
+        for (i, el) in arr.iter().enumerate() {
+            validate_arg_value(el, items_decl, &format!("{name}[{i}]"), method_name)?;
         }
     }
 
@@ -1989,13 +1987,13 @@ pub(crate) async fn dispatch_method(
             // Trust a structured error only if the runtime echoed the
             // dispatched kind/method; otherwise fall through to a generic
             // failure so a confused result cannot masquerade as a typed one.
-            if let Ok(batch_result) = decode_method_runtime_result(runtime_protocol, &result.stdout)
+            if let Ok(batch_result) =
+                decode_method_runtime_result(runtime_protocol, &result.stdout)
+                && batch_result.kind == kind
+                && batch_result.method == method_name
+                && let Some(error) = batch_result.error
             {
-                if batch_result.kind == kind && batch_result.method == method_name {
-                    if let Some(error) = batch_result.error {
-                        return Err(map_method_error(kind, method_name, error));
-                    }
-                }
+                return Err(map_method_error(kind, method_name, error));
             }
             return Err(DispatchError::MethodFailed {
                 kind: kind.to_string(),
@@ -2477,15 +2475,15 @@ fn resolve_method_target_ref(
         // match — the wrapper is narrow by construction and must not be coaxed
         // into dispatching a different kind.
         Some((kind, _bare)) => {
-            if let Some(rk) = ref_kind {
-                if kind != rk {
-                    return Err(DispatchError::MethodInvalidArg {
-                        method: "method_dispatch".into(),
-                        reason: format!(
-                            "tool `{wrapper_ref}` only dispatches `{rk}:` refs, got `{kind}:`"
-                        ),
-                    });
-                }
+            if let Some(rk) = ref_kind
+                && kind != rk
+            {
+                return Err(DispatchError::MethodInvalidArg {
+                    method: "method_dispatch".into(),
+                    reason: format!(
+                        "tool `{wrapper_ref}` only dispatches `{rk}:` refs, got `{kind}:`"
+                    ),
+                });
             }
             Ok(raw.to_string())
         }
@@ -3022,21 +3020,20 @@ fn reject_tool_declared_capabilities(
     requires: Option<&Value>,
     item_ref: &str,
 ) -> Result<(), DispatchError> {
-    if let Some(rv) = requires {
-        if rv
+    if let Some(rv) = requires
+        && rv
             .get("capabilities")
             .and_then(|c| c.get("declared"))
             .is_some()
-        {
-            return Err(DispatchError::InvalidRef(
-                item_ref.to_string(),
-                "tool items cannot self-declare action authority under \
-                 `requires.capabilities.declared`; only \
-                 `requires.capabilities.manifest.runtime_authority` \
-                 (manifest-backed runtime authority) is honored for tools"
-                    .into(),
-            ));
-        }
+    {
+        return Err(DispatchError::InvalidRef(
+            item_ref.to_string(),
+            "tool items cannot self-declare action authority under \
+             `requires.capabilities.declared`; only \
+             `requires.capabilities.manifest.runtime_authority` \
+             (manifest-backed runtime authority) is honored for tools"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -3340,14 +3337,13 @@ async fn dispatch_inner(
             })?;
     }
 
-    if !request.ref_bindings.is_empty() {
-        if let LaunchContractApplicability::NonEnvelope { class } =
+    if !request.ref_bindings.is_empty()
+        && let LaunchContractApplicability::NonEnvelope { class } =
             launch_contract_applicability(item_ref, ctx)?
-        {
-            return Err(DispatchError::RefBindingNotApplicable {
-                class: class.as_str().to_owned(),
-            });
-        }
+    {
+        return Err(DispatchError::RefBindingNotApplicable {
+            class: class.as_str().to_owned(),
+        });
     }
     drop(ref_binding_timer);
 
@@ -3461,14 +3457,14 @@ async fn dispatch_inner(
         // entire dispatch chain. We clone here because the loop may
         // continue (alias/registry hop) and dispatch_by also needs
         // the same data on the terminating hop.
-        if root_subject.is_none() {
-            if let Some(tp) = thread_profile.as_ref() {
-                root_subject = Some(RootSubject {
-                    item_ref: hop_ref.to_string(),
-                    thread_profile: tp.clone(),
-                    verified: verified.clone(),
-                });
-            }
+        if root_subject.is_none()
+            && let Some(tp) = thread_profile.as_ref()
+        {
+            root_subject = Some(RootSubject {
+                item_ref: hop_ref.to_string(),
+                thread_profile: tp.clone(),
+                verified: verified.clone(),
+            });
         }
 
         match next {
@@ -4001,10 +3997,10 @@ pub fn preflight_root_dispatch(
             })?;
             requested_subject = Some(subject);
         }
-        if root_subject.is_none() {
-            if let (Some(subject), Some(profile)) = (verified.clone(), thread_profile.clone()) {
-                root_subject = Some((subject, profile));
-            }
+        if root_subject.is_none()
+            && let (Some(subject), Some(profile)) = (verified.clone(), thread_profile.clone())
+        {
+            root_subject = Some((subject, profile));
         }
         let admitted_requested_subject = requested_subject.clone().ok_or_else(|| {
             DispatchError::InvalidRef(
@@ -4173,15 +4169,14 @@ pub fn preflight_root_dispatch(
                             };
                             if managed_route
                                 == subprocess_execution::ManagedProtocolRoute::CallbackRuntime
+                                && let SubprocessRole::RuntimeTarget { verified_runtime } = &role
                             {
-                                if let SubprocessRole::RuntimeTarget { verified_runtime } = &role {
-                                    enforce_runtime_caps(
-                                        &state.authorizer,
-                                        &hop_ref.to_string(),
-                                        &verified_runtime.yaml.required_caps,
-                                        &ctx.caller_scopes,
-                                    )?;
-                                }
+                                enforce_runtime_caps(
+                                    &state.authorizer,
+                                    &hop_ref.to_string(),
+                                    &verified_runtime.yaml.required_caps,
+                                    &ctx.caller_scopes,
+                                )?;
                             }
                             let (subject, profile) = root_subject.clone().ok_or_else(|| {
                                 DispatchError::InvalidRef(

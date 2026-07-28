@@ -166,15 +166,15 @@ pub fn run_export_remote_descriptor(
     capabilities.dedup();
 
     let admission = if let Some(policy) = &hosted_policy {
-        if let Some(mode) = &requested_admission_mode {
-            if mode != &policy.admission.mode {
-                bail!(
-                    "admission_mode '{}' conflicts with hosted-node policy mode '{}' from {}",
-                    mode,
-                    policy.admission.mode,
-                    policy.source_file.display()
-                );
-            }
+        if let Some(mode) = &requested_admission_mode
+            && mode != &policy.admission.mode
+        {
+            bail!(
+                "admission_mode '{}' conflicts with hosted-node policy mode '{}' from {}",
+                mode,
+                policy.admission.mode,
+                policy.source_file.display()
+            );
         }
         policy.admission.mode.clone()
     } else {
@@ -205,15 +205,15 @@ pub fn run_export_remote_descriptor(
     let yaml = serde_yaml::to_string(&descriptor).context("failed to serialize descriptor YAML")?;
 
     if let Some(path) = params.output {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create descriptor output dir {}",
-                        parent.display()
-                    )
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create descriptor output dir {}",
+                    parent.display()
+                )
+            })?;
         }
         std::fs::write(&path, &yaml)
             .with_context(|| format!("failed to write descriptor {}", path.display()))?;

@@ -863,15 +863,15 @@ pub(super) fn generate_and_sign_manifest_in_place(
     let target = ai_dir.join("manifest.yaml");
 
     // Idempotent: skip write if existing signed manifest is already valid.
-    if let Ok(existing) = fs::read_to_string(&target) {
-        if already_signed_for_body(&existing, &body, signing_key, "#", None) {
-            tracing::info!(
-                path = %target.display(),
-                name = %manifest.name,
-                "manifest unchanged — skipping write"
-            );
-            return Ok((target, false));
-        }
+    if let Ok(existing) = fs::read_to_string(&target)
+        && already_signed_for_body(&existing, &body, signing_key, "#", None)
+    {
+        tracing::info!(
+            path = %target.display(),
+            name = %manifest.name,
+            "manifest unchanged — skipping write"
+        );
+        return Ok((target, false));
     }
 
     let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
@@ -919,10 +919,10 @@ fn write_publisher_trust_doc(
     let target = bundle_source.join("PUBLISHER_TRUST.toml");
 
     // Idempotent: skip write when existing content matches.
-    if let Ok(existing) = fs::read_to_string(&target) {
-        if existing == body {
-            return Ok((target, false));
-        }
+    if let Ok(existing) = fs::read_to_string(&target)
+        && existing == body
+    {
+        return Ok((target, false));
     }
 
     let tmp = target.with_extension(format!("trust-doc.tmp.{}", std::process::id()));

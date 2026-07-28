@@ -1147,10 +1147,10 @@ fn release_tree_publication(
     publication: Option<super::PendingCasPublication>,
     context: &'static str,
 ) {
-    if let Some(publication) = publication {
-        if let Err(error) = publication.publish() {
-            tracing::warn!(%error, context, "failed to release staged CAS publication roots");
-        }
+    if let Some(publication) = publication
+        && let Err(error) = publication.publish()
+    {
+        tracing::warn!(%error, context, "failed to release staged CAS publication roots");
     }
 }
 
@@ -1158,10 +1158,10 @@ fn release_snapshot_publication(
     publication: Option<super::CapturedProjectGeneration>,
     context: &'static str,
 ) {
-    if let Some(publication) = publication {
-        if let Err(error) = publication.publish() {
-            tracing::warn!(%error, context, "failed to release staged CAS snapshot roots");
-        }
+    if let Some(publication) = publication
+        && let Err(error) = publication.publish()
+    {
+        tracing::warn!(%error, context, "failed to release staged CAS snapshot roots");
     }
 }
 
@@ -1752,38 +1752,33 @@ fn recovered_direct_protocol(
     if let Some(bundle_signer) = runtime_identity
         .runtime_bundle_signer_fingerprint
         .as_deref()
+        && !engine.node_trust_store.is_trusted(bundle_signer)
     {
-        if !engine.node_trust_store.is_trusted(bundle_signer) {
-            bail!("admitted direct runtime bundle signer is no longer trusted: {bundle_signer}");
-        }
+        bail!("admitted direct runtime bundle signer is no longer trusted: {bundle_signer}");
     }
     if let ryeos_state::objects::DirectWrapperSourceIdentity::Bundle {
         manifest_signer_fingerprint,
         ..
     } = wrapper_source_identity
-    {
-        if !engine
+        && !engine
             .node_trust_store
             .is_trusted(manifest_signer_fingerprint)
-        {
-            bail!(
-                "admitted direct wrapper manifest signer is no longer trusted: {manifest_signer_fingerprint}"
-            );
-        }
+    {
+        bail!(
+            "admitted direct wrapper manifest signer is no longer trusted: {manifest_signer_fingerprint}"
+        );
     }
     if let ryeos_state::objects::DirectExecutableIdentity::BundleExecutor {
         provider_manifest_signer_fingerprint,
         ..
     } = executable_identity
-    {
-        if !engine
+        && !engine
             .node_trust_store
             .is_trusted(provider_manifest_signer_fingerprint)
-        {
-            bail!(
-                "admitted direct executable provider signer is no longer trusted: {provider_manifest_signer_fingerprint}"
-            );
-        }
+    {
+        bail!(
+            "admitted direct executable provider signer is no longer trusted: {provider_manifest_signer_fingerprint}"
+        );
     }
     let header = lillux::signature::parse_signature_line(
         protocol_descriptor_document.lines().next().unwrap_or(""),
@@ -3300,40 +3295,40 @@ async fn dispatch_detached_bg_task(
 
     // Recovery of a `created` row: transition to `running` so
     // `drain_running_threads` sees it on shutdown.
-    if matches!(prior_status_for_mark_running.as_deref(), Some("created")) {
-        if let Err(err) = bg_state.threads.mark_running(&bg_thread_id) {
+    if matches!(prior_status_for_mark_running.as_deref(), Some("created"))
+        && let Err(err) = bg_state.threads.mark_running(&bg_thread_id)
+    {
+        tracing::error!(
+            phase = log_phase,
+            thread_id = %bg_thread_id,
+            error = %err,
+            "failed to transition recovered created thread to running; terminating its process"
+        );
+        let failed_identity = spawned.process_identity.clone();
+        if let Err(cleanup) = spawned.abort_and_reap() {
             tracing::error!(
                 phase = log_phase,
                 thread_id = %bg_thread_id,
-                error = %err,
-                "failed to transition recovered created thread to running; terminating its process"
+                error = %cleanup,
+                "failed to reap attachment-pending process after running-transition refusal"
             );
-            let failed_identity = spawned.process_identity.clone();
-            if let Err(cleanup) = spawned.abort_and_reap() {
-                tracing::error!(
-                    phase = log_phase,
-                    thread_id = %bg_thread_id,
-                    error = %cleanup,
-                    "failed to reap attachment-pending process after running-transition refusal"
-                );
-            }
-            clear_finished_process(&bg_state, &bg_thread_id, &failed_identity, &launch_owner);
-            if let Err(cleanup_error) = fail_thread_static_owned(
-                &bg_state,
-                &bg_thread_id,
-                "recovery_mark_running_failed",
-                &launch_owner,
-            ) {
-                tracing::error!(
-                    phase = log_phase,
-                    thread_id = %bg_thread_id,
-                    error = %cleanup_error,
-                    "recovery running-transition failure cleanup did not settle"
-                );
-            }
-            drop(bg_temp_dir.take());
-            return;
         }
+        clear_finished_process(&bg_state, &bg_thread_id, &failed_identity, &launch_owner);
+        if let Err(cleanup_error) = fail_thread_static_owned(
+            &bg_state,
+            &bg_thread_id,
+            "recovery_mark_running_failed",
+            &launch_owner,
+        ) {
+            tracing::error!(
+                phase = log_phase,
+                thread_id = %bg_thread_id,
+                error = %cleanup_error,
+                "recovery running-transition failure cleanup did not settle"
+            );
+        }
+        drop(bg_temp_dir.take());
+        return;
     }
 
     if let Err(error) = bg_state.threads.authorize_process_release_owned(
@@ -3439,29 +3434,30 @@ async fn dispatch_detached_bg_task(
                     return;
                 }
             };
-            if callback_sealed_result.is_none() && bg_requires_foldback {
-                if let Err(error) = transition_owned_workspace(
+            if callback_sealed_result.is_none()
+                && bg_requires_foldback
+                && let Err(error) = transition_owned_workspace(
                     &bg_state,
                     bg_temp_dir.as_ref(),
                     &bg_thread_id,
                     &[WorkspaceState::Active],
                     WorkspaceState::Freezing,
                     None,
-                ) {
-                    tracing::error!(
-                        phase = log_phase,
-                        thread_id = %bg_thread_id,
-                        error = %error,
-                        "workspace freeze transition failed"
-                    );
-                    let _ = fail_thread_static_owned(
-                        &bg_state,
-                        &bg_thread_id,
-                        "workspace_freeze_failed",
-                        &launch_owner,
-                    );
-                    return;
-                }
+                )
+            {
+                tracing::error!(
+                    phase = log_phase,
+                    thread_id = %bg_thread_id,
+                    error = %error,
+                    "workspace freeze transition failed"
+                );
+                let _ = fail_thread_static_owned(
+                    &bg_state,
+                    &bg_thread_id,
+                    "workspace_freeze_failed",
+                    &launch_owner,
+                );
+                return;
             }
             let mut pending_project_result = None;
             let result_project_snapshot_hash = if let Some(snapshot) =
@@ -3602,15 +3598,15 @@ async fn dispatch_detached_bg_task(
                 );
             } else {
                 if bg_records_terminal_generation {
-                    if let Some(pending) = pending_project_result.take() {
-                        if let Err(error) = pending.publish() {
-                            tracing::error!(
-                                phase = log_phase,
-                                thread_id = %bg_thread_id,
-                                %error,
-                                "failed to release owner-bound fold-back publication"
-                            );
-                        }
+                    if let Some(pending) = pending_project_result.take()
+                        && let Err(error) = pending.publish()
+                    {
+                        tracing::error!(
+                            phase = log_phase,
+                            thread_id = %bg_thread_id,
+                            %error,
+                            "failed to release owner-bound fold-back publication"
+                        );
                     }
                 } else {
                     drop(pending_project_result.take());

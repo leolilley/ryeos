@@ -1209,33 +1209,33 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
                 );
             }
         }
-        if response_phase == follow_phase::WAITING {
-            if let Some(window_key) = window_key.as_deref() {
-                match state.state_store.launch_window_admit(
-                    window_key,
-                    crate::execution::launch::global_live_fanout_limit(),
-                    lillux::time::timestamp_millis(),
-                ) {
-                    Ok(newly_admitted) => admitted = newly_admitted,
-                    Err(error) => {
-                        // Membership and `waiting` are durable. Report a truthful
-                        // queued acceptance and let the periodic/startup window
-                        // sweep retry admission; never turn an already-continued
-                        // parent into an error response.
-                        tracing::error!(
-                            follow_key,
-                            error = %error,
-                            "follow launch-window admission failed after suspension; queued for sweep"
-                        );
-                    }
+        if response_phase == follow_phase::WAITING
+            && let Some(window_key) = window_key.as_deref()
+        {
+            match state.state_store.launch_window_admit(
+                window_key,
+                crate::execution::launch::global_live_fanout_limit(),
+                lillux::time::timestamp_millis(),
+            ) {
+                Ok(newly_admitted) => admitted = newly_admitted,
+                Err(error) => {
+                    // Membership and `waiting` are durable. Report a truthful
+                    // queued acceptance and let the periodic/startup window
+                    // sweep retry admission; never turn an already-continued
+                    // parent into an error response.
+                    tracing::error!(
+                        follow_key,
+                        error = %error,
+                        "follow launch-window admission failed after suspension; queued for sweep"
+                    );
                 }
-                queued_child_thread_ids.extend(
-                    authority_indices
-                        .iter()
-                        .map(|item_index| child_thread_ids[*item_index].clone())
-                        .filter(|child_id| !admitted.contains(child_id)),
-                );
             }
+            queued_child_thread_ids.extend(
+                authority_indices
+                    .iter()
+                    .map(|item_index| child_thread_ids[*item_index].clone())
+                    .filter(|child_id| !admitted.contains(child_id)),
+            );
         }
     }
     queued_child_thread_ids.retain(|child_id| !admitted.contains(child_id));

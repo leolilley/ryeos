@@ -362,12 +362,11 @@ fn check_all_item_dirs_covered(ai_dir: &Path, kinds: &KindRegistry) -> Result<()
     // Top-level `.ai/` directory each registered kind owns.
     let mut covered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for kind_name in kinds.kinds() {
-        if let Some(schema) = kinds.get(kind_name) {
-            if let Some(top) = schema.directory.split('/').next() {
-                if !top.is_empty() {
-                    covered.insert(top.to_string());
-                }
-            }
+        if let Some(schema) = kinds.get(kind_name)
+            && let Some(top) = schema.directory.split('/').next()
+            && !top.is_empty()
+        {
+            covered.insert(top.to_string());
         }
     }
 

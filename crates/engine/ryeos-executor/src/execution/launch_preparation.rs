@@ -965,12 +965,12 @@ fn validate_handler_error(
     {
         return Err("launch-preparer error message is not a bounded single line".to_owned());
     }
-    if let Some(binding) = &error.binding {
-        if !ref_bindings.contains_key(binding) {
-            return Err(format!(
-                "launch-preparer error names unknown binding `{binding}`"
-            ));
-        }
+    if let Some(binding) = &error.binding
+        && !ref_bindings.contains_key(binding)
+    {
+        return Err(format!(
+            "launch-preparer error names unknown binding `{binding}`"
+        ));
     }
     if error.details.len() > MAX_HANDLER_ERROR_DETAILS {
         return Err("launch-preparer error details exceed the key limit".to_owned());
@@ -981,12 +981,12 @@ fn validate_handler_error(
                 "launch-preparer error detail key `{key}` is invalid"
             ));
         }
-        if let LaunchDiagnosticScalarWire::String(value) = value {
-            if value.len() > MAX_HANDLER_ERROR_DETAIL_STRING_BYTES {
-                return Err(format!(
-                    "launch-preparer error detail `{key}` exceeds the string limit"
-                ));
-            }
+        if let LaunchDiagnosticScalarWire::String(value) = value
+            && value.len() > MAX_HANDLER_ERROR_DETAIL_STRING_BYTES
+        {
+            return Err(format!(
+                "launch-preparer error detail `{key}` exceeds the string limit"
+            ));
         }
     }
     let value = serde_json::to_value(&error.details)

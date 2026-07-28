@@ -473,11 +473,11 @@ fn collect_py(dir: &Path, tools_root: &Path, out: &mut Vec<String>) {
                 continue;
             }
             collect_py(&path, tools_root, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("py") {
-            if let Ok(rel) = path.strip_prefix(tools_root) {
-                let bare = rel.with_extension("");
-                out.push(format!("tool:{}", bare.to_string_lossy()));
-            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("py")
+            && let Ok(rel) = path.strip_prefix(tools_root)
+        {
+            let bare = rel.with_extension("");
+            out.push(format!("tool:{}", bare.to_string_lossy()));
         }
     }
 }
