@@ -150,10 +150,10 @@ async fn await_checkpoint_cursor(
 ) {
     let reader = CheckpointWriter::new(checkpoints_dir.to_path_buf());
     loop {
-        if let Ok(Some(payload)) = reader.load_latest() {
-            if payload.get("current_node").and_then(|v| v.as_str()) == Some(cursor) {
-                return;
-            }
+        if let Ok(Some(payload)) = reader.load_latest()
+            && payload.get("current_node").and_then(|v| v.as_str()) == Some(cursor)
+        {
+            return;
         }
         assert!(
             Instant::now() < deadline,
@@ -194,10 +194,10 @@ fn read_process_identity(
                 )
                 .ok()
                 .flatten();
-            if let Some(value) = identity {
-                if let Ok(identity) = serde_json::from_str(&value) {
-                    return identity;
-                }
+            if let Some(value) = identity
+                && let Ok(identity) = serde_json::from_str(&value)
+            {
+                return identity;
             }
         }
         assert!(
@@ -227,16 +227,14 @@ fn projection_events(state_path: &Path, thread_id: &str) -> Vec<(String, Value)>
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt
-        .query_map(rusqlite::params![thread_id], |row| {
-            let event_type: String = row.get(0)?;
-            let payload_blob: Vec<u8> = row.get(1)?;
-            let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-            Ok((event_type, payload))
-        })
-        .and_then(|m| m.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default();
-    rows
+    stmt.query_map(rusqlite::params![thread_id], |row| {
+        let event_type: String = row.get(0)?;
+        let payload_blob: Vec<u8> = row.get(1)?;
+        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
+        Ok((event_type, payload))
+    })
+    .and_then(|m| m.collect::<Result<Vec<_>, _>>())
+    .unwrap_or_default()
 }
 
 fn count_event(events: &[(String, Value)], event_type: &str) -> usize {

@@ -649,23 +649,16 @@ async fn poll_thread(
     for _ in 0..120 {
         if projection_path.exists() {
             let database = ryeos_state::projection::ProjectionDb::open(projection_path);
-            if let Ok(db) = database {
-                let listed = ryeos_state::queries::list_threads(&db, 200);
-                if let Ok(threads) = listed {
-                    if let Some(t) = threads.into_iter().find(|t| pred(t)) {
-                        let terminal = matches!(
-                            t.status.as_str(),
-                            "completed"
-                                | "failed"
-                                | "cancelled"
-                                | "killed"
-                                | "timed_out"
-                                | "continued"
-                        );
-                        if !require_terminal || terminal {
-                            return Some(t);
-                        }
-                    }
+            if let Ok(db) = database
+                && let Ok(threads) = ryeos_state::queries::list_threads(&db, 200)
+                && let Some(t) = threads.into_iter().find(|t| pred(t))
+            {
+                let terminal = matches!(
+                    t.status.as_str(),
+                    "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+                );
+                if !require_terminal || terminal {
+                    return Some(t);
                 }
             }
         }
