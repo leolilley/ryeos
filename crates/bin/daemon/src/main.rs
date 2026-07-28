@@ -351,6 +351,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     tokio::task::yield_now().await;
 
     let daemon_result: (Result<()>, bool, bool) = {
+        #[allow(clippy::let_and_return)]
         let daemon_work = async {
             startup.phase(
                 ryeos_node::StartupPhase::Bootstrapping,
@@ -1093,7 +1094,6 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             let result =
                 supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await;
-            drop(recovery_execution_release);
             result
         };
         tokio::pin!(daemon_work);

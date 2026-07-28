@@ -200,10 +200,10 @@ where
 
     fn on_record(&self, id: &Id, values: &span::Record<'_>, _ctx: Context<'_, S>) {
         let key = id.into_u64();
-        if let Ok(mut state) = self.state.lock() {
-            if let Some(node) = state.nodes.get_mut(&key) {
-                values.record(&mut FieldRecorder(&mut node.fields));
-            }
+        if let Ok(mut state) = self.state.lock()
+            && let Some(node) = state.nodes.get_mut(&key)
+        {
+            values.record(&mut FieldRecorder(&mut node.fields));
         }
     }
 
@@ -231,11 +231,11 @@ where
             .or_else(|| ctx.lookup_current().map(|sref| sref.id().into_u64()));
 
         if let Ok(mut state) = self.state.lock() {
-            if let Some(id) = target_id {
-                if let Some(node) = state.nodes.get_mut(&id) {
-                    node.events.push(recorded);
-                    return;
-                }
+            if let Some(id) = target_id
+                && let Some(node) = state.nodes.get_mut(&id)
+            {
+                node.events.push(recorded);
+                return;
             }
             state.orphan_events.push(recorded);
         }
