@@ -132,17 +132,15 @@ fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt
-        .query_map([], |row| {
-            let thread_id: String = row.get(0)?;
-            let event_type: String = row.get(1)?;
-            let payload_blob: Vec<u8> = row.get(2)?;
-            let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-            Ok((thread_id, event_type, payload))
-        })
-        .and_then(|m| m.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default();
-    rows
+    stmt.query_map([], |row| {
+        let thread_id: String = row.get(0)?;
+        let event_type: String = row.get(1)?;
+        let payload_blob: Vec<u8> = row.get(2)?;
+        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
+        Ok((thread_id, event_type, payload))
+    })
+    .and_then(|m| m.collect::<Result<Vec<_>, _>>())
+    .unwrap_or_default()
 }
 
 fn count_event(events: &[(String, String, Value)], event_type: &str) -> usize {
