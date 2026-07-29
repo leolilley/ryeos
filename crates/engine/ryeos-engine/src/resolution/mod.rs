@@ -246,11 +246,9 @@ fn run_item_pipeline_inner(
 
     // Load the root once. Steps reuse this rather than re-loading on
     // every entry, and `into_output` ships it as `ResolutionOutput.root`.
+    let services = context::ResolutionServices::new(kinds, parsers, roots, trust_store);
     let root_loaded = context::load_item_at(
-        kinds,
-        parsers,
-        roots,
-        trust_store,
+        services,
         item,
         "<root>",
         ResolutionStepName::PipelineInit,
@@ -259,10 +257,7 @@ fn run_item_pipeline_inner(
 
     let mut ctx = ResolutionContext::new(
         item.clone(),
-        kinds,
-        parsers,
-        roots,
-        trust_store,
+        services,
         alias_resolver,
         root_loaded,
         project_authority,

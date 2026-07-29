@@ -333,11 +333,11 @@ fn authoritative_dependency_matches(
         };
     }
 
-    Ok(&observe_catalog_state_from_content(
+    Ok(observe_catalog_state_from_content(
         content,
         &project_relative,
         &dependency.catalog_extensions,
-    )? == &dependency.state)
+    )? == dependency.state)
 }
 
 #[derive(Debug, Clone)]

@@ -479,10 +479,10 @@ fn sweep_immutable_request_cache(state: &mut ImmutableRequestSnapshotCache) {
     let stale = state
         .slots
         .iter()
-        .filter_map(|(key, entry)| {
-            (now.saturating_duration_since(entry.last_touched) >= IMMUTABLE_REQUEST_CACHE_IDLE_TTL)
-                .then(|| key.clone())
+        .filter(|(_, entry)| {
+            now.saturating_duration_since(entry.last_touched) >= IMMUTABLE_REQUEST_CACHE_IDLE_TTL
         })
+        .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     for key in stale {
         remove_immutable_request_entry(state, &key);
@@ -1347,7 +1347,7 @@ impl Engine {
         }
         self.checked_bundle_generation(|| {
             let key = self.immutable_request_cache_key(subject_resolution_authority)?;
-            let pending_owner = loop {
+            let pending_owner = 'pending_owner: {
                 let lookup = {
                     let mut cache = self
                         .immutable_request_snapshot_cache
@@ -1367,7 +1367,7 @@ impl Engine {
                     } else {
                         let pending = Arc::new(ImmutableRequestSnapshotPending::default());
                         cache.pending.insert(key.clone(), pending.clone());
-                        break Some(pending);
+                        break 'pending_owner Some(pending);
                     }
                 };
                 match lookup {
@@ -1416,7 +1416,7 @@ impl Engine {
                             Err(error) => return Err(EngineError::Shared(error.clone())),
                         }
                     }
-                    None => break None,
+                    None => None,
                 }
             };
             if pending_owner.is_none() {
@@ -2467,7 +2467,7 @@ impl Engine {
         let key = lillux::canonical_json(&key_material)
             .map(|canonical| lillux::sha256_hex(canonical.as_bytes()))
             .map_err(|error| EngineError::Internal(error.to_string()))?;
-        let pending_owner = loop {
+        let pending_owner = 'pending_owner: {
             let lookup = {
                 let mut cache = static_verification_cache()
                     .lock()
@@ -2486,7 +2486,7 @@ impl Engine {
                 } else {
                     let pending = Arc::new(StaticVerificationPending::default());
                     cache.pending.insert(key.clone(), pending.clone());
-                    break Some(pending);
+                    break 'pending_owner Some(pending);
                 }
             };
             match lookup {
@@ -2538,7 +2538,7 @@ impl Engine {
                         Err(error) => return Err(EngineError::Shared(error.clone())),
                     }
                 }
-                None => break None,
+                None => None,
             }
         };
         if pending_owner.is_none() {
