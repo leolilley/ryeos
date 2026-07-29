@@ -381,6 +381,7 @@ fn trust_class_to_wire(t: TrustClass) -> TrustClassWire {
     match t {
         TrustClass::TrustedBundle => TrustClassWire::TrustedBundle,
         TrustClass::TrustedProject => TrustClassWire::TrustedProject,
+        TrustClass::TrustedNode => TrustClassWire::TrustedNode,
         TrustClass::UntrustedProject => TrustClassWire::UntrustedProject,
         TrustClass::Unsigned => TrustClassWire::Unsigned,
     }

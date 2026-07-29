@@ -75,6 +75,10 @@ pub async fn handle(_params: Value, ctx: HandlerContext, state: Arc<AppState>) -
                         item_ref,
                         expected_kind: Some("surface".to_string()),
                         project_root: project_path.clone().map(Into::into),
+                        subject_resolution_authority:
+                            ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                                project_path.as_deref().map(std::path::Path::new),
+                            ),
                     })?;
                     let mut composed = effective.composed_value;
                     let failures = ryeos_api::surface_views::embed_surface_views_in_generation(

@@ -1527,7 +1527,11 @@ fn ensure_no_pull_recovery_artifacts(
     project_root: &lillux::PinnedDirectory,
 ) -> Result<(), PullResultsError> {
     let found = std::cell::RefCell::new(None::<std::path::PathBuf>);
-    project_root.visit_regular_files(
+    project_root.visit_regular_files_bounded(
+        lillux::DirectoryTraversalBudget::new(
+            ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
+            ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
+        ),
         |relative, _directory| {
             if is_pull_transaction_path(relative) {
                 *found.borrow_mut() = Some(relative.to_path_buf());
@@ -1811,7 +1815,11 @@ fn surface_quarantined_files(
     project_root: &lillux::PinnedDirectory,
 ) -> Result<Vec<String>, PullResultsError> {
     let quarantines = std::cell::RefCell::new(Vec::<PathBuf>::new());
-    project_root.visit_regular_files(
+    project_root.visit_regular_files_bounded(
+        lillux::DirectoryTraversalBudget::new(
+            ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
+            ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
+        ),
         |_relative, _directory| Ok(false),
         |relative, _file| {
             if relative.components().any(|component| {

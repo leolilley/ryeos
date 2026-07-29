@@ -41,13 +41,14 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::post;
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, oneshot, watch};
 use tokio::task::JoinHandle;
 
 /// One canned LLM response. The mock pops these FIFO.
@@ -139,6 +140,9 @@ struct MockState {
     /// test keep a thread observably `running` long enough to attach an SSE
     /// subscriber before the thread settles. Zero by default.
     response_delay: std::time::Duration,
+    /// Optional deterministic gate used by concurrency tests that must prove
+    /// an operation occurs while the provider request remains in flight.
+    response_gate: Option<watch::Receiver<bool>>,
 }
 
 /// A live mock provider. Drop signals shutdown to the server task.
@@ -148,6 +152,7 @@ pub struct MockProvider {
     /// `base_url` itself is the bare `http://127.0.0.1:<port>`.
     pub base_url: String,
     state: Arc<Mutex<MockState>>,
+    response_gate_tx: Option<watch::Sender<bool>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     join: Option<JoinHandle<()>>,
 }
@@ -169,11 +174,33 @@ impl MockProvider {
         canned: Vec<MockResponse>,
         response_delay: std::time::Duration,
     ) -> Self {
+        Self::start_with_response_control(canned, response_delay, false).await
+    }
+
+    /// Hold every provider response until [`Self::release_responses`] is
+    /// called. Requests are still captured immediately, making live-runtime
+    /// concurrency tests deterministic without relying on wall-clock delays.
+    pub async fn start_blocked(canned: Vec<MockResponse>) -> Self {
+        Self::start_with_response_control(canned, std::time::Duration::ZERO, true).await
+    }
+
+    async fn start_with_response_control(
+        canned: Vec<MockResponse>,
+        response_delay: std::time::Duration,
+        gated: bool,
+    ) -> Self {
+        let (response_gate_tx, response_gate) = if gated {
+            let (tx, rx) = watch::channel(false);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let state = Arc::new(Mutex::new(MockState {
             queue: canned,
             captured_headers: Vec::new(),
             captured_bodies: Vec::new(),
             response_delay,
+            response_gate,
         }));
 
         let app = Router::new()
@@ -202,8 +229,16 @@ impl MockProvider {
         Self {
             base_url,
             state,
+            response_gate_tx,
             shutdown_tx: Some(shutdown_tx),
             join: Some(join),
+        }
+    }
+
+    /// Permanently open a response gate created by [`Self::start_blocked`].
+    pub fn release_responses(&self) {
+        if let Some(gate) = &self.response_gate_tx {
+            gate.send_replace(true);
         }
     }
 
@@ -246,7 +281,7 @@ async fn handle_chat_completions(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    let (next, response_delay) = {
+    let (next, response_delay, response_gate) = {
         let mut g = state.lock().await;
         g.captured_headers.push(flatten_headers(&headers));
         g.captured_bodies.push(body.clone());
@@ -259,12 +294,23 @@ async fn handle_chat_completions(
         }
         let next = g.queue.remove(0);
         let delay = g.response_delay;
-        (next, delay)
+        (next, delay, g.response_gate.clone())
     };
     // Sleep WITHOUT holding the state lock so concurrent requests aren't
     // serialized by one slow response.
     if !response_delay.is_zero() {
         tokio::time::sleep(response_delay).await;
+    }
+    if let Some(mut response_gate) = response_gate {
+        while !*response_gate.borrow() {
+            if response_gate.changed().await.is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "mock_provider: response gate closed".to_string(),
+                )
+                    .into_response();
+            }
+        }
     }
     let streaming = body
         .get("stream")

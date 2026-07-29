@@ -638,6 +638,36 @@ pub struct MethodDecl {
 
 // ── Launch augmentation types ────────────────────────────────────────
 
+/// Signed execution-elision contract for a private augmentation method.
+///
+/// This declaration belongs to the target kind that implements the method,
+/// never to a consumer that happens to call it. A cache hit omits the child
+/// execution entirely, so the implementation owner must explicitly promise
+/// referential transparency and absence of per-invocation side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AugmentationMethodCacheContract {
+    /// The complete method execution may be omitted when the daemon has a
+    /// projection under the exact content-addressed authority key. The target
+    /// promises that output is a pure function of that key and that execution
+    /// performs no callbacks, writes, accounting, audit, identity allocation,
+    /// or other per-invocation side effects.
+    ContentAddressed,
+}
+
+/// Target-owned declaration for a private method used only by a daemon launch
+/// augmentation. These methods are intentionally separate from `methods`:
+/// they are not generically dispatchable.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AugmentationMethodDecl {
+    /// Required target-owned authority to omit an otherwise-real execution.
+    pub execution_cache: AugmentationMethodCacheContract,
+    /// Runtime/node config snapshots required by this private method.
+    #[serde(default)]
+    pub runtime_config: BTreeMap<String, MethodRuntimeConfigRequirement>,
+}
+
 /// Schema-declared launch augmentations. Engine parses these as opaque
 /// data; daemon interprets each variant between resolution and parent
 /// runtime spawn. Order matters — augmentations run in declared order.
@@ -670,10 +700,6 @@ pub enum LaunchAugmentationDecl {
         /// interpreter when missing.
         #[serde(default)]
         per_position_budget: BTreeMap<String, usize>,
-        /// Runtime/operator config snapshots required by the private target
-        /// method invocation. Keyed by the envelope config name.
-        #[serde(default)]
-        runtime_config: BTreeMap<String, MethodRuntimeConfigRequirement>,
     },
 }
 
@@ -794,6 +820,10 @@ pub struct ExecutionSchema {
     /// terminator/delegate/aliases is still executable.
     #[serde(default)]
     pub methods: BTreeMap<String, MethodDecl>,
+    /// Target-owned private methods available only to daemon launch
+    /// augmentations. They are never part of generic method dispatch.
+    #[serde(default)]
+    pub augmentation_methods: BTreeMap<String, AugmentationMethodDecl>,
     /// Schema-declared launch augmentations. Engine parses these as
     /// opaque data; daemon interprets them between resolution and
     /// parent runtime spawn.
@@ -1001,6 +1031,16 @@ impl KindRegistry {
             )?;
         }
 
+        let execution_schemas = schemas
+            .iter()
+            .filter_map(|(kind, schema)| {
+                schema
+                    .execution
+                    .as_ref()
+                    .map(|execution| (kind.clone(), execution.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+        validate_launch_augmentation_targets(&execution_schemas)?;
         let fingerprint = lillux::cas::sha256_hex(&fingerprint_data);
 
         Ok(Self {
@@ -1076,6 +1116,42 @@ impl KindRegistry {
     pub fn is_empty(&self) -> bool {
         self.schemas.is_empty()
     }
+}
+
+fn validate_launch_augmentation_targets(
+    executions: &HashMap<String, ExecutionSchema>,
+) -> Result<(), EngineError> {
+    for (consumer_kind, execution) in executions {
+        for augmentation in &execution.launch_augmentations {
+            let LaunchAugmentationDecl::ComposeContextPositions {
+                target_kind,
+                target_method,
+                ..
+            } = augmentation;
+            let target = executions.get(target_kind).ok_or_else(|| {
+                EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "kind `{consumer_kind}` launch augmentation targets missing executable kind `{target_kind}`"
+                    ),
+                }
+            })?;
+            if !target.augmentation_methods.contains_key(target_method) {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "kind `{consumer_kind}` launch augmentation targets undeclared private method `{target_kind}.{target_method}`"
+                    ),
+                });
+            }
+            if target.method_dispatch.is_none() {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "kind `{consumer_kind}` launch augmentation targets `{target_kind}.{target_method}`, but target kind `{target_kind}` has no method runtime dispatch contract"
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Default for KindRegistry {
@@ -1905,6 +1981,48 @@ fn parse_execution_schema(
         }
     }
 
+    let mut augmentation_methods = BTreeMap::new();
+    if let Some(methods_value) = execution_value.get("augmentation_methods") {
+        let methods_map =
+            methods_value
+                .as_mapping()
+                .ok_or_else(|| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: `execution.augmentation_methods` must be a mapping"
+                    ),
+                })?;
+        for (key, value) in methods_map {
+            let name = key
+                .as_str()
+                .ok_or_else(|| EngineError::SchemaLoaderError {
+                    reason: format!("{display}: augmentation method name must be a string"),
+                })?
+                .to_owned();
+            let declaration: AugmentationMethodDecl = serde_yaml::from_value(value.clone())
+                .map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{display}: invalid augmentation method declaration `{name}`: {error}"
+                    ),
+                })?;
+            validate_method_runtime_config_requirements(
+                display,
+                &format!("execution.augmentation_methods.{name}.runtime_config"),
+                &declaration.runtime_config,
+            )?;
+            augmentation_methods.insert(name, declaration);
+        }
+    }
+    if let Some(overlap) = augmentation_methods
+        .keys()
+        .find(|name| methods.contains_key(*name))
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: private augmentation method `{overlap}` is also declared in `execution.methods`; private augmentation methods cannot be generically dispatched"
+            ),
+        });
+    }
+
     // Validate: a method-bearing schema MUST declare method_dispatch,
     // and a method_dispatch only makes sense alongside methods.
     match (&method_dispatch, methods.is_empty()) {
@@ -2024,6 +2142,7 @@ fn parse_execution_schema(
         history_policy,
         method_dispatch,
         methods,
+        augmentation_methods,
         launch_augmentations,
     }))
 }
@@ -3526,6 +3645,7 @@ execution:
         let exec = parse_exec(yaml).unwrap().expect("execution present");
         assert!(exec.methods.is_empty());
         assert!(exec.method_dispatch.is_none());
+        assert!(exec.augmentation_methods.is_empty());
         assert!(exec.launch_augmentations.is_empty());
     }
 
@@ -3558,7 +3678,6 @@ execution:
                 output_derived,
                 meta_output_derived,
                 per_position_budget,
-                runtime_config,
             } => {
                 assert_eq!(target_kind, "knowledge");
                 assert_eq!(target_method, "compose_positions");
@@ -3567,7 +3686,6 @@ execution:
                 assert_eq!(meta_output_derived, "rendered_contexts_meta");
                 assert_eq!(per_position_budget.get("system"), Some(&4000));
                 assert_eq!(per_position_budget.get("before"), Some(&2000));
-                assert!(runtime_config.is_empty());
             }
         }
     }
@@ -3592,7 +3710,6 @@ execution:
                 output_derived,
                 meta_output_derived,
                 per_position_budget,
-                runtime_config,
             } => {
                 assert_eq!(target_kind, "knowledge");
                 assert_eq!(target_method, "compose_positions");
@@ -3600,7 +3717,6 @@ execution:
                 assert_eq!(output_derived, "rendered_contexts");
                 assert_eq!(meta_output_derived, "rendered_contexts_meta");
                 assert!(per_position_budget.is_empty());
-                assert!(runtime_config.is_empty());
             }
         }
     }
@@ -3616,6 +3732,120 @@ execution:
       target_kind: knowledge
 ";
         assert!(parse_exec(yaml).is_err());
+    }
+
+    #[test]
+    fn augmentation_method_requires_target_owned_execution_cache_contract() {
+        let yaml = "\
+execution:
+  method_dispatch:
+    via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
+  methods:
+    compose: {}
+  augmentation_methods:
+    compose_positions:
+      runtime_config: {}
+";
+        assert!(parse_exec(yaml).is_err());
+    }
+
+    #[test]
+    fn augmentation_methods_are_private_and_parsed_separately() {
+        let yaml = "\
+execution:
+  method_dispatch:
+    via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
+    default: compose
+  methods:
+    compose: {}
+  augmentation_methods:
+    compose_positions:
+      execution_cache: content_addressed
+      runtime_config:
+        token_estimation:
+          path: knowledge-runtime/token_estimation
+";
+        let exec = parse_exec(yaml).unwrap().expect("execution present");
+        assert!(!exec.methods.contains_key("compose_positions"));
+        let private = exec
+            .augmentation_methods
+            .get("compose_positions")
+            .expect("private method parsed");
+        assert_eq!(
+            private.execution_cache,
+            AugmentationMethodCacheContract::ContentAddressed
+        );
+        assert_eq!(
+            private
+                .runtime_config
+                .get("token_estimation")
+                .map(|requirement| requirement.path.as_str()),
+            Some("knowledge-runtime/token_estimation")
+        );
+    }
+
+    #[test]
+    fn private_augmentation_method_cannot_also_be_public() {
+        let yaml = "\
+execution:
+  method_dispatch:
+    via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
+    default: compose_positions
+  methods:
+    compose_positions: {}
+  augmentation_methods:
+    compose_positions:
+      execution_cache: content_addressed
+";
+        let error = parse_exec(yaml).expect_err("public/private overlap must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be generically dispatched")
+        );
+    }
+
+    #[test]
+    fn registry_rejects_missing_private_augmentation_target_method() {
+        let consumer = parse_exec(
+            "\
+execution:
+  delegate:
+    via: runtime_registry
+  launch_augmentations:
+    - step: compose_context_positions
+      target_kind: knowledge
+      target_method: misspelled
+",
+        )
+        .unwrap()
+        .unwrap();
+        let target = parse_exec(
+            "\
+execution:
+  method_dispatch:
+    via: runtime_registry
+    protocol: protocol:ryeos/core/method_runtime
+    default: compose
+  methods:
+    compose: {}
+  augmentation_methods:
+    compose_positions:
+      execution_cache: content_addressed
+",
+        )
+        .unwrap()
+        .unwrap();
+        let executions = HashMap::from([
+            ("directive".to_string(), consumer),
+            ("knowledge".to_string(), target),
+        ]);
+        let error = validate_launch_augmentation_targets(&executions)
+            .expect_err("misspelled private method must fail registry admission");
+        assert!(error.to_string().contains("knowledge.misspelled"));
     }
 
     #[test]

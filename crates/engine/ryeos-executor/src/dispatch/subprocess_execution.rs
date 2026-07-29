@@ -344,7 +344,7 @@ async fn dispatch_managed_subprocess(
         // opening stimulus; only an autonomous machine continuation suppresses it.
         suppress_stimulus: false,
         // Fresh resolution: use the freshly-resolved caps (no captured set to pin).
-        capability_policy: crate::execution::launch::CapabilityPolicy::Fresh,
+        capability_policy: crate::execution::launch::CapabilityPolicy::AdmissionDefault,
         // Fresh launch: cold start, no checkpoint resume.
         checkpoint_resume_mode: crate::execution::launch::CheckpointResumeMode::None,
         launch_handoff,
@@ -408,9 +408,14 @@ async fn dispatch_streaming_subprocess(
     protocol: &ryeos_engine::protocols::VerifiedProtocol,
 ) -> Result<Value, DispatchError> {
     let terminal_ref = current_ref.to_string();
+    let resolution_project_root = (!matches!(
+        ctx.plan_ctx.subject_resolution_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ))
+    .then_some(request.project_path);
     let engine_roots = ctx
         .engine
-        .resolution_roots(Some(request.project_path.to_path_buf()));
+        .resolution_roots(resolution_project_root.map(std::path::Path::to_path_buf));
 
     let bundle_roots: Vec<std::path::PathBuf> = engine_roots
         .ordered
@@ -689,7 +694,7 @@ async fn dispatch_streaming_subprocess(
                     .project_root_projection()
                     .map(std::path::Path::to_path_buf),
                 base_project_snapshot_hash: project_authority
-                    .base_snapshot_projection()
+                    .operational_snapshot_projection()
                     .map(str::to_owned),
                 project_authority,
                 usage_subject: request.usage_subject.clone(),
@@ -710,23 +715,32 @@ async fn dispatch_streaming_subprocess(
                 .map_err(DispatchError::Internal)?;
             Some(admission.clone())
         };
-        let resolved_stream = ryeos_app::thread_lifecycle::ResolvedExecutionRequest {
-            kind: subject_thread_profile.clone(),
-            item_ref: subject_item_ref.clone(),
-            executor_ref: executor_ref.clone(),
-            launch_mode: request.launch_mode.to_string(),
-            current_site_id: ctx.plan_ctx.current_site_id.clone(),
-            origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-            target_site_id: None,
-            requested_by: Some(request.acting_principal.to_string()),
-            usage_subject: request.usage_subject.clone(),
-            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-            parameters: request.params.clone(),
-            ref_bindings: request.ref_bindings.clone(),
-            root_raw_content_digest: verified_subject.resolved.raw_content_digest.clone(),
-            resolved_item: verified_subject.resolved.clone(),
-            plan_context: ctx.plan_ctx.clone(),
-            root_admission,
+        let resolved_stream = match root_admission {
+            Some(admission) => admission
+                .execution_request(
+                    ryeos_app::thread_lifecycle::RootExecutionRoute::DirectNativeExecutor,
+                    request.launch_mode.to_string(),
+                    request.params.clone(),
+                )
+                .map_err(DispatchError::Internal)?,
+            None => ryeos_app::thread_lifecycle::ResolvedExecutionRequest {
+                kind: subject_thread_profile.clone(),
+                item_ref: subject_item_ref.clone(),
+                executor_ref: executor_ref.clone(),
+                launch_mode: request.launch_mode.to_string(),
+                current_site_id: ctx.plan_ctx.current_site_id.clone(),
+                origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
+                target_site_id: None,
+                requested_by: Some(request.acting_principal.to_string()),
+                usage_subject: request.usage_subject.clone(),
+                usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+                parameters: request.params.clone(),
+                ref_bindings: request.ref_bindings.clone(),
+                root_raw_content_digest: verified_subject.resolved.raw_content_digest.clone(),
+                resolved_item: verified_subject.resolved.clone(),
+                plan_context: ctx.plan_ctx.clone(),
+                root_admission: None,
+            },
         };
         if let Some(previous_thread_id) = request.previous_thread_id.as_deref() {
             state.threads.create_continuation_with_id(
@@ -1011,26 +1025,70 @@ async fn dispatch_tool_subprocess(
 
     require_terminal_executor_id(verified, &item_ref)?;
 
-    let mut resolved = ryeos_app::thread_lifecycle::resolve_root_execution(
-        ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
-            engine: &ctx.engine,
-            plan_context: ctx.plan_ctx.clone(),
-            project_binding: ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
-                &ctx.engine,
-                &ctx.plan_ctx,
-                &request.provenance,
-            )?,
-            node_history_policy: &state.node_history_policy,
-            item_ref: &item_ref,
-            ref_bindings: request.ref_bindings.clone(),
-            launch_mode: request.launch_mode,
-            parameters: request.params.clone(),
-            usage_subject: request.usage_subject.clone(),
-            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-            creates_chain_root: request.previous_thread_id.is_none()
-                && request.root_admission.is_none(),
-        },
-    )?;
+    let admitted_resolution = if request.previous_thread_id.is_none() {
+        request
+            .root_admission
+            .as_ref()
+            .map(|admission| {
+                admission
+                    .ensure_matches_provenance(&request.provenance)
+                    .map_err(DispatchError::Internal)?;
+                admission
+                    .execution_request(
+                        ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
+                        request.launch_mode.to_owned(),
+                        request.params.clone(),
+                    )
+                    .map_err(DispatchError::Internal)
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let resolution_engine = std::sync::Arc::clone(&ctx.engine);
+    let resolution_item_ref = item_ref.clone();
+    let resolution_plan_context = ctx.plan_ctx.clone();
+    let resolution_project_binding =
+        ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+            &ctx.engine,
+            &ctx.plan_ctx,
+            &request.provenance,
+        )?;
+    let node_history_policy = std::sync::Arc::clone(&state.node_history_policy);
+    let resolution_ref_bindings = request.ref_bindings.clone();
+    let resolution_launch_mode = request.launch_mode.to_owned();
+    let resolution_parameters = request.params.clone();
+    let resolution_usage_subject = request.usage_subject.clone();
+    let resolution_usage_subject_asserted_by = request.usage_subject_asserted_by.clone();
+    let creates_chain_root =
+        request.previous_thread_id.is_none() && request.root_admission.is_none();
+    let mut resolved = match admitted_resolution {
+        Some(resolved) => resolved,
+        None => tokio::task::spawn_blocking(move || {
+            ryeos_app::thread_lifecycle::resolve_root_execution(
+                ryeos_app::thread_lifecycle::ResolveRootExecutionParams {
+                    engine: &resolution_engine,
+                    plan_context: resolution_plan_context,
+                    project_binding: resolution_project_binding,
+                    node_history_policy: &node_history_policy,
+                    item_ref: &resolution_item_ref,
+                    ref_bindings: resolution_ref_bindings,
+                    launch_mode: &resolution_launch_mode,
+                    parameters: resolution_parameters,
+                    usage_subject: resolution_usage_subject,
+                    usage_subject_asserted_by: resolution_usage_subject_asserted_by,
+                    creates_chain_root,
+                },
+            )
+        })
+        .await
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "root execution resolution blocking worker failed: {error}"
+            ))
+        })?
+        .map_err(DispatchError::Internal)?,
+    };
 
     resolved.kind = thread_profile.to_string();
     // Data-driven execution routine: walk the wrapper's executor chain to its
@@ -1038,18 +1096,25 @@ async fn dispatch_tool_subprocess(
     // never on the alias name or the terminal ref. Every terminal must declare
     // `terminal_executor`; a missing/invalid descriptor is a hard error (no
     // silent subprocess fallback).
-    let terminal = ctx
-        .engine
-        .resolve_terminal_executor(
-            &resolved.resolved_item.source_path,
-            &resolved.executor_ref,
-            &resolved.resolved_item.kind,
-            Some(request.project_path.to_path_buf()),
-        )
-        .map_err(|e| DispatchError::SchemaMisconfigured {
-            kind: current_ref.kind.clone(),
-            detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
-        })?;
+    let terminal = super::resolve_terminal_executor_for_subject(
+        &ctx.engine,
+        &resolved.resolved_item,
+        &resolved.executor_ref,
+        resolved
+            .root_admission
+            .as_ref()
+            .and_then(|admission| admission.execution_workspace())
+            .or(Some(request.project_path)),
+        resolved
+            .root_admission
+            .as_ref()
+            .and_then(|admission| admission.admitted_request_snapshot())
+            .map(AsRef::as_ref),
+    )
+    .map_err(|e| DispatchError::SchemaMisconfigured {
+        kind: current_ref.kind.clone(),
+        detail: format!("failed to resolve executor-chain terminal for '{item_ref}': {e}"),
+    })?;
     if terminal.kind == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch {
         return Box::pin(dispatch_via_method_executor(
             &resolved,

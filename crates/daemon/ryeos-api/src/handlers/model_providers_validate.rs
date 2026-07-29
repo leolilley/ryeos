@@ -49,6 +49,8 @@ pub async fn handle(
             item_ref,
             expected_kind: None,
             project_root: None,
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         })
         .map_err(|error| HandlerError::Internal(error.to_string()))?;
     let provider: ryeos_directive_core::ProviderConfig =

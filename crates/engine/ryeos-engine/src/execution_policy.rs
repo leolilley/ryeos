@@ -1,13 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
-use crate::config_loading::{ConfigLoadContext, load_and_verify_config_file};
+use crate::config_loading::{ConfigLoadContext, load_and_verify_config_file_with_hash};
 use crate::contracts::ItemSpace;
 use crate::error::EngineError;
+
+const MAX_EXECUTION_POLICY_SOURCE_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicySourceKind {
@@ -75,6 +77,7 @@ pub struct ResolvedExecutionPolicy {
     pub cancellation_grace_secs: Option<Sourced<u64>>,
     pub loaded_layers: Vec<PolicyLayerSource>,
     pub warnings: Vec<String>,
+    dependency_proof: ExecutionPolicyDependencyProof,
 }
 
 impl ResolvedExecutionPolicy {
@@ -88,7 +91,12 @@ impl ResolvedExecutionPolicy {
             cancellation_grace_secs: None,
             loaded_layers: Vec::new(),
             warnings: Vec::new(),
+            dependency_proof: ExecutionPolicyDependencyProof::default(),
         }
+    }
+
+    pub fn dependency_proof(&self) -> &ExecutionPolicyDependencyProof {
+        &self.dependency_proof
     }
 
     pub fn get_runtime_param(&self, key: &str) -> Option<Value> {
@@ -117,6 +125,205 @@ impl ResolvedExecutionPolicy {
             "cancellation_grace_secs" => self.cancellation_grace_secs.as_ref().map(|v| &v.source),
             _ => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum ExecutionPolicyDependencyState {
+    Absent,
+    File { source_hash: String },
+}
+
+#[derive(Debug, Clone)]
+struct ExecutionPolicyDependency {
+    root_index: usize,
+    root_label: String,
+    root_space: ItemSpace,
+    logical_path: PathBuf,
+    absolute_path: PathBuf,
+    state: ExecutionPolicyDependencyState,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionPolicyDependencyProof {
+    dependencies: Vec<ExecutionPolicyDependency>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionPolicyProofStatus {
+    Current,
+    MutableAuthorityChanged,
+    ImmutableAuthorityMismatch,
+}
+
+impl ExecutionPolicyDependencyProof {
+    pub fn identity_digest(&self) -> Result<String, EngineError> {
+        #[derive(Serialize)]
+        struct StableDependency<'a> {
+            root_index: usize,
+            root_label: &'a str,
+            root_space: ItemSpace,
+            logical_path: &'a PathBuf,
+            state: &'a ExecutionPolicyDependencyState,
+        }
+        let stable = self
+            .dependencies
+            .iter()
+            .map(|dependency| StableDependency {
+                root_index: dependency.root_index,
+                root_label: &dependency.root_label,
+                root_space: dependency.root_space,
+                logical_path: &dependency.logical_path,
+                state: &dependency.state,
+            })
+            .collect::<Vec<_>>();
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "dependencies": stable,
+        });
+        let canonical = lillux::canonical_json(&value)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    pub fn revalidate_current(&self) -> bool {
+        self.dependencies.iter().all(|dependency| {
+            execution_policy_state_at(&dependency.absolute_path)
+                .as_ref()
+                .is_ok_and(|state| state == &dependency.state)
+        })
+    }
+
+    pub fn revalidate_under_authority(
+        &self,
+        roots: &crate::item_resolution::ResolutionRoots,
+        project: Option<(
+            &std::path::Path,
+            &dyn crate::project_content::AuthoritativeProjectContent,
+        )>,
+    ) -> bool {
+        self.revalidate_under_authority_status(roots, project)
+            == ExecutionPolicyProofStatus::Current
+    }
+
+    pub fn revalidate_under_authority_status(
+        &self,
+        roots: &crate::item_resolution::ResolutionRoots,
+        project: Option<(
+            &std::path::Path,
+            &dyn crate::project_content::AuthoritativeProjectContent,
+        )>,
+    ) -> ExecutionPolicyProofStatus {
+        let mut status = ExecutionPolicyProofStatus::Current;
+        for dependency in &self.dependencies {
+            let Some(root) = roots.ordered.get(dependency.root_index) else {
+                return ExecutionPolicyProofStatus::ImmutableAuthorityMismatch;
+            };
+            if root.label != dependency.root_label || root.space != dependency.root_space {
+                return ExecutionPolicyProofStatus::ImmutableAuthorityMismatch;
+            }
+            let dependency_status = match root.space {
+                ItemSpace::Bundle => ExecutionPolicyProofStatus::Current,
+                ItemSpace::Node => {
+                    if execution_policy_state_at(&root.ai_root.join(&dependency.logical_path))
+                        .as_ref()
+                        .is_ok_and(|state| state == &dependency.state)
+                    {
+                        ExecutionPolicyProofStatus::Current
+                    } else {
+                        ExecutionPolicyProofStatus::MutableAuthorityChanged
+                    }
+                }
+                ItemSpace::Project => match project {
+                    None => {
+                        if execution_policy_state_at(&root.ai_root.join(&dependency.logical_path))
+                            .as_ref()
+                            .is_ok_and(|state| state == &dependency.state)
+                        {
+                            ExecutionPolicyProofStatus::Current
+                        } else {
+                            ExecutionPolicyProofStatus::MutableAuthorityChanged
+                        }
+                    }
+                    Some((project_root, content)) => {
+                        if root.ai_root != project_root.join(crate::AI_DIR) {
+                            return ExecutionPolicyProofStatus::ImmutableAuthorityMismatch;
+                        }
+                        let relative =
+                            std::path::Path::new(crate::AI_DIR).join(&dependency.logical_path);
+                        let matches = match &dependency.state {
+                            ExecutionPolicyDependencyState::Absent => {
+                                content.validates_absence(&relative).unwrap_or(false)
+                            }
+                            ExecutionPolicyDependencyState::File { source_hash } => content
+                                .validates_file(&relative, source_hash)
+                                .unwrap_or(false),
+                        };
+                        if matches {
+                            ExecutionPolicyProofStatus::Current
+                        } else {
+                            ExecutionPolicyProofStatus::ImmutableAuthorityMismatch
+                        }
+                    }
+                },
+            };
+            status = combine_execution_policy_status(status, dependency_status);
+            if status == ExecutionPolicyProofStatus::ImmutableAuthorityMismatch {
+                return status;
+            }
+        }
+        status
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        self.dependencies.iter().fold(0usize, |total, dependency| {
+            total
+                .saturating_add(std::mem::size_of::<ExecutionPolicyDependency>())
+                .saturating_add(dependency.root_label.capacity())
+                .saturating_add(dependency.logical_path.as_os_str().as_encoded_bytes().len())
+                .saturating_add(
+                    dependency
+                        .absolute_path
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .len(),
+                )
+        })
+    }
+}
+
+fn combine_execution_policy_status(
+    left: ExecutionPolicyProofStatus,
+    right: ExecutionPolicyProofStatus,
+) -> ExecutionPolicyProofStatus {
+    use ExecutionPolicyProofStatus::{
+        Current, ImmutableAuthorityMismatch, MutableAuthorityChanged,
+    };
+    match (left, right) {
+        (ImmutableAuthorityMismatch, _) | (_, ImmutableAuthorityMismatch) => {
+            ImmutableAuthorityMismatch
+        }
+        (MutableAuthorityChanged, _) | (_, MutableAuthorityChanged) => MutableAuthorityChanged,
+        (Current, Current) => Current,
+    }
+}
+
+fn execution_policy_state_at(
+    path: &std::path::Path,
+) -> Result<ExecutionPolicyDependencyState, EngineError> {
+    match lillux::read_optional_regular_file_bounded_no_follow(
+        path,
+        MAX_EXECUTION_POLICY_SOURCE_BYTES,
+    ) {
+        Ok(Some(bytes)) => Ok(ExecutionPolicyDependencyState::File {
+            source_hash: lillux::sha256_hex(&bytes),
+        }),
+        Ok(None) => Ok(ExecutionPolicyDependencyState::Absent),
+        Err(error) => Err(EngineError::InvalidRuntimeConfig {
+            path: path.display().to_string(),
+            reason: format!("securely observe execution policy: {error:#}"),
+        }),
     }
 }
 
@@ -179,16 +386,34 @@ impl<'a> ExecutionPolicyResolver<'a> {
     ) -> Result<ResolvedExecutionPolicy, EngineError> {
         let mut policy = ResolvedExecutionPolicy::empty(item_ref.clone());
         let mut documents = Vec::new();
-        for root in &self.load_ctx.roots.ordered {
+        let mut dependencies = Vec::new();
+        for (root_index, root) in self.load_ctx.roots.ordered.iter().enumerate() {
             let candidate = root
                 .ai_root
                 .join("config")
                 .join("execution")
                 .join("execution.yaml");
-            if !candidate.exists() {
+            let logical_path = PathBuf::from("config/execution/execution.yaml");
+            let state = execution_policy_state_at(&candidate)?;
+            dependencies.push(ExecutionPolicyDependency {
+                root_index,
+                root_label: root.label.clone(),
+                root_space: root.space,
+                logical_path,
+                absolute_path: candidate.clone(),
+                state: state.clone(),
+            });
+            let ExecutionPolicyDependencyState::File { source_hash } = state else {
                 continue;
+            };
+            let (value, loaded_source_hash) =
+                load_and_verify_config_file_with_hash(&candidate, &self.load_ctx)?;
+            if loaded_source_hash != source_hash {
+                return Err(EngineError::InvalidRuntimeConfig {
+                    path: candidate.display().to_string(),
+                    reason: "execution policy changed while it was being loaded".to_string(),
+                });
             }
-            let value = load_and_verify_config_file(&candidate, &self.load_ctx)?;
             let doc: ExecutionPolicyDocument =
                 serde_json::from_value(value).map_err(|e| EngineError::InvalidRuntimeConfig {
                     path: candidate.display().to_string(),
@@ -199,6 +424,13 @@ impl<'a> ExecutionPolicyResolver<'a> {
                 space: root.space,
             });
             documents.push((doc, candidate, root.space));
+        }
+        policy.dependency_proof = ExecutionPolicyDependencyProof { dependencies };
+        if !policy.dependency_proof.revalidate_current() {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: "<execution-policy>".to_string(),
+                reason: "execution policy dependencies changed during resolution".to_string(),
+            });
         }
         for (doc, path, space) in &documents {
             apply_defaults_layer(&mut policy, doc, Some(path.clone()), Some(*space))?;
@@ -369,8 +601,178 @@ fn source(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
+    use crate::project_content::{AuthoritativeProjectContent, ProjectContentEntry};
     use serde_json::json;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
+    use std::path::Path;
+
+    #[derive(Default)]
+    struct TestProjectContent {
+        files: BTreeMap<PathBuf, Vec<u8>>,
+    }
+
+    impl TestProjectContent {
+        fn with_file(mut self, path: &str, bytes: &[u8]) -> Self {
+            self.files.insert(PathBuf::from(path), bytes.to_vec());
+            self
+        }
+    }
+
+    impl AuthoritativeProjectContent for TestProjectContent {
+        fn list_files(
+            &self,
+            prefix: &Path,
+            recursive: bool,
+            max_entries: usize,
+        ) -> Result<Vec<ProjectContentEntry>, EngineError> {
+            let mut entries = Vec::new();
+            for (path, bytes) in &self.files {
+                let Ok(relative) = path.strip_prefix(prefix) else {
+                    continue;
+                };
+                if relative.as_os_str().is_empty()
+                    || (!recursive && relative.components().count() != 1)
+                {
+                    continue;
+                }
+                if entries.len() >= max_entries {
+                    return Err(EngineError::Internal(
+                        "test project content entry bound exceeded".to_string(),
+                    ));
+                }
+                entries.push(ProjectContentEntry {
+                    relative_path: relative.to_path_buf(),
+                    content_hash: lillux::sha256_hex(bytes),
+                    size: bytes.len() as u64,
+                    normalized_mode: 0o644,
+                });
+            }
+            Ok(entries)
+        }
+
+        fn read_file(
+            &self,
+            relative_path: &Path,
+            max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, EngineError> {
+            Ok(self
+                .files
+                .get(relative_path)
+                .filter(|bytes| bytes.len() as u64 <= max_bytes)
+                .cloned())
+        }
+
+        fn validates_file(
+            &self,
+            relative_path: &Path,
+            content_hash: &str,
+        ) -> Result<bool, EngineError> {
+            Ok(self
+                .files
+                .get(relative_path)
+                .is_some_and(|bytes| lillux::sha256_hex(bytes) == content_hash))
+        }
+
+        fn validates_absence(&self, relative_path: &Path) -> Result<bool, EngineError> {
+            Ok(!self.files.contains_key(relative_path))
+        }
+    }
+
+    #[test]
+    fn execution_policy_proof_revalidates_positive_and_negative_project_cas_state() {
+        let project_root = PathBuf::from("/not-opened/project");
+        let policy_bytes = b"defaults:\n  timeout: 30\n";
+        let proof = ExecutionPolicyDependencyProof {
+            dependencies: vec![
+                ExecutionPolicyDependency {
+                    root_index: 0,
+                    root_label: "project".to_string(),
+                    root_space: ItemSpace::Project,
+                    logical_path: PathBuf::from("config/execution/execution.yaml"),
+                    absolute_path: PathBuf::from("/must/not/be/opened/execution.yaml"),
+                    state: ExecutionPolicyDependencyState::File {
+                        source_hash: lillux::sha256_hex(policy_bytes),
+                    },
+                },
+                ExecutionPolicyDependency {
+                    root_index: 0,
+                    root_label: "project".to_string(),
+                    root_space: ItemSpace::Project,
+                    logical_path: PathBuf::from("config/execution/absent.yaml"),
+                    absolute_path: PathBuf::from("/must/not/be/opened/absent.yaml"),
+                    state: ExecutionPolicyDependencyState::Absent,
+                },
+            ],
+        };
+        let roots = ResolutionRoots {
+            ordered: vec![ResolutionRoot {
+                space: ItemSpace::Project,
+                label: "project".to_string(),
+                ai_root: project_root.join(crate::AI_DIR),
+            }],
+        };
+        let exact = TestProjectContent::default()
+            .with_file(".ai/config/execution/execution.yaml", policy_bytes);
+        assert!(proof.revalidate_under_authority(
+            &roots,
+            Some((&project_root, &exact as &dyn AuthoritativeProjectContent)),
+        ));
+
+        let changed = TestProjectContent::default().with_file(
+            ".ai/config/execution/execution.yaml",
+            b"defaults:\n  timeout: 31\n",
+        );
+        assert!(!proof.revalidate_under_authority(
+            &roots,
+            Some((&project_root, &changed as &dyn AuthoritativeProjectContent)),
+        ));
+        assert_eq!(
+            proof.revalidate_under_authority_status(
+                &roots,
+                Some((&project_root, &changed as &dyn AuthoritativeProjectContent)),
+            ),
+            ExecutionPolicyProofStatus::ImmutableAuthorityMismatch
+        );
+    }
+
+    #[test]
+    fn execution_policy_proof_classifies_node_change_as_mutable() {
+        let root = tempfile::tempdir().unwrap();
+        let ai_root = root.path().join(".ai");
+        let relative = PathBuf::from("config/execution/execution.yaml");
+        let absolute = ai_root.join(&relative);
+        std::fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        std::fs::write(&absolute, b"defaults:\n  timeout: 30\n").unwrap();
+        let proof = ExecutionPolicyDependencyProof {
+            dependencies: vec![ExecutionPolicyDependency {
+                root_index: 0,
+                root_label: "node".to_string(),
+                root_space: ItemSpace::Node,
+                logical_path: relative,
+                absolute_path: absolute.clone(),
+                state: ExecutionPolicyDependencyState::File {
+                    source_hash: lillux::sha256_hex(b"defaults:\n  timeout: 30\n"),
+                },
+            }],
+        };
+        let roots = ResolutionRoots {
+            ordered: vec![ResolutionRoot {
+                space: ItemSpace::Node,
+                label: "node".to_string(),
+                ai_root,
+            }],
+        };
+        assert_eq!(
+            proof.revalidate_under_authority_status(&roots, None),
+            ExecutionPolicyProofStatus::Current
+        );
+        std::fs::write(&absolute, b"defaults:\n  timeout: 31\n").unwrap();
+        assert_eq!(
+            proof.revalidate_under_authority_status(&roots, None),
+            ExecutionPolicyProofStatus::MutableAuthorityChanged
+        );
+    }
 
     #[test]
     fn item_override_beats_defaults_and_preserves_sparse_fields() {

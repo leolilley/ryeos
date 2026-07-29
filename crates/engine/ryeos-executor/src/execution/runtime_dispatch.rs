@@ -431,14 +431,24 @@ async fn handle_execute(
             .with_context(|| format!("invalid callback item_id '{}'", params.action.item_id))?;
 
     use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, ProjectContext};
+    let callback_subject_authority = child_provenance.subject_resolution_authority();
+    let callback_project_context = if matches!(
+        callback_subject_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ) {
+        ProjectContext::None
+    } else {
+        ProjectContext::LocalPath {
+            path: child_provenance.effective_path().to_path_buf(),
+        }
+    };
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(ryeos_engine::contracts::Principal {
             fingerprint: caller_principal_id.clone(),
             scopes: caller_scopes.clone(),
         }),
-        project_context: ProjectContext::LocalPath {
-            path: child_provenance.effective_path().to_path_buf(),
-        },
+        project_context: callback_project_context,
+        subject_resolution_authority: callback_subject_authority,
         current_site_id: site_id.to_string(),
         origin_site_id: site_id.to_string(),
         execution_hints: Default::default(),
@@ -532,6 +542,7 @@ async fn handle_execute(
         usage_subject_asserted_by: None,
         previous_thread_id: None,
         root_admission: None,
+        root_dispatch_evidence: None,
         parent_execution_context: Some(parent_execution_context_from_capability(cap)),
     };
 

@@ -10,6 +10,136 @@ use super::{
     RuntimeEnvSource,
 };
 
+/// Typed authority under which item subjects are resolved for one plan.
+///
+/// This is deliberately separate from [`ProjectContext`]. A local path says
+/// where resolution happens; it does not say whether those bytes are live,
+/// an immutable admitted generation, or a writable workspace based on an
+/// admitted generation. Keeping the class and generation explicit prevents a
+/// request-specific checkout pathname from becoming project identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SubjectResolutionAuthority {
+    Projectless,
+    LiveFs,
+    PinnedGeneration {
+        snapshot_hash: String,
+    },
+    CowWorkspace {
+        base_snapshot_hash: String,
+        current_operational_generation: String,
+    },
+}
+
+impl SubjectResolutionAuthority {
+    /// Authority for a current, mutable project view, or for a bundle-only
+    /// request when no project root exists.
+    pub fn for_live_project_root(materialized_project_root: Option<&std::path::Path>) -> Self {
+        if materialized_project_root.is_some() {
+            Self::LiveFs
+        } else {
+            Self::Projectless
+        }
+    }
+
+    pub fn validate_for_project_context(
+        &self,
+        project_context: &ProjectContext,
+    ) -> anyhow::Result<()> {
+        match self {
+            Self::Projectless => {
+                if !matches!(project_context, ProjectContext::None) {
+                    anyhow::bail!(
+                        "projectless subject resolution requires a projectless planning context"
+                    );
+                }
+            }
+            Self::LiveFs => {
+                if !matches!(project_context, ProjectContext::LocalPath { .. }) {
+                    anyhow::bail!(
+                        "live filesystem subject resolution requires a local project path"
+                    );
+                }
+            }
+            Self::PinnedGeneration { snapshot_hash } => {
+                validate_snapshot_hash(snapshot_hash)?;
+                match project_context {
+                    ProjectContext::LocalPath { .. } => {}
+                    ProjectContext::SnapshotHash { hash } if hash == snapshot_hash => {}
+                    ProjectContext::SnapshotHash { .. } => {
+                        anyhow::bail!(
+                            "pinned subject resolution authority differs from snapshot context"
+                        )
+                    }
+                    ProjectContext::None | ProjectContext::ProjectRef { .. } => anyhow::bail!(
+                        "pinned subject resolution requires a project planning context"
+                    ),
+                }
+            }
+            Self::CowWorkspace {
+                base_snapshot_hash,
+                current_operational_generation,
+            } => {
+                validate_snapshot_hash(base_snapshot_hash)?;
+                validate_snapshot_hash(current_operational_generation)?;
+                if !matches!(project_context, ProjectContext::LocalPath { .. }) {
+                    anyhow::bail!(
+                        "writable COW subject resolution requires an admitted workspace path"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_for_materialized_root(
+        &self,
+        materialized_project_root: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
+        match (self, materialized_project_root) {
+            (Self::Projectless, None) => Ok(()),
+            (Self::Projectless, Some(_)) => {
+                anyhow::bail!("projectless subject resolution cannot carry a project root")
+            }
+            (Self::LiveFs | Self::PinnedGeneration { .. } | Self::CowWorkspace { .. }, Some(_)) => {
+                Ok(())
+            }
+            (Self::LiveFs | Self::PinnedGeneration { .. } | Self::CowWorkspace { .. }, None) => {
+                anyhow::bail!("project subject resolution requires a materialized project root")
+            }
+        }
+    }
+
+    pub fn operational_generation(&self) -> Option<&str> {
+        match self {
+            Self::PinnedGeneration { snapshot_hash } => Some(snapshot_hash),
+            Self::CowWorkspace {
+                current_operational_generation,
+                ..
+            } => Some(current_operational_generation),
+            Self::Projectless | Self::LiveFs => None,
+        }
+    }
+
+    /// Whether this authority may legitimately change between observation and
+    /// use. Projectless and content-addressed authorities are immutable;
+    /// exactly the live filesystem class permits a bounded revalidation retry.
+    pub fn permits_mutable_revalidation(&self) -> bool {
+        matches!(self, Self::LiveFs)
+    }
+}
+
+fn validate_snapshot_hash(value: &str) -> anyhow::Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("subject resolution snapshot identity must be a 64-character hex digest");
+    }
+    Ok(())
+}
+
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
 ) -> std::result::Result<Option<T>, D::Error>
@@ -30,6 +160,10 @@ where
 pub struct PlanContext {
     pub requested_by: EffectivePrincipal,
     pub project_context: ProjectContext,
+    /// Exact resolution authority for `project_context`. A local path is only
+    /// a materialization; this field states whether its bytes are live,
+    /// immutable pinned content, or a writable COW generation.
+    pub subject_resolution_authority: SubjectResolutionAuthority,
     pub current_site_id: String,
     pub origin_site_id: String,
     pub execution_hints: ExecutionHints,
@@ -361,5 +495,54 @@ mod tests {
         serde_json::from_value::<PlanTrustAuthority>(wire.clone()).unwrap();
         wire.as_object_mut().unwrap().remove("signer_fingerprint");
         assert!(serde_json::from_value::<PlanTrustAuthority>(wire).is_err());
+    }
+
+    #[test]
+    fn subject_resolution_authority_distinguishes_cow_base_and_current_generation() {
+        let base = "a".repeat(64);
+        let current = "b".repeat(64);
+        let authority = SubjectResolutionAuthority::CowWorkspace {
+            base_snapshot_hash: base,
+            current_operational_generation: current.clone(),
+        };
+        authority
+            .validate_for_project_context(&ProjectContext::LocalPath {
+                path: PathBuf::from("/tmp/cow"),
+            })
+            .unwrap();
+        assert_eq!(authority.operational_generation(), Some(current.as_str()));
+    }
+
+    #[test]
+    fn subject_resolution_authority_rejects_projectless_path_and_bad_hashes() {
+        assert!(SubjectResolutionAuthority::Projectless
+            .validate_for_project_context(&ProjectContext::LocalPath {
+                path: PathBuf::from("/tmp/project"),
+            })
+            .is_err());
+        assert!(SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "not-a-hash".to_owned(),
+        }
+        .validate_for_project_context(&ProjectContext::SnapshotHash {
+            hash: "not-a-hash".to_owned(),
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn live_and_cow_authorities_reject_snapshot_contexts() {
+        let snapshot = "a".repeat(64);
+        let snapshot_context = ProjectContext::SnapshotHash {
+            hash: snapshot.clone(),
+        };
+        assert!(SubjectResolutionAuthority::LiveFs
+            .validate_for_project_context(&snapshot_context)
+            .is_err());
+        assert!(SubjectResolutionAuthority::CowWorkspace {
+            base_snapshot_hash: snapshot.clone(),
+            current_operational_generation: snapshot,
+        }
+        .validate_for_project_context(&snapshot_context)
+        .is_err());
     }
 }

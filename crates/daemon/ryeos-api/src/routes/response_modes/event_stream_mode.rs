@@ -910,8 +910,26 @@ mod tests {
         let bytes = serde_json::to_vec(&body).unwrap();
         let req: LaunchRequest = serde_json::from_slice(&bytes).expect("valid body must parse");
         assert_eq!(req.item_ref, "directive:my/agent");
-        assert_eq!(req.project_path, "/tmp/proj");
+        assert_eq!(req.project_path.as_deref(), Some("/tmp/proj"));
         assert_eq!(req.parameters["name"], "World");
+    }
+
+    #[test]
+    fn launch_request_accepts_projectless_body_without_path() {
+        let body = serde_json::json!({
+            "item_ref": "directive:my/agent",
+            "ref_bindings": {},
+            "parameters": {"name": "World"},
+            "execution_policy": serde_json::to_value(
+                ryeos_app::execution_policy::ExecutionPolicy::projectless(
+                    ryeos_app::execution_policy::ExecutionResponse::Wait,
+                )
+            ).unwrap(),
+        });
+        let bytes = serde_json::to_vec(&body).unwrap();
+        let req: LaunchRequest =
+            serde_json::from_slice(&bytes).expect("projectless body must parse");
+        assert!(req.project_path.is_none());
     }
 
     // ── Subscription-specific compile tests ────

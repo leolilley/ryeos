@@ -42,6 +42,13 @@ use serde::Deserialize;
 /// Default version for TrustedKeyDoc when none is declared in the
 /// TOML file, or when creating a new pin doc.
 const DEFAULT_KEY_DOC_VERSION: &str = "1.0.0";
+/// Shared resource contract for trusted-key discovery. Runtime config proof
+/// and ordinary item verification must observe exactly the same hard bounds.
+pub const MAX_TRUST_DOCUMENTS: usize = 1024;
+pub const MAX_TRUST_DOCUMENT_BYTES: u64 = 1024 * 1024;
+pub const MAX_TRUST_DIRECTORY_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_TRUST_TRAVERSAL_ENTRIES: usize = MAX_TRUST_DOCUMENTS * 2;
+pub const MAX_TRUST_TRAVERSAL_DEPTH: usize = 8;
 
 use crate::contracts::{
     ResolvedItem, SignatureEnvelope, SignatureHeader, SignerFingerprint, TrustClass, VerifiedItem,
@@ -253,32 +260,77 @@ impl TrustStore {
     ///
     /// The fingerprint is the SHA-256 hex digest of the raw public key bytes.
     pub fn load_from_dir(keys_dir: &Path) -> Result<Self, EngineError> {
-        if !keys_dir.exists() {
-            return Ok(Self::empty());
-        }
-
-        let entries = std::fs::read_dir(keys_dir).map_err(|e| {
+        let mut file_count = 0_usize;
+        let mut total_bytes = 0_u64;
+        let mut files = Vec::new();
+        let present = lillux::visit_regular_files_no_follow_bounded(
+            keys_dir,
+            lillux::DirectoryTraversalBudget::new(
+                MAX_TRUST_TRAVERSAL_ENTRIES,
+                MAX_TRUST_TRAVERSAL_DEPTH,
+            ),
+            |_relative, is_directory| Ok(is_directory),
+            |relative, file| {
+                file_count = file_count.saturating_add(1);
+                if file_count > MAX_TRUST_DOCUMENTS {
+                    anyhow::bail!("trust directory exceeds {MAX_TRUST_DOCUMENTS} regular files");
+                }
+                let path = keys_dir.join(relative);
+                let ext = path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("");
+                if !matches!(ext, "toml" | "pub" | "key") {
+                    return Ok(());
+                }
+                let bytes = lillux::read_open_regular_file_bounded(file, MAX_TRUST_DOCUMENT_BYTES)?;
+                total_bytes = total_bytes
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| anyhow::anyhow!("trust directory byte count overflow"))?;
+                if total_bytes > MAX_TRUST_DIRECTORY_BYTES {
+                    anyhow::bail!(
+                        "trust directory exceeds {MAX_TRUST_DIRECTORY_BYTES} aggregate bytes"
+                    );
+                }
+                files.push((path, bytes));
+                Ok(())
+            },
+        )
+        .map_err(|error| {
             EngineError::Internal(format!(
-                "cannot read trust store dir {}: {e}",
+                "cannot securely read trust store dir {}: {error:#}",
                 keys_dir.display()
             ))
         })?;
+        if !present {
+            return Ok(Self::empty());
+        }
+        Self::load_from_files(files)
+    }
 
+    /// Load one deterministic set of trusted-key documents from already
+    /// admitted bytes. Paths are diagnostic identities only and are never
+    /// reopened.
+    pub fn load_from_files(
+        files: impl IntoIterator<Item = (PathBuf, Vec<u8>)>,
+    ) -> Result<Self, EngineError> {
+        let mut files = files.into_iter().collect::<Vec<_>>();
+        files.sort_by(|left, right| left.0.cmp(&right.0));
         let mut signers = HashMap::new();
-
-        let mut paths: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .collect();
-        paths.sort();
-
-        for path in &paths {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
+        for (path, bytes) in files {
+            let ext = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("");
             match ext {
                 "toml" => {
-                    let doc = load_trusted_key_doc(path, &signers)?;
+                    let content = std::str::from_utf8(&bytes).map_err(|error| {
+                        EngineError::Internal(format!(
+                            "trusted key doc {} is not UTF-8: {error}",
+                            path.display()
+                        ))
+                    })?;
+                    let doc = load_trusted_key_doc_content(content, &path, &signers)?;
                     tracing::debug!(
                         fingerprint = %doc.fingerprint,
                         owner = %doc.owner,
@@ -294,20 +346,18 @@ impl TrustStore {
                         },
                     );
                 }
-                "pub" | "key" => match load_signer_key(path) {
-                    Ok(signer) => {
-                        tracing::debug!(fingerprint = %signer.fingerprint, path = %path.display(), "loaded trusted signer key");
-                        signers.insert(signer.fingerprint.clone(), signer);
-                    }
-                    Err(e) => return Err(e),
-                },
-                _ => {
-                    // Non-key files (readme.txt, etc.) are silently skipped
-                    continue;
+                "pub" | "key" => {
+                    let signer = load_signer_key_content(&bytes, &path)?;
+                    tracing::debug!(
+                        fingerprint = %signer.fingerprint,
+                        path = %path.display(),
+                        "loaded trusted signer key"
+                    );
+                    signers.insert(signer.fingerprint.clone(), signer);
                 }
+                _ => {}
             }
         }
-
         Ok(Self { signers })
     }
 
@@ -405,6 +455,17 @@ impl TrustStore {
         lillux::cas::sha256_hex(&bytes)
     }
 
+    pub(crate) fn estimated_size_bytes(&self) -> usize {
+        self.signers
+            .values()
+            .map(|signer| {
+                signer.fingerprint.capacity()
+                    + signer.label.as_ref().map(String::capacity).unwrap_or(0)
+                    + signer.verifying_key.as_bytes().len()
+            })
+            .sum()
+    }
+
     /// Return a trust store that includes project-local keys.
     ///
     /// Project keys take priority (first-wins): if a fingerprint exists
@@ -430,6 +491,53 @@ impl TrustStore {
         }
         Ok(std::borrow::Cow::Owned(Self { signers: merged }))
     }
+
+    /// Overlay project-local keys from one admitted project-content
+    /// authority. File selection, formats, and bounds stay owned by the trust
+    /// subsystem; the engine does not duplicate this policy.
+    pub fn with_project_keys_from_content(
+        &self,
+        content: &dyn crate::project_content::AuthoritativeProjectContent,
+    ) -> Result<Self, EngineError> {
+        let prefix = Path::new(crate::AI_DIR).join(crate::TRUST_KEYS_DIR);
+        let entries = content.list_files(&prefix, false, MAX_TRUST_DOCUMENTS)?;
+        let mut total_bytes = 0_u64;
+        let mut files = Vec::new();
+        for entry in entries.into_iter().filter(|entry| {
+            entry
+                .relative_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| matches!(extension, "toml" | "pub" | "key"))
+        }) {
+            total_bytes = total_bytes.checked_add(entry.size).ok_or_else(|| {
+                EngineError::Internal("project trust-key byte count overflow".to_string())
+            })?;
+            if total_bytes > MAX_TRUST_DIRECTORY_BYTES {
+                return Err(EngineError::Internal(format!(
+                    "project trust keys exceed {MAX_TRUST_DIRECTORY_BYTES} bytes"
+                )));
+            }
+            let project_relative = prefix.join(&entry.relative_path);
+            let bytes = content
+                .read_file(&project_relative, MAX_TRUST_DOCUMENT_BYTES)?
+                .ok_or_else(|| {
+                    EngineError::Internal(format!(
+                        "admitted project trust key disappeared: {}",
+                        project_relative.display()
+                    ))
+                })?;
+            files.push((entry.relative_path, bytes));
+        }
+        let project_keys = Self::load_from_files(files)?;
+        let mut merged = project_keys.signers;
+        for (fingerprint, signer) in &self.signers {
+            merged
+                .entry(fingerprint.clone())
+                .or_insert_with(|| signer.clone());
+        }
+        Ok(Self { signers: merged })
+    }
 }
 
 fn append_fingerprint_field(bytes: &mut Vec<u8>, field: &[u8]) {
@@ -439,16 +547,10 @@ fn append_fingerprint_field(bytes: &mut Vec<u8>, field: &[u8]) {
 
 // ── Key loading ─────────────────────────────────────────────────────
 
-/// Load a single signer public key from a file.
-///
-/// Supports two formats:
-///   - `ed25519:<base64>` (one line)
-///   - Raw base64-encoded 32-byte key (one line)
-fn load_signer_key(path: &Path) -> Result<TrustedSigner, EngineError> {
-    let raw = std::fs::read_to_string(path).map_err(|e| {
-        EngineError::Internal(format!("cannot read key file {}: {e}", path.display()))
+fn load_signer_key_content(raw: &[u8], path: &Path) -> Result<TrustedSigner, EngineError> {
+    let raw = std::str::from_utf8(raw).map_err(|error| {
+        EngineError::Internal(format!("key file {} is not UTF-8: {error}", path.display()))
     })?;
-
     let line = raw.lines().next().unwrap_or("").trim();
 
     let key_b64 = if let Some(stripped) = line.strip_prefix("ed25519:") {
@@ -514,17 +616,11 @@ fn load_signer_key(path: &Path) -> Result<TrustedSigner, EngineError> {
 /// - Self-signed (signer_fp == key_fp): verifies using the key in the file
 /// - Cross-signed (signer_fp != key_fp): looks up signer in already-loaded signers
 /// - Unsigned files are accepted with a warning log
-fn load_trusted_key_doc(
+fn load_trusted_key_doc_content(
+    content: &str,
     path: &Path,
     existing_signers: &HashMap<String, TrustedSigner>,
 ) -> Result<TrustedKeyDoc, EngineError> {
-    let content = std::fs::read_to_string(path).map_err(|e| {
-        EngineError::Internal(format!(
-            "cannot read trusted key doc {}: {e}",
-            path.display()
-        ))
-    })?;
-
     let toml_body = lillux::signature::strip_signature_lines(&content);
 
     let parsed: TrustedKeyToml = toml::from_str(&toml_body).map_err(|e| {
@@ -1020,7 +1116,43 @@ pub fn verify_resolved_item(
             item.source_path.display()
         ))
     })?;
+    verify_resolved_item_content(item, &content, trust_store)
+}
 
+/// Verify a resolved item against exact source bytes already opened by the
+/// engine.
+///
+/// This keeps the read/hash/verify sequence single-pass for static
+/// verification caching. It is crate-visible only: callers outside the engine
+/// cannot pair fabricated resolution metadata with arbitrary bytes.
+pub(crate) fn verify_resolved_item_content(
+    item: ResolvedItem,
+    content: &str,
+    trust_store: &TrustStore,
+) -> Result<VerifiedItem, EngineError> {
+    let actual_content_hash = crate::item_resolution::content_hash(content);
+    verify_resolved_item_content_with_hash(item, content, &actual_content_hash, trust_store)
+}
+
+/// Verify bytes whose whole-file digest was already computed by the engine.
+///
+/// The supplied digest is not caller authority: it is compared with the
+/// resolver's admitted digest before signature verification. Keeping this
+/// helper crate-private prevents another crate from substituting unproven
+/// bytes while avoiding a second SHA-256 pass in the static-evidence cache.
+pub(crate) fn verify_resolved_item_content_with_hash(
+    item: ResolvedItem,
+    content: &str,
+    actual_content_hash: &str,
+    trust_store: &TrustStore,
+) -> Result<VerifiedItem, EngineError> {
+    if actual_content_hash != item.content_hash {
+        return Err(EngineError::ContentHashMismatch {
+            canonical_ref: item.canonical_ref.to_string(),
+            expected: item.content_hash.clone(),
+            actual: actual_content_hash.to_owned(),
+        });
+    }
     tracing::debug!(
         item_ref = %item.canonical_ref,
         has_signature = item.signature_header.is_some(),
@@ -1030,7 +1162,7 @@ pub fn verify_resolved_item(
     match &item.signature_header {
         Some(header) => {
             let (trust_class, signer) =
-                verify_item_signature(&content, header, &item.source_format.signature, trust_store)
+                verify_item_signature(content, header, &item.source_format.signature, trust_store)
                     .map_err(|e| patch_canonical_ref(e, &item.canonical_ref.to_string()))?;
 
             Ok(VerifiedItem {

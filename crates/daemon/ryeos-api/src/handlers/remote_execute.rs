@@ -46,8 +46,8 @@ pub struct Request {
     /// Parameters for the item.
     #[serde(default)]
     pub parameters: Value,
-    /// Explicit execution semantics for the destination. The handler changes
-    /// only routing-local fields after pushing the requested project state.
+    /// Explicit execution semantics for the destination. The shared forwarder
+    /// binds its project source to the exact snapshot produced by the push.
     pub execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
     /// Optional method call `{ method, args }` forwarded to the remote
     /// for method-dispatch kinds (knowledge query/graph/validate, …).
@@ -271,14 +271,7 @@ fn destination_execution_policy(
             ));
         }
     }
-    let mut policy = requested.clone();
-    if let ProjectExecutionPolicy::Pinned { source, .. } = &mut policy.project {
-        *source = PinnedSource::CurrentHead;
-    }
-    policy
-        .validate()
-        .map_err(|error| HandlerError::BadRequest(error.to_string()))?;
-    Ok(policy)
+    Ok(requested.clone())
 }
 
 fn authorize_execution_refs(
@@ -315,6 +308,9 @@ fn authorize_execution_refs(
 
 fn remote_forward_error_to_handler_error(e: forward::RemoteForwardError) -> HandlerError {
     match e {
+        forward::RemoteForwardError::ExecutionPolicyInvalid { message } => {
+            HandlerError::BadRequest(message)
+        }
         forward::RemoteForwardError::MissingSnapshotHash => HandlerError::BadRequest(
             "remote execution completed but no snapshot_hash in result — async remote execute is not supported"
                 .into(),
@@ -339,6 +335,12 @@ fn remote_forward_error_to_handler_error(e: forward::RemoteForwardError) -> Hand
                  This indicates a misconfigured remote or a bug; do not \
                  re-run blindly. Inspect the remote's HEAD ref.",
                 result, pushed
+            ))
+        }
+        mismatch @ forward::RemoteForwardError::SnapshotAuthorityMismatch { .. } => {
+            let code = mismatch.code();
+            HandlerError::Internal(format!(
+                "remote forward failed [{code}]: {mismatch:#}"
             ))
         }
         other => {

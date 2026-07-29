@@ -160,6 +160,10 @@ pub(crate) struct DispatchLaunchOptions {
     /// caller-named wrapper; both success and failure persistence consume this
     /// same non-optional contract.
     root_admission: ryeos_app::thread_lifecycle::RootExecutionAdmission,
+    /// Exact terminal applicability classified by the same preflight as
+    /// `root_admission`; consumed in background dispatch without a second
+    /// route walk.
+    root_dispatch_evidence: ryeos_executor::dispatch::RootDispatchEvidence,
     /// Canonical project authority copied from the sealed admission. Background
     /// launch never reuses the caller's pre-canonical path spelling.
     project_path: std::path::PathBuf,
@@ -173,6 +177,7 @@ impl DispatchLaunchOptions {
     /// Default execution controls for a synchronously admitted root.
     pub(crate) fn admitted(
         root_admission: ryeos_app::thread_lifecycle::RootExecutionAdmission,
+        root_dispatch_evidence: ryeos_executor::dispatch::RootDispatchEvidence,
         execution_workspace: &std::path::Path,
         ref_bindings: BTreeMap<String, String>,
         lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
@@ -209,6 +214,7 @@ impl DispatchLaunchOptions {
             launch_timings: None,
             lifecycle_authority,
             root_admission,
+            root_dispatch_evidence,
             project_path,
             captured_generation: None,
         })
@@ -301,12 +307,22 @@ fn preflight_dispatch_launch_core(
             request.project_path.display()
         ))
     })?;
+    let subject_resolution_authority = request.provenance.subject_resolution_authority();
+    let project_context = if matches!(
+        subject_resolution_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ) {
+        ProjectContext::None
+    } else {
+        ProjectContext::LocalPath { path: project_path }
+    };
     let plan_ctx = PlanContext {
         requested_by: EffectivePrincipal::Local(Principal {
             fingerprint: request.principal_id.to_string(),
             scopes: request.principal_scopes.to_vec(),
         }),
-        project_context: ProjectContext::LocalPath { path: project_path },
+        project_context,
+        subject_resolution_authority,
         current_site_id: request.state.threads.site_id().to_string(),
         origin_site_id: request.origin_site_id.to_string(),
         execution_hints: Default::default(),
@@ -484,6 +500,7 @@ fn spawn_dispatch_launch_inner(
     let launch_timings = options.launch_timings;
     let lifecycle_authority = options.lifecycle_authority;
     let root_admission = options.root_admission;
+    let root_dispatch_evidence = options.root_dispatch_evidence;
     let ref_bindings = options.ref_bindings;
     let captured_generation = options.captured_generation;
     let first_poll_timer = launch_timings.as_ref().map(|timings| {
@@ -520,8 +537,6 @@ fn spawn_dispatch_launch_inner(
             .map_err(DispatchError::Internal)?;
         let plan_ctx = root_admission.plan_context().clone();
         let request_engine = root_admission.request_engine().clone();
-        let current_site_id_for_failure_row = plan_ctx.current_site_id.clone();
-        let origin_site_id_for_failure_row = plan_ctx.origin_site_id.clone();
 
         let exec_ctx = ryeos_executor::executor::ExecutionContext {
             principal_fingerprint: principal_id.clone(),
@@ -530,9 +545,6 @@ fn spawn_dispatch_launch_inner(
             plan_ctx,
             requested_call: call,
         };
-
-        let usage_subject_for_failure_row = usage_subject.clone();
-        let usage_subject_asserted_by_for_failure_row = usage_subject_asserted_by.clone();
 
         let dispatch_req = ryeos_executor::dispatch::DispatchRequest {
             launch_mode: &launch_mode,
@@ -551,6 +563,7 @@ fn spawn_dispatch_launch_inner(
             usage_subject_asserted_by,
             previous_thread_id,
             root_admission: Some(root_admission.clone()),
+            root_dispatch_evidence: Some(root_dispatch_evidence),
             parent_execution_context: None,
         };
 
@@ -635,35 +648,26 @@ fn spawn_dispatch_launch_inner(
                         }
                     }
                     Ok(None) => {
-                        let admitted_subject = &root_admission.verified_subject().resolved;
-                        let failure_request =
-                            ryeos_app::thread_lifecycle::ResolvedExecutionRequest {
-                                kind: root_admission.thread_profile().to_string(),
-                                item_ref: admitted_subject.canonical_ref.to_string(),
-                                executor_ref: admitted_subject.canonical_ref.to_string(),
-                                launch_mode: launch_mode.clone(),
-                                current_site_id: current_site_id_for_failure_row.clone(),
-                                origin_site_id: origin_site_id_for_failure_row.clone(),
-                                target_site_id: None,
-                                requested_by: Some(principal_id.clone()),
-                                usage_subject: usage_subject_for_failure_row.clone(),
-                                usage_subject_asserted_by:
-                                    usage_subject_asserted_by_for_failure_row.clone(),
-                                parameters: dispatch_req.params.clone(),
-                                ref_bindings: root_admission.ref_bindings().clone(),
-                                root_raw_content_digest: admitted_subject
-                                    .raw_content_digest
-                                    .clone(),
-                                resolved_item: admitted_subject.clone(),
-                                plan_context: exec_ctx.plan_ctx.clone(),
-                                root_admission: Some(root_admission.clone()),
-                            };
-                        let creation = state_clone.threads.create_root_thread_with_id(
+                        let failure_request = match root_admission
+                            .execution_request_for_selected_route(
+                                launch_mode.clone(),
+                                dispatch_req.params.clone(),
+                            ) {
+                            Ok(request) => request,
+                            Err(error) => {
+                                tracing::error!(
+                                    thread_id = %pre_minted_thread_id,
+                                    error = %error,
+                                    "refusing to persist a failed root without exact executor-route authority"
+                                );
+                                return Err(LaunchSpawnError::Dispatch(e));
+                            }
+                        };
+                        match state_clone.threads.create_root_thread_with_id(
                             &pre_minted_thread_id,
                             &failure_request,
                             dispatch_req.provenance.project_authority().clone(),
-                        );
-                        match creation {
+                        ) {
                             Ok(_) => state_clone
                                 .threads
                                 .get_thread(&pre_minted_thread_id)

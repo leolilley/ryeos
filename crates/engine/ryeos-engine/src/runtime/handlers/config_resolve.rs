@@ -130,6 +130,7 @@ impl RuntimeHandler for ConfigResolveHandler {
                 parsers: ctx.parsers,
                 kinds: ctx.kinds,
                 trust_store: ctx.trust_store,
+                project_authority: ctx.project_authority,
             };
             let direct_policy =
                 ExecutionPolicyResolver::new(load_ctx).resolve_for_item(&root_ref)?;
@@ -232,6 +233,7 @@ fn resolve_single(spec: &ConfigSpec, ctx: &CompileContext<'_>) -> Result<Value, 
         parsers: ctx.parsers,
         kinds: ctx.kinds,
         trust_store: ctx.trust_store,
+        project_authority: ctx.project_authority,
     };
     Ok(resolve_config_spec(spec, &load_ctx)?.value)
 }
@@ -404,6 +406,7 @@ metadata:
             trust_store: &rig.trust,
             node_trust_store: &rig.trust,
             project_root: None,
+            project_authority: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };

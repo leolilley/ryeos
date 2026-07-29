@@ -276,6 +276,7 @@ fn convert_contributor(value: &LaunchConfigContributorWire) -> ProviderConfigSou
         space: match value.space {
             ItemSpaceWire::Bundle => SnapshotItemSpace::Bundle,
             ItemSpaceWire::Project => SnapshotItemSpace::Project,
+            ItemSpaceWire::Node => SnapshotItemSpace::Node,
         },
         root_label: value.root_label.clone(),
         canonical_id: value.canonical_id.clone(),
@@ -283,6 +284,7 @@ fn convert_contributor(value: &LaunchConfigContributorWire) -> ProviderConfigSou
         trust_class: match value.trust_class {
             TrustClassWire::TrustedBundle => SnapshotTrustClass::TrustedBundle,
             TrustClassWire::TrustedProject => SnapshotTrustClass::TrustedProject,
+            TrustClassWire::TrustedNode => SnapshotTrustClass::TrustedNode,
             TrustClassWire::UntrustedProject => SnapshotTrustClass::UntrustedProject,
             TrustClassWire::Unsigned => SnapshotTrustClass::Unsigned,
         },
@@ -424,7 +426,11 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             exact_values(
                 "model_routing.allowed_spaces",
                 allowed_spaces,
-                &[ItemSpaceWire::Bundle, ItemSpaceWire::Project],
+                &[
+                    ItemSpaceWire::Bundle,
+                    ItemSpaceWire::Project,
+                    ItemSpaceWire::Node,
+                ],
             )?;
             exact_trust_values(
                 "model_routing.allowed_trust",
@@ -432,6 +438,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
                 &[
                     TrustClassWire::TrustedBundle,
                     TrustClassWire::TrustedProject,
+                    TrustClassWire::TrustedNode,
                 ],
             )?;
         }
@@ -451,15 +458,19 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             exact_values(
                 "model_providers.allowed_spaces",
                 allowed_spaces,
-                &[ItemSpaceWire::Bundle],
+                &[ItemSpaceWire::Bundle, ItemSpaceWire::Node],
             )?;
             exact_trust_values(
                 "model_providers.allowed_trust",
                 allowed_trust,
-                &[TrustClassWire::TrustedBundle],
+                &[TrustClassWire::TrustedBundle, TrustClassWire::TrustedNode],
             )?;
         }
-        _ => return Err("model_providers must be the trusted-bundle provider catalog".into()),
+        _ => {
+            return Err(
+                "model_providers must be the trusted node-or-bundle provider catalog".into(),
+            )
+        }
     }
     match request.config_inputs.get(EXECUTION_INPUT) {
         Some(LaunchConfigInputDeclWire::Item {
@@ -475,7 +486,11 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
             exact_values(
                 "execution.allowed_spaces",
                 allowed_spaces,
-                &[ItemSpaceWire::Bundle, ItemSpaceWire::Project],
+                &[
+                    ItemSpaceWire::Bundle,
+                    ItemSpaceWire::Project,
+                    ItemSpaceWire::Node,
+                ],
             )?;
             exact_trust_values(
                 "execution.allowed_trust",
@@ -483,6 +498,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
                 &[
                     TrustClassWire::TrustedBundle,
                     TrustClassWire::TrustedProject,
+                    TrustClassWire::TrustedNode,
                 ],
             )?;
         }
@@ -621,8 +637,9 @@ fn trust_class_key(value: &TrustClassWire) -> u8 {
     match value {
         TrustClassWire::TrustedBundle => 0,
         TrustClassWire::TrustedProject => 1,
-        TrustClassWire::UntrustedProject => 2,
-        TrustClassWire::Unsigned => 3,
+        TrustClassWire::TrustedNode => 2,
+        TrustClassWire::UntrustedProject => 3,
+        TrustClassWire::Unsigned => 4,
     }
 }
 

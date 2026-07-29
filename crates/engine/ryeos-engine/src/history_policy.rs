@@ -716,7 +716,10 @@ mod tests {
                 source_space: ItemSpace::Bundle,
                 resolved_from: "bundle:core".to_string(),
                 shadowed: Vec::new(),
+                probed_absent: Vec::new(),
                 materialized_project_root: None,
+                subject_resolution_authority:
+                    crate::contracts::SubjectResolutionAuthority::Projectless,
                 raw_content_digest: "raw-item-hash".to_string(),
                 content_hash: "item-hash".to_string(),
                 signature_header: Some(SignatureHeader {
@@ -762,6 +765,7 @@ mod tests {
                 }),
                 method_dispatch: None,
                 methods: Default::default(),
+                augmentation_methods: Default::default(),
                 launch_augmentations: Vec::new(),
             }),
             composed_value_contract: crate::contracts::ValueShape::any_mapping(),

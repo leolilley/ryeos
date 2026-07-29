@@ -138,7 +138,19 @@ pub enum LaunchPreparationDecl {
     Handler {
         handler: String,
         config: serde_json::Value,
+        execution_cache: LaunchPreparationExecutionCache,
     },
+}
+
+/// Mandatory signed execution-elision contract for a launch preparer.
+///
+/// Handler isolation and capability denial establish purity boundaries; this
+/// declaration additionally authorizes omitting a repeated invocation for an
+/// exact content-addressed request. There is no implicit legacy default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchPreparationExecutionCache {
+    ContentAddressed,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -172,6 +184,7 @@ pub enum ConfigMergeMode {
 pub enum LaunchItemSpace {
     Bundle,
     Project,
+    Node,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -223,6 +236,32 @@ pub struct VerifiedRuntime {
     pub trust_class: TrustClass,
     pub bundle_root: PathBuf,
     pub descriptor_path: PathBuf,
+}
+
+impl VerifiedRuntime {
+    /// Derive the native executor identity from this verified runtime's signed
+    /// `bin/<target>/<binary>` reference.
+    pub fn native_executor_ref(&self) -> Result<String, EngineError> {
+        let relative = self.yaml.binary_ref.strip_prefix("bin/").ok_or_else(|| {
+            EngineError::Internal(format!(
+                "verified runtime `{}` has an invalid binary_ref `{}`",
+                self.canonical_ref, self.yaml.binary_ref
+            ))
+        })?;
+        let (_, binary) = relative.split_once('/').ok_or_else(|| {
+            EngineError::Internal(format!(
+                "verified runtime `{}` binary_ref has no target/binary boundary",
+                self.canonical_ref
+            ))
+        })?;
+        if binary.is_empty() {
+            return Err(EngineError::Internal(format!(
+                "verified runtime `{}` binary_ref has an empty binary identity",
+                self.canonical_ref
+            )));
+        }
+        Ok(format!("native:{binary}"))
+    }
 }
 
 /// Catalog of all `kind: runtime` items discovered at engine init.
@@ -621,6 +660,18 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
         "launch_contract.primary_allowed_trust",
         &contract.primary_allowed_trust,
     )?;
+    if contract
+        .primary_allowed_spaces
+        .contains(&LaunchItemSpace::Node)
+        || contract
+            .primary_allowed_trust
+            .contains(&TrustClass::TrustedNode)
+    {
+        return runtime_yaml_error(
+            yaml_path,
+            "node source/trust authority is valid only for launch_contract.config_inputs",
+        );
+    }
     if !contract
         .primary_allowed_kinds
         .iter()
@@ -658,6 +709,16 @@ fn validate_launch_contract(yaml_path: &Path, yaml: &RuntimeYaml) -> Result<(), 
             &format!("launch_contract.ref_bindings.{name}.allowed_trust"),
             &binding.allowed_trust,
         )?;
+        if binding.allowed_spaces.contains(&LaunchItemSpace::Node)
+            || binding.allowed_trust.contains(&TrustClass::TrustedNode)
+        {
+            return runtime_yaml_error(
+                yaml_path,
+                format!(
+                    "launch_contract.ref_bindings.{name} cannot use node source/trust authority; node authority is config-only"
+                ),
+            );
+        }
     }
 
     if let LaunchPreparationDecl::Handler { handler, .. } = &contract.preparation {
@@ -1188,6 +1249,40 @@ mod tests {
             validate_runtime_yaml(&test_path(), &yaml).is_ok(),
             "v1 abi_version should be accepted"
         );
+    }
+
+    #[test]
+    fn rejects_config_only_node_authority_for_primary_items() {
+        let mut yaml = minimal_yaml();
+        yaml.launch_contract.primary_allowed_spaces =
+            vec![LaunchItemSpace::Bundle, LaunchItemSpace::Node];
+        let error = validate_runtime_yaml(&test_path(), &yaml)
+            .expect_err("node space must remain launch-config-only");
+        assert!(error.to_string().contains("config_inputs"));
+
+        let mut yaml = minimal_yaml();
+        yaml.launch_contract.primary_allowed_trust =
+            vec![TrustClass::TrustedBundle, TrustClass::TrustedNode];
+        let error = validate_runtime_yaml(&test_path(), &yaml)
+            .expect_err("node trust must remain launch-config-only");
+        assert!(error.to_string().contains("config_inputs"));
+    }
+
+    #[test]
+    fn rejects_config_only_node_authority_for_ref_bindings() {
+        let mut yaml = minimal_yaml();
+        yaml.launch_contract.ref_bindings.insert(
+            "model".to_string(),
+            RefBindingDecl {
+                required: true,
+                allowed_kinds: vec!["test_kind".to_string()],
+                allowed_spaces: vec![LaunchItemSpace::Node],
+                allowed_trust: vec![TrustClass::TrustedNode],
+            },
+        );
+        let error = validate_runtime_yaml(&test_path(), &yaml)
+            .expect_err("node authority must not authorize general ref bindings");
+        assert!(error.to_string().contains("config-only"));
     }
 
     #[test]

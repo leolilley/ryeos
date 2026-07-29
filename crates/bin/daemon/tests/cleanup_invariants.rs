@@ -75,6 +75,8 @@ fn local_plan_ctx() -> PlanContext {
             scopes: vec![],
         }),
         project_context: ProjectContext::None,
+        subject_resolution_authority:
+            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),

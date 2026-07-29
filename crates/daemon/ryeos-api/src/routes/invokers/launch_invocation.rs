@@ -101,7 +101,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
             project_path.as_path(),
             &principal_id,
             &format!("route-{thread_id}"),
-            ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+            None,
         )
         .map_err(|error| RouteDispatchError::BadRequest(format!("capture project: {error}")))?;
         let effective_project = crate::routes::abs_path::AbsolutePathBuf::try_from_str(
@@ -157,6 +157,7 @@ impl CompiledRouteInvocation for CompiledLaunchInvocation {
         })?;
         let launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
+            preflight.root_dispatch_evidence,
             effective_project.as_path(),
             ref_bindings,
             resolved_authority.lifecycle,

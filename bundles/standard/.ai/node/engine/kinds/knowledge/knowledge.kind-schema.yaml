@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-15T07:49:15Z:7f4f4ac08ffced53ea7b0e1f803f9f4057d1142a209d87762a6e2ae03b9155c4:TvQIaTJRPgOojTk0Q55jD6RF8ffh8of8ONxHQXIivy8CmZlwyu5hLEy+FUcgcfROUiL2l9mMpBGUur7sO0dfBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-28T12:15:02Z:fd645c95738cfa78513e72bf184eae80a2deb0daa2e4037504c93ea8d5deac19:sEUwTRAuhFgJ6QPSxqztzJBVFq+IImDL8vmvOGQwcwaNY5Pd/0qx4xiWpj3sF0MyMsyMIyxmX/aWYIgH0+waBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "engine/kinds/knowledge"
 version: "1.0.0"
 location:
@@ -85,6 +85,15 @@ execution:
             type: string
           required: false
           default: []
+  # Private daemon augmentation surface. Unlike `methods`, these operations
+  # cannot be invoked through generic method dispatch. The implementation
+  # owner declares the exact execution-elision and config contract.
+  augmentation_methods:
+    compose_positions:
+      execution_cache: content_addressed
+      runtime_config:
+        token_estimation:
+          path: knowledge-runtime/token_estimation
   thread_profile:
     name: knowledge_run
     root_executable: true

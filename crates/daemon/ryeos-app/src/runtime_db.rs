@@ -1875,7 +1875,10 @@ fn runtime_user_tables(conn: &Connection) -> Result<BTreeSet<String>> {
 }
 
 const PROJECT_AUTHORITY_ENVELOPE_KIND: &str = "execution_project_authority";
-const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 1;
+// Epoch 2 adds the independently durable base snapshot identity to pinned
+// generations. There is deliberately no compatibility reader: a row admitted
+// under the predecessor authority shape must be restarted under this contract.
+const PROJECT_AUTHORITY_SCHEMA_EPOCH: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3122,21 +3125,23 @@ impl RuntimeDb {
             if let Some(hash) = intent.admitted_launch_capsule_hash {
                 roots.insert(hash);
             }
-            if let Some(hash) = intent
-                .child_project_authority
-                .as_ref()
-                .and_then(|authority| authority.base_snapshot_projection())
-            {
-                roots.insert(hash.to_string());
+            if let Some(authority) = intent.child_project_authority.as_ref() {
+                if let Some(hash) = authority.subject_base_snapshot_hash() {
+                    roots.insert(hash.to_string());
+                }
+                if let Some(hash) = authority.operational_snapshot_projection() {
+                    roots.insert(hash.to_string());
+                }
             }
         }
         for waiter in self.list_follow_waiters()? {
-            if let Some(hash) = waiter
-                .child_project_authority
-                .as_ref()
-                .and_then(|authority| authority.base_snapshot_projection())
-            {
-                roots.insert(hash.to_string());
+            if let Some(authority) = waiter.child_project_authority.as_ref() {
+                if let Some(hash) = authority.subject_base_snapshot_hash() {
+                    roots.insert(hash.to_string());
+                }
+                if let Some(hash) = authority.operational_snapshot_projection() {
+                    roots.insert(hash.to_string());
+                }
             }
         }
         Ok(roots.into_iter().collect())
@@ -7120,13 +7125,19 @@ mod tests {
     }
 
     #[test]
-    fn project_authority_envelope_rejects_epoch_before_nested_decode() {
+    fn predecessor_project_authority_envelope_is_rejected_before_nested_decode() {
         let raw = lillux::canonical_json(&serde_json::json!({
             "kind": PROJECT_AUTHORITY_ENVELOPE_KIND,
-            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH + 1,
+            "schema_epoch": PROJECT_AUTHORITY_SCHEMA_EPOCH - 1,
             "authority": {
-                "kind": "live_project",
-                "live_access": {
+                "kind": "pinned_generation",
+                "original_project_path": "/project",
+                "project_identity": "project",
+                "snapshot_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "persistence": "copy_on_write",
+                "access": "read_write",
+                "authorized_write_namespaces": ["project"],
+                "confinement": {
                     "denied_control_paths": [".ai"],
                     "symlink_policy": "descriptor_rooted_no_escape"
                 }
@@ -7139,7 +7150,7 @@ mod tests {
         assert!(message.contains(&format!(
             "current schema_epoch={PROJECT_AUTHORITY_SCHEMA_EPOCH}"
         )));
-        assert!(!message.contains("missing field `confinement`"));
+        assert!(!message.contains("missing field `base_snapshot_hash`"));
     }
 
     #[test]

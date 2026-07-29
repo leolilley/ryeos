@@ -17,6 +17,7 @@ use ryeos_engine::contracts::{
     EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
 };
 use ryeos_engine::engine::Engine;
+use ryeos_engine::item_resolution::RegisteredBundleRoot;
 use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::TrustStore;
@@ -96,6 +97,10 @@ fn build_engine_against_bundle() -> Engine {
         .with_trust_store(trust_store.clone())
         .with_node_trust_store(trust_store)
         .with_composers(composers)
+        .with_registered_bundle_roots(vec![RegisteredBundleRoot {
+            name: "core".to_owned(),
+            canonical_root: bundle_root,
+        }])
 }
 
 fn plan_ctx(project_dir: &Path) -> PlanContext {
@@ -107,6 +112,7 @@ fn plan_ctx(project_dir: &Path) -> PlanContext {
         project_context: ProjectContext::LocalPath {
             path: project_dir.to_path_buf(),
         },
+        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),

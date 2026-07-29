@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-13T07:43:47Z:d3d43d7b3a43de79215c1669a750105706c53480ab3370e34b4d7eac75cccde9:9Ql/8hkc708X6AJsEzfpTlEtJ913/Da9TyhionSGdkUumJakALqzjkzyZTwEAXOH1b0AGKSH515z8qqFxPCmAg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-28T23:59:21Z:860be8e15cf6a37f0060e82d30dd4996f9166f9f65475962c4e901d8485871f0:1JCeRSVCbC4fa5/qnIF/XkxEEH+nAcY6EbyeLFzlbofIoJWKHOfcunD3ZIEcuj/++2vjohG/6pLe5BLWxcMuBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "ui-development"
 title: "Browser UI Development Workflow"
 description: "How to iterate on RyeOS UI browser UI assets without republishing bundles for every JS/CSS edit"
 entry_type: reference
-version: "1.0.0"
+version: "1.1.0"
 ```
 
 # Browser UI Development Workflow
@@ -119,9 +119,10 @@ installed binaries/bundles:
 scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
-That script runs the heavier packaged-layout path: populate bundles, install
-`ryeos`/`ryeosd`, install bundle sources, run `ryeos init`, and restart an
-already-running daemon.
+That script runs the packaged-layout path using already-built checkout
+artifacts: install `ryeos`/`ryeosd`, install bundle sources, run `ryeos init`,
+and restart an already-running daemon. It populates/rebuilds bundles only when
+explicitly passed `--populate` with `--all` or `--crates`.
 
 ## What requires a rebuild or bundle refresh
 
@@ -130,8 +131,8 @@ already-running daemon.
 | `crates/clients/web/pkg/*.js` or `*.css` only | run `scripts/dev-ui-assets.sh --background`, then refresh browser at port 7411 |
 | `crates/clients/base/src/ui/*` | rebuild WASM / update `crates/clients/web/pkg/ryeos_web*.{js,wasm}` through the project’s WASM build path |
 | `crates/daemon/ryeos-ui/src/assets.rs` or route/static-mode code | rebuild/restart daemon |
-| Bundle YAML or bundle-owned binaries | `scripts/populate-bundles.sh` or `scripts/gate.sh --no-tests` |
-| Full packaged install repair | `scripts/pkg/install-local-direct.sh --trust-source-publishers` |
+| Bundle YAML or bundle-owned binaries | `scripts/populate-bundles.sh` or `scripts/gate.sh --refresh-bundles --no-tests` |
+| Full packaged install repair from already-built artifacts | `scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 
 ## Lightweight checks
 

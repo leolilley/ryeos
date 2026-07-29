@@ -82,6 +82,8 @@ async fn unrecorded_only_rejects_a_recorded_service_before_handler_effects() {
         plan_ctx: PlanContext {
             requested_by: EffectivePrincipal::Local(principal),
             project_context: ProjectContext::None,
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             current_site_id: "site:test".to_string(),
             origin_site_id: "site:test".to_string(),
             execution_hints: ExecutionHints::default(),

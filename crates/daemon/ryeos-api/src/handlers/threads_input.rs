@@ -178,8 +178,10 @@ fn ensure_execution_identity_continuity(
     {
         mismatches.push("project_root_projection");
     }
-    if row_authority.and_then(|authority| authority.base_snapshot_projection())
-        != prior_resume.project_authority.base_snapshot_projection()
+    if row_authority.and_then(|authority| authority.operational_snapshot_projection())
+        != prior_resume
+            .project_authority
+            .operational_snapshot_projection()
     {
         mismatches.push("base_project_snapshot_projection");
     }
@@ -416,6 +418,7 @@ fn admit_fresh_launch(
     })?;
     crate::routes::launch::DispatchLaunchOptions::admitted(
         root_admission,
+        preflight.root_dispatch_evidence,
         &project.effective_path,
         ref_bindings.clone(),
         lifecycle_authority,
@@ -483,7 +486,7 @@ pub async fn handle(
                     project_path.as_path(),
                     &ctx.fingerprint,
                     &format!("thread-input-{thread_id}"),
-                    ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+                    None,
                 )
                 .map_err(|error| {
                     HandlerError::BadRequest(format!("capture fresh thread project: {error}"))
@@ -744,7 +747,7 @@ pub async fn handle(
         project_root: previous.project_root.as_ref().map(std::path::PathBuf::from),
         base_project_snapshot_hash: resume_context
             .project_authority
-            .base_snapshot_projection()
+            .operational_snapshot_projection()
             .map(str::to_owned),
         project_authority: resume_context.project_authority.clone(),
         usage_subject: None,
@@ -1064,11 +1067,11 @@ mod tests {
                     .and_then(|authority| authority.project_root_projection())
             );
             assert_eq!(
-                alternative.base_snapshot_projection(),
+                alternative.operational_snapshot_projection(),
                 previous
                     .project_authority
                     .as_ref()
-                    .and_then(|authority| authority.base_snapshot_projection())
+                    .and_then(|authority| authority.operational_snapshot_projection())
             );
             let error =
                 ensure_execution_identity_continuity(&previous, &resume_identity(alternative))

@@ -46,6 +46,39 @@ pub fn resolve_item_for_corpus(
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
 ) -> Result<CorpusItemProjection, ResolutionError> {
+    resolve_item_for_corpus_from_authority(item, kinds, parsers, roots, trust_store, None)
+}
+
+pub fn resolve_item_for_corpus_under_project_authority(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    project_root: &std::path::Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+) -> Result<CorpusItemProjection, ResolutionError> {
+    resolve_item_for_corpus_from_authority(
+        item,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        Some((project_root, project_content)),
+    )
+}
+
+fn resolve_item_for_corpus_from_authority(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<CorpusItemProjection, ResolutionError> {
     // Verified raw load. Errors on integrity failure / missing / unreadable
     // — never silently dropped — but tolerates a malformed body.
     let raw = load_item_raw(
@@ -55,6 +88,7 @@ pub fn resolve_item_for_corpus(
         item,
         "<corpus>",
         ResolutionStepName::PipelineInit,
+        project_authority,
     )?;
 
     let ancestor = ResolvedAncestor {

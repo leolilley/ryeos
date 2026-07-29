@@ -17,7 +17,7 @@ mod runtime_decorations;
 pub use execution_plan::{
     EngineContext, ExecutionPlan, MaterializationRequirement, PlanBundleExecutorIdentity,
     PlanCapabilities, PlanContext, PlanNode, PlanNodeId, PlanRuntimeIdentity, PlanStdin,
-    PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand,
+    PlanSubprocessSpec, PlanTrustAuthority, PlanVerifiedCommand, SubjectResolutionAuthority,
 };
 pub use runtime_decorations::{
     CancellationMode, ExecutionDecorations, NativeAsyncSpec, NativeResumeSpec, RuntimeEnvSource,
@@ -2828,6 +2828,9 @@ pub struct ResolvedSourceFormat {
 pub enum ItemSpace {
     Project,
     Bundle,
+    /// Node-local signed configuration. This space is admitted only by the
+    /// launch-config loader and is never a general authored-item root.
+    Node,
 }
 
 impl ItemSpace {
@@ -2835,6 +2838,7 @@ impl ItemSpace {
         match self {
             Self::Project => "project",
             Self::Bundle => "bundle",
+            Self::Node => "node",
         }
     }
 }
@@ -2939,7 +2943,15 @@ pub struct ResolvedItem {
     pub resolved_from: String,
     /// Lower-priority candidates that were shadowed by the winner
     pub shadowed: Vec<ShadowedCandidate>,
+    /// Higher-or-equal precedence candidates observed absent while selecting
+    /// the winner. These are part of the item's resolution authority because
+    /// adding any one of them can change which source wins.
+    pub probed_absent: Vec<ProbedAbsence>,
     pub materialized_project_root: Option<PathBuf>,
+    /// Engine-bound authority under which this exact item was resolved.
+    /// Verification rejects a context carrying a different authority even
+    /// when both happen to name the same local materialization path.
+    pub subject_resolution_authority: SubjectResolutionAuthority,
     /// SHA-256 of the signature-stripped bytes that runtimes parse. Unlike
     /// `content_hash`, this excludes the signature envelope and therefore
     /// matches `LaunchEnvelope.resolution.root.raw_content_digest`.

@@ -2652,6 +2652,7 @@ dependencies = [
  "ryeos-expression",
  "ryeos-handler-protocol",
  "ryeos-isolation-protocol",
+ "ryeos-state",
  "ryeos-tracing",
  "serde",
  "serde_json",

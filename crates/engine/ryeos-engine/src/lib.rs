@@ -25,6 +25,7 @@ pub mod method_wire;
 mod parser_overlay_cache;
 pub mod parsers;
 pub mod plan_builder;
+pub mod project_content;
 pub mod protocol_vocabulary;
 pub mod protocols;
 pub mod resolution;

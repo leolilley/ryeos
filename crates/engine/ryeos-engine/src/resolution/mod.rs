@@ -14,7 +14,10 @@ pub mod types;
 
 pub use alias::AliasResolver;
 pub use context::ResolutionContext;
-pub use corpus::{CorpusItemProjection, CorpusReferenceEdge, resolve_item_for_corpus};
+pub use corpus::{
+    CorpusItemProjection, CorpusReferenceEdge, resolve_item_for_corpus,
+    resolve_item_for_corpus_under_project_authority,
+};
 pub use decl::ResolutionStepDecl;
 pub use types::{
     AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode, ResolutionEdge,
@@ -62,6 +65,54 @@ pub fn run_resolution_pipeline_with_probes(
     trust_store: &TrustStore,
     composers: &ComposerRegistry,
 ) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
+    run_resolution_pipeline_with_probes_from_authority(
+        item,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        composers,
+        None,
+    )
+}
+
+/// Run the effective pipeline with project discovery and reads sourced
+/// exclusively from one admitted project-content authority.
+#[allow(clippy::too_many_arguments)]
+pub fn run_resolution_pipeline_with_probes_under_project_authority(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    composers: &ComposerRegistry,
+    project_root: &std::path::Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
+    run_resolution_pipeline_with_probes_from_authority(
+        item,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        composers,
+        Some((project_root, project_content)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_resolution_pipeline_with_probes_from_authority(
+    item: &CanonicalRef,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    composers: &ComposerRegistry,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
     let kind_schema = kinds
         .get(&item.kind)
         .ok_or_else(|| ResolutionError::KindNotExecutable {
@@ -86,6 +137,7 @@ pub fn run_resolution_pipeline_with_probes(
         roots,
         trust_store,
         composers,
+        project_authority,
     )
 }
 
@@ -127,6 +179,7 @@ pub fn run_effective_item_pipeline(
         roots,
         trust_store,
         composers,
+        None,
     )
     .map(|(output, _probes)| output)
 }
@@ -145,6 +198,10 @@ fn run_item_pipeline_inner(
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
     composers: &ComposerRegistry,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 ) -> Result<(ResolutionOutput, Vec<crate::contracts::ProbedAbsence>), ResolutionError> {
     // Reject duplicate `resolve_extends_chain` declarations per kind —
     // the step's state (`visiting_extends`, `done_extends`,
@@ -197,6 +254,7 @@ fn run_item_pipeline_inner(
         item,
         "<root>",
         ResolutionStepName::PipelineInit,
+        project_authority,
     )?;
 
     let mut ctx = ResolutionContext::new(
@@ -207,6 +265,7 @@ fn run_item_pipeline_inner(
         trust_store,
         alias_resolver,
         root_loaded,
+        project_authority,
     );
 
     for decl in resolution {

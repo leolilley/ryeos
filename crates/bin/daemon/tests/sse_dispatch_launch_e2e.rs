@@ -385,8 +385,8 @@ async fn sse_dispatch_launch_e2e_round_trip() {
     let events = parse_sse_bytes(&bytes);
     assert!(!events.is_empty(), "no SSE events received");
 
-    // Planning is emitted before a thread exists, so it has no persisted id
-    // and carries only the opaque launch id.
+    // Planning is yielded before the durable thread identity exists, so the
+    // client receives immediate progress without inventing a resumable event.
     let first = &events[0];
     assert_eq!(
         first.event, "execution_planning",
@@ -395,24 +395,33 @@ async fn sse_dispatch_launch_e2e_round_trip() {
     );
     assert!(
         first.id.is_none(),
-        "execution_planning must have no id; got id={:?}",
+        "execution_planning must have no id (would corrupt Last-Event-ID resume); got id={:?}",
         first.id
     );
-    let payload: serde_json::Value =
+    let planning_payload: serde_json::Value =
         serde_json::from_str(&first.data).expect("execution_planning data is JSON");
-    let launch_id = payload
+    assert!(
+        planning_payload
+            .get("launch_id")
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "execution_planning carries its opaque launch id"
+    );
+    let launch_id = planning_payload
         .get("launch_id")
-        .and_then(|v| v.as_str())
+        .and_then(|value| value.as_str())
         .expect("execution_planning carries launch_id");
     assert!(
         launch_id.starts_with("L-"),
         "launch id must start with L-: {launch_id}"
     );
     assert!(
-        payload.get("thread_id").is_none(),
+        planning_payload.get("thread_id").is_none(),
         "execution_planning must precede thread creation"
     );
 
+    // The later handoff event publishes the durable thread identity and also
+    // remains synthetic (no Last-Event-ID).
     let stream_started = events
         .iter()
         .find(|event| event.event == "stream_started")
@@ -455,7 +464,8 @@ async fn sse_dispatch_launch_e2e_round_trip() {
         all_summary
     );
 
-    // Persisted events must have monotonic numeric ids.
+    // Persisted events between the synthetic opening events and terminal must have
+    // monotonic numeric ids.
     let mut prev: Option<i64> = None;
     for ev in &events {
         if let Some(ref id) = ev.id {
@@ -781,7 +791,7 @@ async fn sse_dispatch_launch_rejects_non_root_executable_kind() {
         .await
         .expect("POST /execute/stream timed out")
         .expect("POST /execute/stream send failed");
-    assert_pre_admission_rejection(resp, "has no root-executable thread profile").await;
+    assert_pre_admission_rejection(resp, "is not root-executable").await;
 
     drop(project);
 }

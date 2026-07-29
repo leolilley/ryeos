@@ -809,7 +809,7 @@ fn build_engine_for_roots_with_isolation(
 
     let engine = Engine::new(kinds, parser_dispatcher, bundle_roots)
         .with_registered_bundle_roots(registered_bundle_roots.unwrap_or_default())
-        .with_operator_ai_root(config.app_root.join(ryeos_engine::AI_DIR))
+        .with_node_config_ai_root(config.app_root.join(ryeos_engine::AI_DIR))
         .with_isolation_generation(Arc::clone(&isolation))
         .with_trust_store(trust_store)
         .with_node_trust_store(node_trust_store)

@@ -57,8 +57,6 @@ pub struct ExecuteRequest {
     pub target_site_id: Option<String>,
     #[serde(default)]
     pub validate_only: bool,
-    #[serde(skip)]
-    pub project_source: Option<ProjectSource>,
     /// Method call: `{ method, args }`. The method selector is control
     /// plane — it chooses daemon-owned projection/validation/trust before
     /// the runtime is spawned — while the args are data plane. Absent for
@@ -111,6 +109,116 @@ fn execution_project_context(
             path: effective_path.to_path_buf(),
         }
     }
+}
+
+pub(crate) fn project_source_from_execution_policy(
+    policy: &ProjectExecutionPolicy,
+) -> ProjectSource {
+    match policy {
+        ProjectExecutionPolicy::Projectless | ProjectExecutionPolicy::LiveDirect { .. } => {
+            ProjectSource::LiveFs
+        }
+        ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CurrentHead,
+            ..
+        } => ProjectSource::PushedHead,
+        ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::Snapshot { hash },
+            ..
+        } => ProjectSource::Snapshot { hash: hash.clone() },
+        ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive { .. },
+            ..
+        } => ProjectSource::CaptureLiveFullProject,
+    }
+}
+
+pub(crate) fn pinned_realization_from_execution_policy(
+    policy: &ProjectExecutionPolicy,
+) -> Option<project_source::PinnedContextRealization> {
+    match policy {
+        ProjectExecutionPolicy::Projectless | ProjectExecutionPolicy::LiveDirect { .. } => None,
+        ProjectExecutionPolicy::Pinned {
+            realization: PinnedRealization::ReadOnly,
+            ..
+        } => Some(project_source::PinnedContextRealization::ReadOnly),
+        ProjectExecutionPolicy::Pinned {
+            realization: PinnedRealization::Cow { .. },
+            ..
+        } => Some(project_source::PinnedContextRealization::Cow),
+    }
+}
+
+pub(crate) fn project_execution_dimension_classes(
+    policy: &ProjectExecutionPolicy,
+) -> (
+    ryeos_app::launch_stage_timings::LaunchProjectSourceClass,
+    ryeos_app::launch_stage_timings::LaunchProjectRealizationClass,
+) {
+    use ryeos_app::launch_stage_timings::{
+        LaunchProjectRealizationClass as Realization, LaunchProjectSourceClass as Source,
+    };
+    match policy {
+        ProjectExecutionPolicy::Projectless => (Source::Projectless, Realization::Isolated),
+        ProjectExecutionPolicy::LiveDirect { .. } => (Source::LiveFs, Realization::Live),
+        ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CurrentHead,
+            realization,
+            ..
+        } => (
+            Source::PushedHead,
+            pinned_realization_dimension(realization),
+        ),
+        ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::Snapshot { .. },
+            realization,
+            ..
+        } => (Source::Snapshot, pinned_realization_dimension(realization)),
+        ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive { .. },
+            realization,
+            ..
+        } => (
+            Source::CaptureLive,
+            pinned_realization_dimension(realization),
+        ),
+    }
+}
+
+fn pinned_realization_dimension(
+    realization: &PinnedRealization,
+) -> ryeos_app::launch_stage_timings::LaunchProjectRealizationClass {
+    use ryeos_app::launch_stage_timings::LaunchProjectRealizationClass as Realization;
+    match realization {
+        PinnedRealization::ReadOnly => Realization::ReadOnly,
+        PinnedRealization::Cow { .. } => Realization::Cow,
+    }
+}
+
+pub(crate) fn validate_project_path_presence(
+    policy: &ProjectExecutionPolicy,
+    project_path: Option<&str>,
+) -> Result<(), &'static str> {
+    let projectless = matches!(policy, ProjectExecutionPolicy::Projectless);
+    if projectless == project_path.is_none() {
+        return Ok(());
+    }
+    Err(if projectless {
+        "projectless execution policy must not carry project_path"
+    } else {
+        "project-backed execution policy requires project_path"
+    })
+}
+
+pub(crate) fn create_isolated_no_project_workspace(
+    state: &ryeos_app::state::AppState,
+    checkout_id: &str,
+) -> anyhow::Result<(PathBuf, Arc<ryeos_app::temp_dir_guard::TempDirGuard>)> {
+    ryeos_app::temp_dir_guard::create_projectless_workspace(
+        &state.config.runtime_root().cache(),
+        &format!("no-project-{checkout_id}"),
+    )
+    .map_err(|error| anyhow::anyhow!("create isolated no-project workspace: {error}"))
 }
 
 fn resolve_project_authority(
@@ -381,14 +489,15 @@ pub(crate) fn resolve_execution_contract(
             | ProjectSource::Snapshot { .. }
             | ProjectSource::CaptureLiveFullProject => {
                 ryeos_app::execution_provenance::ExecutionProvenance::root_pushed_head(
-                    project_ctx.effective_path.clone(),
                     project_ctx.original_path.clone(),
                     project_ctx.request_engine.clone(),
                     project_ctx.temp_dir.clone().ok_or_else(|| {
                         anyhow::anyhow!("pinned project context lost its materialization lease")
                     })?,
-                    project_ctx.snapshot_hash.clone().ok_or_else(|| {
-                        anyhow::anyhow!("pinned project context has no immutable snapshot hash")
+                    project_ctx.pinned_materialization.clone().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "pinned project context has no verified materialization authority"
+                        )
                     })?,
                     authority.clone(),
                 )?
@@ -416,13 +525,30 @@ pub(crate) enum ProjectRootNormalization {
     CanonicalizeLive,
 }
 
+pub(crate) fn project_root_normalization_from_execution_policy(
+    policy: &ProjectExecutionPolicy,
+) -> ProjectRootNormalization {
+    match policy {
+        ProjectExecutionPolicy::Projectless => ProjectRootNormalization::Preserve,
+        ProjectExecutionPolicy::LiveDirect { .. }
+        | ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive { .. },
+            ..
+        } => ProjectRootNormalization::CanonicalizeLive,
+        ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CurrentHead | PinnedSource::Snapshot { .. },
+            ..
+        } => ProjectRootNormalization::Preserve,
+    }
+}
+
 pub(crate) struct ResolveProjectContextRequest {
     pub state: ryeos_app::state::AppState,
     pub source: ProjectSource,
     pub project_path: PathBuf,
     pub principal_id: String,
     pub checkout_id: String,
-    pub pinned_realization: project_source::PinnedContextRealization,
+    pub pinned_realization: Option<project_source::PinnedContextRealization>,
     pub normalization: ProjectRootNormalization,
     pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
 }
@@ -467,6 +593,21 @@ pub(crate) async fn resolve_project_context_off_thread(
     } else {
         ryeos_executor::execution::run_unbounded_project_capture_observed(operation, launch_timings)
             .await
+    }
+}
+
+pub(crate) fn map_project_source_error(
+    error: project_source::ProjectSourceError,
+) -> ryeos_executor::dispatch_error::DispatchError {
+    use ryeos_executor::dispatch_error::DispatchError;
+    match error {
+        error @ project_source::ProjectSourceError::PushFirst { .. } => {
+            DispatchError::ProjectSourcePushFirst(error.to_string())
+        }
+        project_source::ProjectSourceError::CheckoutFailed(detail) => {
+            DispatchError::ProjectSourceCheckoutFailed(detail)
+        }
+        project_source::ProjectSourceError::Other(detail) => DispatchError::ProjectSource(detail),
     }
 }
 
@@ -702,24 +843,13 @@ impl CompiledResponseMode for CompiledExecuteMode {
             ExecutionTarget::Here => None,
             ExecutionTarget::Site { site_id } => Some(site_id.clone()),
         };
-        request.project_source = Some(match &request.execution_policy.project {
-            ProjectExecutionPolicy::Projectless | ProjectExecutionPolicy::LiveDirect { .. } => {
-                ProjectSource::LiveFs
-            }
-            ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CurrentHead,
-                ..
-            } => ProjectSource::PushedHead,
-            ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::Snapshot { hash },
-                ..
-            } => ProjectSource::Snapshot { hash: hash.clone() },
-            ProjectExecutionPolicy::Pinned {
-                source: PinnedSource::CaptureLive { .. },
-                ..
-            } => ProjectSource::CaptureLiveFullProject,
-        });
-        let project_source = request.project_source.clone().unwrap_or_default();
+        let project_source =
+            project_source_from_execution_policy(&request.execution_policy.project);
+        if let Some(timings) = ctx.launch_timings.as_ref() {
+            let (source_class, realization_class) =
+                project_execution_dimension_classes(&request.execution_policy.project);
+            timings.set_project_dimensions(source_class, realization_class);
+        }
         if ctx.request_parts.uri.path() == "/execute/launch"
             && request.execution_policy.response != ExecutionResponse::Accepted
         {
@@ -738,16 +868,11 @@ impl CompiledResponseMode for CompiledExecuteMode {
             &request.execution_policy.project,
             ProjectExecutionPolicy::Projectless
         );
-        if no_project_requested != request.project_path.is_none() {
-            return Err(RouteDispatchError::BadRequest(
-                if no_project_requested {
-                    "projectless execution policy must not carry project_path"
-                } else {
-                    "project-backed execution policy requires project_path"
-                }
-                .to_string(),
-            ));
-        }
+        validate_project_path_presence(
+            &request.execution_policy.project,
+            request.project_path.as_deref(),
+        )
+        .map_err(|message| RouteDispatchError::BadRequest(message.to_string()))?;
         let root_canonical =
             ryeos_engine::canonical_ref::CanonicalRef::parse(item_ref).map_err(|error| {
                 RouteDispatchError::BadRequest(format!("invalid item ref '{item_ref}': {error}"))
@@ -914,54 +1039,12 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         axum::Json(json!({ "error": "project_path is required when project_source is pushed_head" })),
                     ).into_response());
                 }
-                let execution_root = state.config.runtime_root().cache().join("executions");
-                std::fs::create_dir_all(&execution_root).map_err(|error| {
-                    RouteDispatchError::Internal(format!(
-                        "create execution workspace root {}: {error}",
-                        execution_root.display()
-                    ))
-                })?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    std::fs::set_permissions(
-                        &execution_root,
-                        std::fs::Permissions::from_mode(0o700),
-                    )
+                let (workspace, guard) = create_isolated_no_project_workspace(&state, &checkout_id)
                     .map_err(|error| {
                         RouteDispatchError::Internal(format!(
-                            "protect execution workspace root {}: {error}",
-                            execution_root.display()
+                            "prepare isolated no-project workspace: {error:#}"
                         ))
                     })?;
-                }
-                let workspace = execution_root.join(format!("no-project-{checkout_id}"));
-                std::fs::create_dir(&workspace).map_err(|error| {
-                    RouteDispatchError::Internal(format!(
-                        "create isolated no-project workspace {}: {error}",
-                        workspace.display()
-                    ))
-                })?;
-                let guard = std::sync::Arc::new(ryeos_app::temp_dir_guard::TempDirGuard::new(
-                    workspace.clone(),
-                ));
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    std::fs::set_permissions(&workspace, std::fs::Permissions::from_mode(0o700))
-                        .map_err(|error| {
-                            RouteDispatchError::Internal(format!(
-                                "protect isolated no-project workspace {}: {error}",
-                                workspace.display()
-                            ))
-                        })?;
-                }
-                std::fs::create_dir(workspace.join(ryeos_engine::AI_DIR)).map_err(|error| {
-                    RouteDispatchError::Internal(format!(
-                        "initialize isolated no-project workspace {}: {error}",
-                        workspace.display()
-                    ))
-                })?;
                 no_project_guard = Some(guard);
                 workspace
             }
@@ -1088,13 +1171,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
         }
 
         // Resolve project execution context.
-        let pinned_realization = match &request.execution_policy.project {
-            ProjectExecutionPolicy::Pinned {
-                realization: PinnedRealization::ReadOnly,
-                ..
-            } => project_source::PinnedContextRealization::ReadOnly,
-            _ => project_source::PinnedContextRealization::Cow,
-        };
+        let pinned_realization =
+            pinned_realization_from_execution_policy(&request.execution_policy.project);
         let mut project_ctx =
             match resolve_project_context_off_thread(ResolveProjectContextRequest {
                 state: state.clone(),
@@ -1110,24 +1188,29 @@ impl CompiledResponseMode for CompiledExecuteMode {
             {
                 Ok(ctx) => ctx,
                 Err(err) => {
-                    use ryeos_executor::dispatch_error::DispatchError;
-                    use ryeos_executor::execution::project_source::ProjectSourceError as PSE;
-                    let dispatch_err: DispatchError = match err {
-                        err @ PSE::PushFirst { .. } => {
-                            DispatchError::ProjectSourcePushFirst(err.to_string())
-                        }
-                        PSE::CheckoutFailed(detail) => {
-                            DispatchError::ProjectSourceCheckoutFailed(detail)
-                        }
-                        PSE::Other(detail) => DispatchError::ProjectSource(detail),
-                    };
-                    return Ok(dispatch_error_response(dispatch_err));
+                    return Ok(dispatch_error_response(map_project_source_error(err)));
                 }
             };
         // The no-project scratch root remains live through capture. Execution
         // itself uses the immutable captured checkout and its own guard.
         let no_project_lifeline = no_project_guard.clone();
         let _no_project_source_guard = no_project_guard;
+
+        let resolved_contract = resolve_execution_contract(
+            &request.execution_policy,
+            &project_source,
+            &project_ctx,
+            no_project_lifeline.clone(),
+            state_root.clone(),
+            &caller_principal_id,
+            &caller_scopes,
+            &state,
+        )
+        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
+        let ResolvedExecutionContract {
+            provenance,
+            lifecycle_authority,
+        } = resolved_contract;
 
         // Build plan context.
         use ryeos_engine::contracts::{EffectivePrincipal, PlanContext};
@@ -1145,6 +1228,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 no_project_requested,
                 &project_ctx.effective_path,
             ),
+            subject_resolution_authority: provenance.subject_resolution_authority(),
             current_site_id: site_id.to_string(),
             origin_site_id: execution_origin_site_id,
             execution_hints: {
@@ -1169,94 +1253,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
             plan_ctx,
             requested_call: request.call().cloned(),
         };
-
-        let resolved_contract = resolve_execution_contract(
-            &request.execution_policy,
-            &project_source,
-            &project_ctx,
-            no_project_lifeline.clone(),
-            state_root.clone(),
-            &caller_principal_id,
-            &caller_scopes,
-            &state,
-        )
-        .map_err(|error| RouteDispatchError::BadRequest(error.to_string()))?;
-        let ResolvedExecutionContract {
-            provenance,
-            lifecycle_authority,
-        } = resolved_contract;
-
-        // ── Phase 0: preflight composition validation ───────────────
-        // Run the full resolution pipeline (including composition and
-        // instance validation) for the root item BEFORE entering
-        // dispatch. This ensures a malformed descriptor fails locally
-        // with a structured contract-violation error before any remote
-        // push, execute, or stream begins.
-        //
-        // The dispatch path's `resolve_dispatch_hop` only calls
-        // `engine.resolve()` + `engine.verify()` which does NOT run
-        // composition or contract validation. This preflight gate
-        // bridges the gap: if the composed value violates the kind
-        // schema's `composed_value_contract`, we return a typed
-        // `contract_violation` error (400) with per-field details
-        // matching the `items.effective` envelope shape.
-        {
-            use ryeos_engine::resolution::run_resolution_pipeline;
-
-            let engine_roots = project_ctx
-                .request_engine
-                .resolution_roots(Some(project_ctx.effective_path.clone()));
-            let request_snapshot = project_ctx
-                .request_engine
-                .effective_request_snapshot(Some(&project_ctx.effective_path))
-                .map_err(|e| {
-                    RouteDispatchError::Internal(format!("preflight parser dispatcher: {e}"))
-                })?;
-
-            match run_resolution_pipeline(
-                &root_canonical,
-                &project_ctx.request_engine.kinds,
-                &request_snapshot.parser_dispatcher,
-                &engine_roots,
-                &request_snapshot.trust_store,
-                &project_ctx.request_engine.composers,
-            ) {
-                Ok(_resolution_output) => {
-                    // Composition validated — proceed to dispatch.
-                }
-                Err(
-                    ryeos_engine::resolution::ResolutionError::ComposedValueContractViolation {
-                        kind: _,
-                        item_ref,
-                        report,
-                    },
-                ) => {
-                    use ryeos_executor::dispatch_error::{ContractViolationDetails, DispatchError};
-                    let details = ContractViolationDetails::from_report(&report);
-                    let error_count = report.errors.len();
-                    let warning_count = report.warnings.len();
-                    let dispatch_err = DispatchError::ComposedValueContractViolation {
-                        canonical_ref: item_ref.clone(),
-                        error_count,
-                        warning_count,
-                        details,
-                    };
-                    return Ok(dispatch_error_response(dispatch_err));
-                }
-                Err(other) => {
-                    // Other resolution errors (item not found, trust
-                    // failure, cycle, etc.) are not surfacing here for
-                    // the first time — dispatch will catch them
-                    // independently with its own error mapping. The
-                    // preflight step only gates on contract violations.
-                    tracing::debug!(
-                        item_ref = %item_ref,
-                        error = %other,
-                        "preflight resolution error (non-contract); deferring to dispatch"
-                    );
-                }
-            }
-        }
 
         // ── Phase 3: target-site forwarding ────────────────────────
         // After preflight validation passes, check whether the caller
@@ -1319,18 +1315,49 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         "seal accepted-launch project authority: {error:#}"
                     ))
                 })?;
-            let accepted_preflight = match ryeos_executor::dispatch::preflight_root_dispatch(
-                item_ref,
-                root_canonical.kind.as_str(),
-                &request.parameters,
-                &request.ref_bindings,
-                usage_subject.as_ref(),
-                usage_subject_asserted_by.as_deref(),
-                &accepted_project_binding,
-                &exec_ctx,
-                &state,
-                None,
-            ) {
+            let preflight_item_ref = item_ref.to_owned();
+            let preflight_kind = root_canonical.kind.clone();
+            let preflight_parameters = request.parameters.clone();
+            let preflight_ref_bindings = request.ref_bindings.clone();
+            let preflight_usage_subject = usage_subject.clone();
+            let preflight_usage_authority = usage_subject_asserted_by.clone();
+            let preflight_exec_ctx = ryeos_executor::executor::ExecutionContext {
+                principal_fingerprint: exec_ctx.principal_fingerprint.clone(),
+                caller_scopes: exec_ctx.caller_scopes.clone(),
+                engine: exec_ctx.engine.clone(),
+                plan_ctx: exec_ctx.plan_ctx.clone(),
+                requested_call: exec_ctx.requested_call.clone(),
+            };
+            let preflight_state = state.clone();
+            let preflight_timings = ctx.launch_timings.clone();
+            let preflight_queue_timer = preflight_timings.as_ref().map(|timings| {
+                timings.nested("preflight_admission", "preflight_blocking_queue_wait")
+            });
+            let accepted_preflight = tokio::task::spawn_blocking(move || {
+                drop(preflight_queue_timer);
+                let _preflight_work_timer = preflight_timings.as_ref().map(|timings| {
+                    timings.nested("preflight_admission", "preflight_blocking_work")
+                });
+                ryeos_executor::dispatch::preflight_root_dispatch(
+                    &preflight_item_ref,
+                    &preflight_kind,
+                    &preflight_parameters,
+                    &preflight_ref_bindings,
+                    preflight_usage_subject.as_ref(),
+                    preflight_usage_authority.as_deref(),
+                    &accepted_project_binding,
+                    &preflight_exec_ctx,
+                    &preflight_state,
+                    preflight_timings.as_ref(),
+                )
+            })
+            .await
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "accepted-launch preflight blocking worker failed: {error}"
+                ))
+            })?;
+            let accepted_preflight = match accepted_preflight {
                 Ok(preflight) if !preflight.class.persists_pre_minted_root() => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
@@ -1385,6 +1412,7 @@ impl CompiledResponseMode for CompiledExecuteMode {
             })?;
             let mut launch_options = crate::routes::launch::DispatchLaunchOptions::admitted(
                 accepted_root_admission,
+                accepted_preflight.root_dispatch_evidence,
                 &project_ctx.effective_path,
                 request.ref_bindings.clone(),
                 lifecycle_authority,
@@ -1521,6 +1549,44 @@ impl CompiledResponseMode for CompiledExecuteMode {
                         "usage_subject attribution is not supported for target-site forwarding",
                     )));
                 }
+                // Resolve, verify, compose, and attest the caller-named root
+                // immediately before the first remote side effect. This
+                // route-neutral boundary preserves structured contract
+                // failures without making local LiveFs launches repeat their
+                // mutable authority walk before full route admission.
+                let resolution_project_binding =
+                    ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                        &exec_ctx.engine,
+                        &exec_ctx.plan_ctx,
+                        &provenance,
+                    )
+                    .map_err(|error| {
+                        RouteDispatchError::Internal(format!(
+                            "seal remote root-resolution project authority: {error:#}"
+                        ))
+                    })?;
+                let resolution_item_ref = item_ref.to_owned();
+                let resolution_exec_ctx = exec_ctx.clone();
+                let resolution_state = state.clone();
+                let resolution_timings = ctx.launch_timings.clone();
+                let resolution_preflight = tokio::task::spawn_blocking(move || {
+                    ryeos_executor::dispatch::preflight_root_resolution(
+                        &resolution_item_ref,
+                        &resolution_project_binding,
+                        &resolution_exec_ctx,
+                        &resolution_state,
+                        resolution_timings.as_ref(),
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "remote root-resolution preflight blocking worker failed: {error}"
+                    ))
+                })?;
+                if let Err(error) = resolution_preflight {
+                    return Ok(dispatch_error_response(error));
+                }
                 let client = crate::remote::client::RemoteClient::from_remote_cfg(
                     &state,
                     &plan.remote.remote,
@@ -1532,11 +1598,6 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 let state_arc = Arc::new(state.clone());
                 let mut destination_policy = request.execution_policy.clone();
                 destination_policy.target = ExecutionTarget::Here;
-                if let ProjectExecutionPolicy::Pinned { source, .. } =
-                    &mut destination_policy.project
-                {
-                    *source = PinnedSource::CurrentHead;
-                }
                 destination_policy.validate().map_err(|error| {
                     RouteDispatchError::BadRequest(format!(
                         "invalid destination execution policy: {error}"
@@ -1573,48 +1634,85 @@ impl CompiledResponseMode for CompiledExecuteMode {
             }
         };
 
-        // A pushed-head request is the remote destination boundary: complete a
-        // threadless admission pass against the request-scoped overlay engine
-        // before local authoritative dispatch can create a row or spawn.
-        if !matches!(&project_source, ProjectSource::LiveFs) {
-            let primary = match exec_ctx.engine.resolve(&exec_ctx.plan_ctx, &root_canonical) {
-                Ok(resolved) => match exec_ctx.engine.verify(&exec_ctx.plan_ctx, resolved) {
-                    Ok(verified) => verified.resolved,
-                    Err(error) => {
-                        return Ok(dispatch_error_response(
-                            ryeos_executor::dispatch_error::DispatchError::InvalidRef(
-                                item_ref.to_string(),
-                                format!("verification failed: {error}"),
-                            ),
-                        ));
-                    }
-                },
-                Err(error) => {
-                    return Ok(dispatch_error_response(
-                        ryeos_executor::dispatch_error::DispatchError::InvalidRef(
-                            item_ref.to_string(),
-                            format!("resolution failed: {error}"),
-                        ),
-                    ));
-                }
-            };
-            let applicability = match ryeos_executor::dispatch::launch_contract_applicability(
-                item_ref, &exec_ctx,
-            ) {
-                Ok(applicability) => applicability,
+        // Complete route admission for every local launch and hand its exact
+        // caller-root evidence to dispatch. LiveFs retains normal mutable
+        // dependency/config revalidation, but the caller-named executable
+        // cannot change between composed-contract validation and execution.
+        // Pushed immutable launches additionally complete their threadless
+        // launch-contract admission under the sealed request authority.
+        let (local_root_admission, local_root_dispatch_evidence) = {
+            let project_binding =
+                ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+                    &exec_ctx.engine,
+                    &exec_ctx.plan_ctx,
+                    &provenance,
+                )
+                .map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "seal local-launch project authority: {error:#}"
+                    ))
+                })?;
+            let preflight_item_ref = item_ref.to_owned();
+            let preflight_kind = root_canonical.kind.clone();
+            let preflight_parameters = request.parameters.clone();
+            let preflight_ref_bindings = request.ref_bindings.clone();
+            let preflight_usage_subject = usage_subject.clone();
+            let preflight_usage_authority = usage_subject_asserted_by.clone();
+            let preflight_exec_ctx = exec_ctx.clone();
+            let preflight_state = state.clone();
+            let preflight_timings = ctx.launch_timings.clone();
+            let preflight = tokio::task::spawn_blocking(move || {
+                ryeos_executor::dispatch::preflight_root_dispatch(
+                    &preflight_item_ref,
+                    &preflight_kind,
+                    &preflight_parameters,
+                    &preflight_ref_bindings,
+                    preflight_usage_subject.as_ref(),
+                    preflight_usage_authority.as_deref(),
+                    &project_binding,
+                    &preflight_exec_ctx,
+                    &preflight_state,
+                    preflight_timings.as_ref(),
+                )
+            })
+            .await
+            .map_err(|error| {
+                RouteDispatchError::Internal(format!(
+                    "local-launch preflight blocking worker failed: {error}"
+                ))
+            })?;
+            let preflight = match preflight {
+                Ok(preflight) => preflight,
                 Err(error) => return Ok(dispatch_error_response(error)),
             };
-            if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
-                &applicability,
-                &primary,
-                &request.ref_bindings,
-                &provenance,
-                &exec_ctx,
-                &state,
+            let root_admission = preflight.root_admission.ok_or_else(|| {
+                RouteDispatchError::Internal(
+                    "local root preflight returned no admitted resolution".to_string(),
+                )
+            })?;
+            if !matches!(
+                &exec_ctx.plan_ctx.subject_resolution_authority,
+                ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs
             ) {
-                return Ok(dispatch_error_response(error));
+                if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
+                    preflight.root_dispatch_evidence.applicability(),
+                    &root_admission,
+                    &request.ref_bindings,
+                    &lifecycle_authority,
+                    &provenance,
+                    &exec_ctx,
+                    &state,
+                )
+                .await
+                {
+                    return Ok(dispatch_error_response(error));
+                }
             }
-        }
+            // An in-process admission is an exact threadless resolution
+            // handoff: it carries no selected executor route and no pre-minted
+            // identity. Persistent classes carry their admitted executor route.
+            (Some(root_admission), Some(preflight.root_dispatch_evidence))
+        };
 
         // ── Local dispatch ─────────────────────────────────────────
         // No target_site_id, or target_site_id == current_site_id
@@ -1636,7 +1734,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
             usage_subject,
             usage_subject_asserted_by,
             previous_thread_id: None,
-            root_admission: None,
+            root_admission: local_root_admission,
+            root_dispatch_evidence: local_root_dispatch_evidence,
             parent_execution_context: None,
         };
 
@@ -1892,6 +1991,18 @@ fn map_forward_error_to_dispatch(
 ) -> ryeos_executor::dispatch_error::DispatchError {
     use crate::remote::forward::RemoteForwardError;
     match e {
+        RemoteForwardError::ExecutionPolicyInvalid { message } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardInternal {
+                target_site_id: target_site_id.to_string(),
+                detail: message.clone(),
+            }
+        }
+        RemoteForwardError::SnapshotAuthorityMismatch { .. } => {
+            ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardInternal {
+                target_site_id: target_site_id.to_string(),
+                detail: e.to_string(),
+            }
+        }
         RemoteForwardError::JobLedgerFailed(detail)
         | RemoteForwardError::PushFailed(detail)
         | RemoteForwardError::PullFailed(detail) => {
@@ -1946,6 +2057,146 @@ mod tests {
     use super::*;
     use base64::Engine as _;
     use ryeos_app::route_raw::{RawLimits, RawRequest, RawResponseSpec};
+
+    #[test]
+    fn project_source_is_derived_only_from_execution_policy() {
+        assert!(matches!(
+            project_source_from_execution_policy(&ProjectExecutionPolicy::Projectless),
+            ProjectSource::LiveFs
+        ));
+        assert!(matches!(
+            project_source_from_execution_policy(
+                &ExecutionPolicy::local_live(ExecutionResponse::Wait).project
+            ),
+            ProjectSource::LiveFs
+        ));
+
+        let current_head = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CurrentHead,
+            realization: PinnedRealization::ReadOnly,
+            child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+        };
+        assert!(matches!(
+            project_source_from_execution_policy(&current_head),
+            ProjectSource::PushedHead
+        ));
+
+        let snapshot = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::Snapshot {
+                hash: "a".repeat(64),
+            },
+            realization: PinnedRealization::Cow {
+                terminal_publication: TerminalPublication::Discard,
+            },
+            child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+        };
+        assert!(matches!(
+            project_source_from_execution_policy(&snapshot),
+            ProjectSource::Snapshot { hash } if hash == "a".repeat(64)
+        ));
+
+        let capture = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive {
+                scope: ryeos_app::execution_policy::ProjectCaptureScope::FullProject,
+            },
+            realization: PinnedRealization::ReadOnly,
+            child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+        };
+        assert!(matches!(
+            project_source_from_execution_policy(&capture),
+            ProjectSource::CaptureLiveFullProject
+        ));
+    }
+
+    #[test]
+    fn project_path_presence_follows_project_policy() {
+        assert!(validate_project_path_presence(&ProjectExecutionPolicy::Projectless, None).is_ok());
+        assert_eq!(
+            validate_project_path_presence(
+                &ProjectExecutionPolicy::Projectless,
+                Some("/tmp/project")
+            ),
+            Err("projectless execution policy must not carry project_path")
+        );
+
+        let live = ExecutionPolicy::local_live(ExecutionResponse::Wait).project;
+        assert!(validate_project_path_presence(&live, Some("/tmp/project")).is_ok());
+        assert_eq!(
+            validate_project_path_presence(&live, None),
+            Err("project-backed execution policy requires project_path")
+        );
+    }
+
+    #[test]
+    fn pinned_realization_and_metric_classes_follow_policy() {
+        let read_only = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CurrentHead,
+            realization: PinnedRealization::ReadOnly,
+            child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+        };
+        assert_eq!(
+            pinned_realization_from_execution_policy(&read_only),
+            Some(project_source::PinnedContextRealization::ReadOnly)
+        );
+        assert_eq!(
+            project_execution_dimension_classes(&read_only),
+            (
+                ryeos_app::launch_stage_timings::LaunchProjectSourceClass::PushedHead,
+                ryeos_app::launch_stage_timings::LaunchProjectRealizationClass::ReadOnly,
+            )
+        );
+
+        let cow = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::Snapshot {
+                hash: "b".repeat(64),
+            },
+            realization: PinnedRealization::Cow {
+                terminal_publication: TerminalPublication::Discard,
+            },
+            child_policy: ryeos_app::execution_policy::ChildProjectPolicy::Inherit,
+        };
+        assert_eq!(
+            pinned_realization_from_execution_policy(&cow),
+            Some(project_source::PinnedContextRealization::Cow)
+        );
+        assert_eq!(
+            project_execution_dimension_classes(&cow),
+            (
+                ryeos_app::launch_stage_timings::LaunchProjectSourceClass::Snapshot,
+                ryeos_app::launch_stage_timings::LaunchProjectRealizationClass::Cow,
+            )
+        );
+        assert_eq!(
+            project_root_normalization_from_execution_policy(&read_only),
+            ProjectRootNormalization::Preserve
+        );
+        assert_eq!(
+            project_root_normalization_from_execution_policy(
+                &ExecutionPolicy::local_live(ExecutionResponse::Wait).project
+            ),
+            ProjectRootNormalization::CanonicalizeLive
+        );
+    }
+
+    #[test]
+    fn project_source_failures_keep_the_canonical_typed_error() {
+        let push_first = map_project_source_error(project_source::ProjectSourceError::PushFirst {
+            project_path: "/project".to_string(),
+        });
+        assert!(matches!(
+            &push_first,
+            ryeos_executor::dispatch_error::DispatchError::ProjectSourcePushFirst(_)
+        ));
+        assert!(push_first.to_string().contains("push first"));
+
+        let checkout = map_project_source_error(
+            project_source::ProjectSourceError::CheckoutFailed("missing object".to_string()),
+        );
+        assert!(matches!(
+            checkout,
+            ryeos_executor::dispatch_error::DispatchError::ProjectSourceCheckoutFailed(_)
+        ));
+    }
 
     fn make_raw(auth: &str, body: RawRequestBody) -> RawRouteSpec {
         RawRouteSpec {
@@ -2072,7 +2323,6 @@ mod tests {
             launch_mode: "wait".into(),
             target_site_id: target_site_id.map(String::from),
             validate_only: false,
-            project_source: None,
             call: None,
             usage_subject: None,
             debug_raw: false,

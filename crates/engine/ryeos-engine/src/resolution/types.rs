@@ -22,6 +22,9 @@ pub enum TrustClass {
     TrustedBundle,
     /// Item from a trusted project source.
     TrustedProject,
+    /// Launch configuration signed by a node-trusted publisher and loaded
+    /// from the node-local configuration layer.
+    TrustedNode,
     /// Item from project or untrusted sources.
     UntrustedProject,
     /// Item not signed or signature invalid.
@@ -590,6 +593,7 @@ impl TrustClass {
     pub fn strength(self) -> u8 {
         match self {
             TrustClass::TrustedBundle => 3,
+            TrustClass::TrustedNode => 3,
             TrustClass::TrustedProject => 2,
             TrustClass::UntrustedProject => 1,
             TrustClass::Unsigned => 0,

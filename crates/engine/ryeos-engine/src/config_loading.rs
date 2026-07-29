@@ -10,6 +10,10 @@ use crate::kind_registry::KindRegistry;
 use crate::parsers::dispatcher::ParserDispatcher;
 use crate::trust::{TrustStore, content_hash_after_signature, verify_item_signature_with_hash};
 
+/// Maximum bytes accepted for one config source, independent of whether it is
+/// observed live or read from an admitted content authority.
+const MAX_CONFIG_SOURCE_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigSpec {
@@ -43,6 +47,10 @@ pub struct ConfigLoadContext<'a> {
     pub parsers: &'a ParserDispatcher,
     pub kinds: &'a KindRegistry,
     pub trust_store: &'a TrustStore,
+    pub project_authority: Option<(
+        &'a Path,
+        &'a dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 }
 
 pub fn resolve_config_spec(
@@ -55,7 +63,7 @@ pub fn resolve_config_spec(
             let mut layers = Vec::new();
             for root in ctx.roots.ordered.iter().rev() {
                 let candidate = root.ai_root.join("config").join(&spec.path);
-                if candidate.exists() {
+                if config_candidate_exists(&candidate, root.space, ctx)? {
                     tracing::info!(
                         config_path = %candidate.display(),
                         space = ?root.space,
@@ -79,7 +87,7 @@ pub fn resolve_config_spec(
             for target in &[ItemSpace::Project, ItemSpace::Bundle] {
                 for root in ctx.roots.ordered.iter().filter(|r| r.space == *target) {
                     let candidate = root.ai_root.join("config").join(&spec.path);
-                    if candidate.exists() {
+                    if config_candidate_exists(&candidate, root.space, ctx)? {
                         tracing::info!(
                             config_path = %candidate.display(),
                             space = ?root.space,
@@ -109,10 +117,48 @@ pub fn load_and_verify_config_file(
     path: &Path,
     ctx: &ConfigLoadContext<'_>,
 ) -> Result<Value, EngineError> {
-    let content = std::fs::read_to_string(path).map_err(|e| EngineError::InvalidRuntimeConfig {
-        path: path.display().to_string(),
-        reason: format!("could not read config file: {e}"),
-    })?;
+    load_and_verify_config_file_with_hash(path, ctx).map(|(value, _)| value)
+}
+
+/// Load, verify, and parse one config from a single securely-opened source
+/// observation, returning the whole-file digest of the exact parsed bytes.
+pub fn load_and_verify_config_file_with_hash(
+    path: &Path,
+    ctx: &ConfigLoadContext<'_>,
+) -> Result<(Value, String), EngineError> {
+    let content = match ctx.project_authority {
+        Some((project_root, project_content)) if path.starts_with(project_root) => {
+            let relative =
+                path.strip_prefix(project_root)
+                    .map_err(|_| EngineError::InvalidRuntimeConfig {
+                        path: path.display().to_string(),
+                        reason: "project config escaped admitted root".to_string(),
+                    })?;
+            let bytes = project_content
+                .read_file(relative, MAX_CONFIG_SOURCE_BYTES)?
+                .ok_or_else(|| EngineError::InvalidRuntimeConfig {
+                    path: path.display().to_string(),
+                    reason: "project config is absent from admitted content".to_string(),
+                })?;
+            String::from_utf8(bytes).map_err(|error| EngineError::InvalidRuntimeConfig {
+                path: path.display().to_string(),
+                reason: format!("config file is not UTF-8: {error}"),
+            })?
+        }
+        _ => String::from_utf8(
+            lillux::read_regular_file_bounded_no_follow(path, MAX_CONFIG_SOURCE_BYTES).map_err(
+                |e| EngineError::InvalidRuntimeConfig {
+                    path: path.display().to_string(),
+                    reason: format!("could not read config file: {e}"),
+                },
+            )?,
+        )
+        .map_err(|error| EngineError::InvalidRuntimeConfig {
+            path: path.display().to_string(),
+            reason: format!("config file is not UTF-8: {error}"),
+        })?,
+    };
+    let source_hash = lillux::sha256_hex(content.as_bytes());
 
     let kind_schema = ctx
         .kinds
@@ -178,9 +224,30 @@ pub fn load_and_verify_config_file(
         .parsers
         .dispatch(&ext_spec.parser, &content, Some(path), envelope)?;
     if parsed.is_null() {
-        Ok(Value::Object(Map::new()))
+        Ok((Value::Object(Map::new()), source_hash))
     } else {
-        Ok(parsed)
+        Ok((parsed, source_hash))
+    }
+}
+
+fn config_candidate_exists(
+    path: &Path,
+    space: ItemSpace,
+    ctx: &ConfigLoadContext<'_>,
+) -> Result<bool, EngineError> {
+    match (space, ctx.project_authority) {
+        (ItemSpace::Project, Some((project_root, project_content))) => {
+            let relative =
+                path.strip_prefix(project_root)
+                    .map_err(|_| EngineError::InvalidRuntimeConfig {
+                        path: path.display().to_string(),
+                        reason: "project config candidate escaped admitted root".to_string(),
+                    })?;
+            project_content
+                .validates_absence(relative)
+                .map(|absent| !absent)
+        }
+        _ => Ok(path.exists()),
     }
 }
 

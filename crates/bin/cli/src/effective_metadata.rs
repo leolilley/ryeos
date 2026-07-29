@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use ryeos_app::node_config::NodeConfigSnapshot;
 use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::SubjectResolutionAuthority;
 use ryeos_engine::engine::{EffectiveItemRequest, Engine};
 use serde_json::Value;
 
@@ -48,6 +49,9 @@ pub fn resolve_effective_composed_value(
             item_ref,
             expected_kind: None,
             project_root: project_path.map(Path::to_path_buf),
+            subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
+                project_path,
+            ),
         })
         .with_context(|| format!("resolve effective metadata for '{execute_ref}'"))?;
     Ok(Some(item.composed_value))

@@ -10,6 +10,54 @@ const MAX_ENTRIES: usize = 128;
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_PENDING: usize = 128;
 const IDLE_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CacheOutcome {
+    Hit,
+    Miss,
+    Bypass,
+    Eviction,
+}
+
+impl CacheOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass => "bypass",
+            Self::Eviction => "eviction",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CacheReason {
+    AuthorityRevalidationFailed,
+    Ready,
+    SingleFlight,
+    Cold,
+    PendingCapacity,
+    ProjectionTooLarge,
+    FillFailed,
+    IdleTtl,
+    Capacity,
+}
+
+impl CacheReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorityRevalidationFailed => "authority_revalidation_failed",
+            Self::Ready => "ready",
+            Self::SingleFlight => "single_flight",
+            Self::Cold => "cold",
+            Self::PendingCapacity => "pending_capacity",
+            Self::ProjectionTooLarge => "projection_too_large",
+            Self::FillFailed => "fill_failed",
+            Self::IdleTtl => "idle_ttl",
+            Self::Capacity => "capacity",
+        }
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CachedComposeProjection {
@@ -38,11 +86,16 @@ struct CacheEntry {
     last_touched: Instant,
 }
 
+#[derive(Debug)]
+enum PendingOutcome {
+    Success(Arc<CachedComposeProjection>),
+    Failure(Arc<super::LaunchAugmentationError>),
+    Retry,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PendingFill {
-    /// `None` means pending, `Some(None)` means the builder failed, and
-    /// `Some(Some(..))` is a successful fill shared with all waiters.
-    result: Mutex<Option<Option<Arc<CachedComposeProjection>>>>,
+    result: Mutex<Option<PendingOutcome>>,
     completed: Notify,
 }
 
@@ -92,7 +145,6 @@ impl CacheFillGuard {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.pending.remove(&self.key);
         sweep_idle(&mut state);
 
         if estimated_bytes <= MAX_BYTES {
@@ -112,7 +164,12 @@ impl CacheFillGuard {
                 );
             }
         } else {
-            emit_metric("miss", "projection_too_large", estimated_bytes, 0);
+            emit_metric(
+                CacheOutcome::Miss,
+                CacheReason::ProjectionTooLarge,
+                estimated_bytes,
+                0,
+            );
         }
 
         let mut pending_result = self
@@ -120,22 +177,42 @@ impl CacheFillGuard {
             .result
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *pending_result = Some(Some(projection.clone()));
+        *pending_result = Some(PendingOutcome::Success(projection.clone()));
         drop(pending_result);
+        state.pending.remove(&self.key);
+        drop(state);
         self.pending.completed.notify_waiters();
         self.completed = true;
         projection
     }
 
-    /// Settle a single-flight miss without publishing a projection. The
-    /// current launch may still use its cold result, but waiters must rebuild
-    /// rather than observe request-scoped identity from another launch.
-    pub(super) fn skip(mut self, reason: &'static str) {
+    pub(super) fn fail(
+        mut self,
+        error: super::LaunchAugmentationError,
+    ) -> Arc<super::LaunchAugmentationError> {
+        let error = Arc::new(error);
+        self.finish_pending(PendingOutcome::Failure(error.clone()));
+        self.completed = true;
+        emit_metric(CacheOutcome::Miss, CacheReason::FillFailed, 0, 0);
+        error
+    }
+
+    pub(super) fn cancel(mut self) {
+        self.finish_pending(PendingOutcome::Retry);
+        self.completed = true;
+    }
+
+    fn finish_pending(&self, outcome: PendingOutcome) {
         let mut state = self
             .cache
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *self
+            .pending
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
         if state
             .pending
             .get(&self.key)
@@ -144,17 +221,7 @@ impl CacheFillGuard {
             state.pending.remove(&self.key);
         }
         drop(state);
-
-        let mut pending_result = self
-            .pending
-            .result
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *pending_result = Some(None);
-        drop(pending_result);
         self.pending.completed.notify_waiters();
-        self.completed = true;
-        emit_metric("bypass", reason, 0, 0);
     }
 }
 
@@ -163,28 +230,12 @@ impl Drop for CacheFillGuard {
         if self.completed {
             return;
         }
-        let mut state = self
-            .cache
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state
-            .pending
-            .get(&self.key)
-            .is_some_and(|pending| Arc::ptr_eq(pending, &self.pending))
-        {
-            state.pending.remove(&self.key);
-        }
-        drop(state);
-        let mut pending_result = self
-            .pending
-            .result
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *pending_result = Some(None);
-        drop(pending_result);
-        self.pending.completed.notify_waiters();
-        emit_metric("miss", "fill_failed", 0, 0);
+        self.finish_pending(PendingOutcome::Failure(Arc::new(
+            super::LaunchAugmentationError::Threads(
+                "compose projection cache fill ended without publishing its result".to_owned(),
+            ),
+        )));
+        emit_metric(CacheOutcome::Miss, CacheReason::FillFailed, 0, 0);
     }
 }
 
@@ -231,7 +282,7 @@ impl ComposeProjectionCache {
         &self,
         key: &str,
         projection: &Arc<CachedComposeProjection>,
-        reason: &'static str,
+        reason: CacheReason,
     ) {
         let mut state = self
             .state
@@ -247,23 +298,31 @@ impl ComposeProjectionCache {
             0
         };
         drop(state);
-        emit_metric("eviction", reason, entry_bytes, 0);
+        emit_metric(CacheOutcome::Eviction, reason, entry_bytes, 0);
     }
 }
 
 impl PendingFill {
-    pub(super) async fn wait(&self) -> Option<Arc<CachedComposeProjection>> {
+    pub(super) async fn wait(
+        &self,
+    ) -> Result<Option<Arc<CachedComposeProjection>>, Arc<super::LaunchAugmentationError>> {
         loop {
             let notified = self.completed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if let Some(result) = self
                 .result
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .as_ref()
             {
-                return result.clone();
+                return match result {
+                    PendingOutcome::Success(projection) => Ok(Some(projection.clone())),
+                    PendingOutcome::Failure(error) => Err(error.clone()),
+                    PendingOutcome::Retry => Ok(None),
+                };
             }
-            notified.await;
+            notified.as_mut().await;
         }
     }
 }
@@ -281,7 +340,13 @@ struct ComposeCacheHitAudit {
     cache_key_digest: String,
     projection_digest: String,
     waited_for_fill: bool,
-    child_execution: &'static str,
+    child_execution: CacheHitChildExecution,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CacheHitChildExecution {
+    Omitted,
 }
 
 /// Record history semantic (a) as its own launch-audit event. It deliberately
@@ -297,7 +362,7 @@ pub(super) fn record_hit_audit(
         cache_key_digest: cache_key_digest.to_string(),
         projection_digest: projection.digest()?,
         waited_for_fill,
-        child_execution: "not_run_cache_hit",
+        child_execution: CacheHitChildExecution::Omitted,
     })
     .map_err(|error| error.to_string())?;
     Ok(super::LaunchAugmentationAudit {
@@ -307,11 +372,13 @@ pub(super) fn record_hit_audit(
 }
 
 pub(super) fn emit_metric(
-    outcome: &'static str,
-    reason: &'static str,
+    outcome: CacheOutcome,
+    reason: CacheReason,
     entry_bytes: usize,
     wait_milliseconds: u64,
 ) {
+    let outcome = outcome.as_str();
+    let reason = reason.as_str();
     tracing::info!(
         target: "ryeos.metrics",
         metric = "compose_context_positions_cache",
@@ -333,7 +400,7 @@ fn sweep_idle(state: &mut CacheState) {
         .collect::<Vec<_>>();
     for key in stale {
         let entry_bytes = remove_entry(state, &key);
-        emit_metric("eviction", "idle_ttl", entry_bytes, 0);
+        emit_metric(CacheOutcome::Eviction, CacheReason::IdleTtl, entry_bytes, 0);
     }
 }
 
@@ -346,7 +413,12 @@ fn evict_to_fit(state: &mut CacheState, incoming_bytes: usize) {
         };
         if let Some(entry) = state.entries.remove(&oldest) {
             state.total_bytes = state.total_bytes.saturating_sub(entry.estimated_bytes);
-            emit_metric("eviction", "capacity", entry.estimated_bytes, 0);
+            emit_metric(
+                CacheOutcome::Eviction,
+                CacheReason::Capacity,
+                entry.estimated_bytes,
+                0,
+            );
         }
     }
 }
@@ -409,7 +481,7 @@ mod tests {
                 };
                 fill.complete(projection("cached"));
                 assert_eq!(
-                    pending.wait().await.unwrap().rendered_positions["system"],
+                    pending.wait().await.unwrap().unwrap().rendered_positions["system"],
                     "cached"
                 );
                 assert!(matches!(cache.begin("key"), CacheLookup::Hit { .. }));
@@ -417,21 +489,52 @@ mod tests {
     }
 
     #[test]
-    fn skipped_sensitive_fill_wakes_waiters_without_caching() {
+    fn oversize_leader_projection_is_shared_with_waiters_but_not_cached() {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
             .block_on(async {
                 let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
-                let CacheLookup::Build(fill) = cache.begin("key") else {
+                let CacheLookup::Build(fill) = cache.begin("oversize-single-flight") else {
+                    panic!("leader must build");
+                };
+                let CacheLookup::Wait { pending } = cache.begin("oversize-single-flight") else {
+                    panic!("concurrent lookup must wait");
+                };
+                let published = fill.complete(projection(&"x".repeat(MAX_BYTES)));
+                let waited = pending
+                    .wait()
+                    .await
+                    .unwrap()
+                    .expect("the admitted waiter receives the leader result");
+                assert!(Arc::ptr_eq(&published, &waited));
+                assert!(
+                    matches!(cache.begin("oversize-single-flight"), CacheLookup::Build(_)),
+                    "oversize projections must not become later cache hits"
+                );
+            });
+    }
+
+    #[test]
+    fn failed_leader_shares_one_error_and_does_not_cache_it() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cache = Box::leak(Box::new(ComposeProjectionCache::default()));
+                let CacheLookup::Build(fill) = cache.begin("failure") else {
                     panic!("first lookup must build");
                 };
-                let CacheLookup::Wait { pending } = cache.begin("key") else {
+                let CacheLookup::Wait { pending } = cache.begin("failure") else {
                     panic!("second lookup must wait");
                 };
-                fill.skip("request_scoped_projection");
-                assert!(pending.wait().await.is_none());
-                assert!(matches!(cache.begin("key"), CacheLookup::Build(_)));
+                let published = fill.fail(super::super::LaunchAugmentationError::Threads(
+                    "exact failure".to_owned(),
+                ));
+                let waited = pending.wait().await.unwrap_err();
+                assert!(Arc::ptr_eq(&published, &waited));
+                assert!(matches!(cache.begin("failure"), CacheLookup::Build(_)));
             });
     }
 
@@ -442,7 +545,7 @@ mod tests {
             panic!("first lookup must build");
         };
         let observed = fill.complete(projection("stale"));
-        cache.discard_if_same("key", &observed, "authority_revalidation_failed");
+        cache.discard_if_same("key", &observed, CacheReason::AuthorityRevalidationFailed);
         assert!(matches!(cache.begin("key"), CacheLookup::Build(_)));
     }
 

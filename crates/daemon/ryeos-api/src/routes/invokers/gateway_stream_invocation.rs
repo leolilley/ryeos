@@ -14,8 +14,11 @@ use crate::routes::invocation::{
     authenticated_execution_origin,
 };
 use crate::routes::response_modes::execute_mode::{
-    ProjectRootNormalization, ResolveProjectContextRequest, preauthorize_execution_policy,
-    resolve_execution_contract, resolve_project_context_off_thread,
+    ProjectRootNormalization, ResolveProjectContextRequest, create_isolated_no_project_workspace,
+    map_project_source_error, pinned_realization_from_execution_policy,
+    preauthorize_execution_policy, project_execution_dimension_classes,
+    project_root_normalization_from_execution_policy, project_source_from_execution_policy,
+    resolve_execution_contract, resolve_project_context_off_thread, validate_project_path_presence,
 };
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
@@ -51,7 +54,8 @@ pub(crate) struct LaunchRequest {
     pub(crate) item_ref: String,
     pub(crate) ref_bindings: std::collections::BTreeMap<String, String>,
     /// Project root path for resolution.
-    pub(crate) project_path: String,
+    #[serde(default)]
+    pub(crate) project_path: Option<String>,
     #[serde(default)]
     pub(crate) parameters: Value,
     pub(crate) execution_policy: ryeos_app::execution_policy::ExecutionPolicy,
@@ -70,6 +74,20 @@ pub(crate) struct LaunchRequest {
     pub(crate) call: Option<ryeos_engine::method_call::MethodCall>,
     #[serde(default)]
     pub(crate) usage_subject: Option<ryeos_state::UsageSubject>,
+}
+
+fn gateway_project_selection(
+    policy: &ryeos_app::execution_policy::ProjectExecutionPolicy,
+) -> (
+    ryeos_executor::execution::project_source::ProjectSource,
+    Option<ryeos_executor::execution::project_source::PinnedContextRealization>,
+    crate::routes::response_modes::execute_mode::ProjectRootNormalization,
+) {
+    (
+        project_source_from_execution_policy(policy),
+        pinned_realization_from_execution_policy(policy),
+        project_root_normalization_from_execution_policy(policy),
+    )
 }
 
 fn handoff_error_envelope(
@@ -219,14 +237,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             ryeos_app::execution_policy::ExecutionTarget::Here => None,
             ryeos_app::execution_policy::ExecutionTarget::Site { site_id } => Some(site_id.clone()),
         };
-        if !matches!(
-            &req.execution_policy.project,
-            ryeos_app::execution_policy::ProjectExecutionPolicy::LiveDirect { .. }
-        ) {
-            return Err(RouteDispatchError::BadRequest(
-                "/execute/stream requires explicit live_direct project policy".to_string(),
-            ));
-        }
+        let (project_source, pinned_realization, normalization) =
+            gateway_project_selection(&req.execution_policy.project);
+        validate_project_path_presence(&req.execution_policy.project, req.project_path.as_deref())
+            .map_err(|message| RouteDispatchError::BadRequest(message.to_string()))?;
         let ref_binding_validation_timer = ctx
             .launch_timings
             .as_ref()
@@ -332,10 +346,6 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             None
         };
 
-        let project_path =
-            crate::routes::abs_path::AbsolutePathBuf::try_from_str(&req.project_path)
-                .map_err(|e| RouteDispatchError::BadRequest(format!("project_path: {e}")))?;
-
         // The dispatch-launch stream is a fire-and-tail-until-terminal
         // contract. Non-waiting launches can return before the thread is
         // terminal, and validate-only dispatch can complete without a
@@ -395,9 +405,30 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         let thread_id = ryeos_app::thread_lifecycle::new_thread_id();
         if let Some(timings) = ctx.launch_timings.as_ref() {
             timings.set_launch_dimensions(item_ref.kind(), "gateway_stream");
+            let (source_class, realization_class) =
+                project_execution_dimension_classes(&req.execution_policy.project);
+            timings.set_project_dimensions(source_class, realization_class);
             timings.bind_thread_id(&thread_id);
         }
-        let project_source = ryeos_executor::execution::project_source::ProjectSource::LiveFs;
+        let mut no_project_guard = None;
+        let project_path = match req.project_path.as_deref() {
+            Some(raw) => crate::routes::abs_path::AbsolutePathBuf::try_from_str(raw)
+                .map_err(|error| RouteDispatchError::BadRequest(format!("project_path: {error}")))?
+                .into_path_buf(),
+            None => {
+                let (workspace, guard) = create_isolated_no_project_workspace(
+                    &ctx.state,
+                    &format!("stream-{thread_id}"),
+                )
+                .map_err(|error| {
+                    RouteDispatchError::Internal(format!(
+                        "prepare isolated stream projectless workspace: {error:#}"
+                    ))
+                })?;
+                no_project_guard = Some(guard);
+                workspace
+            }
+        };
         let project_context_timer = ctx
             .launch_timings
             .as_ref()
@@ -406,27 +437,34 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
             resolve_project_context_off_thread(ResolveProjectContextRequest {
                 state: ctx.state.clone(),
                 source: project_source.clone(),
-                project_path: project_path.as_path().to_path_buf(),
+                project_path,
                 principal_id: principal_id.clone(),
                 checkout_id: format!("stream-{thread_id}"),
-                pinned_realization:
-                    ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
-                normalization: ProjectRootNormalization::CanonicalizeLive,
+                pinned_realization,
+                normalization,
                 launch_timings: ctx.launch_timings.clone(),
             })
             .await;
         drop(project_context_timer);
-        let mut project_ctx = project_context_result.map_err(|error| {
-            if let Some(timings) = ctx.launch_timings.as_ref() {
-                timings.emit("gateway_project_context_failed");
+        let mut project_ctx = match project_context_result {
+            Ok(project_ctx) => project_ctx,
+            Err(error) => {
+                if let Some(timings) = ctx.launch_timings.as_ref() {
+                    timings.emit("gateway_project_context_failed");
+                }
+                return Ok(pre_spawn_dispatch_error(
+                    self.keep_alive_secs,
+                    map_project_source_error(error),
+                ));
             }
-            RouteDispatchError::BadRequest(format!("resolve stream project: {error}"))
-        })?;
+        };
         let resolved_contract = resolve_execution_contract(
             &req.execution_policy,
             &project_source,
             &project_ctx,
-            project_ctx.temp_dir.clone(),
+            no_project_guard
+                .clone()
+                .or_else(|| project_ctx.temp_dir.clone()),
             None,
             &principal_id,
             &principal_scopes,
@@ -486,6 +524,7 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
         })?;
         let mut options = crate::routes::launch::DispatchLaunchOptions::admitted(
             root_admission,
+            preflight.root_dispatch_evidence,
             &project_ctx.effective_path,
             req.ref_bindings,
             resolved_contract.lifecycle_authority,
@@ -816,12 +855,92 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::response_modes::execute_mode::ProjectRootNormalization;
+    use ryeos_app::execution_policy::{
+        ChildProjectPolicy, ExecutionResponse, PinnedRealization, PinnedSource,
+        ProjectCaptureScope, ProjectExecutionPolicy, TerminalPublication,
+    };
+    use ryeos_executor::execution::project_source::{PinnedContextRealization, ProjectSource};
 
     fn local_live_policy() -> Value {
         serde_json::to_value(ryeos_app::execution_policy::ExecutionPolicy::local_live(
             ryeos_app::execution_policy::ExecutionResponse::Wait,
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn gateway_derives_every_project_surface_from_the_typed_execution_policy() {
+        let live =
+            ryeos_app::execution_policy::ExecutionPolicy::local_live(ExecutionResponse::Wait)
+                .project;
+        assert!(matches!(
+            gateway_project_selection(&live),
+            (
+                ProjectSource::LiveFs,
+                None,
+                ProjectRootNormalization::CanonicalizeLive
+            )
+        ));
+
+        let projectless = ProjectExecutionPolicy::Projectless;
+        assert!(matches!(
+            gateway_project_selection(&projectless),
+            (
+                ProjectSource::LiveFs,
+                None,
+                ProjectRootNormalization::Preserve
+            )
+        ));
+
+        let current_head = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CurrentHead,
+            realization: PinnedRealization::ReadOnly,
+            child_policy: ChildProjectPolicy::Inherit,
+        };
+        assert!(matches!(
+            gateway_project_selection(&current_head),
+            (
+                ProjectSource::PushedHead,
+                Some(PinnedContextRealization::ReadOnly),
+                ProjectRootNormalization::Preserve
+            )
+        ));
+
+        let snapshot_hash = "a".repeat(64);
+        let snapshot = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::Snapshot {
+                hash: snapshot_hash.clone(),
+            },
+            realization: PinnedRealization::Cow {
+                terminal_publication: TerminalPublication::Discard,
+            },
+            child_policy: ChildProjectPolicy::Inherit,
+        };
+        assert!(matches!(
+            gateway_project_selection(&snapshot),
+            (
+                ProjectSource::Snapshot { hash },
+                Some(PinnedContextRealization::Cow),
+                ProjectRootNormalization::Preserve
+            ) if hash == snapshot_hash
+        ));
+
+        let capture = ProjectExecutionPolicy::Pinned {
+            source: PinnedSource::CaptureLive {
+                scope: ProjectCaptureScope::FullProject,
+            },
+            realization: PinnedRealization::ReadOnly,
+            child_policy: ChildProjectPolicy::Inherit,
+        };
+        assert!(matches!(
+            gateway_project_selection(&capture),
+            (
+                ProjectSource::CaptureLiveFullProject,
+                Some(PinnedContextRealization::ReadOnly),
+                ProjectRootNormalization::CanonicalizeLive
+            )
+        ));
     }
 
     #[test]
@@ -835,7 +954,7 @@ mod tests {
         });
         let req: LaunchRequest = serde_json::from_value(json).unwrap();
         assert_eq!(req.item_ref, "directive:foo/bar");
-        assert_eq!(req.project_path, "/tmp/project");
+        assert_eq!(req.project_path.as_deref(), Some("/tmp/project"));
         assert!(req.launch_mode.is_empty());
         assert_eq!(req.target_site_id, None);
         assert!(!req.validate_only);

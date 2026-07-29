@@ -610,7 +610,8 @@ context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noo
         .unwrap();
 
         let loader =
-            crate::verified_loader::VerifiedLoader::new(project, vec![bundle], &trusted_keys);
+            crate::verified_loader::VerifiedLoader::new(project, vec![bundle], &trusted_keys)
+                .unwrap();
         let sources = load_configured_hook_sources(&loader).unwrap();
 
         assert_eq!(sources.builtin[0].id, "builtin");

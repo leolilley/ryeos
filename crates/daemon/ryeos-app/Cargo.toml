@@ -45,3 +45,4 @@ libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+ryeos-state = { workspace = true, features = ["test-support"] }

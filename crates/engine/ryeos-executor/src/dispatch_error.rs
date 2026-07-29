@@ -18,6 +18,7 @@
 //! truly unexpected internal errors are 500.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::http::StatusCode;
 use ryeos_handler_protocol::LaunchDiagnosticScalarWire;
@@ -340,6 +341,11 @@ pub enum DispatchError {
     /// outcome is durably confirmed.
     #[error("recording integrity failure: {detail}")]
     RecordingIntegrity { detail: String },
+    /// One exact error result shared by all requests waiting on the same
+    /// in-flight cache fill. The wrapper delegates every public error
+    /// classification to the leader's immutable result.
+    #[error("{0}")]
+    Shared(Arc<DispatchError>),
     #[error("internal: {0}")]
     Internal(#[from] anyhow::Error),
 }
@@ -360,6 +366,9 @@ impl DispatchError {
     /// The execute response mode calls this once per error path; status
     /// is determined by variant, never by matching the message string.
     pub fn http_status(&self) -> StatusCode {
+        if let Self::Shared(error) = self {
+            return error.http_status();
+        }
         match self {
             Self::InvalidRef(..)
             | Self::AliasCycle { .. }
@@ -430,11 +439,15 @@ impl DispatchError {
             | Self::RecordingIntegrity { .. }
             | Self::Internal(_)
             | Self::TargetSiteForwardInternal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Shared(_) => unreachable!("shared errors return before classification"),
         }
     }
 
     /// Stable machine-readable error code for structured error surfaces.
     pub fn code(&self) -> &str {
+        if let Self::Shared(error) = self {
+            return error.code();
+        }
         match self {
             Self::InvalidRef(..) => "invalid_ref",
             Self::NotRootExecutable { .. } => "not_root_executable",
@@ -486,6 +499,7 @@ impl DispatchError {
             }
             Self::RecordingIntegrity { .. } => "recording_integrity",
             Self::Internal(_) => "internal",
+            Self::Shared(_) => unreachable!("shared errors return before classification"),
         }
     }
 
@@ -493,6 +507,9 @@ impl DispatchError {
     /// configuration change. This is an explicit allowlist: unknown and newly
     /// added failures remain non-retryable until their safety is established.
     pub fn retryable(&self) -> bool {
+        if let Self::Shared(error) = self {
+            return error.retryable();
+        }
         match self {
             Self::ServiceUnavailable { .. } => true,
             Self::LaunchPreparationFailed { classification, .. } => classification == "unavailable",

@@ -3,7 +3,7 @@
 //! Provides a single `execute_unary_forward` function that implements the
 //! push → execute → pull/apply cycle. Used by:
 //! - `remote_execute` handler (existing explicit remote execution)
-//! - `execute_mode` response mode (future target-site forwarding in Phase 3)
+//! - `execute_mode` response mode (target-site forwarding)
 //!
 //! The helper takes an already-resolved `ResolvedRemote` (from Phase 1's
 //! `resolve_remote_by_site_id`) so it doesn't duplicate remote config
@@ -25,6 +25,10 @@ use crate::remote::client::RemoteClient;
 use crate::remote::config::ResolvedRemote;
 use crate::remote::pull::{PullResultsError, extract_snapshot_hash, pull_results};
 use crate::remote::push::{PushResult, push_project, push_snapshot_generation};
+use ryeos_app::execution_policy::{
+    ExecutionPolicy, ExecutionTarget, PinnedRealization, PinnedSource, ProjectExecutionPolicy,
+    TerminalPublication,
+};
 use ryeos_app::ignore::IgnoreMatcher;
 use ryeos_app::state::AppState;
 use ryeos_state::{
@@ -56,7 +60,7 @@ pub struct RemoteForwardRequest<'a> {
     pub parameters: Value,
     /// Exact execution contract to present to the destination node. Routing
     /// fields have already been projected into destination-local terms.
-    pub execution_policy: &'a ryeos_app::execution_policy::ExecutionPolicy,
+    pub execution_policy: &'a ExecutionPolicy,
     /// Acting principal (caller identity).
     pub acting_principal: &'a str,
     /// Ignore rules for project ingest.
@@ -94,9 +98,7 @@ pub struct PullSummary {
     pub files_deleted: usize,
 }
 
-fn requests_terminal_project_generation(
-    policy: &ryeos_app::execution_policy::ExecutionPolicy,
-) -> bool {
+fn requests_terminal_project_generation(policy: &ExecutionPolicy) -> bool {
     matches!(
         &policy.project,
         ryeos_app::execution_policy::ProjectExecutionPolicy::Pinned {
@@ -112,6 +114,19 @@ fn requests_terminal_project_generation(
 /// Errors from the unary forward pipeline.
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteForwardError {
+    /// The supplied destination policy cannot be projected into exact remote
+    /// project authority.
+    #[error("invalid remote execution policy: {message}")]
+    ExecutionPolicyInvalid { message: String },
+    /// Two independently admitted snapshot authorities disagree. This is an
+    /// internal fail-closed integrity error, not a reason to select either
+    /// mutable source.
+    #[error("{authority} snapshot authority '{expected}' differs from pushed snapshot '{pushed}'")]
+    SnapshotAuthorityMismatch {
+        authority: &'static str,
+        expected: String,
+        pushed: String,
+    },
     /// Durable sync job ledger failed before or during remote orchestration.
     #[error("sync job ledger failed: {0}")]
     JobLedgerFailed(String),
@@ -147,6 +162,8 @@ impl RemoteForwardError {
     /// Machine-readable error code.
     pub fn code(&self) -> &'static str {
         match self {
+            Self::ExecutionPolicyInvalid { .. } => "remote_execution_policy_invalid",
+            Self::SnapshotAuthorityMismatch { .. } => "remote_snapshot_authority_mismatch",
             Self::JobLedgerFailed(_) => "remote_job_ledger_failed",
             Self::PushFailed(_) => "remote_push_failed",
             Self::ExecuteFailed(_) => "remote_execute_failed",
@@ -160,6 +177,122 @@ impl RemoteForwardError {
     }
 }
 
+/// Validate the caller-side authority before any remote side effect.
+///
+/// `CurrentHead` is accepted only when the local admission boundary supplied
+/// the exact generation it resolved. `CaptureLive` may omit that generation
+/// because the shared forwarder performs the capture itself. A direct live
+/// policy is never portable.
+fn validate_forward_policy_authority(
+    policy: &ExecutionPolicy,
+    admitted_snapshot_hash: Option<&str>,
+) -> Result<(), RemoteForwardError> {
+    policy
+        .validate()
+        .map_err(|error| RemoteForwardError::ExecutionPolicyInvalid {
+            message: error.to_string(),
+        })?;
+    if policy.target != ExecutionTarget::Here {
+        return Err(RemoteForwardError::ExecutionPolicyInvalid {
+            message: "remote forwarding receives a destination-local policy; target must be `here`"
+                .to_string(),
+        });
+    }
+    match &policy.project {
+        ProjectExecutionPolicy::Projectless => {
+            if admitted_snapshot_hash.is_some() {
+                return Err(RemoteForwardError::ExecutionPolicyInvalid {
+                    message:
+                        "projectless remote forwarding cannot carry project snapshot authority"
+                            .to_string(),
+                });
+            }
+        }
+        ProjectExecutionPolicy::LiveDirect { .. } => {
+            return Err(RemoteForwardError::ExecutionPolicyInvalid {
+                message:
+                    "remote forwarding requires pinned portable project authority, not live_direct"
+                        .to_string(),
+            });
+        }
+        ProjectExecutionPolicy::Pinned {
+            source,
+            realization,
+            ..
+        } => {
+            if matches!(
+                realization,
+                PinnedRealization::Cow {
+                    terminal_publication: TerminalPublication::AdvanceHead { .. }
+                }
+            ) {
+                return Err(RemoteForwardError::ExecutionPolicyInvalid {
+                    message: "remote advance-head publication requires destination-scoped delegated authority and is not supported in v1; use retain-result"
+                        .to_string(),
+                });
+            }
+            match source {
+                PinnedSource::Snapshot { hash } => {
+                    let admitted = admitted_snapshot_hash.ok_or_else(|| {
+                        RemoteForwardError::ExecutionPolicyInvalid {
+                            message: "snapshot remote forwarding requires exact locally admitted snapshot authority"
+                                .to_string(),
+                        }
+                    })?;
+                    if hash != admitted {
+                        return Err(RemoteForwardError::SnapshotAuthorityMismatch {
+                            authority: "execution-policy",
+                            expected: hash.clone(),
+                            pushed: admitted.to_string(),
+                        });
+                    }
+                }
+                PinnedSource::CurrentHead if admitted_snapshot_hash.is_none() => {
+                    return Err(RemoteForwardError::ExecutionPolicyInvalid {
+                        message: "current_head remote forwarding requires exact locally admitted snapshot authority"
+                            .to_string(),
+                    });
+                }
+                PinnedSource::CurrentHead | PinnedSource::CaptureLive { .. } => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Bind destination execution to the exact generation that the push phase
+/// published. The remote never receives `current_head` or `capture_live`, so a
+/// concurrent destination HEAD advance cannot change what executes.
+fn bind_destination_execution_policy(
+    policy: &ExecutionPolicy,
+    admitted_snapshot_hash: Option<&str>,
+    pushed_snapshot_hash: &str,
+) -> Result<ExecutionPolicy, RemoteForwardError> {
+    validate_forward_policy_authority(policy, admitted_snapshot_hash)?;
+    if let Some(admitted) = admitted_snapshot_hash {
+        if admitted != pushed_snapshot_hash {
+            return Err(RemoteForwardError::SnapshotAuthorityMismatch {
+                authority: "local-admission",
+                expected: admitted.to_string(),
+                pushed: pushed_snapshot_hash.to_string(),
+            });
+        }
+    }
+
+    let mut bound = policy.clone();
+    if let ProjectExecutionPolicy::Pinned { source, .. } = &mut bound.project {
+        *source = PinnedSource::Snapshot {
+            hash: pushed_snapshot_hash.to_string(),
+        };
+    }
+    bound
+        .validate()
+        .map_err(|error| RemoteForwardError::ExecutionPolicyInvalid {
+            message: format!("pushed snapshot binding is invalid: {error}"),
+        })?;
+    Ok(bound)
+}
+
 /// Execute a unary remote forward: push → execute → pull/apply.
 ///
 /// This is the single production implementation of the push/execute/pull
@@ -170,6 +303,8 @@ pub async fn execute_unary_forward(
     client: &RemoteClient,
     req: RemoteForwardRequest<'_>,
 ) -> Result<RemoteForwardResult, RemoteForwardError> {
+    validate_forward_policy_authority(req.execution_policy, req.source_snapshot_hash)?;
+
     // Capture one descriptor-bound state authority for the complete
     // push/execute/pull pipeline. CAS and recovery handles below must all be
     // derived from this capture; no phase independently reopens runtime paths.
@@ -311,6 +446,39 @@ pub async fn execute_unary_forward(
         }
     };
 
+    let destination_policy = match bind_destination_execution_policy(
+        req.execution_policy,
+        req.source_snapshot_hash,
+        &push_result.snapshot_hash,
+    ) {
+        Ok(policy) => policy,
+        Err(error) => {
+            let message = error.to_string();
+            finish_sync_job_attempt_and_update_job(
+                state,
+                &attempt_id,
+                FinishSyncJobAttempt {
+                    state: SyncJobAttemptState::Failed,
+                    phase: "snapshot_authority_failed".to_string(),
+                    error: Some(message.clone()),
+                    result: None,
+                },
+                &job_id,
+                SyncJobUpdate {
+                    state: SyncJobState::Failed,
+                    phase: "snapshot_authority_failed".to_string(),
+                    roots: Some(vec![push_result.snapshot_hash.clone()]),
+                    heads: None,
+                    uploaded_hashes: vec![push_result.snapshot_hash.clone()],
+                    fetched_hashes: Vec::new(),
+                    last_error: Some(message),
+                    result: None,
+                },
+            )?;
+            return Err(error);
+        }
+    };
+
     update_sync_job(
         state,
         &job_id,
@@ -326,19 +494,19 @@ pub async fn execute_unary_forward(
         },
     )?;
 
-    // 2. Execute on remote with project_source: pushed_head.
+    // 2. Execute on the remote against the exact snapshot published above.
     let remote_result = match client
         .execute_with_options(
             req.item_ref,
             req.ref_bindings,
             (!matches!(
-                &req.execution_policy.project,
+                &destination_policy.project,
                 ryeos_app::execution_policy::ProjectExecutionPolicy::Projectless
             ))
             .then_some(req.remote_project_path),
             &req.parameters,
             req.call,
-            req.execution_policy,
+            &destination_policy,
         )
         .await
     {
@@ -374,7 +542,7 @@ pub async fn execute_unary_forward(
     // project generation. Their remote result is already complete; requiring
     // a synthetic snapshot here would silently strengthen the selected
     // publication contract.
-    if !requests_terminal_project_generation(req.execution_policy) {
+    if !requests_terminal_project_generation(&destination_policy) {
         let completed_result = serde_json::json!({
             "project_generation": "not_requested",
         });
@@ -714,9 +882,37 @@ async fn push_no_project(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ryeos_app::execution_policy::{ChildProjectPolicy, ExecutionResponse, ProjectCaptureScope};
+
+    fn pinned_policy(source: PinnedSource, realization: PinnedRealization) -> ExecutionPolicy {
+        ExecutionPolicy {
+            project: ProjectExecutionPolicy::Pinned {
+                source,
+                realization,
+                child_policy: ChildProjectPolicy::Inherit,
+            },
+            ..ExecutionPolicy::projectless(ExecutionResponse::Wait)
+        }
+    }
 
     #[test]
     fn error_codes_are_stable() {
+        assert_eq!(
+            RemoteForwardError::ExecutionPolicyInvalid {
+                message: "x".into()
+            }
+            .code(),
+            "remote_execution_policy_invalid"
+        );
+        assert_eq!(
+            RemoteForwardError::SnapshotAuthorityMismatch {
+                authority: "test",
+                expected: "a".into(),
+                pushed: "b".into(),
+            }
+            .code(),
+            "remote_snapshot_authority_mismatch"
+        );
         assert_eq!(
             RemoteForwardError::JobLedgerFailed("x".into()).code(),
             "remote_job_ledger_failed"
@@ -801,5 +997,120 @@ mod tests {
         assert_eq!(s.cas_objects_fetched, 5);
         assert_eq!(s.files_updated, 3);
         assert_eq!(s.files_deleted, 1);
+    }
+
+    #[test]
+    fn capture_live_is_bound_to_exact_pushed_snapshot() {
+        let pushed = "11".repeat(32);
+        let policy = pinned_policy(
+            PinnedSource::CaptureLive {
+                scope: ProjectCaptureScope::FullProject,
+            },
+            PinnedRealization::ReadOnly,
+        );
+
+        let bound = bind_destination_execution_policy(&policy, None, &pushed).unwrap();
+
+        assert!(matches!(
+            bound.project,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::Snapshot { hash },
+                ..
+            } if hash == pushed
+        ));
+        assert!(matches!(
+            policy.project,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::CaptureLive { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn current_head_is_bound_only_from_exact_local_admission() {
+        let admitted = "22".repeat(32);
+        let policy = pinned_policy(PinnedSource::CurrentHead, PinnedRealization::ReadOnly);
+
+        let bound = bind_destination_execution_policy(&policy, Some(&admitted), &admitted).unwrap();
+
+        assert!(matches!(
+            bound.project,
+            ProjectExecutionPolicy::Pinned {
+                source: PinnedSource::Snapshot { hash },
+                ..
+            } if hash == admitted
+        ));
+        assert!(matches!(
+            bind_destination_execution_policy(&policy, None, &admitted),
+            Err(RemoteForwardError::ExecutionPolicyInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn declared_snapshot_must_match_local_admission() {
+        let declared = "33".repeat(32);
+        let admitted = "44".repeat(32);
+        let policy = pinned_policy(
+            PinnedSource::Snapshot {
+                hash: declared.clone(),
+            },
+            PinnedRealization::ReadOnly,
+        );
+
+        assert!(matches!(
+            bind_destination_execution_policy(&policy, Some(&admitted), &admitted),
+            Err(RemoteForwardError::SnapshotAuthorityMismatch {
+                authority: "execution-policy",
+                expected,
+                pushed,
+            }) if expected == declared && pushed == admitted
+        ));
+    }
+
+    #[test]
+    fn pushed_snapshot_must_match_local_admission() {
+        let admitted = "55".repeat(32);
+        let pushed = "66".repeat(32);
+        let policy = pinned_policy(PinnedSource::CurrentHead, PinnedRealization::ReadOnly);
+
+        assert!(matches!(
+            bind_destination_execution_policy(&policy, Some(&admitted), &pushed),
+            Err(RemoteForwardError::SnapshotAuthorityMismatch {
+                authority: "local-admission",
+                expected,
+                pushed: actual,
+            }) if expected == admitted && actual == pushed
+        ));
+    }
+
+    #[test]
+    fn projectless_forwarding_stays_projectless() {
+        let policy = ExecutionPolicy::projectless(ExecutionResponse::Wait);
+        let pushed = "77".repeat(32);
+
+        let bound = bind_destination_execution_policy(&policy, None, &pushed).unwrap();
+
+        assert!(matches!(bound.project, ProjectExecutionPolicy::Projectless));
+    }
+
+    #[test]
+    fn remote_advance_head_is_rejected_before_push() {
+        let policy = pinned_policy(
+            PinnedSource::CaptureLive {
+                scope: ProjectCaptureScope::FullProject,
+            },
+            PinnedRealization::Cow {
+                terminal_publication: TerminalPublication::AdvanceHead {
+                    head_ref: "refs/projects/example".into(),
+                    expected_hash: "88".repeat(32),
+                },
+            },
+        );
+
+        assert!(matches!(
+            validate_forward_policy_authority(&policy, None),
+            Err(RemoteForwardError::ExecutionPolicyInvalid { .. })
+        ));
     }
 }

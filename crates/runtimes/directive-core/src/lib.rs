@@ -1416,6 +1416,7 @@ fn glob_match(pattern: &str, candidate: &str) -> bool {
 pub enum SnapshotItemSpace {
     Bundle,
     Project,
+    Node,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1423,6 +1424,7 @@ pub enum SnapshotItemSpace {
 pub enum SnapshotTrustClass {
     TrustedBundle,
     TrustedProject,
+    TrustedNode,
     UntrustedProject,
     Unsigned,
 }

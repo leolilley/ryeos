@@ -34,6 +34,11 @@ use crate::trust::TrustStore;
 
 use super::descriptor::ParserDescriptor;
 
+const MAX_PROJECT_PARSER_FILES: usize = 4096;
+const MAX_PROJECT_PARSER_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PARSER_TRAVERSAL_ENTRIES: usize = MAX_PROJECT_PARSER_FILES * 2;
+const MAX_PARSER_TRAVERSAL_DEPTH: usize = 64;
+
 /// A canonical-ref collision detected during multi-root base loading.
 ///
 /// The base layer's contract is **uniqueness** — the project overlay
@@ -140,6 +145,7 @@ impl ParserRegistry {
                     replace_existing: false,
                     trust_store,
                     bootstrap: &bootstrap,
+                    limits: None,
                 },
                 &tools_root,
             )?;
@@ -211,6 +217,10 @@ impl ParserRegistry {
                 replace_existing: true,
                 trust_store,
                 bootstrap: &bootstrap,
+                limits: Some(WalkToolsLimits {
+                    max_files: MAX_PROJECT_PARSER_FILES,
+                    max_bytes: MAX_PROJECT_PARSER_BYTES,
+                }),
             },
             &tools_root,
         )?;
@@ -219,6 +229,116 @@ impl ParserRegistry {
         Ok(Self {
             descriptors,
             fingerprint,
+        })
+    }
+
+    /// Apply a project parser overlay from authoritative, already-admitted
+    /// bytes. Relative paths are interpreted beneath the parser kind's
+    /// declared project directory and are used only for canonical identity
+    /// and diagnostics; this method never reopens the project filesystem.
+    pub fn with_project_overlay_from_content(
+        &self,
+        project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+        trust_store: &TrustStore,
+        kinds: &KindRegistry,
+    ) -> Result<Self, EngineError> {
+        let bootstrap = ParserBootstrap::derive(kinds)?;
+        let project_prefix = Path::new(AI_DIR).join(&bootstrap.directory);
+        let tools_root = PathBuf::from("<admitted-project-parser-overlay>");
+        let entries =
+            project_content.list_files(&project_prefix, true, MAX_PROJECT_PARSER_FILES)?;
+
+        let mut descriptors = self.descriptors.clone();
+        let mut fingerprint_data = self.fingerprint.as_bytes().to_vec();
+        let mut origin_paths: HashMap<String, PathBuf> = HashMap::new();
+        let mut total_bytes = 0_u64;
+
+        for entry in entries {
+            let relative = entry.relative_path;
+            if relative.is_absolute()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!("unsafe admitted parser overlay path {}", relative.display()),
+                }
+                .into());
+            }
+            let extension_matches = relative
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| bootstrap.extensions.contains(extension));
+            if !extension_matches {
+                continue;
+            }
+            total_bytes = total_bytes.checked_add(entry.size).ok_or_else(|| {
+                EngineError::SchemaLoaderError {
+                    reason: "project parser overlay byte count overflow".to_string(),
+                }
+            })?;
+            if total_bytes > MAX_PROJECT_PARSER_BYTES {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "project parser overlay exceeds {MAX_PROJECT_PARSER_BYTES} bytes"
+                    ),
+                }
+                .into());
+            }
+            let project_relative = project_prefix.join(&relative);
+            let bytes = project_content
+                .read_file(&project_relative, MAX_PROJECT_PARSER_BYTES)?
+                .ok_or_else(|| EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "admitted parser overlay file disappeared: {}",
+                        project_relative.display()
+                    ),
+                })?;
+            let path = tools_root.join(&relative);
+            let content =
+                std::str::from_utf8(&bytes).map_err(|error| EngineError::SchemaLoaderError {
+                    reason: format!("{} is not UTF-8: {error}", path.display()),
+                })?;
+            verify_signature_with_envelope(&path, content, trust_store, &bootstrap.signature)?;
+            let stripped = lillux::signature::strip_signature_lines_with_envelope(
+                content,
+                &bootstrap.signature.prefix,
+                bootstrap.signature.suffix.as_deref(),
+            );
+            let descriptor: ParserDescriptor =
+                serde_yaml::from_str(&stripped).map_err(|error| {
+                    EngineError::SchemaLoaderError {
+                        reason: format!("{}: invalid parser descriptor: {error}", path.display()),
+                    }
+                })?;
+            if descriptor.parser_api_version != 1 {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "{}: parser_api_version must be 1 (got {})",
+                        path.display(),
+                        descriptor.parser_api_version
+                    ),
+                });
+            }
+            let canonical_ref = derive_canonical_ref(&tools_root, &path)
+                .map_err(|reason| EngineError::SchemaLoaderError { reason })?;
+            if let Some(prior) = origin_paths.insert(canonical_ref.clone(), path.clone()) {
+                return Err(EngineError::SchemaLoaderError {
+                    reason: format!(
+                        "duplicate parser canonical ref `{canonical_ref}` within project overlay: \
+                         {} and {} both map to it",
+                        prior.display(),
+                        path.display()
+                    ),
+                });
+            }
+            descriptors.insert(canonical_ref.clone(), descriptor);
+            extend_overlay_fingerprint(&mut fingerprint_data, &canonical_ref, content);
+        }
+
+        Ok(Self {
+            descriptors,
+            fingerprint: lillux::cas::sha256_hex(&fingerprint_data),
         })
     }
 
@@ -388,6 +508,13 @@ struct WalkToolsContext<'a> {
     replace_existing: bool,
     trust_store: &'a TrustStore,
     bootstrap: &'a ParserBootstrap,
+    limits: Option<WalkToolsLimits>,
+}
+
+#[derive(Clone, Copy)]
+struct WalkToolsLimits {
+    max_files: usize,
+    max_bytes: u64,
 }
 
 fn walk_tools(ctx: WalkToolsContext<'_>, cur: &Path) -> Result<(), EngineError> {
@@ -400,134 +527,160 @@ fn walk_tools(ctx: WalkToolsContext<'_>, cur: &Path) -> Result<(), EngineError> 
         replace_existing,
         trust_store,
         bootstrap,
+        limits,
     } = ctx;
-    let entries = match std::fs::read_dir(cur) {
-        Ok(d) => d,
-        Err(e) => {
-            return Err(EngineError::SchemaLoaderError {
-                reason: format!("cannot read parsers dir {}: {e}", cur.display()),
-            });
-        }
-    };
-
-    let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
-    sorted.sort();
-
-    for path in sorted {
-        if path.is_dir() {
-            walk_tools(
-                WalkToolsContext {
-                    tools_root,
-                    descriptors,
-                    origin_paths,
-                    duplicates,
-                    fingerprint_data,
-                    replace_existing,
-                    trust_store,
-                    bootstrap,
-                },
-                &path,
-            )?;
-            continue;
-        }
-
-        let ext_match = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|e| bootstrap.extensions.contains(e))
-            .unwrap_or(false);
-        if !ext_match {
-            continue;
-        }
-
-        let content = match std::fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                return Err(EngineError::SchemaLoaderError {
-                    reason: format!("cannot read {}: {e}", path.display()),
-                });
+    if cur != tools_root {
+        return Err(EngineError::SchemaLoaderError {
+            reason: "parser walker must begin at its exact tools root".to_string(),
+        });
+    }
+    let mut file_count = 0_usize;
+    let mut total_bytes = 0_u64;
+    let present = lillux::visit_regular_files_no_follow_bounded(
+        tools_root,
+        lillux::DirectoryTraversalBudget::new(
+            MAX_PARSER_TRAVERSAL_ENTRIES,
+            MAX_PARSER_TRAVERSAL_DEPTH,
+        ),
+        |_relative, _is_directory| Ok(false),
+        |relative, file| {
+            file_count = file_count.saturating_add(1);
+            if limits.is_some_and(|limits| file_count > limits.max_files) {
+                anyhow::bail!(
+                    "project parser overlay exceeds {} files",
+                    limits.expect("checked").max_files
+                );
             }
-        };
+            let path = tools_root.join(relative);
+            let ext_match = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|e| bootstrap.extensions.contains(e))
+                .unwrap_or(false);
+            if !ext_match {
+                return Ok(());
+            }
+            let max_file_bytes = limits.map(|limits| limits.max_bytes).unwrap_or(u64::MAX);
+            let bytes = lillux::read_open_regular_file_bounded(file, max_file_bytes)?;
+            total_bytes = total_bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("parser overlay byte count overflow"))?;
+            if limits.is_some_and(|limits| total_bytes > limits.max_bytes) {
+                anyhow::bail!(
+                    "project parser overlay exceeds {} bytes",
+                    limits.expect("checked").max_bytes
+                );
+            }
+            let content = std::str::from_utf8(&bytes)
+                .map_err(|error| anyhow::anyhow!("{} is not UTF-8: {error}", path.display()))?;
 
-        // Verify signature using the parser kind's declared envelope.
-        verify_signature_with_envelope(&path, &content, trust_store, &bootstrap.signature)?;
+            // Verify signature using the parser kind's declared envelope.
+            verify_signature_with_envelope(&path, content, trust_store, &bootstrap.signature)?;
 
-        let stripped = lillux::signature::strip_signature_lines_with_envelope(
-            &content,
-            &bootstrap.signature.prefix,
-            bootstrap.signature.suffix.as_deref(),
-        );
-        let descriptor: ParserDescriptor =
-            serde_yaml::from_str(&stripped).map_err(|e| EngineError::SchemaLoaderError {
-                reason: format!("{}: invalid parser descriptor: {e}", path.display()),
-            })?;
+            let stripped = lillux::signature::strip_signature_lines_with_envelope(
+                content,
+                &bootstrap.signature.prefix,
+                bootstrap.signature.suffix.as_deref(),
+            );
+            let descriptor: ParserDescriptor =
+                serde_yaml::from_str(&stripped).map_err(|e| EngineError::SchemaLoaderError {
+                    reason: format!("{}: invalid parser descriptor: {e}", path.display()),
+                })?;
 
-        if descriptor.parser_api_version != 1 {
-            return Err(EngineError::SchemaLoaderError {
-                reason: format!(
-                    "{}: parser_api_version must be 1 (got {})",
-                    path.display(),
-                    descriptor.parser_api_version
-                ),
-            });
-        }
-
-        let canonical_ref = derive_canonical_ref(tools_root, &path)
-            .map_err(|reason| EngineError::SchemaLoaderError { reason })?;
-
-        if replace_existing {
-            // Within a single overlay walk, a canonical ref MUST
-            // appear at most once. The overlay is the only sanctioned
-            // override path; two overlay files mapping to the same
-            // ref would silently become last-write-wins by traversal
-            // order, which is a project authoring bug — fail loud.
-            // (Base-vs-overlay collisions are still allowed: the
-            // descriptors map may already hold a base entry for this
-            // ref, but `origin_paths` starts empty for the overlay
-            // walk, so we only fire on intra-overlay duplicates.)
-            if let Some(prior) = origin_paths.get(&canonical_ref) {
+            if descriptor.parser_api_version != 1 {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!(
-                        "duplicate parser canonical ref `{canonical_ref}` \
+                        "{}: parser_api_version must be 1 (got {})",
+                        path.display(),
+                        descriptor.parser_api_version
+                    ),
+                }
+                .into());
+            }
+
+            let canonical_ref = derive_canonical_ref(tools_root, &path)
+                .map_err(|reason| EngineError::SchemaLoaderError { reason })?;
+
+            if replace_existing {
+                // Within a single overlay walk, a canonical ref MUST
+                // appear at most once. The overlay is the only sanctioned
+                // override path; two overlay files mapping to the same
+                // ref would silently become last-write-wins by traversal
+                // order, which is a project authoring bug — fail loud.
+                // (Base-vs-overlay collisions are still allowed: the
+                // descriptors map may already hold a base entry for this
+                // ref, but `origin_paths` starts empty for the overlay
+                // walk, so we only fire on intra-overlay duplicates.)
+                if let Some(prior) = origin_paths.get(&canonical_ref) {
+                    return Err(EngineError::SchemaLoaderError {
+                        reason: format!(
+                            "duplicate parser canonical ref `{canonical_ref}` \
                          within project overlay: {} and {} both map to it; \
                          project overlays must declare each parser exactly once",
-                        prior.display(),
-                        path.display()
-                    ),
-                });
-            }
-            descriptors.insert(canonical_ref.clone(), descriptor);
-            origin_paths.insert(canonical_ref, path.clone());
-            fingerprint_data.extend_from_slice(content.as_bytes());
-        } else {
-            use std::collections::hash_map::Entry;
-            match descriptors.entry(canonical_ref.clone()) {
-                Entry::Vacant(e) => {
-                    e.insert(descriptor);
-                    origin_paths.insert(canonical_ref, path.clone());
-                    fingerprint_data.extend_from_slice(content.as_bytes());
+                            prior.display(),
+                            path.display()
+                        ),
+                    }
+                    .into());
                 }
-                Entry::Occupied(_) => {
-                    // Base layer must be unique. We retain the first
-                    // occupant only so the in-memory registry stays
-                    // well-formed; the collision is recorded so the
-                    // boot validator can fail boot loudly.
-                    let entry = duplicates.entry(canonical_ref.clone()).or_insert_with(|| {
-                        // Seed with the original winner so the issue
-                        // report points at both files.
-                        let winner = origin_paths
-                            .get(&canonical_ref)
-                            .cloned()
-                            .unwrap_or_else(|| PathBuf::from("<unknown>"));
-                        vec![winner]
-                    });
-                    entry.push(path.clone());
+                descriptors.insert(canonical_ref.clone(), descriptor);
+                origin_paths.insert(canonical_ref.clone(), path.clone());
+                extend_overlay_fingerprint(fingerprint_data, &canonical_ref, content);
+            } else {
+                use std::collections::hash_map::Entry;
+                match descriptors.entry(canonical_ref.clone()) {
+                    Entry::Vacant(e) => {
+                        e.insert(descriptor);
+                        origin_paths.insert(canonical_ref.clone(), path.clone());
+                        extend_overlay_fingerprint(fingerprint_data, &canonical_ref, content);
+                    }
+                    Entry::Occupied(_) => {
+                        // Base layer must be unique. We retain the first
+                        // occupant only so the in-memory registry stays
+                        // well-formed; the collision is recorded so the
+                        // boot validator can fail boot loudly.
+                        let entry = duplicates.entry(canonical_ref.clone()).or_insert_with(|| {
+                            // Seed with the original winner so the issue
+                            // report points at both files.
+                            let winner = origin_paths
+                                .get(&canonical_ref)
+                                .cloned()
+                                .unwrap_or_else(|| PathBuf::from("<unknown>"));
+                            vec![winner]
+                        });
+                        entry.push(path.clone());
+                    }
                 }
             }
-        }
+            Ok(())
+        },
+    )
+    .map_err(|error| match error.downcast::<EngineError>() {
+        Ok(error) => error,
+        Err(error) => EngineError::SchemaLoaderError {
+            reason: format!(
+                "cannot securely walk parsers dir {}: {error:#}",
+                cur.display()
+            ),
+        },
+    })?;
+    if !present {
+        return Ok(());
     }
 
     Ok(())
+}
+
+/// Add one parser descriptor to the registry fingerprint with explicit entry
+/// identity and framing. Descriptor bytes alone are insufficient: moving the
+/// same signed document to a different canonical ref changes which parser is
+/// overridden, and raw concatenation admits boundary collisions.
+fn extend_overlay_fingerprint(fingerprint: &mut Vec<u8>, canonical_ref: &str, content: &str) {
+    fingerprint.extend_from_slice(b"ryeos:parser-overlay-entry:v1\0");
+    for field in [canonical_ref.as_bytes(), content.as_bytes()] {
+        fingerprint.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        fingerprint.extend_from_slice(field);
+    }
 }
 
 /// Verify a parser descriptor signature using the supplied envelope.
@@ -663,6 +816,44 @@ mod tests {
         };
         let signed = lillux::signature::sign_content(body, sk, "#", None);
         fs::write(path, signed).unwrap();
+    }
+
+    fn overlay_fingerprint(entries: &[(&str, &str)]) -> String {
+        let mut bytes = Vec::new();
+        for (canonical_ref, content) in entries {
+            extend_overlay_fingerprint(&mut bytes, canonical_ref, content);
+        }
+        lillux::cas::sha256_hex(&bytes)
+    }
+
+    #[test]
+    fn overlay_fingerprint_binds_canonical_ref_not_only_source_bytes() {
+        let content = "the exact same signed parser document";
+        assert_ne!(
+            overlay_fingerprint(&[("parser:one", content)]),
+            overlay_fingerprint(&[("parser:two", content)]),
+            "moving identical bytes to another canonical parser ref changes registry semantics"
+        );
+    }
+
+    #[test]
+    fn overlay_fingerprint_frames_fields_against_concatenation_collisions() {
+        assert_ne!(
+            overlay_fingerprint(&[("parser:ab", "c")]),
+            overlay_fingerprint(&[("parser:a", "bc")]),
+            "canonical ref and source boundaries must be length framed"
+        );
+    }
+
+    #[test]
+    fn overlay_fingerprint_binds_ordered_registry_entries() {
+        let first = ("parser:first", "first source");
+        let second = ("parser:second", "second source");
+        assert_ne!(
+            overlay_fingerprint(&[first, second]),
+            overlay_fingerprint(&[second, first]),
+            "the fingerprint must bind the canonical registry entry order"
+        );
     }
 
     /// The default parser kind schema used by most tests — directory

@@ -252,22 +252,22 @@ mod integration_tests {
         let (_tmp, store) = setup_state_store();
         seed_follow_parent(&store);
         store.reserve_follow(&follow_seed("k4")).unwrap();
-        set_follow_child(&store, "k4", "T-C", "T-Croot");
+        set_follow_child(&store, "k4", "T-child", "T-child-root");
         store.set_follow_parent_successor("k4", "S").unwrap();
         store.mark_follow_waiting("k4").unwrap();
 
         let envelope = serde_json::json!({
             "success": true,
-            "child_thread_id": "T-C",
+            "child_thread_id": "T-child",
             "status": "completed",
             "result": { "x": 1 },
-            "outputs": null,
+            "outputs": {},
             "warnings": [],
             "cost": null,
         });
         // First terminal for the child chain: waiting → ready, returns true.
         let first = store
-            .mark_follow_child_terminal("T-Croot", "T-C", "completed", &envelope)
+            .mark_follow_child_terminal("T-child-root", "T-child", "completed", &envelope)
             .unwrap();
         assert!(first);
         let w = store.get_follow_waiter_by_key("k4").unwrap().unwrap();
@@ -275,13 +275,13 @@ mod integration_tests {
         assert_eq!(w.children[0].terminal_status.as_deref(), Some("completed"));
         // Duplicate identical terminal is a no-op (already ready) → false.
         let second = store
-            .mark_follow_child_terminal("T-Croot", "T-C", "completed", &envelope)
+            .mark_follow_child_terminal("T-child-root", "T-child", "completed", &envelope)
             .unwrap();
         assert!(!second);
         // An unknown child chain has no waiter → false, not an error.
         assert!(
             !store
-                .mark_follow_child_terminal("unknown-chain", "T-C", "completed", &envelope)
+                .mark_follow_child_terminal("unknown-chain", "T-child", "completed", &envelope)
                 .unwrap()
         );
     }

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T23:40:19Z:1d5f7907b77fac69d1e3fb2c78bd4877f2e394fd641b591ef4c63d35908e9e96:TTmxPBPyTkUSBY1Q4HmeIvX1NibuR6EHJQA1k3t+bHeoetc6tLdFZ1bmJtqlSOwaaXD/10RDn8MfgOyHUttjDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-28T15:40:40Z:b3b8ed90eb5060b35edc847d1118bd0517e36306effb3891a1e6cad34103e761:B43RaITWPkfvQLfuI2GNcIsRPzwFxzpDHdPBV9uT4LEXS8LeGZNO1PbMLNtT6TVxZ9Z155V/XHXF9nD8RM4xDA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -62,10 +62,10 @@ config:
                 break
         if tools_root is None:sys.exit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
         rel=tool_path.relative_to(tools_root)
-        if len(rel.parts)<2:sys.exit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
-        bundle_tool_root=tools_root/rel.parts[0]
+        if not rel.parts:sys.exit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
+        tool_namespace_root=tools_root/rel.parts[0] if len(rel.parts)>1 else tools_root
         tool_dir=tool_path.parent
-        for path in reversed([tool_dir,bundle_tool_root,bundle_tool_root/"lib",runtime_lib]):prepend(path)
+        for path in reversed([tool_dir,tool_namespace_root,tool_namespace_root/"lib",runtime_lib]):prepend(path)
         mod=types.ModuleType("tool")
         mod.__file__=str(tool_path)
         mod.__loader__=None
