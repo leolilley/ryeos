@@ -6,10 +6,10 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use ryeos_engine::trust::{
-    MAX_TRUST_DIRECTORY_BYTES, MAX_TRUST_DOCUMENTS, MAX_TRUST_DOCUMENT_BYTES,
+    MAX_TRUST_DIRECTORY_BYTES, MAX_TRUST_DOCUMENT_BYTES, MAX_TRUST_DOCUMENTS,
     MAX_TRUST_TRAVERSAL_DEPTH, MAX_TRUST_TRAVERSAL_ENTRIES,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 const MAX_CONFIG_SOURCE_BYTES: u64 = 1024 * 1024;
@@ -2296,7 +2296,9 @@ pem = """
         oversized.push(b'\n');
         fs::write(path, oversized).unwrap();
         let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes")));
+        assert!(
+            format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes"))
+        );
     }
 
     #[test]

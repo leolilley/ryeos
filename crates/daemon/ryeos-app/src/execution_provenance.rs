@@ -1212,9 +1212,11 @@ mod tests {
             pinned(Path::new("/laptop"), &"a".repeat(64)),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not match its effective path"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its effective path")
+        );
     }
 
     #[test]

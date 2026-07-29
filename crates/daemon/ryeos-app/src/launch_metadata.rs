@@ -1373,13 +1373,15 @@ mod tests {
         });
         let mut changed = source.clone();
         changed.parameters = serde_json::json!({"input": "new"});
-        assert!(changed
-            .validate_continuation_transition_from(
-                &source,
-                None,
-                ContinuationAuthorityTransitionKind::Inherit,
-            )
-            .is_err());
+        assert!(
+            changed
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::Inherit,
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1403,13 +1405,15 @@ mod tests {
             .unwrap();
 
         operator.item_ref = "tool:test/other".to_string();
-        assert!(operator
-            .validate_continuation_transition_from(
-                &source,
-                None,
-                ContinuationAuthorityTransitionKind::OperatorFollowUp,
-            )
-            .is_err());
+        assert!(
+            operator
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::OperatorFollowUp,
+                )
+                .is_err()
+        );
     }
 
     #[test]

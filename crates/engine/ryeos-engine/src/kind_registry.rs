@@ -2066,15 +2066,6 @@ fn parse_execution_schema(
                         reason: format!("{display}: invalid launch_augmentations entry: {e}"),
                     }
                 })?;
-            match &aug {
-                LaunchAugmentationDecl::ComposeContextPositions { runtime_config, .. } => {
-                    validate_method_runtime_config_requirements(
-                        display,
-                        "execution.launch_augmentations[].runtime_config",
-                        runtime_config,
-                    )?;
-                }
-            }
             launch_augmentations.push(aug);
         }
     }

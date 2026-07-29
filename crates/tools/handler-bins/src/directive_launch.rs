@@ -469,7 +469,7 @@ fn validate_contract(request: &ValidateLaunchPreparerConfigRequest) -> Result<()
         _ => {
             return Err(
                 "model_providers must be the trusted node-or-bundle provider catalog".into(),
-            )
+            );
         }
     }
     match request.config_inputs.get(EXECUTION_INPUT) {

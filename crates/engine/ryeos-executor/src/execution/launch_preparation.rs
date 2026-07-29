@@ -567,7 +567,7 @@ fn consume_prepared_proof_status(
                 "launch_config_authority_invariant",
                 "immutable admitted launch config authority failed exact revalidation",
                 LaunchPrepareErrorClass::Internal,
-            ))
+            ));
         }
         ryeos_engine::launch_config::LaunchConfigProofStatus::MutableAuthorityChanged => {}
     }
