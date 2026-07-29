@@ -1453,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "lillux"
-version = "0.5.69"
+version = "0.5.70"
 dependencies = [
  "anyhow",
  "base64",
@@ -2468,7 +2468,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-cli"
-version = "0.5.69"
+version = "0.5.70"
 dependencies = [
  "anyhow",
  "base64",
@@ -2567,7 +2567,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-core-tools"
-version = "0.5.69"
+version = "0.5.70"
 dependencies = [
  "anyhow",
  "base64",
@@ -2805,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "ryeos-runtime"
-version = "0.5.69"
+version = "0.5.70"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "ryeosd"
-version = "0.5.69"
+version = "0.5.70"
 dependencies = [
  "anyhow",
  "arc-swap",

@@ -264,4 +264,23 @@ mod tests {
             assert_eq!(actual, expected, "unexpected binding for {bundle}/{file}");
         }
     }
+
+    #[test]
+    fn snapshot_commands_bind_the_selected_project_to_the_tool_schema_field() {
+        for file in [
+            "snapshot-create.yaml",
+            "snapshot-log.yaml",
+            "snapshot-status.yaml",
+        ] {
+            let command = source_command("core", file);
+            assert_eq!(
+                command
+                    .project
+                    .as_ref()
+                    .and_then(|project| project.bind_parameter.as_deref()),
+                Some("project_path"),
+                "snapshot command {file} must satisfy the target tool's required project_path",
+            );
+        }
+    }
 }
