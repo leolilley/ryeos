@@ -252,6 +252,7 @@ impl PreparedItemPlan {
             bail!("direct recovery found a non-direct admitted execution closure");
         };
         let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+            executor_ref,
             execution_plan_hash,
             executable_identity,
             runtime_identity,

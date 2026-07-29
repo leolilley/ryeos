@@ -2743,14 +2743,14 @@ where
         let name_c = std::ffi::CString::new(name.as_bytes())?;
         if let Some(child_directory) = open_child_directory(directory, &name_c, &display)? {
             if !prune(&relative, true)? {
-                if let Some(state) = budget.as_ref() {
-                    if depth >= state.max_depth {
-                        anyhow::bail!(
-                            "secure directory traversal exceeds maximum depth {} at {}",
-                            state.max_depth,
-                            display.display()
-                        );
-                    }
+                if let Some(state) = budget.as_ref()
+                    && depth >= state.max_depth
+                {
+                    anyhow::bail!(
+                        "secure directory traversal exceeds maximum depth {} at {}",
+                        state.max_depth,
+                        display.display()
+                    );
                 }
                 visit_from_open_directory(
                     root,
