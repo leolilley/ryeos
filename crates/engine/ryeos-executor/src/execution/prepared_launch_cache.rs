@@ -427,11 +427,10 @@ fn retire_previous_generation(state: &mut CacheState, key: &PreparedCacheKey) {
     };
     if let Some((active_epoch, active_generation)) =
         state.active_generations.get(&key.retirement_scope)
+        && (*active_epoch > epoch
+            || (*active_epoch == epoch && active_generation == &key.generation))
     {
-        if *active_epoch > epoch || (*active_epoch == epoch && active_generation == &key.generation)
-        {
-            return;
-        }
+        return;
     }
     state.active_generations.insert(
         key.retirement_scope.clone(),

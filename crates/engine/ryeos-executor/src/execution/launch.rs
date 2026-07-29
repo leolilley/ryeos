@@ -678,12 +678,11 @@ impl ExecutorVerificationFlight {
                 .and_then(|bytes| bytes.checked_add(1)),
             Some(reserved_bytes)
         );
-        let blob = Arc::new(ExecutorVerificationBlob {
+        Arc::new(ExecutorVerificationBlob {
             bytes,
             reserved_bytes,
             budget: Arc::clone(&self.blob_budget),
-        });
-        blob
+        })
     }
 
     fn publish(
@@ -1074,7 +1073,7 @@ fn verify_native_executor_chain(
 
         let verified_ref =
             match ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
-                &signed_ref,
+                signed_ref,
                 |fingerprint| {
                     trust_store
                         .get(fingerprint)

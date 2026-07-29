@@ -185,7 +185,7 @@ impl OwnedPreparedLaunchSkeletonAuthority {
         Self {
             subject_resolution_authority: authority.subject_resolution_authority.clone(),
             execution_project_authority: authority.execution_project_authority.clone(),
-            lifecycle_authority: authority.lifecycle_authority.clone(),
+            lifecycle_authority: *authority.lifecycle_authority,
             protocol: authority.protocol.clone(),
             executor_chain_identity: authority.executor_chain_identity.to_owned(),
             request_engine_generation_identity: authority
@@ -336,174 +336,167 @@ pub async fn prepare_runtime_launch_cached(
             generation_epoch: cache_generation_epoch,
             identity: cache_identity,
         };
-        loop {
-            match super::prepared_launch_cache::cache().begin(cache_key.clone()) {
-                super::prepared_launch_cache::Lookup::Hit {
-                    skeleton,
+        match super::prepared_launch_cache::cache().begin(cache_key.clone()) {
+            super::prepared_launch_cache::Lookup::Hit {
+                skeleton,
+                entry_bytes,
+            } => {
+                // Revalidate the dependency proof captured from this launch's
+                // active roots, not the cached skeleton's original
+                // materialization paths. The stable proof digest is in the
+                // key, so identical pinned generations share the entry even
+                // after an earlier temporary checkout is reclaimed.
+                let proof_status = prepared_config_proof_status(
+                    &inputs.config_dependency_proof,
+                    &prepared_config_roots,
+                    config_materialization.as_ref(),
+                )
+                .await?;
+                if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current {
+                    super::prepared_launch_cache::cache().discard_if_same(
+                        &cache_key,
+                        &skeleton,
+                        super::prepared_launch_cache::CacheReason::AuthorityRevalidationFailed,
+                    );
+                    consume_prepared_proof_status(proof_status, &mut authority_retries)?;
+                    continue 'authority;
+                }
+                super::prepared_launch_cache::emit_metric(
+                    super::prepared_launch_cache::CacheOutcome::Hit,
+                    super::prepared_launch_cache::CacheReason::Ready,
                     entry_bytes,
-                } => {
-                    // Revalidate the dependency proof captured from this launch's
-                    // active roots, not the cached skeleton's original
-                    // materialization paths. The stable proof digest is in the
-                    // key, so identical pinned generations share the entry even
-                    // after an earlier temporary checkout is reclaimed.
-                    let proof_status = prepared_config_proof_status(
-                        &inputs.config_dependency_proof,
-                        &prepared_config_roots,
-                        config_materialization.as_ref(),
-                    )
-                    .await?;
-                    if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current
-                    {
-                        super::prepared_launch_cache::cache().discard_if_same(
-                            &cache_key,
-                            &skeleton,
-                            super::prepared_launch_cache::CacheReason::AuthorityRevalidationFailed,
-                        );
-                        consume_prepared_proof_status(proof_status, &mut authority_retries)?;
-                        continue 'authority;
-                    }
-                    super::prepared_launch_cache::emit_metric(
-                        super::prepared_launch_cache::CacheOutcome::Hit,
-                        super::prepared_launch_cache::CacheReason::Ready,
-                        entry_bytes,
-                        0,
+                    0,
+                );
+                return Ok(skeleton.prepared.clone());
+            }
+            super::prepared_launch_cache::Lookup::Wait { pending } => {
+                let wait_started = Instant::now();
+                let Some(skeleton) = pending.wait().await.map_err(DispatchError::Shared)? else {
+                    consume_mutable_prepared_authority_retry(&mut authority_retries)?;
+                    continue 'authority;
+                };
+                let proof_status = prepared_config_proof_status(
+                    &inputs.config_dependency_proof,
+                    &prepared_config_roots,
+                    config_materialization.as_ref(),
+                )
+                .await?;
+                if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current {
+                    super::prepared_launch_cache::cache().discard_if_same(
+                        &cache_key,
+                        &skeleton,
+                        super::prepared_launch_cache::CacheReason::AuthorityRevalidationFailed,
                     );
-                    return Ok(skeleton.prepared.clone());
+                    consume_prepared_proof_status(proof_status, &mut authority_retries)?;
+                    continue 'authority;
                 }
-                super::prepared_launch_cache::Lookup::Wait { pending } => {
-                    let wait_started = Instant::now();
-                    let Some(skeleton) = pending.wait().await.map_err(DispatchError::Shared)?
-                    else {
-                        consume_mutable_prepared_authority_retry(&mut authority_retries)?;
-                        continue 'authority;
-                    };
-                    let proof_status = prepared_config_proof_status(
-                        &inputs.config_dependency_proof,
-                        &prepared_config_roots,
-                        config_materialization.as_ref(),
-                    )
-                    .await?;
-                    if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current
-                    {
-                        super::prepared_launch_cache::cache().discard_if_same(
-                            &cache_key,
-                            &skeleton,
-                            super::prepared_launch_cache::CacheReason::AuthorityRevalidationFailed,
-                        );
-                        consume_prepared_proof_status(proof_status, &mut authority_retries)?;
-                        continue 'authority;
+                super::prepared_launch_cache::emit_metric(
+                    super::prepared_launch_cache::CacheOutcome::Hit,
+                    super::prepared_launch_cache::CacheReason::SingleFlight,
+                    0,
+                    wait_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                );
+                return Ok(skeleton.prepared.clone());
+            }
+            super::prepared_launch_cache::Lookup::Build(fill) => {
+                let finish_engine = owned_request.engine.clone();
+                let finish_runtime = owned_request.runtime.clone();
+                let finish_ref_bindings = owned_request.ref_bindings.clone();
+                let finish_inputs = inputs.clone();
+                let loaded = tokio::task::spawn_blocking(move || {
+                    let prepared = finish_runtime_launch_preparation_parts(
+                        &finish_engine,
+                        &finish_runtime,
+                        &finish_ref_bindings,
+                        &finish_inputs,
+                    )?;
+                    let serialized_bytes = serde_json::to_vec(&prepared)
+                        .map(|serialized| serialized.len())
+                        .unwrap_or(usize::MAX);
+                    Ok::<_, DispatchError>((prepared, serialized_bytes))
+                })
+                .await
+                .map_err(|error| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "runtime launch-preparer blocking worker failed: {error}"
+                    ))
+                })
+                .and_then(|result| result);
+                let (prepared, serialized_bytes) = match loaded {
+                    Ok(prepared) => prepared,
+                    Err(error) => {
+                        return Err(DispatchError::Shared(fill.fail(error)));
                     }
-                    super::prepared_launch_cache::emit_metric(
-                        super::prepared_launch_cache::CacheOutcome::Hit,
-                        super::prepared_launch_cache::CacheReason::SingleFlight,
-                        0,
-                        wait_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                    );
-                    return Ok(skeleton.prepared.clone());
-                }
-                super::prepared_launch_cache::Lookup::Build(fill) => {
-                    let finish_engine = owned_request.engine.clone();
-                    let finish_runtime = owned_request.runtime.clone();
-                    let finish_ref_bindings = owned_request.ref_bindings.clone();
-                    let finish_inputs = inputs.clone();
-                    let loaded = tokio::task::spawn_blocking(move || {
-                        let prepared = finish_runtime_launch_preparation_parts(
-                            &finish_engine,
-                            &finish_runtime,
-                            &finish_ref_bindings,
-                            &finish_inputs,
-                        )?;
-                        let serialized_bytes = serde_json::to_vec(&prepared)
-                            .map(|serialized| serialized.len())
-                            .unwrap_or(usize::MAX);
-                        Ok::<_, DispatchError>((prepared, serialized_bytes))
-                    })
-                    .await
-                    .map_err(|error| {
-                        DispatchError::Internal(anyhow::anyhow!(
-                            "runtime launch-preparer blocking worker failed: {error}"
-                        ))
-                    })
-                    .and_then(|result| result);
-                    let (prepared, serialized_bytes) = match loaded {
-                        Ok(prepared) => prepared,
-                        Err(error) => {
-                            return Err(DispatchError::Shared(fill.fail(error)));
-                        }
-                    };
-                    let proof_status = match prepared_config_proof_status(
-                        &inputs.config_dependency_proof,
-                        &prepared_config_roots,
-                        config_materialization.as_ref(),
-                    )
-                    .await
-                    {
-                        Ok(valid) => valid,
-                        Err(error) => {
-                            return Err(DispatchError::Shared(fill.fail(error)));
-                        }
-                    };
-                    if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current
-                    {
-                        if let Err(error) =
-                            consume_prepared_proof_status(proof_status, &mut authority_retries)
-                        {
-                            return Err(DispatchError::Shared(fill.fail(error)));
-                        }
-                        fill.cancel();
-                        continue 'authority;
+                };
+                let proof_status = match prepared_config_proof_status(
+                    &inputs.config_dependency_proof,
+                    &prepared_config_roots,
+                    config_materialization.as_ref(),
+                )
+                .await
+                {
+                    Ok(valid) => valid,
+                    Err(error) => {
+                        return Err(DispatchError::Shared(fill.fail(error)));
                     }
-                    let skeleton = fill.complete(
-                        super::prepared_launch_cache::PreparedManagedLaunchSkeleton { prepared },
-                        serialized_bytes,
-                    );
-                    super::prepared_launch_cache::emit_metric(
-                        super::prepared_launch_cache::CacheOutcome::Miss,
-                        super::prepared_launch_cache::CacheReason::Cold,
-                        0,
-                        0,
-                    );
-                    return Ok(skeleton.prepared.clone());
-                }
-                super::prepared_launch_cache::Lookup::Bypass => {
-                    super::prepared_launch_cache::emit_metric(
-                        super::prepared_launch_cache::CacheOutcome::Bypass,
-                        super::prepared_launch_cache::CacheReason::PendingCapacity,
-                        0,
-                        0,
-                    );
-                    let finish_engine = owned_request.engine.clone();
-                    let finish_runtime = owned_request.runtime.clone();
-                    let finish_ref_bindings = owned_request.ref_bindings.clone();
-                    let finish_inputs = inputs.clone();
-                    let prepared = tokio::task::spawn_blocking(move || {
-                        finish_runtime_launch_preparation_parts(
-                            &finish_engine,
-                            &finish_runtime,
-                            &finish_ref_bindings,
-                            &finish_inputs,
-                        )
-                    })
-                    .await
-                    .map_err(|error| {
-                        DispatchError::Internal(anyhow::anyhow!(
-                            "runtime launch-preparer blocking worker failed: {error}"
-                        ))
-                    })??;
-                    let proof_status = prepared_config_proof_status(
-                        &inputs.config_dependency_proof,
-                        &prepared_config_roots,
-                        config_materialization.as_ref(),
-                    )
-                    .await?;
-                    if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current
+                };
+                if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current {
+                    if let Err(error) =
+                        consume_prepared_proof_status(proof_status, &mut authority_retries)
                     {
-                        consume_prepared_proof_status(proof_status, &mut authority_retries)?;
-                        continue 'authority;
+                        return Err(DispatchError::Shared(fill.fail(error)));
                     }
-                    return Ok(prepared);
+                    fill.cancel();
+                    continue 'authority;
                 }
+                let skeleton = fill.complete(
+                    super::prepared_launch_cache::PreparedManagedLaunchSkeleton { prepared },
+                    serialized_bytes,
+                );
+                super::prepared_launch_cache::emit_metric(
+                    super::prepared_launch_cache::CacheOutcome::Miss,
+                    super::prepared_launch_cache::CacheReason::Cold,
+                    0,
+                    0,
+                );
+                return Ok(skeleton.prepared.clone());
+            }
+            super::prepared_launch_cache::Lookup::Bypass => {
+                super::prepared_launch_cache::emit_metric(
+                    super::prepared_launch_cache::CacheOutcome::Bypass,
+                    super::prepared_launch_cache::CacheReason::PendingCapacity,
+                    0,
+                    0,
+                );
+                let finish_engine = owned_request.engine.clone();
+                let finish_runtime = owned_request.runtime.clone();
+                let finish_ref_bindings = owned_request.ref_bindings.clone();
+                let finish_inputs = inputs.clone();
+                let prepared = tokio::task::spawn_blocking(move || {
+                    finish_runtime_launch_preparation_parts(
+                        &finish_engine,
+                        &finish_runtime,
+                        &finish_ref_bindings,
+                        &finish_inputs,
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "runtime launch-preparer blocking worker failed: {error}"
+                    ))
+                })??;
+                let proof_status = prepared_config_proof_status(
+                    &inputs.config_dependency_proof,
+                    &prepared_config_roots,
+                    config_materialization.as_ref(),
+                )
+                .await?;
+                if proof_status != ryeos_engine::launch_config::LaunchConfigProofStatus::Current {
+                    consume_prepared_proof_status(proof_status, &mut authority_retries)?;
+                    continue 'authority;
+                }
+                return Ok(prepared);
             }
         }
     }

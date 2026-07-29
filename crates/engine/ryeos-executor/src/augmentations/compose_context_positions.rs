@@ -1135,6 +1135,9 @@ pub async fn run(
     }
 }
 
+// This blocking boundary keeps every authority input explicit so none can be
+// silently recovered from ambient state inside the worker.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_compose_authority_off_thread(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1183,6 +1186,7 @@ async fn resolve_compose_authority_off_thread(
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_compose_authority(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1461,6 +1465,9 @@ fn runtime_config_snapshot_cache() -> &'static crate::resolved_config_cache::Sna
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
 }
 
+// The cache key is deliberately parameterized by the complete admitted
+// authority tuple.
+#[allow(clippy::too_many_arguments)]
 async fn load_runtime_config_snapshot_cached(
     kind: &str,
     requirements: &BTreeMap<String, ryeos_engine::kind_registry::MethodRuntimeConfigRequirement>,

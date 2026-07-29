@@ -1582,6 +1582,8 @@ fn method_runtime_config_snapshot_with_proof_from_authority(
     })
 }
 
+// The blocking loader receives the complete authority tuple explicitly.
+#[allow(clippy::too_many_arguments)]
 async fn method_runtime_config_snapshot_off_thread(
     kind: &str,
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
@@ -3845,17 +3847,15 @@ async fn dispatch_inner(
         }
         (None, _) => {}
     }
-    if verified_root.is_none() {
-        if let (Some(evidence), Some(admission)) = (
+    if verified_root.is_none()
+        && let (Some(evidence), Some(admission)) = (
             request.root_dispatch_evidence.as_ref(),
             request.root_admission.as_ref(),
-        ) {
-            if can_reuse_root_dispatch_evidence(admission)
-                && evidence.requested_subject.resolved.canonical_ref == current_ref
-            {
-                verified_root = Some(evidence.requested_subject.clone());
-            }
-        }
+        )
+        && can_reuse_root_dispatch_evidence(admission)
+        && evidence.requested_subject.resolved.canonical_ref == current_ref
+    {
+        verified_root = Some(evidence.requested_subject.clone());
     }
 
     // Secondary execution identities are independently authorized before any
@@ -4694,12 +4694,12 @@ fn finish_root_dispatch_preflight(
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<RootDispatchPreflight, DispatchError> {
-    if !ref_bindings.is_empty() {
-        if let LaunchContractApplicability::NonEnvelope { class } = &applicability {
-            return Err(DispatchError::RefBindingNotApplicable {
-                class: class.as_str().to_owned(),
-            });
-        }
+    if !ref_bindings.is_empty()
+        && let LaunchContractApplicability::NonEnvelope { class } = &applicability
+    {
+        return Err(DispatchError::RefBindingNotApplicable {
+            class: class.as_str().to_owned(),
+        });
     }
     let subject_authority = project_binding.subject_resolution_authority().clone();
     let admitted_root_ref = root_subject.resolved.canonical_ref.to_string();
@@ -4793,20 +4793,19 @@ fn admit_request_authority(
         .map_err(DispatchError::Internal)
 }
 
+type CachedRootDispatchSubject = (
+    VerifiedItem,
+    std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
+    std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
+);
+
 fn cached_root_dispatch_subject(
     canonical_ref: &CanonicalRef,
     project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
     ctx: &ExecutionContext,
     state: &AppState,
     admitted_request_snapshot: Option<&ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>,
-) -> Result<
-    Option<(
-        VerifiedItem,
-        std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
-        std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
-    )>,
-    DispatchError,
-> {
+) -> Result<Option<CachedRootDispatchSubject>, DispatchError> {
     let project_root = match &ctx.plan_ctx.project_context {
         ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
         ryeos_engine::contracts::ProjectContext::SnapshotHash { .. }
@@ -4969,10 +4968,10 @@ fn map_root_resolution_validation_error(
     requested_root: &str,
 ) -> DispatchError {
     for cause in error.chain() {
-        if let Some(engine_error) = cause.downcast_ref::<ryeos_engine::error::EngineError>() {
-            if let Some(mapped) = map_engine_root_resolution_error(engine_error, requested_root) {
-                return mapped;
-            }
+        if let Some(engine_error) = cause.downcast_ref::<ryeos_engine::error::EngineError>()
+            && let Some(mapped) = map_engine_root_resolution_error(engine_error, requested_root)
+        {
+            return mapped;
         }
     }
     DispatchError::Internal(error)
@@ -5028,13 +5027,13 @@ fn validate_root_resolution_inner(
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<ValidatedDispatchRoot, DispatchError> {
-    if let Some(schema) = ctx.engine.kinds.get(&canonical_ref.kind) {
-        if schema.execution().is_none() {
-            return Err(DispatchError::NotRootExecutable {
-                kind: canonical_ref.kind.clone(),
-                detail: "schema has no `execution:` block".to_string(),
-            });
-        }
+    if let Some(schema) = ctx.engine.kinds.get(&canonical_ref.kind)
+        && schema.execution().is_none()
+    {
+        return Err(DispatchError::NotRootExecutable {
+            kind: canonical_ref.kind.clone(),
+            detail: "schema has no `execution:` block".to_string(),
+        });
     }
     let admitted_request_snapshot = admit_request_authority(project_binding, ctx)?;
     let cached = cached_root_dispatch_subject(

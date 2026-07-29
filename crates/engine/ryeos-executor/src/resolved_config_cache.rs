@@ -337,11 +337,11 @@ fn retire_previous_generation<T>(state: &mut CacheState<T>, key: &SnapshotCacheK
         return;
     };
     let scope = (key.namespace, key.retirement_scope.clone());
-    if let Some((active_epoch, active_generation)) = state.active_generations.get(&scope) {
-        if *active_epoch > epoch || (*active_epoch == epoch && active_generation == &key.generation)
-        {
-            return;
-        }
+    if let Some((active_epoch, active_generation)) = state.active_generations.get(&scope)
+        && (*active_epoch > epoch
+            || (*active_epoch == epoch && active_generation == &key.generation))
+    {
+        return;
     }
     state
         .active_generations
@@ -374,9 +374,8 @@ fn sweep_idle<T>(state: &mut CacheState<T>) {
     let stale = state
         .entries
         .iter()
-        .filter_map(|(key, entry)| {
-            (now.saturating_duration_since(entry.last_touched) >= IDLE_TTL).then(|| key.clone())
-        })
+        .filter(|(_, entry)| now.saturating_duration_since(entry.last_touched) >= IDLE_TTL)
+        .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     for key in stale {
         let entry_bytes = remove_entry(state, &key);
