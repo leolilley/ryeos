@@ -2165,10 +2165,9 @@ fn optional_runtime_text_rows(
         let mut statement = conn
             .prepare(&format!("PRAGMA table_info({table})"))
             .with_context(|| format!("inspect runtime table `{table}`"))?;
-        let columns = statement
+        statement
             .query_map([], |row| row.get::<_, String>(1))?
-            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-        columns
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?
     };
     if !columns.contains(value_column) {
         return Ok(Vec::new());
