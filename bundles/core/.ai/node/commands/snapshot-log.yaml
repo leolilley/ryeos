@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-22T12:09:33Z:429f819d461ee81155018d0ed62f594add379d8b45d7eeaae1b186988bf72940:PeTWsI4baAW/9BWwxfhZimq1i+ER8FmYx9MIZwIrASOlSQnYx+4iUTHVj8jgJ/VMd2NtoQITYQ5pylTbt1cXAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-29T05:00:13Z:d4b02ad0763870de9916851e76d1b1449e6949cd0c49cfe078629e0efdfb9a28:X+O8rwEo+wDaf1YyoLjl7IJGYo+UBEvwTw0quf2p8gwv74gUUIlGjFHzua+875YCX3lXwAdSAxX3LdtRmlV1Dg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - log
 description: Show recent local project snapshots
@@ -9,7 +9,7 @@ aliases:
   description: Show recent local project snapshots
 project:
   resolution: required
-  bind_parameter: project
+  bind_parameter: project_path
 dispatch:
   kind: execute_ref
   execute: tool:ryeos/core/snapshot-log
