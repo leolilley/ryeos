@@ -1693,20 +1693,18 @@ impl CompiledResponseMode for CompiledExecuteMode {
             if !matches!(
                 &exec_ctx.plan_ctx.subject_resolution_authority,
                 ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs
-            ) {
-                if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
-                    preflight.root_dispatch_evidence.applicability(),
-                    &root_admission,
-                    &request.ref_bindings,
-                    &lifecycle_authority,
-                    &provenance,
-                    &exec_ctx,
-                    &state,
-                )
-                .await
-                {
-                    return Ok(dispatch_error_response(error));
-                }
+            ) && let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
+                preflight.root_dispatch_evidence.applicability(),
+                &root_admission,
+                &request.ref_bindings,
+                &lifecycle_authority,
+                &provenance,
+                &exec_ctx,
+                &state,
+            )
+            .await
+            {
+                return Ok(dispatch_error_response(error));
             }
             // An in-process admission is an exact threadless resolution
             // handoff: it carries no selected executor route and no pre-minted

@@ -269,14 +269,14 @@ fn bind_destination_execution_policy(
     pushed_snapshot_hash: &str,
 ) -> Result<ExecutionPolicy, RemoteForwardError> {
     validate_forward_policy_authority(policy, admitted_snapshot_hash)?;
-    if let Some(admitted) = admitted_snapshot_hash {
-        if admitted != pushed_snapshot_hash {
-            return Err(RemoteForwardError::SnapshotAuthorityMismatch {
-                authority: "local-admission",
-                expected: admitted.to_string(),
-                pushed: pushed_snapshot_hash.to_string(),
-            });
-        }
+    if let Some(admitted) = admitted_snapshot_hash
+        && admitted != pushed_snapshot_hash
+    {
+        return Err(RemoteForwardError::SnapshotAuthorityMismatch {
+            authority: "local-admission",
+            expected: admitted.to_string(),
+            pushed: pushed_snapshot_hash.to_string(),
+        });
     }
 
     let mut bound = policy.clone();
