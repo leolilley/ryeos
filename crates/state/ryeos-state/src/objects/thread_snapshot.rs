@@ -738,9 +738,12 @@ impl ThreadSnapshot {
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| anyhow::anyhow!("thread snapshot has no numeric schema"))?;
         if schema != u64::from(THREAD_SNAPSHOT_SCHEMA_VERSION) {
-            anyhow::bail!(
-                "thread snapshot is not the exact current contract: stored schema={schema}, current schema={THREAD_SNAPSHOT_SCHEMA_VERSION}"
-            );
+            return Err(super::IncompatibleCurrentObjectSchema::new(
+                "thread snapshot",
+                schema,
+                THREAD_SNAPSHOT_SCHEMA_VERSION,
+            )
+            .into());
         }
         let snapshot: Self =
             serde_json::from_value(value).context("deserialize current thread snapshot")?;
@@ -1406,6 +1409,9 @@ mod tests {
         );
 
         let error = ThreadSnapshot::from_current_value(value).unwrap_err();
+        assert!(error
+            .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+            .is_some());
         assert!(
             error.to_string().contains("not the exact current contract"),
             "unexpected error: {error:#}"

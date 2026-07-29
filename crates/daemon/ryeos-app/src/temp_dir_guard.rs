@@ -88,7 +88,7 @@ impl TempDirGuard {
         }
     }
 
-    fn new_pinned(
+    pub(crate) fn new_pinned(
         parent: lillux::PinnedDirectory,
         name: std::ffi::OsString,
         root: lillux::PinnedDirectory,

@@ -1129,13 +1129,17 @@ fn verified_repair_closure_inner(
         &mut cancellation_check,
     )?;
     if !closure.is_complete() {
-        anyhow::bail!(
+        let summary = format!(
             "incomplete CAS closure for chain {chain_root_id}@{head_hash}: missing_objects={}, missing_blobs={}, malformed_objects={}, unsupported_objects={}",
             closure.missing_objects.len(),
             closure.missing_blobs.len(),
             closure.malformed_objects.len(),
             closure.unsupported_objects.len(),
         );
+        if let Some(mismatch) = closure.decisive_incompatible_current_schema() {
+            return Err(anyhow::Error::new(mismatch.clone())).context(summary);
+        }
+        anyhow::bail!("{summary}");
     }
     if verify_all_hashes {
         for hash in &closure.object_hashes {
@@ -1953,6 +1957,37 @@ mod tests {
         let state_hash = write_object(cas_root, &state);
         write_signed_head(refs_root, chain_root_id, &state_hash);
         state_hash
+    }
+
+    #[test]
+    fn repair_closure_preserves_predecessor_snapshot_schema_as_a_typed_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cas_root = tmp.path().join("objects");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let cas = lillux::CasStore::new(cas_root.clone());
+
+        let mut snapshot = make_snapshot_json("T-root", "T-root", "created");
+        snapshot["schema"] = Value::from(crate::objects::THREAD_SNAPSHOT_SCHEMA_VERSION - 1);
+        let snapshot_hash = write_object(&cas_root, &snapshot);
+        let state = make_chain_state(
+            "T-root",
+            None,
+            vec![("T-root", &snapshot_hash, None, 0, "created")],
+            None,
+            0,
+        );
+        let state_hash = write_object(&cas_root, &state);
+
+        let error = verified_repair_closure_with_cas(&cas, "T-root", &state_hash, true)
+            .expect_err("predecessor snapshot epoch must fail the startup repair closure");
+        let mismatch = error
+            .chain()
+            .find_map(|cause| {
+                cause.downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+            })
+            .expect("the typed mismatch must survive closure validation");
+        assert!(mismatch.is_predecessor());
+        assert!(format!("{error:#}").contains("incomplete CAS closure"));
     }
 
     fn make_chain_state(

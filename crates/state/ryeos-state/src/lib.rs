@@ -57,7 +57,8 @@ pub use objects::{
     BundleEventAttachment, BundleEventAttribution, BundleEventObject, CapturedEffectiveTrustClass,
     CapturedItemSpace, CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance,
     CapturedPolicyProvenance, CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy,
-    ChainState, ThreadHistoryRetention, MAX_TERMINAL_DURATION_SECONDS,
+    ChainState, IncompatibleCurrentObjectSchema, ThreadHistoryRetention,
+    MAX_TERMINAL_DURATION_SECONDS,
 };
 pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,

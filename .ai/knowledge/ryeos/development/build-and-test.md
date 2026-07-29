@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-28T23:59:20Z:c601dbae028b2659f253e8aa697a91abbc71f8c00b0ee56be1f979cc3b60dc3d:qu5LvqBv9AzP3mbvnfPtgpvFIgUSpht14k6bR2AOcIL2/nJgCGDnYIuSk/VyuZGsxHZNE/esh23H2ktMbY4aDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-07-29T01:42:39Z:d293c9cbf286fbd2eb94751f1b5b1c6324dc3dd134e4b50c153b5d28b8aed569:FH3uOqr7U1vpZ1mxeFud4eAkIERy2wcyd/xhNBMCChSmmR2PTtq9RNCenFaIXHnfm5rU8jJozjvoFue8GlSDDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
 title: "Build, Test, and Local Install Runbook"
 description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.4.0"
+version: "1.4.1"
 ```
 
 # Build, Test, and Local Install Runbook
@@ -140,6 +140,41 @@ explicitly:
 
 Use `--populate --crates "<crate ...>"` instead when only named bundle-owned
 binaries need rebuilding.
+
+### Clean-cut execution-state upgrades
+
+The installer never silently discards authoritative execution history. If an
+installed release advances an immutable thread/capsule/project-authority
+contract, restart can correctly refuse retained history from the predecessor
+epoch. Inspect and apply the explicit offline cutover while the daemon is
+stopped:
+
+```bash
+ryeos node gc \
+  --discard-thread-history \
+  --discard-project-heads \
+  --dry-run
+
+ryeos node gc \
+  --discard-thread-history \
+  --discard-project-heads \
+  --confirm-discard-thread-history \
+  --confirm-discard-project-heads
+
+ryeos start
+```
+
+If the runtime schema is incompatible, dry-run reports runtime-row counts as
+unavailable instead of decoding those rows or claiming a false zero; the other
+retirement counts remain visible. The confirmed report preserves that
+unavailable classification instead of presenting the empty post-reset schema
+as an exact zero-row retirement.
+
+The confirmed command is destructive to local thread history and project
+HEADs, so it requires the operator decision shown above rather than an install
+flag or automatic fallback. It preserves project worktrees, installed bundles,
+vault values, trust, and node/signing identity. No reinstall is needed after
+the cutover when the new binaries and bundles were already installed.
 
 Important: bundle-owned binaries (`ryeos-core-tools`, parsers, composers,
 runtimes, `ryeos-tui`, etc.) belong inside signed bundle bin trees under
