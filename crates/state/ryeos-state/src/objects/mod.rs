@@ -31,7 +31,7 @@ pub mod thread_snapshot;
 pub use admitted_launch_capsule::{
     AdmittedAccountingScope, AdmittedDirectCommandClosure, AdmittedExecutionClosure,
     AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, DirectExecutableIdentity,
-    DirectRuntimeIdentity, DirectRuntimeSourceSpace, DirectWrapperSourceIdentity,
+    DirectRootSourceIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
     ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
 };
 pub use attestation::Attestation;
@@ -68,6 +68,41 @@ pub use thread_snapshot::{
 /// Schema version shared across all CAS object types.
 /// Bump when the object format changes in a incompatible way.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Typed clean-cut rejection for an immutable CAS object whose outer schema
+/// differs from the only contract this release is allowed to decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncompatibleCurrentObjectSchema {
+    object: &'static str,
+    stored: u64,
+    current: u32,
+}
+
+impl IncompatibleCurrentObjectSchema {
+    pub fn new(object: &'static str, stored: u64, current: u32) -> Self {
+        Self {
+            object,
+            stored,
+            current,
+        }
+    }
+
+    pub fn is_predecessor(&self) -> bool {
+        self.stored < u64::from(self.current)
+    }
+}
+
+impl std::fmt::Display for IncompatibleCurrentObjectSchema {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} is not the exact current contract: stored schema={}, current schema={}",
+            self.object, self.stored, self.current
+        )
+    }
+}
+
+impl std::error::Error for IncompatibleCurrentObjectSchema {}
 
 /// Validate the canonical, contained project-relative path used as the source
 /// manifest key and embedded `ItemSource.item_ref`. These fields identify

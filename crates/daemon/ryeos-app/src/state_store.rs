@@ -31,6 +31,21 @@ mod projection_access;
 
 use projection_access::committed_value;
 
+fn with_execution_schema_cutover_hint(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<ryeos_state::IncompatibleCurrentObjectSchema>())
+        .any(ryeos_state::IncompatibleCurrentObjectSchema::is_predecessor)
+    {
+        error.context(format!(
+            "authoritative execution history predates the exact current contract; RyeOS will not reinterpret or rewrite it in place. Stop the daemon and run `{}` to retire that history epoch, then restart",
+            crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND
+        ))
+    } else {
+        error
+    }
+}
+
 const MAX_THREAD_ARTIFACT_ITEMS: usize = 512;
 const MAX_THREAD_ARTIFACT_TYPE_BYTES: usize = 1024;
 const MAX_THREAD_ARTIFACT_METADATA_BYTES: usize = 256 * 1024;
@@ -103,6 +118,14 @@ fn map_launch_planning_reservation_error(error: anyhow::Error) -> LaunchPlanning
 #[derive(Debug, thiserror::Error)]
 #[error("launch planning admission is no longer active")]
 pub struct LaunchPlanningInactive;
+
+/// An event append returned an error and authoritative signed-head readback
+/// could prove neither the exact commit nor its absence. Callers retaining
+/// retryable input must not replay it: doing so could duplicate an already
+/// committed event batch.
+#[derive(Debug, thiserror::Error)]
+#[error("event append commit state is uncertain")]
+pub struct EventAppendCommitUncertain;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PersistedEventRecord {
@@ -1161,14 +1184,51 @@ fn load_admitted_launch_capsule(
 
 fn attach_continuation_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
+    cas_guard: &ryeos_state::CasMutationGuard,
     inner: &Inner,
     chain_root_id: &str,
     source_thread_id: &str,
     snapshot: ThreadSnapshot,
     launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
+    expected_result_snapshot_hash: Option<&str>,
+    transition_kind: crate::launch_metadata::ContinuationAuthorityTransitionKind,
 ) -> Result<(ThreadSnapshot, ThreadSnapshot)> {
     let source_snapshot =
         authoritative_snapshot_for_transition(inner, chain_root_id, source_thread_id)?;
+    if let Some(successor_metadata) = launch_metadata {
+        let source_metadata = inner
+            .runtime_db
+            .get_runtime_info(source_thread_id)?
+            .and_then(|runtime| runtime.launch_metadata)
+            .ok_or_else(|| {
+                anyhow!("continuation source {source_thread_id} has no captured launch metadata")
+            })?;
+        verify_admitted_launch_capsule(
+            state_authority,
+            &source_snapshot,
+            Some(&source_metadata),
+        )
+        .with_context(|| {
+            format!(
+                "verify continuation source {source_thread_id} metadata against its authoritative admitted capsule"
+            )
+        })?;
+        let source_resume = source_metadata.resume_context.as_ref().ok_or_else(|| {
+            anyhow!("continuation source {source_thread_id} has no captured ResumeContext")
+        })?;
+        let successor_resume = successor_metadata.resume_context.as_ref().ok_or_else(|| {
+            anyhow!(
+                "continuation successor {} has no captured ResumeContext",
+                snapshot.thread_id
+            )
+        })?;
+        successor_resume.validate_continuation_transition_from(
+            source_resume,
+            expected_result_snapshot_hash
+                .or(source_snapshot.result_project_snapshot_hash.as_deref()),
+            transition_kind,
+        )?;
+    }
     let source_capsule = source_snapshot
         .admitted_launch_capsule_hash
         .as_deref()
@@ -1199,8 +1259,8 @@ fn attach_continuation_launch_capsule(
         }
         (Some(_), Some(_)) => {}
     }
-    let mut snapshot = snapshot;
-    snapshot.admitted_launch_capsule_hash = source_snapshot.admitted_launch_capsule_hash.clone();
+    let snapshot =
+        attach_admitted_launch_capsule(state_authority, cas_guard, snapshot, launch_metadata)?;
     Ok((snapshot, source_snapshot))
 }
 
@@ -1226,10 +1286,7 @@ fn verify_admitted_launch_capsule(
         (Some(rooted_hash), Some(expected)) => {
             let expected_hash = expected.content_hash()?;
             let rooted = load_admitted_launch_capsule(state_authority, rooted_hash)?;
-            if snapshot.upstream_thread_id.is_none()
-                && rooted.schema == expected.schema
-                && rooted_hash != expected_hash
-            {
+            if rooted.schema == expected.schema && rooted_hash != expected_hash {
                 bail!(
                     "thread {} admitted capsule drift: authoritative {}, attempted {}",
                     snapshot.thread_id,
@@ -1369,6 +1426,116 @@ fn same_authored_event(
 
 fn same_exact_snapshot(actual: &ThreadSnapshot, expected: &ThreadSnapshot) -> bool {
     actual.to_value() == expected.to_value()
+}
+
+enum EventAppendCommitReadback {
+    Exact(Vec<ryeos_state::objects::ThreadEvent>),
+    ProvenAbsent,
+    Ambiguous(&'static str),
+}
+
+fn same_unpositioned_authored_event(
+    actual: &ryeos_state::objects::ThreadEvent,
+    expected: &ryeos_state::objects::ThreadEvent,
+) -> bool {
+    actual.schema == expected.schema
+        && actual.kind == expected.kind
+        && actual.chain_root_id == expected.chain_root_id
+        && actual.thread_id == expected.thread_id
+        && actual.event_type == expected.event_type
+        && actual.durability == expected.durability
+        && actual.payload == expected.payload
+}
+
+fn read_exact_committed_event_append(
+    g: &Inner,
+    chain_root_id: &str,
+    thread_id: &str,
+    predecessor: &ryeos_state::AuthoritativeThreadAppendAnchorReadback,
+    expected: &[ryeos_state::objects::ThreadEvent],
+) -> Result<EventAppendCommitReadback> {
+    let readback = g
+        .state_db
+        .read_authoritative_thread_append_history(chain_root_id, thread_id)?;
+    classify_event_append_readback(readback.as_ref(), predecessor, expected)
+}
+
+fn classify_event_append_readback(
+    readback: Option<&ryeos_state::AuthoritativeThreadAppendHistoryReadback>,
+    predecessor: &ryeos_state::AuthoritativeThreadAppendAnchorReadback,
+    expected: &[ryeos_state::objects::ThreadEvent],
+) -> Result<EventAppendCommitReadback> {
+    let Some(readback) = readback else {
+        return Ok(EventAppendCommitReadback::Ambiguous(
+            "authoritative thread disappeared after append attempt",
+        ));
+    };
+    if readback.anchor == *predecessor {
+        return Ok(EventAppendCommitReadback::ProvenAbsent);
+    }
+
+    let event_count =
+        u64::try_from(expected.len()).context("expected append batch is too large")?;
+    let Some(final_chain_seq) = predecessor.chain_last_seq.checked_add(event_count) else {
+        return Ok(EventAppendCommitReadback::Ambiguous(
+            "expected chain sequence overflowed",
+        ));
+    };
+    let Some(final_thread_seq) = predecessor.thread_last_seq.checked_add(event_count) else {
+        return Ok(EventAppendCommitReadback::Ambiguous(
+            "expected thread sequence overflowed",
+        ));
+    };
+    if readback.anchor.chain_last_seq != final_chain_seq
+        || readback.anchor.thread_last_seq != final_thread_seq
+    {
+        return Ok(EventAppendCommitReadback::Ambiguous(
+            "authoritative append position diverged from the attempted batch",
+        ));
+    }
+
+    let Some(batch_start) = readback.events.len().checked_sub(expected.len()) else {
+        return Ok(EventAppendCommitReadback::Ambiguous(
+            "authoritative thread history is shorter than the attempted batch",
+        ));
+    };
+    let actual = &readback.events[batch_start..];
+    let mut previous_chain_hash = predecessor.chain_last_event_hash.as_deref();
+    let mut previous_thread_hash = predecessor.thread_last_event_hash.as_deref();
+    for (index, ((hash, actual), expected)) in actual.iter().zip(expected).enumerate() {
+        let offset = u64::try_from(index).context("append batch index exceeds u64")?;
+        let expected_chain_seq = predecessor
+            .chain_last_seq
+            .checked_add(offset)
+            .and_then(|sequence| sequence.checked_add(1));
+        let expected_thread_seq = predecessor
+            .thread_last_seq
+            .checked_add(offset)
+            .and_then(|sequence| sequence.checked_add(1));
+        if Some(actual.chain_seq) != expected_chain_seq
+            || Some(actual.thread_seq) != expected_thread_seq
+            || actual.prev_chain_event_hash.as_deref() != previous_chain_hash
+            || actual.prev_thread_event_hash.as_deref() != previous_thread_hash
+            || !same_unpositioned_authored_event(actual, expected)
+        {
+            return Ok(EventAppendCommitReadback::Ambiguous(
+                "authoritative event batch diverged from the attempted append",
+            ));
+        }
+        previous_chain_hash = Some(hash.as_str());
+        previous_thread_hash = Some(hash.as_str());
+    }
+    if readback.anchor.chain_last_event_hash.as_deref() != previous_chain_hash
+        || readback.anchor.thread_last_event_hash.as_deref() != previous_thread_hash
+    {
+        return Ok(EventAppendCommitReadback::Ambiguous(
+            "authoritative append anchors do not name the attempted batch tail",
+        ));
+    }
+
+    Ok(EventAppendCommitReadback::Exact(
+        actual.iter().map(|(_, event)| event.clone()).collect(),
+    ))
 }
 
 fn same_successor_event_batch(
@@ -1863,19 +2030,55 @@ fn append_events_locked(
         let cas_mutation_guard = cas_mutation_guard.ok_or_else(|| {
             anyhow!("durable event append requires an admitted CAS mutation guard")
         })?;
-        let result = committed_value(g.state_db.append_events_admitted(
+        let predecessor = g
+            .state_db
+            .read_authoritative_thread_append_anchor(chain_root_id, thread_id)?
+            .ok_or_else(|| {
+                anyhow!(
+                    "authoritative append predecessor missing for thread {thread_id} in chain {chain_root_id}"
+                )
+            })?;
+        let committed = g.state_db.append_events_admitted(
             chain_root_id,
             thread_id,
-            durable_thread_events,
+            durable_thread_events.clone(),
             vec![],
             g.signer.as_ref(),
             &g.runtime_db,
             cas_mutation_guard,
-        )?);
-        for (idx, record) in durable_indices
-            .into_iter()
-            .zip(persisted_from_append(&result, &durable_events)?)
-        {
+        );
+        let persisted = match committed {
+            Ok(committed) => persisted_from_append(&committed_value(committed), &durable_events)?,
+            Err(error) => match read_exact_committed_event_append(
+                g,
+                chain_root_id,
+                thread_id,
+                &predecessor,
+                &durable_thread_events,
+            ) {
+                Ok(EventAppendCommitReadback::Exact(stored_events)) => {
+                    tracing::error!(
+                        thread_id,
+                        chain_root_id,
+                        error = %error,
+                        "event append returned an error after publishing the exact authoritative batch; continuing from signed-head readback"
+                    );
+                    persisted_from_stored_events(&stored_events, &durable_events)?
+                }
+                Ok(EventAppendCommitReadback::ProvenAbsent) => return Err(error),
+                Ok(EventAppendCommitReadback::Ambiguous(reason)) => {
+                    return Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
+                        "event append failed with ambiguous authoritative readback ({reason}); write error: {error:#}"
+                    )));
+                }
+                Err(readback_error) => {
+                    return Err(anyhow::Error::new(EventAppendCommitUncertain).context(format!(
+                        "event append failed and authoritative readback was unavailable; write error: {error:#}; readback error: {readback_error:#}"
+                    )));
+                }
+            },
+        };
+        for (idx, record) in durable_indices.into_iter().zip(persisted) {
             records[idx] = Some(record);
         }
     }
@@ -2617,7 +2820,7 @@ impl StateStore {
                     head_trust,
                     recovery_observer,
                     &runtime_db,
-                )?
+                )
             }
             None => {
                 StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
@@ -2627,9 +2830,10 @@ impl StateStore {
                     projection_health.clone(),
                     head_trust,
                     &runtime_db,
-                )?
+                )
             }
-        };
+        }
+        .map_err(with_execution_schema_cutover_hint)?;
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
@@ -3866,7 +4070,7 @@ impl StateStore {
             let mut updated_snapshot = authoritative_snapshot;
             let authoritative_base = updated_snapshot
                 .project_authority
-                .base_snapshot_projection()
+                .operational_snapshot_projection()
                 .map(str::to_owned);
             if let Some(requested_base) = base_project_snapshot_hash {
                 if Some(requested_base) != authoritative_base.as_deref() {
@@ -4556,11 +4760,14 @@ impl StateStore {
         }
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
+            permit.cas_guard(),
             &g,
             chain_root_id,
             source_thread_id,
             build_snapshot(&successor_with_upstream),
             launch_metadata,
+            None,
+            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
         )?;
         // Predecessor-immutability contract: terminal sources retain their
         // exact snapshot, while a running source is settled to `continued` in
@@ -5090,6 +5297,7 @@ impl StateStore {
         successor_resume_context.validate_continuation_transition_from(
             &source_resume_context,
             source_result_snapshot_hash,
+            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
         )?;
         if successor_meta
             .continuation_source_thread_id
@@ -5105,11 +5313,14 @@ impl StateStore {
         };
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
+            permit.cas_guard(),
             &g,
             chain_root_id,
             source_thread_id,
             build_continuation_snapshot(&successor_with_upstream, &successor_resume_context)?,
             Some(&successor_meta),
+            source_result_snapshot_hash,
+            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
         )?;
 
         // Runtime-db writes FIRST: insert the successor runtime row and seed its
@@ -5401,11 +5612,14 @@ impl StateStore {
         };
         let (successor_snapshot, source_snapshot_before) = attach_continuation_launch_capsule(
             &self.state_authority,
+            permit.cas_guard(),
             &g,
             chain_root_id,
             source_thread_id,
             base_successor_snapshot,
             effective_launch_metadata.as_ref(),
+            None,
+            crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
         )?;
         let source_snapshot_updated = !is_terminal_status(&source_row.status);
         let source_snapshot_after = if source_snapshot_updated {
@@ -9366,6 +9580,32 @@ mod tests {
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use tempfile::tempdir;
 
+    #[test]
+    fn immutable_execution_schema_mismatch_gets_the_explicit_cutover_command() {
+        let mismatch = anyhow::Error::new(ryeos_state::IncompatibleCurrentObjectSchema::new(
+            "thread snapshot",
+            7,
+            8,
+        ))
+        .context("decode current snapshot");
+        let error = with_execution_schema_cutover_hint(mismatch);
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(error
+            .chain()
+            .any(|cause| cause.is::<ryeos_state::IncompatibleCurrentObjectSchema>()));
+
+        let unrelated = with_execution_schema_cutover_hint(anyhow!("untrusted signed head"));
+        assert!(
+            !format!("{unrelated:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
+
+        let newer = with_execution_schema_cutover_hint(anyhow::Error::new(
+            ryeos_state::IncompatibleCurrentObjectSchema::new("thread snapshot", 9, 8),
+        ));
+        assert!(!format!("{newer:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+    }
+
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();
         let runtime_state_dir = tmp.join(".ai/state");
@@ -9409,6 +9649,101 @@ mod tests {
             prev_thread_event_hash,
             payload: json!({}),
         }
+    }
+
+    #[test]
+    fn event_append_readback_proves_exact_batch_from_both_predecessor_anchors() {
+        let predecessor_chain_hash = "a".repeat(64);
+        let predecessor_thread_hash = "b".repeat(64);
+        let first_hash = "c".repeat(64);
+        let second_hash = "d".repeat(64);
+        let predecessor = ryeos_state::AuthoritativeThreadAppendAnchorReadback {
+            chain_last_event_hash: Some(predecessor_chain_hash.clone()),
+            chain_last_seq: 40,
+            thread_last_event_hash: Some(predecessor_thread_hash.clone()),
+            thread_last_seq: 7,
+        };
+        let first = positioned_test_event(
+            "T-root",
+            41,
+            8,
+            Some(predecessor_chain_hash),
+            Some(predecessor_thread_hash),
+        );
+        let second = positioned_test_event(
+            "T-root",
+            42,
+            9,
+            Some(first_hash.clone()),
+            Some(first_hash.clone()),
+        );
+        let readback = ryeos_state::AuthoritativeThreadAppendHistoryReadback {
+            anchor: ryeos_state::AuthoritativeThreadAppendAnchorReadback {
+                chain_last_event_hash: Some(second_hash.clone()),
+                chain_last_seq: 42,
+                thread_last_event_hash: Some(second_hash),
+                thread_last_seq: 9,
+            },
+            events: vec![
+                (first_hash, first.clone()),
+                ("d".repeat(64), second.clone()),
+            ],
+        };
+
+        assert!(matches!(
+            classify_event_append_readback(
+                Some(&readback),
+                &predecessor,
+                &[first, second]
+            )
+            .unwrap(),
+            EventAppendCommitReadback::Exact(events) if events.len() == 2
+        ));
+    }
+
+    #[test]
+    fn event_append_readback_only_retries_a_proven_unchanged_head() {
+        let predecessor = ryeos_state::AuthoritativeThreadAppendAnchorReadback {
+            chain_last_event_hash: Some("a".repeat(64)),
+            chain_last_seq: 10,
+            thread_last_event_hash: Some("b".repeat(64)),
+            thread_last_seq: 4,
+        };
+        let unchanged = ryeos_state::AuthoritativeThreadAppendHistoryReadback {
+            anchor: predecessor.clone(),
+            events: Vec::new(),
+        };
+        let expected = positioned_test_event("T-root", 0, 1, None, None);
+        assert!(matches!(
+            classify_event_append_readback(Some(&unchanged), &predecessor, &[expected.clone()])
+                .unwrap(),
+            EventAppendCommitReadback::ProvenAbsent
+        ));
+
+        let advanced = ryeos_state::AuthoritativeThreadAppendHistoryReadback {
+            anchor: ryeos_state::AuthoritativeThreadAppendAnchorReadback {
+                chain_last_event_hash: Some("c".repeat(64)),
+                chain_last_seq: 11,
+                thread_last_event_hash: Some("d".repeat(64)),
+                thread_last_seq: 5,
+            },
+            events: vec![(
+                "d".repeat(64),
+                ryeos_state::objects::ThreadEvent {
+                    payload: json!({"different": true}),
+                    ..expected
+                },
+            )],
+        };
+        assert!(matches!(
+            classify_event_append_readback(
+                Some(&advanced),
+                &predecessor,
+                &[positioned_test_event("T-root", 0, 1, None, None)]
+            )
+            .unwrap(),
+            EventAppendCommitReadback::Ambiguous(_)
+        ));
     }
 
     #[test]
@@ -11097,16 +11432,23 @@ mod tests {
     #[test]
     fn continuation_handoff_persists_created_successor_with_inherited_pin() {
         let store = test_store();
+        let resume = continuation_resume_context(ProjectContext::LocalPath {
+            path: PathBuf::from("/work/project"),
+        });
+        let launch_metadata = crate::launch_metadata::RuntimeLaunchMetadata::default()
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
+            .with_resume_context(resume.clone());
         store
-            .create_thread_for_test(&thread_record("T-root", "T-root"))
+            .create_root_thread_with_events_and_launch_metadata(
+                &thread_record("T-root", "T-root"),
+                Vec::new(),
+                Some(&launch_metadata),
+            )
             .expect("root thread");
 
         let mut successor = thread_record("T-successor", "T-root");
         successor.project_root = Some(PathBuf::from("/work/project"));
         successor.base_project_snapshot_hash = Some("a".repeat(64));
-        let resume = continuation_resume_context(ProjectContext::LocalPath {
-            path: PathBuf::from("/work/project"),
-        });
         successor.project_authority = resume.project_authority.clone();
         let outcome = store
             .create_or_get_continuation_for_test(

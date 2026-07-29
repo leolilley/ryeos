@@ -59,7 +59,9 @@ impl LaunchPreparerRegistry {
         for runtime in sorted_runtimes {
             let (handler_ref, handler_config) = match &runtime.yaml.launch_contract.preparation {
                 LaunchPreparationDecl::None => continue,
-                LaunchPreparationDecl::Handler { handler, config } => (handler, config),
+                LaunchPreparationDecl::Handler {
+                    handler, config, ..
+                } => (handler, config),
             };
             let handler =
                 handlers

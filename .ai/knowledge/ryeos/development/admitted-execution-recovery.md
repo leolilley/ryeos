@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-27T22:59:50Z:6b8fa308628bc8bbac954b003532b65c6ecd05ada50b1a68e8ccc68410102c33:4P9oUVyz40xtgDV3SsqERZHoOrJFCwasqb6R5M3A9o4xLXQLCz2pz4pdRuaU0oGwEP/vCpudyW5w8VI5SCheDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-07-28T23:56:24Z:3ec6e5497656cb3f1953584c48154eda3c4da00dd907d3ec50ee5101dffc14dd:oLZOMxQc25rvMbZ+ufkg3BrzZLsgsO3BYUiSwg6GguDx4UtamLLVVkiXlE5ALp53RNXhjLssp47Vs33Oga+RAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "admitted-execution-recovery"
 title: "Admitted Execution Closure & Recovery"
 description: "How a managed launch is sealed at first admission into its signed capsule and recovered/relocated verbatim, never re-derived from mutable registries"
 entry_type: reference
-version: "1.0.1"
+version: "1.0.2"
 ```
 
 # Admitted Execution Closure & Recovery
@@ -45,8 +45,22 @@ thread's signed `AdmittedLaunchCapsule`. Two shapes:
     design; recovery of a node-policy direct execution fails closed rather than
     resurrecting a command whose bytes were never content-pinned.
 
-Everything sealed is either a content hash or a signed descriptor document —
-sealed material is pinned, not a pointer into mutable space.
+  Its artifact identity separately binds the caller-named root subject's whole
+  signed-source digest, signer, and source-generation identity. Those are root
+  authority—not the declared executor hop. The declared `executor_ref` is
+  checked against the first hop after `execution_plan.root_ref`, while the
+  terminal executor remains `execution_plan.root_executor_id`.
+
+External material is sealed by content hash or signed descriptor identity.
+Exact embedded values are covered by the signed capsule and cross-checked
+against its independently rooted authority; none is a pointer into mutable
+registry or project space.
+
+The sealed invocation also carries the complete typed executor route selected
+at admission (including the managed runtime ref/hash/signer/served kind, or the
+exact direct route). A discriminant or executor string alone is insufficient:
+recovery must be able to validate the route without consulting today's runtime
+registry.
 
 ## What recovery must NOT do
 
@@ -57,8 +71,10 @@ sealed material is pinned, not a pointer into mutable space.
 The asymmetry is the whole point: **the *what* is immutable; the *gate* may only
 tighten.** A restart that runs under a narrower isolation policy or a revoked
 signer set is allowed to *refuse* recovery, but never to re-resolve a *different*
-program for the same admitted thread. Recovery reads the exact program and
-closure; it never asks project or bundle space to recreate an earlier admission.
+program for the same admitted thread. Recovery reads the exact program, prepared
+launch, capability closure, executor route, and execution closure. Its current
+policy view loads trust/revocation only; it does not rebuild parser, kind,
+runtime, launch-preparer, capability-manifest, or executor registries.
 
 ## Recovery re-validation
 
@@ -73,6 +89,11 @@ closed on any divergence:
 - sealed project authority == `capsule.project_authority`
 - sealed runtime ref == `capsule.runtime_ref`
 - sealed executor ref == `capsule.executor_ref`
+- sealed typed executor route == `capsule.artifact_identity`
+
+The capsule's `effective_caps` are also the exact admitted capability closure.
+Recovery may validate an additional captured equality assertion, but it never
+re-mints runtime-manifest capabilities or re-derives composed grants.
 
 A mismatch bails with *"admitted capsule invocation contradicts its rooted
 program authority."* Only a self-consistent capsule is restored, via
@@ -88,10 +109,17 @@ A recovered direct plan can be **relocated** for spawn (a different working
 materialization, e.g. a fresh project root) via `relocate_admitted_direct_plan` /
 `validate_direct_plan_portability` / `relocate_project_for_spawn`, colocated in
 `thread_lifecycle/direct_execution.rs`. Portability is validated before the
-move, and the **project authority is not permitted to change during recovery**
-— relocation moves *where* the sealed plan runs, never *what* authority it runs
-under. Runtime parameters carry typed stdin so a relocated launch feeds the
-same inputs across the boundary.
+move, and the **project authority of one admitted continuation segment is not
+permitted to change during recovery** — relocation moves *where* that segment
+runs, never *what* authority it runs under. A COW continuation that advances
+generation receives a new segment-specific capsule rooted in the new operational
+authority while retaining its stable base lineage.
+
+The retained `subject.source` file lives under a private capsule directory, but
+that directory is never project authority. Projectless recovery keeps
+`materialized_project_root = None`; live/pinned/COW recovery rebinds both the
+request subject and admitted subject to the exact reconstructed provenance
+workspace. Only `source_path` points into the capsule.
 
 ## Relationship to the resolution cache
 

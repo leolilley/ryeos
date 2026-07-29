@@ -94,6 +94,10 @@ pub struct ResolutionContext<'a> {
     pub(crate) parsers: &'a ParserDispatcher,
     pub(crate) roots: &'a ResolutionRoots,
     pub(crate) trust_store: &'a TrustStore,
+    pub(crate) project_authority: Option<(
+        &'a std::path::Path,
+        &'a dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 
     /// Alias expansion (recursive, with depth + cycle protection).
     pub(crate) aliases: AliasResolver,
@@ -152,6 +156,10 @@ impl<'a> ResolutionContext<'a> {
         trust_store: &'a TrustStore,
         aliases: AliasResolver,
         root_loaded: LoadedItem,
+        project_authority: Option<(
+            &'a std::path::Path,
+            &'a dyn crate::project_content::AuthoritativeProjectContent,
+        )>,
     ) -> Self {
         // Seed the negative-dependency accumulator with the root item's own
         // probes before `root_loaded` is moved into the context.
@@ -177,6 +185,7 @@ impl<'a> ResolutionContext<'a> {
             parsers,
             roots,
             trust_store,
+            project_authority,
             aliases,
             root_loaded,
             root_ancestor,
@@ -307,6 +316,7 @@ impl<'a> ResolutionContext<'a> {
             ref_,
             referenced_by,
             step,
+            self.project_authority,
         )?;
         self.probed_absent
             .borrow_mut()
@@ -333,8 +343,20 @@ pub(crate) fn load_item_at(
     ref_: &CanonicalRef,
     referenced_by: &str,
     step: ResolutionStepName,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 ) -> Result<LoadedItem, ResolutionError> {
-    let raw = load_item_raw(kinds, roots, trust_store, ref_, referenced_by, step)?;
+    let raw = load_item_raw(
+        kinds,
+        roots,
+        trust_store,
+        ref_,
+        referenced_by,
+        step,
+        project_authority,
+    )?;
 
     let kind_schema = kinds
         .get(&ref_.kind)
@@ -425,6 +447,10 @@ pub(crate) fn load_item_raw(
     ref_: &CanonicalRef,
     referenced_by: &str,
     step: ResolutionStepName,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 ) -> Result<RawLoadedItem, ResolutionError> {
     let kind_schema = kinds
         .get(&ref_.kind)
@@ -434,7 +460,19 @@ pub(crate) fn load_item_raw(
             reason: format!("unknown kind: {}", ref_.kind),
         })?;
 
-    let result = match crate::item_resolution::resolve_item_full(roots, kind_schema, ref_) {
+    let result = match project_authority {
+        Some((project_root, project_content)) => {
+            crate::item_resolution::resolve_item_full_under_project_authority(
+                roots,
+                kind_schema,
+                ref_,
+                project_root,
+                project_content,
+            )
+        }
+        None => crate::item_resolution::resolve_item_full(roots, kind_schema, ref_),
+    };
+    let result = match result {
         Ok(result) => result,
         Err(EngineError::ItemNotFound { .. }) => {
             return Err(ResolutionError::MissingItem {
@@ -458,12 +496,21 @@ pub(crate) fn load_item_raw(
         }
     };
 
-    let content =
-        std::fs::read_to_string(&result.winner_path).map_err(|e| ResolutionError::StepFailed {
-            step,
-            class: ResolutionFailureClass::DependencyUnavailable,
-            reason: format!("read {}: {e}", result.winner_path.display()),
-        })?;
+    let content = match project_authority {
+        Some((project_root, project_content)) => {
+            crate::item_resolution::read_resolved_source_under_project_authority(
+                &result,
+                project_root,
+                project_content,
+            )
+        }
+        None => crate::item_resolution::read_item_source_no_follow(&result.winner_path),
+    }
+    .map_err(|error| ResolutionError::StepFailed {
+        step,
+        class: ResolutionFailureClass::DependencyUnavailable,
+        reason: error.to_string(),
+    })?;
 
     let source_format = kind_schema
         .resolved_format_for(&result.matched_ext)
@@ -495,6 +542,7 @@ pub(crate) fn load_item_raw(
             let trust_class = match (contract_trust, result.winner_space) {
                 (ContractTrustClass::Trusted, ItemSpace::Bundle) => TrustClass::TrustedBundle,
                 (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedProject,
+                (ContractTrustClass::Trusted, ItemSpace::Node) => TrustClass::TrustedNode,
                 (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
                 (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
             };

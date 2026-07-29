@@ -387,12 +387,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 bootstrap::load_node_config_two_phase(&config)?;
             let node_history_policy = {
                 let roots = engine.resolution_roots(Some(config.app_root.clone()));
-                let parsers = engine.effective_parser_dispatcher(Some(&config.app_root))?;
+                let parsers = engine.effective_parser_dispatcher(
+                    Some(&config.app_root),
+                    &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
+                )?;
                 let context = ryeos_engine::config_loading::ConfigLoadContext {
                     roots: &roots,
                     parsers: &parsers,
                     kinds: &engine.kinds,
                     trust_store: &engine.node_trust_store,
+                    project_authority: None,
                 };
                 Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
             };
@@ -416,6 +420,8 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                             },
                         ),
                         project_context: ryeos_engine::contracts::ProjectContext::None,
+                        subject_resolution_authority:
+                            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
                         current_site_id: "site:local".into(),
                         origin_site_id: "site:local".into(),
                         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
@@ -714,7 +720,9 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 isolation,
                 state_store,
                 engine: engine.clone(),
-                resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+                resolution_cache: std::sync::Arc::new(
+                    ryeos_app::resolution_cache::ResolutionCache::new(128),
+                ),
                 engine_cache: ryeos_app::engine_cache::EngineCache::new(
                     ryeos_app::engine_cache::EngineCacheConfig::default(),
                 ),
@@ -1276,7 +1284,10 @@ fn load_node_max_live_fanout(
     app_root: &std::path::Path,
 ) -> Option<u32> {
     let roots = engine.resolution_roots(Some(app_root.to_path_buf()));
-    let parsers = match engine.effective_parser_dispatcher(Some(app_root)) {
+    let parsers = match engine.effective_parser_dispatcher(
+        Some(app_root),
+        &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
+    ) {
         Ok(p) => p,
         Err(err) => {
             tracing::warn!(error = %err, "node execution limits: parser dispatcher unavailable");
@@ -1288,6 +1299,7 @@ fn load_node_max_live_fanout(
         parsers: &parsers,
         kinds: &engine.kinds,
         trust_store: &engine.node_trust_store,
+        project_authority: None,
     };
     let mut limit: Option<u32> = None;
     for root in &roots.ordered {
@@ -2419,12 +2431,16 @@ async fn run_service_standalone(
         bootstrap::load_node_config_two_phase_standalone(config)?;
     let node_history_policy = {
         let roots = engine.resolution_roots(Some(config.app_root.clone()));
-        let parsers = engine.effective_parser_dispatcher(Some(&config.app_root))?;
+        let parsers = engine.effective_parser_dispatcher(
+            Some(&config.app_root),
+            &ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
+        )?;
         let context = ryeos_engine::config_loading::ConfigLoadContext {
             roots: &roots,
             parsers: &parsers,
             kinds: &engine.kinds,
             trust_store: &engine.node_trust_store,
+            project_authority: None,
         };
         Arc::new(ryeos_engine::history_policy::load_node_thread_history_policy(&context)?)
     };
@@ -2444,6 +2460,8 @@ async fn run_service_standalone(
             },
         ),
         project_context: ryeos_engine::contracts::ProjectContext::None,
+        subject_resolution_authority:
+            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
@@ -2566,7 +2584,9 @@ async fn run_service_standalone(
         isolation,
         state_store,
         engine: engine.clone(),
-        resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(128)),
+        resolution_cache: std::sync::Arc::new(ryeos_app::resolution_cache::ResolutionCache::new(
+            128,
+        )),
         engine_cache: ryeos_app::engine_cache::EngineCache::new(
             ryeos_app::engine_cache::EngineCacheConfig::default(),
         ),

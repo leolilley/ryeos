@@ -510,7 +510,9 @@ pub fn validate_runtime_launch_handlers(
     for runtime in sorted_runtimes {
         let (handler_id, handler_config) = match &runtime.yaml.launch_contract.preparation {
             LaunchPreparationDecl::None => continue,
-            LaunchPreparationDecl::Handler { handler, config } => (handler, config),
+            LaunchPreparationDecl::Handler {
+                handler, config, ..
+            } => (handler, config),
         };
         let runtime_ref = runtime.canonical_ref.to_string();
 
@@ -730,6 +732,7 @@ fn item_space_wire(space: LaunchItemSpace) -> ItemSpaceWire {
     match space {
         LaunchItemSpace::Bundle => ItemSpaceWire::Bundle,
         LaunchItemSpace::Project => ItemSpaceWire::Project,
+        LaunchItemSpace::Node => ItemSpaceWire::Node,
     }
 }
 
@@ -737,6 +740,7 @@ fn trust_class_wire(trust: TrustClass) -> TrustClassWire {
     match trust {
         TrustClass::TrustedBundle => TrustClassWire::TrustedBundle,
         TrustClass::TrustedProject => TrustClassWire::TrustedProject,
+        TrustClass::TrustedNode => TrustClassWire::TrustedNode,
         TrustClass::UntrustedProject => TrustClassWire::UntrustedProject,
         TrustClass::Unsigned => TrustClassWire::Unsigned,
     }

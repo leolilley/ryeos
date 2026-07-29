@@ -111,17 +111,42 @@ pub(super) fn prepare_managed_launch(
                     .map_err(DispatchError::Internal)?;
                 Ok(admission.clone())
             } else {
-                ryeos_app::thread_lifecycle::admit_verified_root_execution(
-                    &ctx.engine,
-                    &ctx.plan_ctx,
-                    &ctx.plan_ctx,
+                let project_binding =
                     ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
                         &ctx.engine,
                         &ctx.plan_ctx,
                         &request.provenance,
                     )
-                    .map_err(DispatchError::Internal)?,
-                    verified_subject.clone(),
+                    .map_err(DispatchError::Internal)?;
+                let admitted_request_snapshot = project_binding
+                    .admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)
+                    .map_err(DispatchError::Internal)?;
+                let verified_attestation = match admitted_request_snapshot.as_ref() {
+                    Some(authority) => ctx.engine.resolve_attested_under_admitted_authority(
+                        &ctx.plan_ctx,
+                        &verified_subject.resolved.canonical_ref,
+                        project_binding.execution_workspace().ok_or_else(|| {
+                            DispatchError::Internal(anyhow::anyhow!(
+                                "content-addressed managed root has no execution workspace"
+                            ))
+                        })?,
+                        authority,
+                    ),
+                    None => ctx
+                        .engine
+                        .verify_attested(&ctx.plan_ctx, verified_subject.resolved.clone()),
+                }
+                .map_err(|error| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "attest managed launch subject: {error}"
+                    ))
+                })?;
+                ryeos_app::thread_lifecycle::admit_verified_root_execution(
+                    &ctx.engine,
+                    &ctx.plan_ctx,
+                    &ctx.plan_ctx,
+                    project_binding,
+                    verified_attestation,
                     node_history_policy,
                     subject.thread_profile.clone(),
                     request.ref_bindings.clone(),
@@ -133,23 +158,34 @@ pub(super) fn prepare_managed_launch(
         })
         .transpose()?;
     let resolved_item = verified_subject.resolved.clone();
-    let resolved = ResolvedExecutionRequest {
-        kind: subject.thread_profile.clone(),
-        item_ref: subject.item_ref.clone(),
-        executor_ref: executor_ref.clone(),
-        launch_mode: "wait".to_string(),
-        current_site_id: ctx.plan_ctx.current_site_id.clone(),
-        origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-        target_site_id: None,
-        requested_by: Some(request.acting_principal.to_string()),
-        usage_subject: request.usage_subject.clone(),
-        usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-        parameters: request.params.clone(),
-        root_raw_content_digest: resolved_item.raw_content_digest.clone(),
-        ref_bindings: request.ref_bindings.clone(),
-        resolved_item,
-        plan_context: ctx.plan_ctx.clone(),
-        root_admission,
+    let resolved = match root_admission {
+        Some(admission) => admission
+            .execution_request(
+                ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
+                    &verified_runtime.canonical_ref,
+                ),
+                "wait".to_string(),
+                request.params.clone(),
+            )
+            .map_err(DispatchError::Internal)?,
+        None => ResolvedExecutionRequest {
+            kind: subject.thread_profile.clone(),
+            item_ref: subject.item_ref.clone(),
+            executor_ref: executor_ref.clone(),
+            launch_mode: "wait".to_string(),
+            current_site_id: ctx.plan_ctx.current_site_id.clone(),
+            origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
+            target_site_id: None,
+            requested_by: Some(request.acting_principal.to_string()),
+            usage_subject: request.usage_subject.clone(),
+            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
+            parameters: request.params.clone(),
+            root_raw_content_digest: resolved_item.raw_content_digest.clone(),
+            ref_bindings: request.ref_bindings.clone(),
+            resolved_item,
+            plan_context: ctx.plan_ctx.clone(),
+            root_admission: None,
+        },
     };
     Ok(PreparedManagedLaunch {
         resolved,

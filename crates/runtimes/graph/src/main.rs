@@ -148,7 +148,7 @@ fn main() -> anyhow::Result<()> {
         resolved.project_root.clone(),
         resolved.bundle_roots.clone(),
         &resolved.node_trusted_keys_dir,
-    );
+    )?;
     let hook_sources = ryeos_runtime::load_configured_hook_sources(&loader)?;
     let target_digest = resolved
         .target_digest

@@ -943,10 +943,9 @@ fn read_pre_tree_for_snapshot(state: &AppState, snap_hash: &str) -> Result<(Stri
     let guard = authority.acquire_shared_guard()?;
     authority.ensure_guard(&guard)?;
     let cas = authority.cas_store()?;
-    let snap_obj = cas
-        .get_object(snap_hash)?
-        .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
-    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)?;
+    let snapshot =
+        ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snap_hash)?
+            .ok_or_else(|| anyhow::anyhow!("snapshot {} not found in CAS", snap_hash))?;
     Ok((snapshot.project_tree_hash, snapshot.effective_policy_hash))
 }
 
@@ -1722,7 +1721,7 @@ fn recovered_direct_protocol(
     item_kind: &str,
 ) -> Result<ryeos_engine::protocols::VerifiedProtocol> {
     let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-        wrapper_source_identity,
+        root_subject_source_identity,
         protocol_ref,
         protocol_content_hash,
         protocol_signer_fingerprint,
@@ -1756,17 +1755,17 @@ fn recovered_direct_protocol(
             bail!("admitted direct runtime bundle signer is no longer trusted: {bundle_signer}");
         }
     }
-    if let ryeos_state::objects::DirectWrapperSourceIdentity::Bundle {
+    if let ryeos_state::objects::DirectRootSourceIdentity::Bundle {
         manifest_signer_fingerprint,
         ..
-    } = wrapper_source_identity
+    } = root_subject_source_identity
     {
         if !engine
             .node_trust_store
             .is_trusted(manifest_signer_fingerprint)
         {
             bail!(
-                "admitted direct wrapper manifest signer is no longer trusted: {manifest_signer_fingerprint}"
+                "admitted direct root manifest signer is no longer trusted: {manifest_signer_fingerprint}"
             );
         }
     }
@@ -3870,16 +3869,16 @@ fn execution_provenance_from_resume_context(
             Ok((provenance, ProjectContext::LocalPath { path: canonical }))
         }
         ResumeProvenanceDecision::Projectless => {
-            let execution_root = state.config.runtime_root().cache().join("executions");
-            std::fs::create_dir_all(&execution_root)?;
-            let scratch = execution_root.join(format!(
+            let workspace_name = format!(
                 "resume-projectless-{}-{:08x}",
                 lillux::time::timestamp_millis(),
                 rand::random::<u32>()
-            ));
-            std::fs::create_dir(&scratch)?;
-            std::fs::create_dir(scratch.join(ryeos_engine::AI_DIR))?;
-            let lifeline = Arc::new(TempDirGuard::new(scratch.clone()));
+            );
+            let (scratch, lifeline) = ryeos_app::temp_dir_guard::create_projectless_workspace(
+                &state.config.runtime_root().cache(),
+                &workspace_name,
+            )
+            .context("create protected projectless resume workspace")?;
             let provenance = ExecutionProvenance::root_projectless(
                 scratch,
                 Arc::clone(&state.engine),
@@ -3913,11 +3912,14 @@ fn execution_provenance_from_resume_context(
             );
             let effective_path = ctx.effective_path.clone();
             let provenance = ExecutionProvenance::root_pushed_head(
-                effective_path.clone(),
                 pinned.original_project_path.clone(),
                 ctx.request_engine,
                 lifeline,
-                pinned.snapshot_hash.clone(),
+                ctx.pinned_materialization.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "resume: pinned context has no verified materialization authority"
+                    )
+                })?,
                 resume.project_authority.clone(),
             )?;
             tracing::info!(
@@ -3959,11 +3961,14 @@ fn execution_provenance_from_resume_context(
             );
             let effective_path = ctx.effective_path.clone();
             let provenance = ExecutionProvenance::root_pushed_head(
-                effective_path.clone(),
                 original_path.to_path_buf(),
                 ctx.request_engine,
                 lifeline,
-                snapshot_hash.to_string(),
+                ctx.pinned_materialization.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "resume: pinned context has no verified materialization authority"
+                    )
+                })?,
                 resume.project_authority.clone(),
             )?;
             tracing::info!(
@@ -4295,21 +4300,20 @@ async fn run_existing_recovered_thread(
         guard.fail_thread("admitted_protocol_closure_invalid");
         guard.cleanup();
     })?;
-    let primary_resolution = params
-        .resolved
-        .root_admission
-        .as_ref()
-        .ok_or_else(|| {
-            guard.fail_thread("admitted_program_authority_unavailable");
-            guard.cleanup();
-            ResumeError::Other(anyhow::anyhow!(
-                "direct recovery has no exact admitted root resolution"
-            ))
-        })?
-        .resolution_output();
+    let root_admission = params.resolved.root_admission.as_ref().ok_or_else(|| {
+        guard.fail_thread("admitted_program_authority_unavailable");
+        guard.cleanup();
+        ResumeError::Other(anyhow::anyhow!(
+            "direct recovery has no exact admitted root resolution"
+        ))
+    })?;
+    let primary_resolution = root_admission.resolution_output();
+    let current_trust_store = root_admission
+        .current_policy_trust_store()
+        .map_err(ResumeError::Other)?;
     super::admitted_trust::validate_direct_current_trust(
         &engine,
-        effective_project_root,
+        &current_trust_store,
         primary_resolution,
         prepared_plan.execution_plan(),
         &admitted_capsule,

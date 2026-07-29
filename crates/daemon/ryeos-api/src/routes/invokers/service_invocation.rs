@@ -92,6 +92,8 @@ impl CompiledRouteInvocation for CompiledServiceInvocation {
                 scopes: principal_scopes.clone(),
             }),
             project_context: ProjectContext::None,
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             current_site_id: site_id,
             origin_site_id,
             execution_hints: Default::default(),

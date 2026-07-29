@@ -13,6 +13,8 @@ mod compose_cache;
 pub mod compose_context_positions;
 pub mod projection;
 
+use std::sync::Arc;
+
 use ryeos_engine::kind_registry::{ExecutionSchema, LaunchAugmentationDecl};
 use ryeos_engine::resolution::ResolutionOutput;
 
@@ -44,6 +46,9 @@ pub async fn run_augmentations(
     principal_fingerprint: &str,
     state: &ryeos_app::state::AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    admitted_request_snapshot: Option<
+        &std::sync::Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>,
+    >,
 ) -> Result<Vec<LaunchAugmentationAudit>, LaunchAugmentationError> {
     let mut audits = Vec::new();
     for decl in &exec.launch_augmentations {
@@ -61,6 +66,7 @@ pub async fn run_augmentations(
                         principal_fingerprint,
                         state,
                         launch_timings,
+                        admitted_request_snapshot,
                     )
                     .await?,
                 );
@@ -88,7 +94,9 @@ impl From<LaunchAugmentationError> for DispatchError {
             }
             LaunchAugmentationError::ChildBootstrap { .. }
             | LaunchAugmentationError::ChildFailed { .. }
-            | LaunchAugmentationError::RuntimeRegistry(_) => DispatchError::SubprocessRunFailed {
+            | LaunchAugmentationError::AuthorityChangedDuringExecution { .. }
+            | LaunchAugmentationError::RuntimeRegistry(_)
+            | LaunchAugmentationError::Shared(_) => DispatchError::SubprocessRunFailed {
                 item_ref: "launch_augmentation".to_string(),
                 detail: e.to_string(),
             },
@@ -147,6 +155,15 @@ pub enum LaunchAugmentationError {
     #[error("runtime registry lookup failed: {0}")]
     RuntimeRegistry(String),
 
+    #[error("compose authority changed during {attempts} consecutive cold executions")]
+    AuthorityChangedDuringExecution { attempts: usize },
+
     #[error("thread infra: {0}")]
     Threads(String),
+
+    /// Exact leader failure shared with every waiter on one compose-cache
+    /// fill. Failed results remain in-flight only and are never admitted as
+    /// reusable cache entries.
+    #[error("{0}")]
+    Shared(Arc<LaunchAugmentationError>),
 }

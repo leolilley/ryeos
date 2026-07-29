@@ -1763,6 +1763,20 @@ pub struct AuthoritativeThreadSnapshotReadback {
     pub is_chain_final_event: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthoritativeThreadAppendAnchorReadback {
+    pub chain_last_event_hash: Option<String>,
+    pub chain_last_seq: u64,
+    pub thread_last_event_hash: Option<String>,
+    pub thread_last_seq: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthoritativeThreadAppendHistoryReadback {
+    pub anchor: AuthoritativeThreadAppendAnchorReadback,
+    pub events: Vec<(String, ThreadEvent)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthoritativeThreadEventChainReadback {
     pub snapshot: ThreadSnapshot,
@@ -4377,6 +4391,76 @@ impl StateDb {
             snapshot,
             last_event,
         }))
+    }
+
+    /// Read the current chain-global and thread-local append anchors through
+    /// the trust-verified signed head without traversing event history.
+    pub fn read_authoritative_thread_append_anchor(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<AuthoritativeThreadAppendAnchorReadback>> {
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self._refs_directory,
+            &self._cas_directory,
+            &self.recovery,
+            chain_root_id,
+        )?;
+        let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+        chain::read_authoritative_thread_append_anchor_with_trust(
+            &self.cas_root,
+            &self.refs_root,
+            &chain_lock,
+            chain_root_id,
+            thread_id,
+            self.trust_store.as_ref(),
+            &mut head_cache,
+        )
+        .map(|readback| {
+            readback.map(|readback| AuthoritativeThreadAppendAnchorReadback {
+                chain_last_event_hash: readback.chain_last_event_hash,
+                chain_last_seq: readback.chain_last_seq,
+                thread_last_event_hash: readback.thread_last_event_hash,
+                thread_last_seq: readback.thread_last_seq,
+            })
+        })
+    }
+
+    /// Read one thread's complete event chain and its current append anchors
+    /// from a single trust-verified signed head. Reserved for commit
+    /// reconciliation after an append acknowledgement is ambiguous.
+    pub fn read_authoritative_thread_append_history(
+        &self,
+        chain_root_id: &str,
+        thread_id: &str,
+    ) -> anyhow::Result<Option<AuthoritativeThreadAppendHistoryReadback>> {
+        let chain_lock = crate::chain::ChainLock::acquire_in_refs_directory(
+            &self._refs_directory,
+            &self._cas_directory,
+            &self.recovery,
+            chain_root_id,
+        )?;
+        let mut head_cache = self.head_cache.lock().expect("head_cache lock");
+        chain::read_authoritative_thread_event_chain_with_trust(
+            &self.cas_root,
+            &self.refs_root,
+            &chain_lock,
+            chain_root_id,
+            thread_id,
+            self.trust_store.as_ref(),
+            &mut head_cache,
+        )
+        .map(|readback| {
+            readback.map(|readback| AuthoritativeThreadAppendHistoryReadback {
+                anchor: AuthoritativeThreadAppendAnchorReadback {
+                    chain_last_event_hash: readback.anchor.chain_last_event_hash,
+                    chain_last_seq: readback.anchor.chain_last_seq,
+                    thread_last_event_hash: readback.anchor.thread_last_event_hash,
+                    thread_last_seq: readback.anchor.thread_last_seq,
+                },
+                events: readback.events,
+            })
+        })
     }
 
     /// Read one root publication and its canonical predecessor genesis under

@@ -103,6 +103,7 @@ async fn cli_initialized_but_stopped_suggests_start() {
         .arg("service:node/status")
         .env("RYEOS_APP_ROOT", &state_path)
         .env("HOME", user_space.path())
+        .env("XDG_RUNTIME_DIR", user_space.path())
         .output()
         .await
         .expect("spawn ryeos");

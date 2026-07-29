@@ -5,6 +5,10 @@ edition = "2021"
 license.workspace = true
 description = "CAS-as-truth persistence plane for RyeOS"
 
+[features]
+default = []
+test-support = []
+
 [dependencies]
 lillux = { workspace = true }
 ryeos-accounting = { workspace = true }

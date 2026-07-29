@@ -121,9 +121,12 @@ where
     serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
-pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 4;
+/// v7 seals subject-resolution authority independently for the project
+/// binding, admitted resolution closure, resolved root item, and the complete
+/// typed executor route selected at admission.
+pub(super) const SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION: u32 = 7;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SealedShadowedCandidate {
     label: String,
@@ -131,7 +134,7 @@ struct SealedShadowedCandidate {
     path: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SealedItemMetadata {
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -166,8 +169,10 @@ struct SealedResolvedItem {
     source_space: ItemSpace,
     resolved_from: String,
     shadowed: Vec<SealedShadowedCandidate>,
+    probed_absent: Vec<ryeos_engine::contracts::ProbedAbsence>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     materialized_project_root: Option<PathBuf>,
+    subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
     raw_content_digest: String,
     source_content_b64: String,
     content_hash: String,
@@ -178,13 +183,30 @@ struct SealedResolvedItem {
 }
 
 impl SealedResolvedItem {
-    fn capture(resolved: &ResolvedItem) -> Result<Self> {
-        let source_bytes = std::fs::read(&resolved.source_path).with_context(|| {
-            format!(
-                "read admitted item source for launch capsule: {}",
-                resolved.source_path.display()
-            )
-        })?;
+    fn capture(resolved: &ResolvedItem, retained_source_bytes: Option<&[u8]>) -> Result<Self> {
+        let source_bytes = match retained_source_bytes {
+            Some(bytes) => bytes.to_vec(),
+            None if resolved
+                .subject_resolution_authority
+                .operational_generation()
+                .is_some() =>
+            {
+                bail!(
+                    "content-addressed admitted item source was not retained before launch capsule capture: {}",
+                    resolved.source_path.display()
+                )
+            }
+            None => {
+                ryeos_engine::item_resolution::read_item_source_no_follow(&resolved.source_path)
+                    .with_context(|| {
+                        format!(
+                            "securely read admitted item source for launch capsule: {}",
+                            resolved.source_path.display()
+                        )
+                    })?
+                    .into_bytes()
+            }
+        };
         let source_digest = lillux::sha256_hex(&source_bytes);
         if source_digest != resolved.content_hash {
             bail!(
@@ -210,7 +232,9 @@ impl SealedResolvedItem {
                     path: candidate.path.clone(),
                 })
                 .collect(),
+            probed_absent: resolved.probed_absent.clone(),
             materialized_project_root: resolved.materialized_project_root.clone(),
+            subject_resolution_authority: resolved.subject_resolution_authority.clone(),
             raw_content_digest: resolved.raw_content_digest.clone(),
             source_content_b64: base64::engine::general_purpose::STANDARD.encode(source_bytes),
             content_hash: resolved.content_hash.clone(),
@@ -255,34 +279,49 @@ impl SealedResolvedItem {
                 self.raw_content_digest
             );
         }
-        std::fs::create_dir_all(capsule_root).with_context(|| {
-            format!(
-                "create admitted launch capsule root {}",
-                capsule_root.display()
-            )
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(capsule_root, std::fs::Permissions::from_mode(0o700))?;
-        }
-        let materialized_source = capsule_root.join("subject.source");
-        if materialized_source.exists() {
-            let existing = std::fs::read(&materialized_source)?;
-            if lillux::sha256_hex(&existing) != self.content_hash {
-                bail!(
-                    "admitted launch capsule materialization has conflicting content: {}",
-                    materialized_source.display()
-                );
-            }
-        } else {
-            lillux::atomic_write(&materialized_source, &source_bytes).with_context(|| {
+        let pinned_capsule_root = lillux::PinnedDirectory::open_or_create(capsule_root)
+            .with_context(|| {
                 format!(
-                    "materialize admitted launch capsule source {}",
-                    materialized_source.display()
+                    "create admitted launch capsule root {}",
+                    capsule_root.display()
                 )
             })?;
+        pinned_capsule_root.set_mode(0o700)?;
+        pinned_capsule_root.ensure_path_binding()?;
+        let source_name = std::ffi::OsStr::new("subject.source");
+        let mut materialized_source_file =
+            match pinned_capsule_root.open_regular(source_name, false)? {
+                Some(existing) => existing,
+                None => match pinned_capsule_root.atomic_create_regular(
+                    source_name,
+                    &source_bytes,
+                    0o600,
+                )? {
+                    Some(created) => created,
+                    None => pinned_capsule_root
+                        .open_regular(source_name, false)?
+                        .ok_or_else(|| {
+                            anyhow!("admitted launch capsule source disappeared during create race")
+                        })?,
+                },
+            };
+        let expected_source_len = u64::try_from(source_bytes.len())
+            .context("admitted launch capsule source length exceeds u64")?;
+        let (materialized_source_hash, materialized_source_metadata) =
+            lillux::digest_open_regular_file_stable_exact(
+                &mut materialized_source_file,
+                expected_source_len,
+            )?;
+        if materialized_source_hash != self.content_hash
+            || materialized_source_metadata.len() != expected_source_len
+        {
+            bail!(
+                "admitted launch capsule materialization has conflicting content: {}",
+                capsule_root.join(source_name).display()
+            );
         }
+        pinned_capsule_root.ensure_path_binding()?;
+        let materialized_source = capsule_root.join(source_name);
         Ok(ResolvedItem {
             canonical_ref,
             kind: self.kind.clone(),
@@ -298,7 +337,13 @@ impl SealedResolvedItem {
                     path: candidate.path.clone(),
                 })
                 .collect(),
-            materialized_project_root: Some(capsule_root.to_path_buf()),
+            probed_absent: self.probed_absent.clone(),
+            // The capsule directory owns only the retained source bytes. It is
+            // never project authority. Direct restore keeps the sealed
+            // materialized root; reconstructed recovery rebinds this field to
+            // the exact provenance workspace before dispatch.
+            materialized_project_root: self.materialized_project_root.clone(),
+            subject_resolution_authority: self.subject_resolution_authority.clone(),
             raw_content_digest: self.raw_content_digest.clone(),
             content_hash: self.content_hash.clone(),
             signature_header: self.signature_header.clone(),
@@ -323,7 +368,7 @@ impl SealedResolvedItem {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 // This exact durable wire shape keeps delegated-principal fields flattened.
 // Adding indirection would change the sealed request representation.
@@ -420,9 +465,6 @@ impl SealedPrincipal {
     }
 }
 
-/// Exact, current-format durable authority for a root admitted before its
-/// first launch. This is persisted only for the created-root crash window and
-/// reconstructs the complete request without consulting mutable item source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SealedRootExecutionRequest {
@@ -430,6 +472,7 @@ pub struct SealedRootExecutionRequest {
     kind: String,
     item_ref: String,
     executor_ref: String,
+    executor_route: AdmittedExecutorRoute,
     runtime_ref: String,
     launch_mode: String,
     current_site_id: String,
@@ -455,6 +498,8 @@ pub struct SealedRootExecutionRequest {
     planning_principal: SealedPrincipal,
     project_context: ProjectContext,
     project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    project_binding_subject_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
+    resolution_subject_authority: ryeos_engine::contracts::SubjectResolutionAuthority,
     execution_hints: HashMap<String, Value>,
     validate_only: bool,
     resolved_history_policy: ResolvedThreadHistoryPolicy,
@@ -488,6 +533,44 @@ impl SealedRootExecutionRequest {
         }
         CanonicalRef::parse(&runtime_ref)
             .map_err(|error| anyhow!("invalid sealed runtime ref `{runtime_ref}`: {error}"))?;
+        let executor_route = match admission.selected_executor_route.as_ref() {
+            Some(route @ AdmittedExecutorRoute::RootExecutorChain { .. })
+            | Some(route @ AdmittedExecutorRoute::DirectNativeExecutor { .. }) => route.clone(),
+            Some(
+                route @ AdmittedExecutorRoute::ManagedRuntimeForKind {
+                    runtime_ref: admitted_runtime,
+                    ..
+                },
+            ) => {
+                if admitted_runtime != &runtime_ref {
+                    bail!(
+                        "sealed runtime `{runtime_ref}` differs from admitted managed route `{admitted_runtime}`"
+                    );
+                }
+                route.clone()
+            }
+            Some(
+                route @ AdmittedExecutorRoute::RuntimeDescriptorExecutor {
+                    runtime_ref: admitted_runtime,
+                    ..
+                },
+            ) => {
+                if admitted_runtime != &runtime_ref {
+                    bail!(
+                        "sealed runtime `{runtime_ref}` differs from admitted descriptor route `{admitted_runtime}`"
+                    );
+                }
+                route.clone()
+            }
+            None => bail!("cannot seal a root request without a typed executor route"),
+        };
+        if executor_route.executor_ref() != request.executor_ref {
+            bail!(
+                "sealed executor route `{}` differs from request executor `{}`",
+                executor_route.executor_ref(),
+                request.executor_ref
+            );
+        }
         let verified = &admission.verified_subject;
         if resolution_output.root.raw_content_digest != verified.resolved.raw_content_digest {
             bail!(
@@ -496,11 +579,17 @@ impl SealedRootExecutionRequest {
                 verified.resolved.raw_content_digest
             );
         }
+        if verified.resolved.subject_resolution_authority
+            != *admission.resolution_closure.subject_authority()
+        {
+            bail!("sealed resolved-item authority differs from its admitted resolution closure");
+        }
         Ok(Self {
             schema_version: SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION,
             kind: request.kind.clone(),
             item_ref: request.item_ref.clone(),
             executor_ref: request.executor_ref.clone(),
+            executor_route,
             runtime_ref,
             launch_mode: request.launch_mode.clone(),
             current_site_id: request.current_site_id.clone(),
@@ -511,7 +600,13 @@ impl SealedRootExecutionRequest {
             usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
             parameters: request.parameters.clone(),
             ref_bindings: request.ref_bindings.clone(),
-            verified_subject: SealedResolvedItem::capture(&verified.resolved)?,
+            verified_subject: SealedResolvedItem::capture(
+                &verified.resolved,
+                admission
+                    .resolution_closure
+                    .verified_attestation()
+                    .map(|attestation| attestation.source_bytes()),
+            )?,
             verified_signer_fingerprint: verified.signer.as_ref().map(|value| value.0.clone()),
             verified_trust_class: verified.trust_class,
             verified_pinned_version: verified.pinned_version.clone(),
@@ -519,6 +614,11 @@ impl SealedRootExecutionRequest {
             planning_principal: SealedPrincipal::from(&admission.plan_context.requested_by),
             project_context: admission.plan_context.project_context.clone(),
             project_authority: admission.project_authority().clone(),
+            project_binding_subject_authority: admission
+                .project_binding
+                .subject_resolution_authority()
+                .clone(),
+            resolution_subject_authority: admission.resolution_closure.subject_authority().clone(),
             execution_hints: admission.plan_context.execution_hints.values.clone(),
             validate_only: admission.plan_context.validate_only,
             resolved_history_policy: admission.resolved_history_policy.clone(),
@@ -558,6 +658,7 @@ impl SealedRootExecutionRequest {
             "planning_principal",
             "project_context",
             "project_authority",
+            "project_binding_subject_authority",
             "usage_subject",
             "usage_subject_asserted_by",
         ] {
@@ -571,6 +672,38 @@ impl SealedRootExecutionRequest {
     pub fn admitted_program_hash(&self) -> Result<String> {
         let canonical = lillux::canonical_json(&self.admitted_program_value()?)?;
         Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    /// Prove that the operational resume ledger describes this exact sealed
+    /// invocation. The capsule stores both representations deliberately: the
+    /// sealed request is immutable execution authority, while `ResumeContext`
+    /// is the daemon's reconstruction index. Neither may silently become a
+    /// partial or independently editable copy of the other.
+    pub(crate) fn validate_invocation_against_resume(
+        &self,
+        resume: &crate::launch_metadata::ResumeContext,
+    ) -> Result<()> {
+        if self.kind != resume.kind
+            || self.item_ref != resume.item_ref
+            || self.ref_bindings != resume.ref_bindings
+            || self.launch_mode != resume.launch_mode
+            || self.parameters != resume.parameters
+            || self.current_site_id != resume.current_site_id
+            || self.origin_site_id != resume.origin_site_id
+            || self.requested_by.as_deref() != Some(resume.principal_identifier())
+            || self.planning_principal != SealedPrincipal::from(&resume.requested_by)
+            || self.project_context != resume.project_context
+            || self.project_authority != resume.project_authority
+            || resume.executor_ref.as_deref() != Some(self.executor_ref())
+            || resume.runtime_ref.as_deref() != Some(self.runtime_ref())
+            || self.execution_hints != resume.execution_hints.values
+        {
+            bail!(
+                "sealed invocation and resume authority disagree for {}",
+                resume.item_ref
+            );
+        }
+        Ok(())
     }
 
     /// Rebind only the invocation envelope of an exact admitted program for a
@@ -601,7 +734,12 @@ impl SealedRootExecutionRequest {
         successor.planning_principal = SealedPrincipal::from(&resume.requested_by);
         successor.project_context = resume.project_context.clone();
         successor.project_authority = resume.project_authority.clone();
+        successor.project_binding_subject_authority = continued_binding_subject_authority(
+            &self.project_binding_subject_authority,
+            &resume.project_authority,
+        )?;
         successor.execution_hints = resume.execution_hints.values.clone();
+        successor.validate_invocation_against_resume(resume)?;
         Ok(successor)
     }
 
@@ -618,7 +756,8 @@ impl SealedRootExecutionRequest {
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn storage_test_fixture() -> Self {
-        let content_hash = "11".repeat(32);
+        let source_content = b"{}";
+        let content_hash = lillux::sha256_hex(source_content);
         let kind_schema_content_hash = "22".repeat(32);
         let canonical_item_ref = "graph:test/storage-fixture".to_string();
         let resolved_history_policy = ResolvedThreadHistoryPolicy {
@@ -649,6 +788,13 @@ impl SealedRootExecutionRequest {
             kind: "graph_run".to_string(),
             item_ref: canonical_item_ref.clone(),
             executor_ref: "native:storage-fixture".to_string(),
+            executor_route: AdmittedExecutorRoute::ManagedRuntimeForKind {
+                runtime_ref: "runtime:storage-fixture".to_string(),
+                runtime_content_hash: "33".repeat(32),
+                runtime_signer_fingerprint: "44".repeat(32),
+                serves_kind: "graph".to_string(),
+                executor_ref: "native:storage-fixture".to_string(),
+            },
             runtime_ref: "runtime:storage-fixture".to_string(),
             launch_mode: "detached".to_string(),
             current_site_id: "site:test".to_string(),
@@ -666,9 +812,13 @@ impl SealedRootExecutionRequest {
                 source_space: ItemSpace::Project,
                 resolved_from: "storage_test_fixture".to_string(),
                 shadowed: Vec::new(),
+                probed_absent: Vec::new(),
                 materialized_project_root: None,
+                subject_resolution_authority:
+                    ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
                 raw_content_digest: content_hash.clone(),
-                source_content_b64: base64::engine::general_purpose::STANDARD.encode(b"{}"),
+                source_content_b64: base64::engine::general_purpose::STANDARD
+                    .encode(source_content),
                 content_hash: content_hash.clone(),
                 signature_header: None,
                 source_format: SealedSourceFormat {
@@ -717,6 +867,10 @@ impl SealedRootExecutionRequest {
             },
             project_context: ProjectContext::None,
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS,
+            project_binding_subject_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+            resolution_subject_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
             execution_hints: HashMap::new(),
             validate_only: false,
             resolved_history_policy,
@@ -735,6 +889,11 @@ impl SealedRootExecutionRequest {
     ) -> Self {
         let mut fixture = Self::storage_test_fixture();
         fixture.project_context = project_context;
+        fixture.project_binding_subject_authority =
+            storage_fixture_subject_authority_from_project_authority(&project_authority);
+        fixture.resolution_subject_authority = fixture.project_binding_subject_authority.clone();
+        fixture.verified_subject.subject_resolution_authority =
+            fixture.resolution_subject_authority.clone();
         fixture.project_authority = project_authority;
         fixture
     }
@@ -777,6 +936,7 @@ impl SealedRootExecutionRequest {
         let plan_context = PlanContext {
             requested_by: self.planning_principal.restore(),
             project_context: self.project_context.clone(),
+            subject_resolution_authority: self.project_binding_subject_authority.clone(),
             current_site_id: self.current_site_id.clone(),
             origin_site_id: self.origin_site_id.clone(),
             execution_hints: ExecutionHints {
@@ -784,11 +944,32 @@ impl SealedRootExecutionRequest {
             },
             validate_only: false,
         };
-        let project_binding =
-            AdmittedProjectBinding::restore(engine, &plan_context, self.project_authority.clone())?;
+        let project_binding = AdmittedProjectBinding::restore(
+            engine,
+            &plan_context,
+            self.project_authority.clone(),
+            self.project_binding_subject_authority.clone(),
+        )?;
         let admission = RootExecutionAdmission {
             verified_subject,
-            resolution_output: self.resolution_output.clone(),
+            resolution_closure: std::sync::Arc::new(
+                crate::resolution_cache::ResolvedClosure::restored(
+                    self.resolution_output.clone(),
+                    self.resolution_subject_authority.clone(),
+                    match (&self.resolution_subject_authority, &self.project_context) {
+                        (ryeos_engine::contracts::SubjectResolutionAuthority::Projectless, _) => {
+                            None
+                        }
+                        (_, ProjectContext::LocalPath { path }) => Some(path.clone()),
+                        (
+                            _,
+                            ProjectContext::None
+                            | ProjectContext::SnapshotHash { .. }
+                            | ProjectContext::ProjectRef { .. },
+                        ) => None,
+                    },
+                )?,
+            ),
             plan_context: plan_context.clone(),
             thread_profile: self.kind.clone(),
             usage_subject: self.usage_subject.clone(),
@@ -797,8 +978,32 @@ impl SealedRootExecutionRequest {
             resolved_history_policy: self.resolved_history_policy.clone(),
             captured_history_policy: self.captured_history_policy.clone(),
             project_binding,
+            admitted_request_snapshot: None,
+            selected_executor_route: None,
         };
-        admission.validate_for_persistence()?;
+        if self.executor_route.executor_ref() != self.executor_ref {
+            bail!(
+                "sealed root executor `{}` differs from its admitted executor route `{}`",
+                self.executor_ref,
+                self.executor_route.executor_ref()
+            );
+        }
+        if self
+            .executor_route
+            .runtime_ref()
+            .is_some_and(|runtime_ref| runtime_ref != self.runtime_ref)
+        {
+            bail!(
+                "sealed root runtime `{}` differs from its admitted executor route",
+                self.runtime_ref
+            );
+        }
+        let mut admission = admission;
+        admission.selected_executor_route = Some(self.executor_route.clone());
+        // The sealed request already crossed fresh admission. Recovery proves
+        // its internal closure and applies explicit current trust/isolation
+        // narrowing; it never re-enters today's kind/runtime registries.
+        admission.validate()?;
         let request = ResolvedExecutionRequest {
             kind: self.kind.clone(),
             item_ref: self.item_ref.clone(),
@@ -856,8 +1061,20 @@ impl SealedRootExecutionRequest {
         };
         let mut rebound_plan_context = request.plan_context.clone();
         rebound_plan_context.project_context = rebound_project_context;
+        rebound_plan_context.subject_resolution_authority =
+            provenance.subject_resolution_authority();
         let rebound_binding =
             AdmittedProjectBinding::from_provenance(engine, &rebound_plan_context, provenance)?;
+        let rebound_materialized_project_root = match provenance {
+            crate::execution_provenance::ExecutionProvenance::Projectless { .. } => None,
+            crate::execution_provenance::ExecutionProvenance::RootLiveProject { .. }
+            | crate::execution_provenance::ExecutionProvenance::ChildLiveProject { .. }
+            | crate::execution_provenance::ExecutionProvenance::RootPinnedGeneration { .. }
+            | crate::execution_provenance::ExecutionProvenance::ChildPinnedGeneration { .. } => {
+                Some(provenance.effective_path().to_path_buf())
+            }
+        };
+        request.resolved_item.materialized_project_root = rebound_materialized_project_root.clone();
         {
             let admission = request
                 .root_admission
@@ -865,7 +1082,16 @@ impl SealedRootExecutionRequest {
                 .ok_or_else(|| anyhow!("restored sealed root has no admission"))?;
             admission.plan_context = rebound_plan_context.clone();
             admission.project_binding = rebound_binding;
-            admission.validate_for_persistence()?;
+            admission
+                .verified_subject
+                .resolved
+                .materialized_project_root = rebound_materialized_project_root;
+            // Complete request snapshots include parser/kind registry
+            // semantics and belong only to fresh admission. Recovered paths
+            // use the sealed execution closure plus a trust-only current
+            // policy view derived from this exact project materialization.
+            admission.admitted_request_snapshot = None;
+            admission.validate()?;
         }
         request.plan_context = rebound_plan_context;
         let admission = request
@@ -893,6 +1119,7 @@ impl SealedRootExecutionRequest {
         capsule.validate()?;
         let sealed: Self = serde_json::from_value(capsule.sealed_invocation.clone())
             .context("decode admitted capsule sealed invocation")?;
+        sealed.validate_executor_route_against_capsule(capsule)?;
         if sealed.admitted_program_value()? != capsule.exact_program
             || sealed.admitted_program_hash()? != capsule.exact_program_hash
             || sealed.project_authority() != &capsule.project_authority
@@ -904,7 +1131,365 @@ impl SealedRootExecutionRequest {
         sealed.restore_for_reconstructed_provenance(engine, capsule_root, provenance)
     }
 
+    fn validate_executor_route_against_capsule(
+        &self,
+        capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
+    ) -> Result<()> {
+        if self.executor_route.executor_ref() != capsule.executor_ref {
+            bail!("sealed executor route contradicts admitted capsule executor identity");
+        }
+        match (&self.executor_route, &capsule.artifact_identity) {
+            (
+                AdmittedExecutorRoute::ManagedRuntimeForKind {
+                    runtime_ref,
+                    runtime_content_hash,
+                    runtime_signer_fingerprint,
+                    executor_ref,
+                    ..
+                },
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                    runtime_ref: artifact_runtime_ref,
+                    runtime_content_hash: artifact_runtime_content_hash,
+                    runtime_signer_fingerprint: artifact_runtime_signer,
+                    executor_ref: artifact_executor_ref,
+                    ..
+                },
+            ) => {
+                if runtime_ref != artifact_runtime_ref
+                    || runtime_content_hash != artifact_runtime_content_hash
+                    || runtime_signer_fingerprint != artifact_runtime_signer
+                    || executor_ref != artifact_executor_ref
+                {
+                    bail!(
+                        "sealed managed executor route contradicts admitted capsule artifact identity"
+                    );
+                }
+            }
+            (
+                AdmittedExecutorRoute::ManagedRuntimeForKind { .. },
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor { .. },
+            ) => {
+                bail!("sealed managed executor route has a direct-item capsule artifact identity");
+            }
+            (
+                AdmittedExecutorRoute::RuntimeDescriptorExecutor {
+                    runtime_ref,
+                    runtime_content_hash,
+                    runtime_signer_fingerprint,
+                    ..
+                },
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                    runtime_identity,
+                    ..
+                },
+            ) => {
+                if runtime_ref != &runtime_identity.runtime_ref
+                    || runtime_content_hash != &runtime_identity.runtime_content_hash
+                    || runtime_signer_fingerprint != &runtime_identity.runtime_signer_fingerprint
+                {
+                    bail!(
+                        "sealed runtime-descriptor route contradicts admitted direct runtime identity"
+                    );
+                }
+            }
+            (
+                AdmittedExecutorRoute::RuntimeDescriptorExecutor { .. },
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime { .. },
+            ) => {
+                bail!(
+                    "sealed runtime-descriptor executor route has a managed capsule artifact identity"
+                );
+            }
+            (
+                AdmittedExecutorRoute::RootExecutorChain { .. }
+                | AdmittedExecutorRoute::DirectNativeExecutor { .. },
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
+                    runtime_identity,
+                    ..
+                },
+            ) => {
+                if self.runtime_ref != runtime_identity.runtime_ref {
+                    bail!(
+                        "sealed direct executor route contradicts admitted direct runtime identity"
+                    );
+                }
+            }
+            (
+                AdmittedExecutorRoute::RootExecutorChain { .. }
+                | AdmittedExecutorRoute::DirectNativeExecutor { .. },
+                ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime { .. },
+            ) => {
+                bail!("sealed direct executor route has a managed capsule artifact identity");
+            }
+        }
+        Ok(())
+    }
+
     pub fn project_authority(&self) -> &ryeos_state::objects::ExecutionProjectAuthority {
         &self.project_authority
+    }
+}
+
+fn continued_binding_subject_authority(
+    previous: &ryeos_engine::contracts::SubjectResolutionAuthority,
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> Result<ryeos_engine::contracts::SubjectResolutionAuthority> {
+    use ryeos_engine::contracts::SubjectResolutionAuthority;
+    use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
+
+    match project_authority {
+        ExecutionProjectAuthority::Projectless { .. } => {
+            if previous != &SubjectResolutionAuthority::Projectless {
+                bail!("projectless continuation must inherit projectless subject authority");
+            }
+            Ok(SubjectResolutionAuthority::Projectless)
+        }
+        ExecutionProjectAuthority::LiveProject { .. } => {
+            if previous != &SubjectResolutionAuthority::LiveFs {
+                bail!("live continuation must inherit live subject authority");
+            }
+            Ok(SubjectResolutionAuthority::LiveFs)
+        }
+        ExecutionProjectAuthority::PinnedGeneration {
+            snapshot_hash,
+            realization: PinnedProjectRealization::ReadOnly,
+            ..
+        } => {
+            let expected = SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: snapshot_hash.clone(),
+            };
+            if previous != &expected {
+                bail!("read-only pinned continuation must inherit the exact pinned generation");
+            }
+            Ok(expected)
+        }
+        ExecutionProjectAuthority::PinnedGeneration {
+            base_snapshot_hash: authority_base,
+            snapshot_hash,
+            realization: PinnedProjectRealization::Cow { .. },
+            ..
+        } => {
+            let base_snapshot_hash = match previous {
+                SubjectResolutionAuthority::CowWorkspace {
+                    base_snapshot_hash, ..
+                } if base_snapshot_hash == authority_base => base_snapshot_hash.clone(),
+                SubjectResolutionAuthority::CowWorkspace { .. } => {
+                    bail!("pinned COW continuation changed its original base generation")
+                }
+                SubjectResolutionAuthority::Projectless
+                | SubjectResolutionAuthority::LiveFs
+                | SubjectResolutionAuthority::PinnedGeneration { .. } => {
+                    bail!("pinned COW continuation must inherit an existing COW subject authority")
+                }
+            };
+            Ok(SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash,
+                current_operational_generation: snapshot_hash.clone(),
+            })
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn storage_fixture_subject_authority_from_project_authority(
+    project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
+) -> ryeos_engine::contracts::SubjectResolutionAuthority {
+    use ryeos_engine::contracts::SubjectResolutionAuthority;
+    use ryeos_state::objects::{ExecutionProjectAuthority, PinnedProjectRealization};
+
+    match project_authority {
+        ExecutionProjectAuthority::Projectless { .. } => SubjectResolutionAuthority::Projectless,
+        ExecutionProjectAuthority::LiveProject { .. } => SubjectResolutionAuthority::LiveFs,
+        ExecutionProjectAuthority::PinnedGeneration {
+            snapshot_hash,
+            realization: PinnedProjectRealization::ReadOnly,
+            ..
+        } => SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: snapshot_hash.clone(),
+        },
+        ExecutionProjectAuthority::PinnedGeneration {
+            base_snapshot_hash,
+            snapshot_hash,
+            realization: PinnedProjectRealization::Cow { .. },
+            ..
+        } => SubjectResolutionAuthority::CowWorkspace {
+            base_snapshot_hash: base_snapshot_hash.clone(),
+            current_operational_generation: snapshot_hash.clone(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    fn cow_authority(base: &str, current: &str) -> ryeos_state::objects::ExecutionProjectAuthority {
+        let authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            None,
+            base.to_string(),
+            ryeos_state::objects::PinnedProjectRealization::Cow {
+                terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,
+            },
+            ryeos_state::objects::EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        authority
+            .transition_operational_generation(
+                ryeos_state::objects::OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: current,
+                },
+            )
+            .unwrap()
+    }
+
+    fn continuation_resume(
+        project_path: &str,
+        project_authority: ryeos_state::objects::ExecutionProjectAuthority,
+    ) -> crate::launch_metadata::ResumeContext {
+        crate::launch_metadata::ResumeContext {
+            kind: "graph_run".to_string(),
+            item_ref: "graph:test/storage-fixture".to_string(),
+            ref_bindings: BTreeMap::new(),
+            launch_mode: "detached".to_string(),
+            parameters: json!({"continuation": true}),
+            project_context: ProjectContext::LocalPath {
+                path: PathBuf::from(project_path),
+            },
+            project_authority,
+            lifecycle_authority:
+                ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+            stable_project_identity: None,
+            local_overlay_root: None,
+            original_snapshot_hash: None,
+            original_pushed_head_ref: None,
+            state_root: None,
+            current_site_id: "site:test".to_string(),
+            origin_site_id: "site:test".to_string(),
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "session:test".to_string(),
+                scopes: Vec::new(),
+            }),
+            execution_hints: ExecutionHints::default(),
+            effective_caps: Vec::new(),
+            parent_delegation_caps: None,
+            executor_ref: Some("native:storage-fixture".to_string()),
+            runtime_ref: Some("runtime:storage-fixture".to_string()),
+        }
+    }
+
+    #[test]
+    fn continuation_subject_authority_preserves_exact_family_and_cow_base() {
+        use ryeos_engine::contracts::SubjectResolutionAuthority;
+
+        let base = "a".repeat(64);
+        let current = "b".repeat(64);
+        let authority = cow_authority(&base, &current);
+        let inherited = continued_binding_subject_authority(
+            &SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash: base.clone(),
+                current_operational_generation: base.clone(),
+            },
+            &authority,
+        )
+        .unwrap();
+        assert_eq!(
+            inherited,
+            SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash: base.clone(),
+                current_operational_generation: current,
+            }
+        );
+        assert!(continued_binding_subject_authority(
+            &SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: base.clone(),
+            },
+            &authority,
+        )
+        .is_err());
+        assert!(continued_binding_subject_authority(
+            &SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash: "c".repeat(64),
+                current_operational_generation: base,
+            },
+            &authority,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sealed_source_capsule_never_becomes_materialized_project_root() {
+        let projectless = SealedRootExecutionRequest::storage_test_fixture();
+        let capsule = tempfile::tempdir().unwrap();
+        let restored = projectless
+            .verified_subject
+            .restore(capsule.path())
+            .unwrap();
+        assert_eq!(restored.source_path, capsule.path().join("subject.source"));
+        assert_eq!(restored.materialized_project_root, None);
+
+        let mut project = SealedRootExecutionRequest::storage_test_fixture();
+        project.verified_subject.materialized_project_root =
+            Some(PathBuf::from("/admitted/project"));
+        let capsule = tempfile::tempdir().unwrap();
+        let restored = project.verified_subject.restore(capsule.path()).unwrap();
+        assert_eq!(restored.source_path, capsule.path().join("subject.source"));
+        assert_eq!(
+            restored.materialized_project_root,
+            Some(PathBuf::from("/admitted/project"))
+        );
+    }
+
+    #[test]
+    fn sealed_cow_continuation_survives_restart_and_advances_operational_generation() {
+        use ryeos_engine::contracts::SubjectResolutionAuthority;
+
+        let base = "a".repeat(64);
+        let generation_b = "b".repeat(64);
+        let generation_c = "c".repeat(64);
+        let mut initial = SealedRootExecutionRequest::storage_test_fixture_with_project_identity(
+            ProjectContext::LocalPath {
+                path: PathBuf::from("/tmp/cow-a"),
+            },
+            cow_authority(&base, &base),
+        );
+        initial.parameters = json!({"continuation": true});
+        let generation_b_request = initial
+            .for_continuation_invocation(&continuation_resume(
+                "/tmp/cow-b",
+                cow_authority(&base, &generation_b),
+            ))
+            .unwrap();
+        let restarted: SealedRootExecutionRequest =
+            serde_json::from_value(serde_json::to_value(generation_b_request).unwrap()).unwrap();
+        let generation_c_request = restarted
+            .for_continuation_invocation(&continuation_resume(
+                "/tmp/cow-c",
+                cow_authority(&base, &generation_c),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            generation_c_request.project_binding_subject_authority,
+            SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash: base.clone(),
+                current_operational_generation: generation_c,
+            }
+        );
+        assert_eq!(
+            generation_c_request.resolution_subject_authority,
+            SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash: base.clone(),
+                current_operational_generation: base.clone(),
+            },
+            "the admitted program closure remains rooted at its original generation"
+        );
+        assert_eq!(
+            generation_c_request
+                .project_authority
+                .subject_base_snapshot_hash(),
+            Some(base.as_str())
+        );
     }
 }

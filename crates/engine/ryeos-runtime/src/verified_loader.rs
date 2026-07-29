@@ -5,8 +5,14 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use lillux::crypto::VerifyingKey;
-use serde::de::DeserializeOwned;
+use ryeos_engine::trust::{
+    MAX_TRUST_DIRECTORY_BYTES, MAX_TRUST_DOCUMENTS, MAX_TRUST_DOCUMENT_BYTES,
+    MAX_TRUST_TRAVERSAL_DEPTH, MAX_TRUST_TRAVERSAL_ENTRIES,
+};
+use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
+
+const MAX_CONFIG_SOURCE_BYTES: u64 = 1024 * 1024;
 
 /// Strict, three-state error returned by [`VerifiedLoader::load_config_strict`].
 ///
@@ -73,6 +79,14 @@ pub struct TrustedKey {
 #[derive(Debug, Clone)]
 pub struct TrustStore {
     keys: HashMap<String, TrustedKey>,
+    project_sources: Vec<TrustSourceDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct TrustSourceDependency {
+    logical_path: PathBuf,
+    source_hash: String,
 }
 
 impl TrustStore {
@@ -81,43 +95,149 @@ impl TrustStore {
     /// passed explicitly by the caller — the daemon for preflight, the
     /// launch envelope for runtimes). Bundle roots are NOT a trust
     /// authority: a bundle cannot ship keys that vouch for itself.
-    pub fn load(project_root: &Path, node_trusted_keys_dir: &Path) -> Self {
+    pub fn load(project_root: &Path, node_trusted_keys_dir: &Path) -> Result<Self> {
+        Self::load_with_optional_project(Some(project_root), node_trusted_keys_dir)
+    }
+
+    fn load_with_optional_project(
+        project_root: Option<&Path>,
+        node_trusted_keys_dir: &Path,
+    ) -> Result<Self> {
         let mut keys = HashMap::new();
 
-        let project_trusted_dir = project_root.join(".ai/config/keys/trusted");
-        for dir in [project_trusted_dir.as_path(), node_trusted_keys_dir] {
-            if !dir.is_dir() {
-                continue;
-            }
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) != Some("toml") {
-                        continue;
-                    }
-                    if let Ok(key) = Self::parse_trusted_key_toml(&path) {
-                        tracing::info!(
-                            fingerprint = %key.fingerprint,
-                            owner = %key.owner,
-                            "loaded trusted key"
+        let project_trusted_dir = project_root.map(|root| root.join(".ai/config/keys/trusted"));
+        let mut project_sources = Vec::new();
+        for (dir, is_project) in project_trusted_dir
+            .as_deref()
+            .map(|dir| (dir, true))
+            .into_iter()
+            .chain(std::iter::once((node_trusted_keys_dir, false)))
+        {
+            let mut file_count = 0_usize;
+            let mut total_bytes = 0_u64;
+            lillux::visit_regular_files_no_follow_bounded(
+                dir,
+                lillux::DirectoryTraversalBudget::new(
+                    MAX_TRUST_TRAVERSAL_ENTRIES,
+                    MAX_TRUST_TRAVERSAL_DEPTH,
+                ),
+                |_relative, is_directory| Ok(is_directory),
+                |relative, file| {
+                    file_count = file_count.saturating_add(1);
+                    if file_count > MAX_TRUST_DOCUMENTS {
+                        bail!(
+                            "trust directory {} exceeds {MAX_TRUST_DOCUMENTS} regular files",
+                            dir.display()
                         );
-                        keys.entry(key.fingerprint.clone()).or_insert(key);
                     }
-                }
-            }
+                    if relative.extension().and_then(|extension| extension.to_str()) != Some("toml")
+                    {
+                        return Ok(());
+                    }
+                    let bytes =
+                        lillux::read_open_regular_file_bounded(file, MAX_TRUST_DOCUMENT_BYTES)?;
+                    total_bytes = total_bytes
+                        .checked_add(bytes.len() as u64)
+                        .ok_or_else(|| anyhow::anyhow!("trust directory byte count overflow"))?;
+                    if total_bytes > MAX_TRUST_DIRECTORY_BYTES {
+                        bail!(
+                            "trust directory {} exceeds {MAX_TRUST_DIRECTORY_BYTES} aggregate bytes",
+                            dir.display()
+                        );
+                    }
+                    let path = dir.join(relative);
+                    let content = std::str::from_utf8(&bytes).with_context(|| {
+                        format!("trusted key document is not UTF-8: {}", path.display())
+                    })?;
+                    let key = Self::parse_trusted_key_toml_content(&path, content)?;
+                    if is_project {
+                        project_sources.push(TrustSourceDependency {
+                            logical_path: relative.to_path_buf(),
+                            source_hash: lillux::sha256_hex(&bytes),
+                        });
+                    }
+                    tracing::info!(
+                        fingerprint = %key.fingerprint,
+                        owner = %key.owner,
+                        "loaded trusted key"
+                    );
+                    keys.entry(key.fingerprint.clone()).or_insert(key);
+                    Ok(())
+                },
+            )
+            .with_context(|| format!("load trusted keys from {}", dir.display()))?;
         }
 
         if !keys.is_empty() {
             tracing::info!(count = keys.len(), "trust store loaded");
         }
 
-        Self { keys }
+        project_sources.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        Ok(Self {
+            keys,
+            project_sources,
+        })
     }
 
-    fn parse_trusted_key_toml(path: &Path) -> Result<TrustedKey> {
-        let content = fs::read_to_string(path)
-            .with_context(|| format!("reading trust store entry {}", path.display()))?;
+    fn load_with_project_content(
+        project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+        node_trusted_keys_dir: &Path,
+    ) -> Result<Self> {
+        let mut node = Self::load_with_optional_project(None, node_trusted_keys_dir)?;
+        let prefix = Path::new(".ai/config/keys/trusted");
+        let entries = project_content.list_files(prefix, false, MAX_TRUST_DOCUMENTS)?;
+        let mut total_bytes = 0_u64;
+        let mut project_sources = Vec::new();
+        for entry in entries.into_iter().filter(|entry| {
+            entry
+                .relative_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                == Some("toml")
+        }) {
+            if entry.size > MAX_TRUST_DOCUMENT_BYTES {
+                bail!(
+                    "project trust document {} exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes",
+                    entry.relative_path.display()
+                );
+            }
+            total_bytes = total_bytes
+                .checked_add(entry.size)
+                .ok_or_else(|| anyhow::anyhow!("project trust byte count overflow"))?;
+            if total_bytes > MAX_TRUST_DIRECTORY_BYTES {
+                bail!(
+                    "project trust directory exceeds {MAX_TRUST_DIRECTORY_BYTES} aggregate bytes"
+                );
+            }
+            let logical_path = prefix.join(&entry.relative_path);
+            let bytes = project_content
+                .read_file(&logical_path, MAX_TRUST_DOCUMENT_BYTES)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "admitted project trust document disappeared: {}",
+                        logical_path.display()
+                    )
+                })?;
+            let content = std::str::from_utf8(&bytes).with_context(|| {
+                format!(
+                    "admitted project trust document is not UTF-8: {}",
+                    logical_path.display()
+                )
+            })?;
+            let source_hash = lillux::sha256_hex(&bytes);
+            let key = Self::parse_trusted_key_toml_content(&logical_path, content)?;
+            node.keys.insert(key.fingerprint.clone(), key);
+            project_sources.push(TrustSourceDependency {
+                logical_path: entry.relative_path,
+                source_hash,
+            });
+        }
+        project_sources.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        node.project_sources = project_sources;
+        Ok(node)
+    }
 
+    fn parse_trusted_key_toml_content(path: &Path, content: &str) -> Result<TrustedKey> {
         let mut fingerprint = None;
         let mut owner = String::new();
         let mut pem_lines: Vec<String> = Vec::new();
@@ -204,6 +324,12 @@ impl TrustStore {
         };
         let verifying_key = VerifyingKey::from_bytes(&key_bytes)
             .map_err(|_| anyhow::anyhow!("invalid Ed25519 public key"))?;
+        let observed_fingerprint = lillux::crypto::fingerprint(&verifying_key);
+        if fingerprint != observed_fingerprint {
+            bail!(
+                "declared fingerprint {fingerprint} does not match public key fingerprint {observed_fingerprint}"
+            );
+        }
 
         Ok(TrustedKey {
             fingerprint,
@@ -223,20 +349,398 @@ impl TrustStore {
     pub fn len(&self) -> usize {
         self.keys.len()
     }
+
+    /// Stable identity of the exact trusted signer set used for verification.
+    /// Include the decoded public key and owner as well as the declared
+    /// fingerprint so malformed trust documents cannot alias an earlier
+    /// generation by reusing a map key.
+    pub fn identity(&self) -> String {
+        let mut keys = self.keys.values().collect::<Vec<_>>();
+        keys.sort_by(|left, right| left.fingerprint.cmp(&right.fingerprint));
+        let mut identity = Vec::new();
+        for key in keys {
+            append_identity_field(&mut identity, key.fingerprint.as_bytes());
+            append_identity_field(&mut identity, key.verifying_key.as_bytes());
+            append_identity_field(&mut identity, key.owner.as_bytes());
+        }
+        lillux::sha256_hex(&identity)
+    }
+}
+
+fn append_identity_field(identity: &mut Vec<u8>, field: &[u8]) {
+    identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+    identity.extend_from_slice(field);
 }
 
 pub struct VerifiedLoader {
     project_root: PathBuf,
+    project_config_enabled: bool,
+    node_config_root: Option<PathBuf>,
     bundle_roots: Vec<PathBuf>,
     node_trusted_keys_dir: PathBuf,
-    trust_store: TrustStore,
+    effective_trust_store: TrustStore,
+    node_trust_store: TrustStore,
 }
 
 #[derive(Debug)]
 pub struct VerifiedContent {
     pub content: String,
     pub hash: String,
+    pub source_hash: String,
+    pub signer_fingerprint: Option<String>,
     pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+enum ConfigCandidateState {
+    Absent,
+    Present {
+        source_hash: String,
+        content_hash: String,
+        signer_fingerprint: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ConfigCandidateRootClass {
+    Project,
+    Node,
+    Bundle,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigCandidateDependency {
+    root_class: ConfigCandidateRootClass,
+    root_index: usize,
+    logical_path: PathBuf,
+    path: PathBuf,
+    state: ConfigCandidateState,
+}
+
+/// Complete positive and negative dependency proof for one merged config.
+///
+/// Absolute paths are retained only for live revalidation. The stable digest
+/// commits to ordered root class/index and content state, so disposable pinned
+/// materialization paths never become config identity.
+#[derive(Debug, Clone)]
+pub struct ConfigDependencyProof {
+    config_id: String,
+    effective_trust_identity: String,
+    node_trust_identity: String,
+    project_trust_sources: Vec<TrustSourceDependency>,
+    candidates: Vec<ConfigCandidateDependency>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigDependencyProofStatus {
+    Current,
+    MutableAuthorityChanged,
+    ImmutableAuthorityMismatch,
+}
+
+impl ConfigDependencyProof {
+    pub fn trust_identities_match(
+        &self,
+        effective_identity: Option<&str>,
+        node_identity: &str,
+    ) -> bool {
+        self.node_trust_identity == node_identity
+            && effective_identity
+                .map(|identity| self.effective_trust_identity == identity)
+                .unwrap_or(true)
+    }
+
+    pub fn identity_digest(&self) -> Result<String> {
+        #[derive(Serialize)]
+        struct StableCandidate<'a> {
+            root_class: ConfigCandidateRootClass,
+            root_index: usize,
+            logical_path: &'a Path,
+            state: &'a ConfigCandidateState,
+        }
+        #[derive(Serialize)]
+        struct StableProof<'a> {
+            schema_version: u32,
+            config_id: &'a str,
+            effective_trust_identity: &'a str,
+            node_trust_identity: &'a str,
+            project_trust_sources: &'a [TrustSourceDependency],
+            candidates: Vec<StableCandidate<'a>>,
+        }
+        let value = serde_json::to_value(StableProof {
+            schema_version: 1,
+            config_id: &self.config_id,
+            effective_trust_identity: &self.effective_trust_identity,
+            node_trust_identity: &self.node_trust_identity,
+            project_trust_sources: &self.project_trust_sources,
+            candidates: self
+                .candidates
+                .iter()
+                .map(|candidate| StableCandidate {
+                    root_class: candidate.root_class,
+                    root_index: candidate.root_index,
+                    logical_path: &candidate.logical_path,
+                    state: &candidate.state,
+                })
+                .collect(),
+        })?;
+        let canonical = lillux::canonical_json(&value)?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    /// Re-prove every positive and negative dependency against the same roots.
+    /// This is required for live cache hits; exact pinned and sealed COW
+    /// callers instead bind the proof to admitted content authority.
+    pub fn revalidate_current(&self) -> bool {
+        self.revalidate_candidates(|candidate| Some(candidate.path.clone()))
+    }
+
+    /// Re-prove this snapshot against a new materialization of the same
+    /// logical project/bundle authority. This is the COW/pinned cache-hit
+    /// path: disposable checkout paths never become part of the proof.
+    pub fn revalidate_against(
+        &self,
+        project_root: Option<&Path>,
+        node_config_root: Option<&Path>,
+        bundle_roots: &[PathBuf],
+    ) -> bool {
+        self.revalidate_candidates(|candidate| match candidate.root_class {
+            ConfigCandidateRootClass::Project if candidate.root_index == 0 => {
+                project_root.map(|root| root.join(&candidate.logical_path))
+            }
+            ConfigCandidateRootClass::Node if candidate.root_index == 0 => {
+                node_config_root.map(|root| root.join(&candidate.logical_path))
+            }
+            ConfigCandidateRootClass::Bundle => bundle_roots
+                .get(candidate.root_index)
+                .map(|root| root.join(&candidate.logical_path)),
+            _ => None,
+        })
+    }
+
+    /// Revalidate only roots that remain mutable under the admitted execution
+    /// authority. Bundle roots are sealed by the engine generation; an exact
+    /// pinned project root is sealed by its opaque materialization proof. Node
+    /// config is always mutable and therefore always re-probed.
+    pub fn revalidate_mutable_against(
+        &self,
+        project_root: Option<&Path>,
+        node_config_root: Option<&Path>,
+        revalidate_project: bool,
+    ) -> bool {
+        self.candidates
+            .iter()
+            .all(|candidate| match candidate.root_class {
+                ConfigCandidateRootClass::Bundle => true,
+                ConfigCandidateRootClass::Project if !revalidate_project => true,
+                ConfigCandidateRootClass::Project if candidate.root_index == 0 => project_root
+                    .map(|root| root.join(&candidate.logical_path))
+                    .is_some_and(|path| revalidate_candidate_at(candidate, &path)),
+                ConfigCandidateRootClass::Node if candidate.root_index == 0 => node_config_root
+                    .map(|root| root.join(&candidate.logical_path))
+                    .is_some_and(|path| revalidate_candidate_at(candidate, &path)),
+                _ => false,
+            })
+    }
+
+    /// Revalidate project inputs against the exact admitted project-content
+    /// closure. The verified loader owns config/trust discovery policy; this
+    /// method only asks the generic authority to prove the resulting positive
+    /// and negative dependencies. Node config and node trust remain mutable
+    /// node-local authority and are checked separately by the caller.
+    pub fn revalidate_under_project_authority(
+        &self,
+        project_root: Option<&Path>,
+        node_config_root: Option<&Path>,
+        project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    ) -> bool {
+        self.revalidate_under_project_authority_status(
+            project_root,
+            node_config_root,
+            project_content,
+        ) == ConfigDependencyProofStatus::Current
+    }
+
+    /// Classify exact-project contradictions separately from mutable node
+    /// configuration changes. Callers may retry the latter under a bound; they
+    /// must fail closed immediately when admitted project content disagrees.
+    pub fn revalidate_under_project_authority_status(
+        &self,
+        project_root: Option<&Path>,
+        node_config_root: Option<&Path>,
+        project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    ) -> ConfigDependencyProofStatus {
+        let trust_prefix = Path::new(".ai/config/keys/trusted");
+        let trust_matches = match project_content {
+            Some(content) => content
+                .list_files(trust_prefix, false, MAX_TRUST_DOCUMENTS)
+                .map(|entries| {
+                    let mut observed = entries
+                        .into_iter()
+                        .filter(|entry| {
+                            entry
+                                .relative_path
+                                .extension()
+                                .and_then(|value| value.to_str())
+                                == Some("toml")
+                        })
+                        .map(|entry| TrustSourceDependency {
+                            logical_path: entry.relative_path,
+                            source_hash: entry.content_hash,
+                        })
+                        .collect::<Vec<_>>();
+                    observed.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+                    observed == self.project_trust_sources
+                })
+                .unwrap_or(false),
+            None => self.project_trust_sources.is_empty(),
+        };
+        if !trust_matches {
+            return ConfigDependencyProofStatus::ImmutableAuthorityMismatch;
+        }
+        let mut status = ConfigDependencyProofStatus::Current;
+        for candidate in &self.candidates {
+            let candidate_status = match candidate.root_class {
+                ConfigCandidateRootClass::Bundle => ConfigDependencyProofStatus::Current,
+                ConfigCandidateRootClass::Node if candidate.root_index == 0 => {
+                    if node_config_root
+                        .map(|root| root.join(&candidate.logical_path))
+                        .is_some_and(|path| revalidate_candidate_at(candidate, &path))
+                    {
+                        ConfigDependencyProofStatus::Current
+                    } else {
+                        ConfigDependencyProofStatus::MutableAuthorityChanged
+                    }
+                }
+                ConfigCandidateRootClass::Project if candidate.root_index == 0 => {
+                    let (Some(_project_root), Some(content)) = (project_root, project_content)
+                    else {
+                        return ConfigDependencyProofStatus::ImmutableAuthorityMismatch;
+                    };
+                    let relative = candidate.logical_path.clone();
+                    let matches = match &candidate.state {
+                        ConfigCandidateState::Absent => {
+                            content.validates_absence(&relative).unwrap_or(false)
+                        }
+                        ConfigCandidateState::Present { source_hash, .. } => content
+                            .validates_file(&relative, source_hash)
+                            .unwrap_or(false),
+                    };
+                    if matches {
+                        ConfigDependencyProofStatus::Current
+                    } else {
+                        ConfigDependencyProofStatus::ImmutableAuthorityMismatch
+                    }
+                }
+                _ => ConfigDependencyProofStatus::ImmutableAuthorityMismatch,
+            };
+            status = combine_config_proof_status(status, candidate_status);
+            if status == ConfigDependencyProofStatus::ImmutableAuthorityMismatch {
+                return status;
+            }
+        }
+        status
+    }
+
+    fn revalidate_candidates(
+        &self,
+        mut current_path: impl FnMut(&ConfigCandidateDependency) -> Option<PathBuf>,
+    ) -> bool {
+        self.candidates.iter().all(|candidate| {
+            let Some(path) = current_path(candidate) else {
+                return false;
+            };
+            match (
+                &candidate.state,
+                lillux::read_optional_regular_file_bounded_no_follow(
+                    &path,
+                    MAX_CONFIG_SOURCE_BYTES,
+                ),
+            ) {
+                (ConfigCandidateState::Absent, Ok(None)) => true,
+                (ConfigCandidateState::Present { source_hash, .. }, Ok(Some(current_source))) => {
+                    lillux::sha256_hex(&current_source) == *source_hash
+                }
+                _ => false,
+            }
+        })
+    }
+
+    pub fn estimated_bytes(&self) -> usize {
+        self.config_id
+            .capacity()
+            .saturating_add(self.effective_trust_identity.capacity())
+            .saturating_add(self.node_trust_identity.capacity())
+            .saturating_add(
+                self.project_trust_sources
+                    .iter()
+                    .fold(0usize, |total, dependency| {
+                        total
+                            .saturating_add(
+                                dependency.logical_path.as_os_str().as_encoded_bytes().len(),
+                            )
+                            .saturating_add(dependency.source_hash.capacity())
+                    }),
+            )
+            .saturating_add(
+                self.candidates
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<ConfigCandidateDependency>()),
+            )
+            .saturating_add(self.candidates.iter().fold(0usize, |total, candidate| {
+                total
+                    .saturating_add(candidate.logical_path.as_os_str().as_encoded_bytes().len())
+                    .saturating_add(candidate.path.as_os_str().as_encoded_bytes().len())
+                    .saturating_add(
+                        serde_json::to_vec(&candidate.state)
+                            .map(|serialized| serialized.len())
+                            .unwrap_or(usize::MAX),
+                    )
+            }))
+    }
+}
+
+fn combine_config_proof_status(
+    left: ConfigDependencyProofStatus,
+    right: ConfigDependencyProofStatus,
+) -> ConfigDependencyProofStatus {
+    use ConfigDependencyProofStatus::{
+        Current, ImmutableAuthorityMismatch, MutableAuthorityChanged,
+    };
+    match (left, right) {
+        (ImmutableAuthorityMismatch, _) | (_, ImmutableAuthorityMismatch) => {
+            ImmutableAuthorityMismatch
+        }
+        (MutableAuthorityChanged, _) | (_, MutableAuthorityChanged) => MutableAuthorityChanged,
+        (Current, Current) => Current,
+    }
+}
+
+fn revalidate_candidate_at(candidate: &ConfigCandidateDependency, path: &Path) -> bool {
+    match (
+        &candidate.state,
+        lillux::read_optional_regular_file_bounded_no_follow(path, MAX_CONFIG_SOURCE_BYTES),
+    ) {
+        (ConfigCandidateState::Absent, Ok(None)) => true,
+        (ConfigCandidateState::Present { source_hash, .. }, Ok(Some(current_source))) => {
+            lillux::sha256_hex(&current_source) == *source_hash
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug)]
+pub struct VerifiedConfigSnapshot<T> {
+    pub value: T,
+    pub dependency_proof: ConfigDependencyProof,
+}
+
+#[derive(Debug)]
+pub struct VerifiedOptionalConfigSnapshot<T> {
+    pub value: Option<T>,
+    pub dependency_proof: ConfigDependencyProof,
 }
 
 #[derive(Debug)]
@@ -247,6 +751,15 @@ pub struct ScannedItem {
 }
 
 impl VerifiedLoader {
+    fn trust_store_for_config_root(&self, root_class: ConfigCandidateRootClass) -> &TrustStore {
+        match root_class {
+            ConfigCandidateRootClass::Project => &self.effective_trust_store,
+            ConfigCandidateRootClass::Node | ConfigCandidateRootClass::Bundle => {
+                &self.node_trust_store
+            }
+        }
+    }
+
     /// `bundle_roots` are CONFIG search roots only (configs ship in
     /// bundles); trust comes exclusively from the project root and the
     /// explicit node trusted-keys dir. No hidden env reads here —
@@ -255,14 +768,72 @@ impl VerifiedLoader {
         project_root: PathBuf,
         bundle_roots: Vec<PathBuf>,
         node_trusted_keys_dir: &Path,
-    ) -> Self {
-        let trust_store = TrustStore::load(&project_root, node_trusted_keys_dir);
-        Self {
+    ) -> Result<Self> {
+        Self::new_with_node_config(project_root, None, bundle_roots, node_trusted_keys_dir)
+    }
+
+    /// Construct with an explicit node-local config layer. Config merges in
+    /// bundle → node → project order, while signer trust remains sourced only
+    /// from the project and node trusted-key directories.
+    pub fn new_with_node_config(
+        project_root: PathBuf,
+        node_config_root: Option<PathBuf>,
+        bundle_roots: Vec<PathBuf>,
+        node_trusted_keys_dir: &Path,
+    ) -> Result<Self> {
+        let effective_trust_store = TrustStore::load(&project_root, node_trusted_keys_dir)?;
+        let node_trust_store = TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?;
+        Ok(Self {
             project_root,
+            project_config_enabled: true,
+            node_config_root,
             bundle_roots,
             node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
-            trust_store,
-        }
+            effective_trust_store,
+            node_trust_store,
+        })
+    }
+
+    pub fn new_with_node_config_under_project_authority(
+        project_root: PathBuf,
+        project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+        node_config_root: Option<PathBuf>,
+        bundle_roots: Vec<PathBuf>,
+        node_trusted_keys_dir: &Path,
+    ) -> Result<Self> {
+        let effective_trust_store =
+            TrustStore::load_with_project_content(project_content, node_trusted_keys_dir)?;
+        let node_trust_store = TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?;
+        Ok(Self {
+            project_root,
+            project_config_enabled: true,
+            node_config_root,
+            bundle_roots,
+            node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
+            effective_trust_store,
+            node_trust_store,
+        })
+    }
+
+    /// Construct for a projectless execution. Its scratch cwd is deliberately
+    /// excluded from both config and trust resolution.
+    pub fn new_projectless_with_node_config(
+        node_config_root: Option<PathBuf>,
+        bundle_roots: Vec<PathBuf>,
+        node_trusted_keys_dir: &Path,
+    ) -> Result<Self> {
+        let node_trust_store = TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?;
+        Ok(Self {
+            project_root: node_config_root
+                .clone()
+                .unwrap_or_else(|| node_trusted_keys_dir.to_path_buf()),
+            project_config_enabled: false,
+            node_config_root,
+            bundle_roots,
+            node_trusted_keys_dir: node_trusted_keys_dir.to_path_buf(),
+            effective_trust_store: node_trust_store.clone(),
+            node_trust_store,
+        })
     }
 
     pub fn project_root(&self) -> &Path {
@@ -274,7 +845,32 @@ impl VerifiedLoader {
     }
 
     pub fn trust_store(&self) -> &TrustStore {
-        &self.trust_store
+        &self.effective_trust_store
+    }
+
+    /// Identity of both source-specific trust domains used by merged config:
+    /// effective project trust for project candidates, and node trust for
+    /// node/bundle candidates.
+    pub fn config_trust_identity(&self) -> String {
+        let mut identity = Vec::new();
+        append_identity_field(
+            &mut identity,
+            self.effective_trust_store.identity().as_bytes(),
+        );
+        append_identity_field(&mut identity, self.node_trust_store.identity().as_bytes());
+        lillux::sha256_hex(&identity)
+    }
+
+    pub fn effective_trust_identity(&self) -> String {
+        self.effective_trust_store.identity()
+    }
+
+    pub fn node_trust_identity(&self) -> String {
+        self.node_trust_store.identity()
+    }
+
+    pub fn node_trust_identity_from(node_trusted_keys_dir: &Path) -> Result<String> {
+        Ok(TrustStore::load_with_optional_project(None, node_trusted_keys_dir)?.identity())
     }
 
     fn kind_subdir(kind: &str) -> &'static str {
@@ -299,8 +895,33 @@ impl VerifiedLoader {
         path: &Path,
         strictness: LoadStrictness,
     ) -> Result<VerifiedContent> {
-        let raw =
-            fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        self.load_verified_with_trust_store(kind, path, strictness, &self.effective_trust_store)
+    }
+
+    fn load_verified_with_trust_store(
+        &self,
+        kind: &str,
+        path: &Path,
+        strictness: LoadStrictness,
+        trust_store: &TrustStore,
+    ) -> Result<VerifiedContent> {
+        let raw = String::from_utf8(
+            lillux::read_regular_file_bounded_no_follow(path, MAX_CONFIG_SOURCE_BYTES)
+                .with_context(|| format!("securely reading {}", path.display()))?,
+        )
+        .with_context(|| format!("securely reading {}", path.display()))?;
+        self.load_verified_content_with_trust_store(kind, path, raw, strictness, trust_store)
+    }
+
+    fn load_verified_content_with_trust_store(
+        &self,
+        kind: &str,
+        path: &Path,
+        raw: String,
+        strictness: LoadStrictness,
+        trust_store: &TrustStore,
+    ) -> Result<VerifiedContent> {
+        let source_hash = lillux::sha256_hex(raw.as_bytes());
 
         let content = lillux::signature::strip_signature_lines(&raw);
 
@@ -318,7 +939,7 @@ impl VerifiedLoader {
                 );
             }
 
-            if let Some(trusted_key) = self.trust_store.get(&sig_header.signer_fingerprint) {
+            if let Some(trusted_key) = trust_store.get(&sig_header.signer_fingerprint) {
                 if !lillux::signature::verify_signature(
                     &sig_header.content_hash,
                     &sig_header.signature_b64,
@@ -333,6 +954,8 @@ impl VerifiedLoader {
                 VerifiedContent {
                     content,
                     hash,
+                    source_hash,
+                    signer_fingerprint: Some(sig_header.signer_fingerprint),
                     path: path.to_path_buf(),
                 }
             } else {
@@ -346,6 +969,8 @@ impl VerifiedLoader {
                         VerifiedContent {
                             content,
                             hash,
+                            source_hash,
+                            signer_fingerprint: Some(sig_header.signer_fingerprint),
                             path: path.to_path_buf(),
                         }
                     }
@@ -365,6 +990,8 @@ impl VerifiedLoader {
                 LoadStrictness::Permissive => VerifiedContent {
                     content,
                     hash,
+                    source_hash,
+                    signer_fingerprint: None,
                     path: path.to_path_buf(),
                 },
                 LoadStrictness::Required => {
@@ -426,21 +1053,29 @@ impl VerifiedLoader {
         let subdir = Self::kind_subdir("config");
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
-        // Collect least-specific first (bundles) then project last, so the
-        // deep merge below — where each later overlay wins — yields the
-        // documented `project > bundle` precedence.
+        // Collect least-specific first (bundles, node, then project), so the
+        // deep merge below yields `project > node > bundle` precedence.
         let mut candidate_paths = Vec::new();
 
         for bundle_root in &self.bundle_roots {
             let p = bundle_root.join(&item_path);
             if p.exists() {
-                candidate_paths.push(p);
+                candidate_paths.push((p, ConfigCandidateRootClass::Bundle));
             }
         }
 
-        let p = self.project_root.join(&item_path);
-        if p.exists() {
-            candidate_paths.push(p);
+        if let Some(node_config_root) = &self.node_config_root {
+            let path = node_config_root.join(&item_path);
+            if path.exists() {
+                candidate_paths.push((path, ConfigCandidateRootClass::Node));
+            }
+        }
+
+        if self.project_config_enabled {
+            let path = self.project_root.join(&item_path);
+            if path.exists() {
+                candidate_paths.push((path, ConfigCandidateRootClass::Project));
+            }
         }
 
         if candidate_paths.is_empty() {
@@ -448,13 +1083,18 @@ impl VerifiedLoader {
         }
 
         if candidate_paths.len() == 1 {
-            let path = &candidate_paths[0];
-            let verified =
-                self.load_verified("config", path)
-                    .map_err(|e| ConfigLoadError::VerifyFailed {
-                        path: path.clone(),
-                        source: e,
-                    })?;
+            let (path, root_class) = &candidate_paths[0];
+            let verified = self
+                .load_verified_with_trust_store(
+                    "config",
+                    path,
+                    LoadStrictness::Permissive,
+                    self.trust_store_for_config_root(*root_class),
+                )
+                .map_err(|e| ConfigLoadError::VerifyFailed {
+                    path: path.clone(),
+                    source: e,
+                })?;
             // Parse raw YAML first, then type-convert — same as the
             // merged path. This ensures YAML syntax errors always surface
             // as RawYamlParseFailed and type-shape errors as TypedParseFailed,
@@ -476,13 +1116,18 @@ impl VerifiedLoader {
         }
 
         let mut merged = serde_yaml::Value::Null;
-        for path in &candidate_paths {
-            let verified =
-                self.load_verified("config", path)
-                    .map_err(|e| ConfigLoadError::VerifyFailed {
-                        path: path.clone(),
-                        source: e,
-                    })?;
+        for (path, root_class) in &candidate_paths {
+            let verified = self
+                .load_verified_with_trust_store(
+                    "config",
+                    path,
+                    LoadStrictness::Permissive,
+                    self.trust_store_for_config_root(*root_class),
+                )
+                .map_err(|e| ConfigLoadError::VerifyFailed {
+                    path: path.clone(),
+                    source: e,
+                })?;
             let value =
                 serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(|e| {
                     ConfigLoadError::RawYamlParseFailed {
@@ -499,7 +1144,7 @@ impl VerifiedLoader {
         // shape stable (file path + underlying error).
         let last_path = candidate_paths
             .last()
-            .cloned()
+            .map(|(path, _)| path.clone())
             .unwrap_or_else(|| item_path.clone());
         let value =
             serde_yaml::from_value::<T>(merged).map_err(|e| ConfigLoadError::TypedParseFailed {
@@ -559,6 +1204,306 @@ impl VerifiedLoader {
             .map(|opt| opt.map(|(v, _contribs)| v))
     }
 
+    /// Load a signed merged config together with the exact positive and
+    /// negative root dependencies that selected it.
+    ///
+    /// Unlike a selected-value digest, this proof changes when a previously
+    /// absent higher-precedence project file appears. It is therefore suitable
+    /// as one leg of a content-addressed launch-cache key.
+    pub fn load_config_strict_signed_with_proof<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+    ) -> std::result::Result<Option<VerifiedConfigSnapshot<T>>, ConfigLoadError> {
+        self.load_optional_config_strict_signed_with_proof_from_authority(config_id, None)
+            .map(|snapshot| {
+                snapshot.value.map(|value| VerifiedConfigSnapshot {
+                    value,
+                    dependency_proof: snapshot.dependency_proof,
+                })
+            })
+    }
+
+    pub fn load_config_strict_signed_with_proof_under_project_authority<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+        project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    ) -> std::result::Result<Option<VerifiedConfigSnapshot<T>>, ConfigLoadError> {
+        self.load_optional_config_strict_signed_with_proof_from_authority(
+            config_id,
+            Some(project_content),
+        )
+        .map(|snapshot| {
+            snapshot.value.map(|value| VerifiedConfigSnapshot {
+                value,
+                dependency_proof: snapshot.dependency_proof,
+            })
+        })
+    }
+
+    /// Signed config resolution with a proof even when every candidate is
+    /// absent. Absence is static authority too: a cache may reuse a default
+    /// only while no higher-precedence contributor has appeared.
+    pub fn load_optional_config_strict_signed_with_proof<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+    ) -> std::result::Result<VerifiedOptionalConfigSnapshot<T>, ConfigLoadError> {
+        self.load_optional_config_strict_signed_with_proof_from_authority(config_id, None)
+    }
+
+    pub fn load_optional_config_strict_signed_with_proof_under_project_authority<
+        T: DeserializeOwned,
+    >(
+        &self,
+        config_id: &str,
+        project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    ) -> std::result::Result<VerifiedOptionalConfigSnapshot<T>, ConfigLoadError> {
+        self.load_optional_config_strict_signed_with_proof_from_authority(
+            config_id,
+            Some(project_content),
+        )
+    }
+
+    fn load_optional_config_strict_signed_with_proof_from_authority<T: DeserializeOwned>(
+        &self,
+        config_id: &str,
+        project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    ) -> std::result::Result<VerifiedOptionalConfigSnapshot<T>, ConfigLoadError> {
+        let item_path = PathBuf::from(format!("{}{config_id}.yaml", Self::kind_subdir("config")));
+        let mut candidates = Vec::with_capacity(
+            self.bundle_roots.len() + 1 + usize::from(self.node_config_root.is_some()),
+        );
+        let mut verified_present = Vec::new();
+
+        for (root_index, bundle_root) in self.bundle_roots.iter().enumerate() {
+            self.capture_config_candidate(
+                bundle_root.join(&item_path),
+                item_path.clone(),
+                ConfigCandidateRootClass::Bundle,
+                root_index,
+                &mut candidates,
+                &mut verified_present,
+            )?;
+        }
+        if let Some(node_config_root) = &self.node_config_root {
+            self.capture_config_candidate(
+                node_config_root.join(&item_path),
+                item_path.clone(),
+                ConfigCandidateRootClass::Node,
+                0,
+                &mut candidates,
+                &mut verified_present,
+            )?;
+        }
+        if self.project_config_enabled {
+            match project_content {
+                Some(content) => self.capture_project_config_candidate(
+                    self.project_root.join(&item_path),
+                    item_path.clone(),
+                    content,
+                    &mut candidates,
+                    &mut verified_present,
+                )?,
+                None => self.capture_config_candidate(
+                    self.project_root.join(&item_path),
+                    item_path.clone(),
+                    ConfigCandidateRootClass::Project,
+                    0,
+                    &mut candidates,
+                    &mut verified_present,
+                )?,
+            }
+        }
+
+        let dependency_proof = ConfigDependencyProof {
+            config_id: config_id.to_string(),
+            effective_trust_identity: self.effective_trust_identity(),
+            node_trust_identity: self.node_trust_identity(),
+            project_trust_sources: self.effective_trust_store.project_sources.clone(),
+            candidates,
+        };
+        if !self.config_dependency_proof_is_current(&dependency_proof, project_content) {
+            return Err(ConfigLoadError::VerifyFailed {
+                path: item_path.clone(),
+                source: anyhow::anyhow!(
+                    "config candidates changed while the verified snapshot was being captured"
+                ),
+            });
+        }
+        if verified_present.is_empty() {
+            return Ok(VerifiedOptionalConfigSnapshot {
+                value: None,
+                dependency_proof,
+            });
+        }
+
+        let mut merged = serde_yaml::Value::Null;
+        let mut last_path = item_path;
+        for verified in verified_present {
+            last_path = verified.path.clone();
+            let value =
+                serde_yaml::from_str::<serde_yaml::Value>(&verified.content).map_err(|source| {
+                    ConfigLoadError::RawYamlParseFailed {
+                        path: verified.path,
+                        source,
+                    }
+                })?;
+            merged = deep_merge_yaml(merged, value);
+        }
+        let value = serde_yaml::from_value::<T>(merged).map_err(|source| {
+            ConfigLoadError::TypedParseFailed {
+                path: last_path.clone(),
+                source,
+            }
+        })?;
+        if !self.config_dependency_proof_is_current(&dependency_proof, project_content) {
+            return Err(ConfigLoadError::VerifyFailed {
+                path: last_path,
+                source: anyhow::anyhow!(
+                    "config candidates changed while the verified snapshot was being captured"
+                ),
+            });
+        }
+        Ok(VerifiedOptionalConfigSnapshot {
+            value: Some(value),
+            dependency_proof,
+        })
+    }
+
+    fn config_dependency_proof_is_current(
+        &self,
+        proof: &ConfigDependencyProof,
+        project_content: Option<&dyn ryeos_engine::project_content::AuthoritativeProjectContent>,
+    ) -> bool {
+        match project_content {
+            Some(content) => proof.revalidate_under_project_authority(
+                Some(&self.project_root),
+                self.node_config_root.as_deref(),
+                Some(content),
+            ),
+            None => proof.revalidate_current(),
+        }
+    }
+
+    fn capture_project_config_candidate(
+        &self,
+        path: PathBuf,
+        logical_path: PathBuf,
+        project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+        candidates: &mut Vec<ConfigCandidateDependency>,
+        verified_present: &mut Vec<VerifiedContent>,
+    ) -> std::result::Result<(), ConfigLoadError> {
+        let source = project_content
+            .read_file(&logical_path, MAX_CONFIG_SOURCE_BYTES)
+            .map_err(|source| ConfigLoadError::VerifyFailed {
+                path: path.clone(),
+                source: anyhow::anyhow!(source),
+            })?;
+        match source {
+            Some(source) => {
+                let raw =
+                    String::from_utf8(source).map_err(|source| ConfigLoadError::VerifyFailed {
+                        path: path.clone(),
+                        source: anyhow::anyhow!(source),
+                    })?;
+                let verified = self
+                    .load_verified_content_with_trust_store(
+                        "config",
+                        &path,
+                        raw,
+                        LoadStrictness::Required,
+                        &self.effective_trust_store,
+                    )
+                    .map_err(|source| ConfigLoadError::VerifyFailed {
+                        path: path.clone(),
+                        source,
+                    })?;
+                candidates.push(ConfigCandidateDependency {
+                    root_class: ConfigCandidateRootClass::Project,
+                    root_index: 0,
+                    logical_path,
+                    path,
+                    state: ConfigCandidateState::Present {
+                        source_hash: verified.source_hash.clone(),
+                        content_hash: verified.hash.clone(),
+                        signer_fingerprint: verified.signer_fingerprint.clone(),
+                    },
+                });
+                verified_present.push(verified);
+            }
+            None => candidates.push(ConfigCandidateDependency {
+                root_class: ConfigCandidateRootClass::Project,
+                root_index: 0,
+                logical_path,
+                path,
+                state: ConfigCandidateState::Absent,
+            }),
+        }
+        Ok(())
+    }
+
+    fn capture_config_candidate(
+        &self,
+        path: PathBuf,
+        logical_path: PathBuf,
+        root_class: ConfigCandidateRootClass,
+        root_index: usize,
+        candidates: &mut Vec<ConfigCandidateDependency>,
+        verified_present: &mut Vec<VerifiedContent>,
+    ) -> std::result::Result<(), ConfigLoadError> {
+        match lillux::inspect_optional_entry_no_follow(&path) {
+            Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => {
+                let verified = self
+                    .load_verified_with_trust_store(
+                        "config",
+                        &path,
+                        LoadStrictness::Required,
+                        self.trust_store_for_config_root(root_class),
+                    )
+                    .map_err(|source| ConfigLoadError::VerifyFailed {
+                        path: path.clone(),
+                        source,
+                    })?;
+                candidates.push(ConfigCandidateDependency {
+                    root_class,
+                    root_index,
+                    logical_path,
+                    path,
+                    state: ConfigCandidateState::Present {
+                        source_hash: verified.source_hash.clone(),
+                        content_hash: verified.hash.clone(),
+                        signer_fingerprint: verified.signer_fingerprint.clone(),
+                    },
+                });
+                verified_present.push(verified);
+                Ok(())
+            }
+            Ok(None) => {
+                candidates.push(ConfigCandidateDependency {
+                    root_class,
+                    root_index,
+                    logical_path,
+                    path,
+                    state: ConfigCandidateState::Absent,
+                });
+                Ok(())
+            }
+            Ok(Some(_)) => Err(ConfigLoadError::VerifyFailed {
+                path: path.clone(),
+                source: anyhow::anyhow!(
+                    "config candidate is not a regular non-symlink file: {}",
+                    path.display()
+                ),
+            }),
+            Err(error) => Err(ConfigLoadError::VerifyFailed {
+                path: path.clone(),
+                source: error.context(format!(
+                    "securely inspect config candidate {}",
+                    path.display()
+                )),
+            }),
+        }
+    }
+
     /// Permissive provenance loader — permissive.
     pub fn load_config_with_provenance<T: DeserializeOwned>(
         &self,
@@ -598,21 +1543,31 @@ impl VerifiedLoader {
         let item_path = PathBuf::from(format!("{subdir}{config_id}.yaml"));
 
         // Collect (path, root_label) pairs least-specific first (bundle →
-        // project), so the deep merge below — where each later overlay wins —
-        // yields the documented `project > bundle` precedence.
-        let mut candidate_paths: Vec<(PathBuf, &'static str)> = Vec::new();
+        // node → project), so later overlays yield
+        // `project > node > bundle` precedence.
+        let mut candidate_paths: Vec<(PathBuf, &'static str, ConfigCandidateRootClass)> =
+            Vec::new();
 
         for bundle_root in &self.bundle_roots {
             let p = bundle_root.join(&item_path);
             if p.exists() {
-                candidate_paths.push((p, "bundle"));
+                candidate_paths.push((p, "bundle", ConfigCandidateRootClass::Bundle));
             }
         }
 
         if include_project {
+            if let Some(node_config_root) = &self.node_config_root {
+                let path = node_config_root.join(&item_path);
+                if path.exists() {
+                    candidate_paths.push((path, "node", ConfigCandidateRootClass::Node));
+                }
+            }
+        }
+
+        if include_project && self.project_config_enabled {
             let p = self.project_root.join(&item_path);
             if p.exists() {
-                candidate_paths.push((p, "project"));
+                candidate_paths.push((p, "project", ConfigCandidateRootClass::Project));
             }
         }
 
@@ -622,13 +1577,18 @@ impl VerifiedLoader {
 
         let contributors: Vec<String> = candidate_paths
             .iter()
-            .map(|(_, label)| label.to_string())
+            .map(|(_, label, _)| label.to_string())
             .collect();
 
         if candidate_paths.len() == 1 {
-            let (path, _) = &candidate_paths[0];
+            let (path, _, root_class) = &candidate_paths[0];
             let verified = self
-                .load_verified_with_strictness("config", path, strictness)
+                .load_verified_with_trust_store(
+                    "config",
+                    path,
+                    strictness,
+                    self.trust_store_for_config_root(*root_class),
+                )
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -652,9 +1612,14 @@ impl VerifiedLoader {
         // Multi-root merge path — preserve existing merge logic but return
         // all contributors so callers can apply trust policy.
         let mut merged = serde_yaml::Value::Null;
-        for (path, _) in &candidate_paths {
+        for (path, _, root_class) in &candidate_paths {
             let verified = self
-                .load_verified_with_strictness("config", path, strictness)
+                .load_verified_with_trust_store(
+                    "config",
+                    path,
+                    strictness,
+                    self.trust_store_for_config_root(*root_class),
+                )
                 .map_err(|e| ConfigLoadError::VerifyFailed {
                     path: path.clone(),
                     source: e,
@@ -671,7 +1636,7 @@ impl VerifiedLoader {
 
         let last_path = candidate_paths
             .last()
-            .map(|(p, _)| p.clone())
+            .map(|(p, _, _)| p.clone())
             .unwrap_or_else(|| item_path.clone());
         let value =
             serde_yaml::from_value::<T>(merged).map_err(|e| ConfigLoadError::TypedParseFailed {
@@ -752,7 +1717,85 @@ fn deep_merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde
 mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
+    use ryeos_engine::project_content::{AuthoritativeProjectContent, ProjectContentEntry};
+    use std::collections::BTreeMap;
     use std::fs;
+
+    #[derive(Default)]
+    struct TestProjectContent {
+        files: BTreeMap<PathBuf, Vec<u8>>,
+    }
+
+    impl TestProjectContent {
+        fn with_file(mut self, path: &str, bytes: &[u8]) -> Self {
+            self.files.insert(PathBuf::from(path), bytes.to_vec());
+            self
+        }
+    }
+
+    impl AuthoritativeProjectContent for TestProjectContent {
+        fn list_files(
+            &self,
+            prefix: &Path,
+            recursive: bool,
+            max_entries: usize,
+        ) -> Result<Vec<ProjectContentEntry>, ryeos_engine::error::EngineError> {
+            let mut entries = Vec::new();
+            for (path, bytes) in &self.files {
+                let Ok(relative) = path.strip_prefix(prefix) else {
+                    continue;
+                };
+                if relative.as_os_str().is_empty()
+                    || (!recursive && relative.components().count() != 1)
+                {
+                    continue;
+                }
+                if entries.len() >= max_entries {
+                    return Err(ryeos_engine::error::EngineError::Internal(
+                        "test project content entry bound exceeded".to_string(),
+                    ));
+                }
+                entries.push(ProjectContentEntry {
+                    relative_path: relative.to_path_buf(),
+                    content_hash: lillux::sha256_hex(bytes),
+                    size: bytes.len() as u64,
+                    normalized_mode: 0o644,
+                });
+            }
+            entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+            Ok(entries)
+        }
+
+        fn read_file(
+            &self,
+            relative_path: &Path,
+            max_bytes: u64,
+        ) -> Result<Option<Vec<u8>>, ryeos_engine::error::EngineError> {
+            Ok(self
+                .files
+                .get(relative_path)
+                .filter(|bytes| bytes.len() as u64 <= max_bytes)
+                .cloned())
+        }
+
+        fn validates_file(
+            &self,
+            relative_path: &Path,
+            content_hash: &str,
+        ) -> Result<bool, ryeos_engine::error::EngineError> {
+            Ok(self
+                .files
+                .get(relative_path)
+                .is_some_and(|bytes| lillux::sha256_hex(bytes) == content_hash))
+        }
+
+        fn validates_absence(
+            &self,
+            relative_path: &Path,
+        ) -> Result<bool, ryeos_engine::error::EngineError> {
+            Ok(!self.files.contains_key(relative_path))
+        }
+    }
 
     fn create_file(dir: &Path, relative: &str, content: &str) -> PathBuf {
         let p = dir.join(relative);
@@ -769,7 +1812,7 @@ mod tests {
         PathBuf::from("/nonexistent-operator-trust")
     }
 
-    fn create_trust_store(dir: &Path, signing_key: &SigningKey) {
+    fn trust_document(signing_key: &SigningKey) -> String {
         let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
         let vk_bytes = signing_key.verifying_key().to_bytes();
         let pem_b64 = base64::engine::general_purpose::STANDARD.encode(
@@ -782,7 +1825,7 @@ mod tests {
             .copied()
             .collect::<Vec<u8>>(),
         );
-        let toml_content = format!(
+        format!(
             r#"version = "1.0.0"
 category = "keys/trusted"
 fingerprint = "{fingerprint}"
@@ -795,7 +1838,12 @@ pem = """
 -----END PUBLIC KEY-----
 """
 "#,
-        );
+        )
+    }
+
+    fn create_trust_store(dir: &Path, signing_key: &SigningKey) {
+        let fingerprint = lillux::signature::compute_fingerprint(&signing_key.verifying_key());
+        let toml_content = trust_document(signing_key);
         create_file(
             dir,
             &format!(".ai/config/keys/trusted/{fingerprint}.toml"),
@@ -816,7 +1864,7 @@ pem = """
         create_file(&bundle, ".ai/config/test.yaml", "name: bundle\n");
         create_file(&project, ".ai/config/test.yaml", "name: project\n");
 
-        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust());
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust()).unwrap();
         let config: serde_yaml::Value = loader.load_config_strict("test").unwrap().unwrap();
 
         assert_eq!(config["name"], "project");
@@ -827,7 +1875,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust());
+        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust()).unwrap();
         let config = loader
             .load_config_strict::<serde_yaml::Value>("nonexistent")
             .unwrap();
@@ -842,7 +1890,7 @@ pem = """
 
         create_file(&project, ".ai/config/bad.yaml", "not valid yaml: [");
 
-        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust());
+        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust()).unwrap();
         let result = loader.load_config_strict::<serde_yaml::Value>("bad");
 
         assert!(
@@ -859,10 +1907,212 @@ pem = """
 
         create_file(&bundle, ".ai/config/defaults.yaml", "key: from_bundle\n");
 
-        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust());
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust()).unwrap();
         let config: serde_yaml::Value = loader.load_config_strict("defaults").unwrap().unwrap();
 
         assert_eq!(config["key"], "from_bundle");
+    }
+
+    #[test]
+    fn signed_config_proof_detects_new_project_shadow() {
+        let signing_key = SigningKey::from_bytes(&[42u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let bundle = tmp.path().join("bundle");
+        create_trust_store(&project, &signing_key);
+        let bundle_body = "name: bundle\n";
+        create_file(
+            &bundle,
+            ".ai/config/test.yaml",
+            &lillux::signature::sign_content(bundle_body, &signing_key, "#", None),
+        );
+        let loader = VerifiedLoader::new(
+            project.clone(),
+            vec![bundle],
+            &project.join(".ai/config/keys/trusted"),
+        )
+        .unwrap();
+        let first = loader
+            .load_config_strict_signed_with_proof::<serde_yaml::Value>("test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.value["name"], "bundle");
+        assert!(first.dependency_proof.revalidate_current());
+        create_file(
+            &project,
+            ".ai/config/test.yaml",
+            &lillux::signature::sign_content("name: project\n", &signing_key, "#", None),
+        );
+        assert!(!first.dependency_proof.revalidate_current());
+        let second = loader
+            .load_config_strict_signed_with_proof::<serde_yaml::Value>("test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.value["name"], "project");
+        assert_ne!(
+            first.dependency_proof.identity_digest().unwrap(),
+            second.dependency_proof.identity_digest().unwrap()
+        );
+    }
+
+    #[test]
+    fn signed_config_proof_revalidates_project_trust_from_admitted_content() {
+        let config_bytes = b"# signed fixture\nname: project\n";
+        let trust_bytes = b"version = \"1.0.0\"\n";
+        let proof = ConfigDependencyProof {
+            config_id: "test".to_string(),
+            effective_trust_identity: "effective".to_string(),
+            node_trust_identity: "node".to_string(),
+            project_trust_sources: vec![TrustSourceDependency {
+                logical_path: PathBuf::from("publisher.toml"),
+                source_hash: lillux::sha256_hex(trust_bytes),
+            }],
+            candidates: vec![ConfigCandidateDependency {
+                root_class: ConfigCandidateRootClass::Project,
+                root_index: 0,
+                logical_path: PathBuf::from(".ai/config/test.yaml"),
+                path: PathBuf::from("/must/not/be/opened/test.yaml"),
+                state: ConfigCandidateState::Present {
+                    source_hash: lillux::sha256_hex(config_bytes),
+                    content_hash: "content".to_string(),
+                    signer_fingerprint: Some("publisher".to_string()),
+                },
+            }],
+        };
+        let project_root = PathBuf::from("/not-opened/project");
+        let exact = TestProjectContent::default()
+            .with_file(".ai/config/test.yaml", config_bytes)
+            .with_file(".ai/config/keys/trusted/publisher.toml", trust_bytes);
+        assert!(proof.revalidate_under_project_authority(Some(&project_root), None, Some(&exact),));
+
+        let revoked = TestProjectContent::default().with_file(".ai/config/test.yaml", config_bytes);
+        assert!(!proof.revalidate_under_project_authority(
+            Some(&project_root),
+            None,
+            Some(&revoked),
+        ));
+        assert_eq!(
+            proof.revalidate_under_project_authority_status(
+                Some(&project_root),
+                None,
+                Some(&revoked),
+            ),
+            ConfigDependencyProofStatus::ImmutableAuthorityMismatch
+        );
+
+        let replaced = TestProjectContent::default()
+            .with_file(".ai/config/test.yaml", config_bytes)
+            .with_file(
+                ".ai/config/keys/trusted/publisher.toml",
+                b"version = \"changed\"\n",
+            );
+        assert!(!proof.revalidate_under_project_authority(
+            Some(&project_root),
+            None,
+            Some(&replaced),
+        ));
+    }
+
+    #[test]
+    fn signed_config_proof_classifies_node_change_as_mutable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_root = tmp.path().join("node");
+        create_file(&node_root, "test.yaml", "name: original\n");
+        let original = b"name: original\n";
+        let proof = ConfigDependencyProof {
+            config_id: "test".to_string(),
+            effective_trust_identity: "effective".to_string(),
+            node_trust_identity: "node".to_string(),
+            project_trust_sources: Vec::new(),
+            candidates: vec![ConfigCandidateDependency {
+                root_class: ConfigCandidateRootClass::Node,
+                root_index: 0,
+                logical_path: PathBuf::from("test.yaml"),
+                path: node_root.join("test.yaml"),
+                state: ConfigCandidateState::Present {
+                    source_hash: lillux::sha256_hex(original),
+                    content_hash: "content".to_string(),
+                    signer_fingerprint: Some("publisher".to_string()),
+                },
+            }],
+        };
+        assert_eq!(
+            proof.revalidate_under_project_authority_status(None, Some(&node_root), None),
+            ConfigDependencyProofStatus::Current
+        );
+        create_file(&node_root, "test.yaml", "name: changed\n");
+        assert_eq!(
+            proof.revalidate_under_project_authority_status(None, Some(&node_root), None),
+            ConfigDependencyProofStatus::MutableAuthorityChanged
+        );
+    }
+
+    #[test]
+    fn project_trust_cannot_admit_bundle_or_node_config() {
+        let project_key = SigningKey::from_bytes(&[51u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project");
+        let node_config = tmp.path().join("node-config");
+        let node_trust = tmp.path().join("node-trust");
+        let bundle = tmp.path().join("bundle");
+        create_trust_store(&project, &project_key);
+        create_file(
+            &bundle,
+            ".ai/config/test.yaml",
+            &lillux::signature::sign_content("name: bundle\n", &project_key, "#", None),
+        );
+        let loader = VerifiedLoader::new_with_node_config(
+            project.clone(),
+            Some(node_config.clone()),
+            vec![bundle],
+            &node_trust,
+        )
+        .unwrap();
+        let error = loader
+            .load_config_strict_signed_with_proof::<serde_yaml::Value>("test")
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown signer"));
+
+        create_file(
+            &node_config,
+            ".ai/config/node-only.yaml",
+            &lillux::signature::sign_content("name: node\n", &project_key, "#", None),
+        );
+        let error = loader
+            .load_config_strict_signed_with_proof::<serde_yaml::Value>("node-only")
+            .unwrap_err();
+        assert!(error.to_string().contains("unknown signer"));
+
+        create_file(
+            &project,
+            ".ai/config/project-only.yaml",
+            &lillux::signature::sign_content("name: project\n", &project_key, "#", None),
+        );
+        let project_config = loader
+            .load_config_strict_signed_with_proof::<serde_yaml::Value>("project-only")
+            .unwrap()
+            .unwrap();
+        assert_eq!(project_config.value["name"], "project");
+    }
+
+    #[test]
+    fn trust_document_fingerprint_must_match_decoded_key() {
+        let signing_key = SigningKey::from_bytes(&[52u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        create_trust_store(tmp.path(), &signing_key);
+        let trust_dir = tmp.path().join(".ai/config/keys/trusted");
+        let entry = fs::read_dir(&trust_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let declared = lillux::crypto::fingerprint(&signing_key.verifying_key());
+        let content = fs::read_to_string(&entry).unwrap();
+        fs::write(&entry, content.replace(&declared, &"f".repeat(64))).unwrap();
+
+        let error = TrustStore::load(tmp.path(), &no_operator_trust()).unwrap_err();
+        assert!(format!("{error:#}").contains("declared fingerprint"));
     }
 
     #[test]
@@ -876,7 +2126,8 @@ pem = """
         let path = tmp.path().join("test.md");
         fs::write(&path, &signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
+        let loader =
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(!verified.content.contains("ryeos:signed:"));
@@ -891,7 +2142,8 @@ pem = """
         let content = "# Plain Directive\n\nSome content here.\n";
         fs::write(&path, content).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
+        let loader =
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert_eq!(verified.content, content);
@@ -910,7 +2162,8 @@ pem = """
         let path = tmp.path().join("tampered.md");
         fs::write(&path, &tampered).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
+        let loader =
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -935,7 +2188,8 @@ pem = """
         let path = tmp.path().join("bad_sig.md");
         fs::write(&path, &forged).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
+        let loader =
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
@@ -954,7 +2208,8 @@ pem = """
         let path = tmp.path().join("unknown_signer.md");
         fs::write(&path, &signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
+        let loader =
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
         let verified = loader.load_verified("directive", &path).unwrap();
 
         assert!(verified.content.contains("# Test"));
@@ -970,13 +2225,103 @@ pem = """
         create_trust_store(&operator_root, &op_sk);
         create_trust_store(&project, &proj_sk);
 
-        let store = TrustStore::load(&project, &operator_root.join(".ai/config/keys/trusted"));
+        let store =
+            TrustStore::load(&project, &operator_root.join(".ai/config/keys/trusted")).unwrap();
 
         assert_eq!(store.len(), 2);
         let op_fp = lillux::signature::compute_fingerprint(&op_sk.verifying_key());
         let proj_fp = lillux::signature::compute_fingerprint(&proj_sk.verifying_key());
         assert!(store.get(&op_fp).is_some());
         assert!(store.get(&proj_fp).is_some());
+    }
+
+    fn padded_trust_document(signing_key: &SigningKey, target_bytes: usize) -> Vec<u8> {
+        let mut document = trust_document(signing_key).into_bytes();
+        assert!(document.len().saturating_add(2) <= target_bytes);
+        document.push(b'#');
+        document.resize(target_bytes.saturating_sub(1), b'x');
+        document.push(b'\n');
+        assert_eq!(document.len(), target_bytes);
+        document
+    }
+
+    #[test]
+    fn trust_store_enforces_exact_document_count_boundary() {
+        let signing_key = SigningKey::from_bytes(&[61u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let trust_dir = tmp.path().join("trusted");
+        fs::create_dir_all(&trust_dir).unwrap();
+        let document = trust_document(&signing_key);
+        for index in 0..MAX_TRUST_DOCUMENTS {
+            fs::write(trust_dir.join(format!("{index:04}.toml")), &document).unwrap();
+        }
+        let exact = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap();
+        assert_eq!(exact.len(), 1);
+
+        fs::write(
+            trust_dir.join(format!("{:04}.toml", MAX_TRUST_DOCUMENTS)),
+            &document,
+        )
+        .unwrap();
+        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENTS} regular files"))
+        );
+    }
+
+    #[test]
+    fn trust_store_enforces_exact_document_size_boundary() {
+        let signing_key = SigningKey::from_bytes(&[62u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let trust_dir = tmp.path().join("trusted");
+        fs::create_dir_all(&trust_dir).unwrap();
+        let exact = padded_trust_document(
+            &signing_key,
+            usize::try_from(MAX_TRUST_DOCUMENT_BYTES).unwrap(),
+        );
+        let path = trust_dir.join("exact.toml");
+        fs::write(&path, &exact).unwrap();
+        assert_eq!(
+            TrustStore::load(Path::new("/missing-project"), &trust_dir)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let mut oversized = exact;
+        oversized.push(b'\n');
+        fs::write(path, oversized).unwrap();
+        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
+        assert!(format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes")));
+    }
+
+    #[test]
+    fn trust_store_enforces_exact_aggregate_size_boundary() {
+        let signing_key = SigningKey::from_bytes(&[63u8; 32]);
+        let tmp = tempfile::tempdir().unwrap();
+        let trust_dir = tmp.path().join("trusted");
+        fs::create_dir_all(&trust_dir).unwrap();
+        let document = padded_trust_document(
+            &signing_key,
+            usize::try_from(MAX_TRUST_DOCUMENT_BYTES).unwrap(),
+        );
+        let exact_count =
+            usize::try_from(MAX_TRUST_DIRECTORY_BYTES / MAX_TRUST_DOCUMENT_BYTES).unwrap();
+        for index in 0..exact_count {
+            fs::write(trust_dir.join(format!("{index:02}.toml")), &document).unwrap();
+        }
+        assert_eq!(
+            TrustStore::load(Path::new("/missing-project"), &trust_dir)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        fs::write(trust_dir.join("overflow.toml"), &document).unwrap();
+        let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
+        assert!(format!("{error:#}").contains(&format!(
+            "exceeds {MAX_TRUST_DIRECTORY_BYTES} aggregate bytes"
+        )));
     }
 
     #[test]
@@ -992,7 +2337,8 @@ pem = """
             tmp.path().join("project"),
             vec![bundle],
             &no_operator_trust(),
-        );
+        )
+        .unwrap();
 
         assert!(
             loader.trust_store().is_empty(),
@@ -1002,7 +2348,8 @@ pem = """
 
     #[test]
     fn trust_store_empty_when_no_dirs() {
-        let store = TrustStore::load(Path::new("/nonexistent"), Path::new("/also-nonexistent"));
+        let store =
+            TrustStore::load(Path::new("/nonexistent"), Path::new("/also-nonexistent")).unwrap();
         assert!(store.is_empty());
     }
 
@@ -1013,7 +2360,8 @@ pem = """
         let content = "deterministic content";
         fs::write(&path, content).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust());
+        let loader =
+            VerifiedLoader::new(tmp.path().to_path_buf(), vec![], &no_operator_trust()).unwrap();
         let v1 = loader.load_verified("directive", &path).unwrap();
         let v2 = loader.load_verified("directive", &path).unwrap();
 
@@ -1032,7 +2380,7 @@ pem = """
         create_file(&project, ".ai/tools/shared.md", "# Project Shared\n");
 
         let project_clone = project.clone();
-        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust());
+        let loader = VerifiedLoader::new(project, vec![bundle], &no_operator_trust()).unwrap();
         let items = loader.scan_kind("tool").unwrap();
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
 
@@ -1051,7 +2399,7 @@ pem = """
         let tmp = tempfile::tempdir().unwrap();
         let project = tmp.path().join("project");
 
-        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust());
+        let loader = VerifiedLoader::new(project, vec![], &no_operator_trust()).unwrap();
         let items = loader.scan_kind("directive").unwrap();
 
         assert!(items.is_empty());
@@ -1096,7 +2444,8 @@ pem = """
             tmp.path().join("project"),
             vec![system],
             &no_operator_trust(),
-        );
+        )
+        .unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unsigned config");
@@ -1125,7 +2474,8 @@ pem = """
             tmp.path().join("project"),
             vec![system],
             &no_operator_trust(),
-        );
+        )
+        .unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(res.is_err(), "strict mode must reject unknown signer");
@@ -1148,7 +2498,8 @@ pem = """
         let signed = sign_and_pin(yaml_body, &operator_keys);
         std::fs::write(system.join(cfg_subpath), signed).unwrap();
 
-        let loader = VerifiedLoader::new(tmp.path().join("project"), vec![system], &operator_keys);
+        let loader =
+            VerifiedLoader::new(tmp.path().join("project"), vec![system], &operator_keys).unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(
@@ -1177,7 +2528,8 @@ pem = """
             tmp.path().join("project"),
             vec![system],
             &no_operator_trust(),
-        );
+        )
+        .unwrap();
         let res = loader
             .load_config_strict_signed::<serde_yaml::Value>("ryeos-runtime/model-providers/test");
         assert!(

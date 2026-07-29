@@ -76,6 +76,19 @@ pub(crate) struct AuthoritativeRootBirthReadback {
     pub(crate) predecessor: Option<AuthoritativeRootGenesisReadback>,
 }
 
+#[derive(Clone)]
+pub(crate) struct AuthoritativeThreadAppendAnchorReadback {
+    pub(crate) chain_last_event_hash: Option<String>,
+    pub(crate) chain_last_seq: u64,
+    pub(crate) thread_last_event_hash: Option<String>,
+    pub(crate) thread_last_seq: u64,
+}
+
+pub(crate) struct AuthoritativeThreadEventChainReadback {
+    pub(crate) anchor: AuthoritativeThreadAppendAnchorReadback,
+    pub(crate) events: Vec<(String, ThreadEvent)>,
+}
+
 /// Validate through an already-pinned CAS root so every object in the closure
 /// is read from the same authority inode.
 pub(crate) fn validate_authoritative_history_with_cas(
@@ -861,6 +874,80 @@ pub(crate) fn read_thread_snapshot_with_trust(
     }
     read_current_snapshot_for_mutation(cas_root, Some(chain_lock), &chain_state, thread_id)
         .map(Some)
+}
+
+/// Read the exact append position for one thread from a trust-verified signed
+/// head. This intentionally avoids traversing event history on the ordinary
+/// append path; callers need the complete chain only when write
+/// acknowledgement is ambiguous.
+pub(crate) fn read_authoritative_thread_append_anchor_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<AuthoritativeThreadAppendAnchorReadback>> {
+    validate_chain_root_id(chain_root_id)?;
+    chain_lock.ensure_protects(refs_root, chain_root_id)?;
+    let chain_state = read_chain_head_for_mutation(
+        cas_root,
+        refs_root,
+        Some(chain_lock),
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?;
+    let Some(entry) = chain_state.threads.get(thread_id) else {
+        return Ok(None);
+    };
+    Ok(Some(AuthoritativeThreadAppendAnchorReadback {
+        chain_last_event_hash: chain_state.last_event_hash,
+        chain_last_seq: chain_state.last_chain_seq,
+        thread_last_event_hash: entry.last_event_hash.clone(),
+        thread_last_seq: entry.last_thread_seq,
+    }))
+}
+
+/// Read one thread's complete event chain and current append position from the
+/// same trust-verified signed head. This is the commit-qualified readback used
+/// only after an append returned an error that may have followed head
+/// publication.
+pub(crate) fn read_authoritative_thread_event_chain_with_trust(
+    cas_root: &Path,
+    refs_root: &Path,
+    chain_lock: &ChainLock,
+    chain_root_id: &str,
+    thread_id: &str,
+    trust_store: &TrustStore,
+    head_cache: &mut HeadCache,
+) -> anyhow::Result<Option<AuthoritativeThreadEventChainReadback>> {
+    validate_chain_root_id(chain_root_id)?;
+    chain_lock.ensure_protects(refs_root, chain_root_id)?;
+    let chain_state = read_chain_head_for_mutation(
+        cas_root,
+        refs_root,
+        Some(chain_lock),
+        chain_root_id,
+        trust_store,
+        head_cache,
+    )?;
+    let Some(entry) = chain_state.threads.get(thread_id) else {
+        return Ok(None);
+    };
+    let anchor = AuthoritativeThreadAppendAnchorReadback {
+        chain_last_event_hash: chain_state.last_event_hash,
+        chain_last_seq: chain_state.last_chain_seq,
+        thread_last_event_hash: entry.last_event_hash.clone(),
+        thread_last_seq: entry.last_thread_seq,
+    };
+    let events =
+        read_entry_thread_event_chain(cas_root, chain_lock, chain_root_id, thread_id, entry)?;
+    Ok(Some(AuthoritativeThreadEventChainReadback {
+        anchor,
+        events,
+    }))
 }
 
 /// Read the exact source entry and complete successor thread history from one

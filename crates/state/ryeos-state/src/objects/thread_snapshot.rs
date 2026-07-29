@@ -12,13 +12,15 @@ use serde::{Deserialize, Serialize};
 
 use super::validate_object_kind;
 
-/// Clean-cut current thread-snapshot format. Schema 6 carries the exact
-/// current project authority contract and admitted launch capsule root.
-/// Schema identifiers are immutable CAS wire identities; older shapes are not
-/// accepted through a compatibility reader.
+/// Clean-cut current thread-snapshot format. Schema identifiers are immutable
+/// CAS wire identities; older shapes are not accepted through a compatibility
+/// reader.
+/// v6: exact project authority contract and admitted launch capsule root.
 /// v7: embedded `ThreadUsage.spend_usd` is exact fixed-point money as a
 /// canonical decimal string; JSON-number money does not decode.
-pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 7;
+/// v8: pinned COW authority persists both its immutable base snapshot and its
+/// current operational generation.
+pub const THREAD_SNAPSHOT_SCHEMA_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -736,9 +738,12 @@ impl ThreadSnapshot {
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| anyhow::anyhow!("thread snapshot has no numeric schema"))?;
         if schema != u64::from(THREAD_SNAPSHOT_SCHEMA_VERSION) {
-            anyhow::bail!(
-                "thread snapshot is not the exact current contract: stored schema={schema}, current schema={THREAD_SNAPSHOT_SCHEMA_VERSION}"
-            );
+            return Err(super::IncompatibleCurrentObjectSchema::new(
+                "thread snapshot",
+                schema,
+                THREAD_SNAPSHOT_SCHEMA_VERSION,
+            )
+            .into());
         }
         let snapshot: Self =
             serde_json::from_value(value).context("deserialize current thread snapshot")?;
@@ -800,7 +805,7 @@ impl ThreadSnapshot {
             anyhow::bail!("project_root projection contradicts project_authority");
         }
         if self.base_project_snapshot_hash.as_deref()
-            != self.project_authority.base_snapshot_projection()
+            != self.project_authority.operational_snapshot_projection()
         {
             anyhow::bail!("base_project_snapshot_hash projection contradicts project_authority");
         }
@@ -1404,6 +1409,9 @@ mod tests {
         );
 
         let error = ThreadSnapshot::from_current_value(value).unwrap_err();
+        assert!(error
+            .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+            .is_some());
         assert!(
             error.to_string().contains("not the exact current contract"),
             "unexpected error: {error:#}"

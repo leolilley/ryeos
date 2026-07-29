@@ -126,6 +126,7 @@ mod tests {
             trust_store: &trust,
             node_trust_store: &trust,
             project_root: None,
+            project_authority: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         };

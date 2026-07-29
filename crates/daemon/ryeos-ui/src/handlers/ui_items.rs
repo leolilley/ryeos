@@ -395,6 +395,10 @@ fn build_item_inspect(
             item_ref: item_ref.clone(),
             expected_kind: None,
             project_root: project_path.cloned(),
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                    project_path.map(std::path::PathBuf::as_path),
+                ),
         };
         state
             .engine

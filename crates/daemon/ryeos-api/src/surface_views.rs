@@ -16,6 +16,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
+use ryeos_engine::contracts::SubjectResolutionAuthority;
 use ryeos_engine::engine::{CheckedEngineGeneration, EffectiveItemRequest, Engine};
 
 /// Collect every `view:`-prefixed ref anywhere in the composed surface
@@ -125,6 +126,9 @@ pub fn embed_surface_views(
                 item_ref,
                 expected_kind: Some("view".to_string()),
                 project_root: project_root.map(Path::to_path_buf),
+                subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
+                    project_root,
+                ),
             })
             .map(|effective| effective.composed_value)
             .map_err(|e| e.to_string())
@@ -153,6 +157,9 @@ pub fn embed_surface_views_in_generation(
                     item_ref,
                     expected_kind: Some("view".to_string()),
                     project_root: project_root.map(Path::to_path_buf),
+                    subject_resolution_authority: SubjectResolutionAuthority::for_live_project_root(
+                        project_root,
+                    ),
                 });
             }
             Err(error) => resolved.push((view_ref, Err(format!("invalid view ref: {error}")))),

@@ -57,7 +57,7 @@ impl RunningItem {
 pub struct PreparedItemPlan {
     plan: ExecutionPlan,
     pub timeout_secs: u64,
-    wrapper_source_identity: ryeos_state::objects::DirectWrapperSourceIdentity,
+    root_subject_source_identity: ryeos_state::objects::DirectRootSourceIdentity,
     admitted_command: Option<ryeos_engine::isolation::IsolationDescriptorBoundCommand>,
 }
 
@@ -104,6 +104,9 @@ impl PreparedItemPlan {
                 ryeos_engine::contracts::ItemSpace::Bundle => {
                     ryeos_state::objects::DirectRuntimeSourceSpace::Bundle
                 }
+                ryeos_engine::contracts::ItemSpace::Node => {
+                    anyhow::bail!("node-local configuration cannot be admitted as a direct runtime")
+                }
             },
             runtime_content_hash: plan_runtime.runtime_content_hash.clone(),
             runtime_signer_fingerprint,
@@ -135,16 +138,16 @@ impl PreparedItemPlan {
                 ryeos_state::objects::DirectExecutableIdentity::NodePolicy
             }
         };
-        let wrapper_source_identity = self.wrapper_source_identity.clone();
+        let root_subject_source_identity = self.root_subject_source_identity.clone();
         let identity = ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
             executor_ref: resolved.executor_ref.clone(),
-            executor_item_content_hash: resolved.resolved_item.raw_content_digest.clone(),
-            executor_item_signer_fingerprint: resolved
+            root_subject_source_content_digest: resolved.resolved_item.content_hash.clone(),
+            root_subject_signer_fingerprint: resolved
                 .resolved_item
                 .signature_header
                 .as_ref()
                 .map(|header| header.signer_fingerprint.clone()),
-            wrapper_source_identity,
+            root_subject_source_identity,
             protocol_ref: protocol.canonical_ref.clone(),
             protocol_content_hash: protocol.raw_content_digest.clone(),
             protocol_signer_fingerprint: protocol.signer_fingerprint.clone(),
@@ -253,7 +256,7 @@ impl PreparedItemPlan {
             execution_plan_hash,
             executable_identity,
             runtime_identity,
-            wrapper_source_identity,
+            root_subject_source_identity,
             ..
         } = &capsule.artifact_identity
         else {
@@ -288,9 +291,7 @@ impl PreparedItemPlan {
         }
         let mut plan: ExecutionPlan = serde_json::from_value(execution_plan.clone())
             .context("decode admitted direct execution plan")?;
-        if &plan.root_executor_id != executor_ref {
-            bail!("admitted direct execution plan contradicts executor ref");
-        }
+        validate_admitted_direct_executor_binding(&plan, executor_ref)?;
         let plan_runtime = plan
             .runtime_identity
             .as_ref()
@@ -382,7 +383,7 @@ impl PreparedItemPlan {
         Ok(Self {
             plan,
             timeout_secs,
-            wrapper_source_identity: wrapper_source_identity.clone(),
+            root_subject_source_identity: root_subject_source_identity.clone(),
             admitted_command: Some(admitted_command),
         })
     }
@@ -401,6 +402,23 @@ impl PreparedItemPlan {
             effective_project_root,
         )
     }
+}
+
+fn validate_admitted_direct_executor_binding(
+    plan: &ExecutionPlan,
+    admitted_executor_ref: &str,
+) -> Result<()> {
+    // `root_executor_id` is the resolved terminal executor. The admitted
+    // artifact identity binds the executor declared by the root item, which
+    // is the first hop after the root in the complete executor chain. These
+    // identities differ whenever an alias/runtime chain has more than one
+    // hop, so recovery must compare like with like.
+    if plan.executor_chain.first().map(String::as_str) != Some(plan.root_ref.as_str())
+        || plan.executor_chain.get(1).map(String::as_str) != Some(admitted_executor_ref)
+    {
+        bail!("admitted direct execution plan contradicts executor ref");
+    }
+    Ok(())
 }
 
 fn capture_signed_descriptor_document(
@@ -596,19 +614,10 @@ pub fn prepare_item_plan(
     lifecycle_authority: ryeos_state::objects::ExecutionLifecycleAuthority,
     live_access: Option<&ryeos_engine::isolation::IsolationLiveAccessAuthority>,
 ) -> Result<PreparedItemPlan> {
-    engine.with_checked_bundle_generation(|generation| {
-        let verified = generation
-            .verify(&resolved.plan_context, resolved.resolved_item.clone())
-            .map_err(|e| anyhow!("verification failed: {e}"))?;
-        let mut plan = generation
-            .build_plan(
-                &resolved.plan_context,
-                &verified,
-                &resolved.parameters,
-                &resolved.plan_context.execution_hints,
-            )
-            .map_err(|e| anyhow!("plan build failed: {e}"))?;
-        let wrapper_source_identity = if resolved.resolved_item.source_space
+    engine.with_checked_bundle_generation(|_generation| {
+        let verified = super::verified_execution_subject(engine, resolved)?;
+        let mut plan = super::build_execution_plan_for_request(engine, resolved, &verified)?;
+        let root_subject_source_identity = if resolved.resolved_item.source_space
             == ryeos_engine::contracts::ItemSpace::Bundle
         {
             let ai = resolved
@@ -636,12 +645,12 @@ pub fn prepare_item_plan(
                 expected_name,
                 &engine.node_trust_store,
             )?;
-            ryeos_state::objects::DirectWrapperSourceIdentity::Bundle {
+            ryeos_state::objects::DirectRootSourceIdentity::Bundle {
                 manifest_hash: identity.body_digest,
                 manifest_signer_fingerprint: identity.signer_fingerprint,
             }
         } else {
-            ryeos_state::objects::DirectWrapperSourceIdentity::Project
+            ryeos_state::objects::DirectRootSourceIdentity::Project
         };
         if lifecycle_authority.recovery
             == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
@@ -682,7 +691,7 @@ pub fn prepare_item_plan(
         Ok(PreparedItemPlan {
             plan,
             timeout_secs,
-            wrapper_source_identity,
+            root_subject_source_identity,
             admitted_command: None,
         })
     })
@@ -1023,7 +1032,7 @@ mod tests {
                     }
                 },
                 "tool_path": project_root.join(".ai/tools/test/run.yaml"),
-                "executor_chain": ["tool:test/runtime"]
+                "executor_chain": ["tool:test/run", "tool:test/runtime"]
             }],
             "entrypoint": "spawn",
             "capabilities": {
@@ -1035,12 +1044,27 @@ mod tests {
             "materialization_requirements": [],
             "cache_key": "test",
             "thread_kind": "tool",
-            "executor_chain": ["tool:test/runtime"],
+            "executor_chain": ["tool:test/run", "tool:test/runtime"],
             "executor_authorities": [],
             "runtime_identity": null,
             "debug_raw": false
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn direct_recovery_binds_declared_executor_hop_not_terminal_executor() {
+        let mut plan = portable_direct_plan(Path::new("/tmp/admitted-project"));
+        plan.root_executor_id = "tool:test/subprocess-terminal".to_string();
+        plan.executor_chain
+            .push("tool:test/subprocess-terminal".to_string());
+
+        validate_admitted_direct_executor_binding(&plan, "tool:test/runtime")
+            .expect("the admitted executor is the first hop after the root");
+        assert!(
+            validate_admitted_direct_executor_binding(&plan, "tool:test/subprocess-terminal")
+                .is_err()
+        );
     }
 
     #[test]

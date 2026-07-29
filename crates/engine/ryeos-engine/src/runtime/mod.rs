@@ -348,6 +348,10 @@ pub struct CompileContext<'a> {
     pub trust_store: &'a TrustStore,
     pub node_trust_store: &'a TrustStore,
     pub project_root: Option<&'a Path>,
+    pub project_authority: Option<(
+        &'a Path,
+        &'a dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
     pub root_trust_class: TrustClass,
     /// Operator-supplied allowlist + snapshot for host-env passthrough.
     /// Populated once at daemon bootstrap from `RYEOS_TOOL_ENV_PASSTHROUGH`.
@@ -507,6 +511,10 @@ pub fn compile_with_handlers(
     node_trust_store: &TrustStore,
     roots: &ResolutionRoots,
     root_trust_class: TrustClass,
+    project_authority: Option<(
+        &Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 ) -> Result<PlanSubprocessSpec, EngineError> {
     let mut ctx = CompileContext {
         template_ctx: TemplateContext::new(root_source_path.to_path_buf()),
@@ -526,6 +534,7 @@ pub fn compile_with_handlers(
         trust_store,
         node_trust_store,
         project_root,
+        project_authority,
         root_trust_class,
         host_env,
     };

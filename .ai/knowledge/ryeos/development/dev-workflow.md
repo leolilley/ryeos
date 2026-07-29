@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-13T07:43:47Z:a111e8406d9c9dc5b56e2cfe960c749618ec5b0d94fcee8abc3aff4732fafed9:w3ZYx6kcJV1nLlrXxXVkY1VXr/7/1ZMVMa2Xro1F+ign0n47egRPp7Skg00smf9s4aMFpQgGi26+yniczw0vAQ==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-28T23:59:20Z:4d5fe0d29bab251b0fa53a3de4fd00495e64d457934f2aef82a16a0670a50fab:TyxFz2gW3tEcY86pzCuNBqLPWrrT8nSFMOua6gdN+BWvY7Pl7Gysi2x64YsGaum0PILCgBobsrCBf3kN9VOeAw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "dev-workflow"
 title: "Development Workflow"
 description: "Short LLM-facing guide for choosing the right RyeOS dev workflow"
 entry_type: reference
-version: "1.2.0"
+version: "1.3.0"
 ```
 
 # Development Workflow
@@ -18,22 +18,27 @@ signing, and install commands, prefer `development/build-and-test.md`.
 | Change type | Loop |
 |---|---|
 | Rust-only, compile feedback | `cargo build` or a targeted `cargo test -p <crate>` |
-| Rust that affects bundled binaries | `./scripts/gate.sh --no-tests`, then targeted/full tests |
-| Anything under `bundles/` | `./scripts/gate.sh` unless intentionally skipping tests |
-| Daemon/CLI behavior with installed bundles | `./scripts/dev-up.sh` for repo-local `.local/ryeos` |
-| System packaged-layout repair | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
+| Rust that affects bundled binaries | `./scripts/gate.sh --refresh-bundles --no-tests`, then targeted/full tests |
+| Anything under `bundles/` | `./scripts/gate.sh --refresh-bundles` unless intentionally skipping tests |
+| Daemon/CLI behavior with installed bundles | initialize/start a repo-local app root with `--app-root .local/ryeos` |
+| System packaged-layout repair from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
 
 Default rule: if a test or runtime loads bundle items, refresh/sign bundles
 first. Stale bundle bin/CAS/signature state is the most common false failure.
 
-## Fresh checkout
+## Repo-local app root
 
 ```bash
-./scripts/dev-up.sh
+target/release/ryeos init \
+  --app-root .local/ryeos \
+  --source bundles \
+  --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+target/release/ryeos start --app-root .local/ryeos
 ```
 
-This populates bundles, initializes `.local/ryeos`, and starts a daemon against
-that isolated system space. It does not touch the normal user/system install.
+This initializes `.local/ryeos` from the already-built source bundles and
+starts a daemon against that isolated app root. It does not populate/rebuild
+bundles or touch the normal user app root.
 
 ## Day-to-day examples
 
@@ -47,7 +52,7 @@ cargo test -p ryeos-engine
 Bundle-aware edit:
 
 ```bash
-./scripts/gate.sh --no-tests
+./scripts/gate.sh --refresh-bundles --no-tests
 cargo test -p ryeos-cli
 ```
 
@@ -95,5 +100,5 @@ Committed and meaningful:
   through signed bundle bin trees.
 - If a daemon is running while bundles are reinitialized, restart it so the
   in-memory engine matches disk.
-- If unsure which command to run, use `./scripts/gate.sh --no-tests` before
-  targeted tests.
+- If unsure which command to run for bundle-affecting work, use
+  `./scripts/gate.sh --refresh-bundles --no-tests` before targeted tests.

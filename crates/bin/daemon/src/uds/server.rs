@@ -1101,8 +1101,9 @@ fn handle_replay_events(params: &serde_json::Value, state: &AppState) -> Result<
 /// the running-guarded path → return the persisted inputs for the runtime to
 /// fold. The guard is the terminal-safety anchor: if the thread is no longer
 /// running, the append is a no-op and the drained items are discarded (never a
-/// `cognition_in` after terminal). A transient append error restores the items
-/// to the front so a later poll retries.
+/// `cognition_in` after terminal). A signed-head readback distinguishes an
+/// exact postcommit acknowledgement failure from a proven precommit failure;
+/// only the latter restores the drained inputs for retry.
 fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<serde_json::Value> {
     let thread_id = params
         .get("thread_id")
@@ -1175,9 +1176,21 @@ fn handle_poll_input(params: &serde_json::Value, state: &AppState) -> Result<ser
             state.live_input.ack_drained(thread_id, n);
             Ok(json!({ "inputs": [] }))
         }
-        // Transient failure — restore for a later poll, then surface the error.
+        // A failure whose signed-head state could not be proven either exact or
+        // absent must never replay the batch: it may already be durable. Drop
+        // the in-flight reservation and fail closed so continuation/recovery,
+        // rather than a duplicate cognition_in append, is the recourse.
         Err(e) => {
-            state.live_input.restore_front(thread_id, pending);
+            let commit_uncertain = e
+                .chain()
+                .any(|cause| cause.is::<ryeos_app::state_store::EventAppendCommitUncertain>());
+            if commit_uncertain {
+                state.live_input.ack_drained(thread_id, n);
+            } else {
+                // Authoritative readback proved the attempted batch absent (or
+                // the write was rejected before it could begin).
+                state.live_input.restore_front(thread_id, pending);
+            }
             Err(e)
         }
     }
@@ -2639,13 +2652,11 @@ mod tests {
     /// `running` — the shape the `AlreadyClaimed` cleanup must accept.
     fn seed_marked_follow_successor(state: &AppState) {
         use ryeos_app::launch_metadata::{ResumeContext, RuntimeLaunchMetadata};
-        use ryeos_engine::contracts::{
-            EffectivePrincipal, ExecutionHints, Principal, ProjectContext,
+        use ryeos_engine::contracts::{EffectivePrincipal, Principal, ProjectContext};
+        let project_context = ProjectContext::LocalPath {
+            path: std::path::PathBuf::from("/tmp/p"),
         };
-        let mut parent = make_create_params("P", "P");
-        parent.project_root = Some(std::path::PathBuf::from("/tmp/p"));
-        parent.base_project_snapshot_hash = Some("a".repeat(64));
-        parent.project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
+        let project_authority = ryeos_state::objects::ExecutionProjectAuthority::pinned(
             "local:/tmp/p".to_string(),
             Some(std::path::PathBuf::from("/tmp/p")),
             "a".repeat(64),
@@ -2656,66 +2667,117 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        state.threads.create_thread_for_test(&parent).unwrap();
-        state.threads.mark_running("P").unwrap();
-        state
-            .state_store
-            .seed_launch_metadata(
-                "P",
-                &RuntimeLaunchMetadata::default()
-                    .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
-                    .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
-                    .with_resume_context(ResumeContext {
-                        kind: "graph".into(),
-                        item_ref: "graph:test/graph".into(),
-                        ref_bindings: std::collections::BTreeMap::new(),
-                        launch_mode: "detached".into(),
-                        parameters: json!({}),
-                        project_context: ProjectContext::LocalPath {
-                            path: std::path::PathBuf::from("/tmp/p"),
-                        },
-                        project_authority: ryeos_state::objects::ExecutionProjectAuthority::pinned(
-                            "local:/tmp/p".to_string(),
-                            Some(std::path::PathBuf::from("/tmp/p")),
-                            "a".repeat(64),
-                            ryeos_state::objects::PinnedProjectRealization::Cow {
-                                terminal_publication:
-                                    ryeos_state::objects::PinnedTerminalPublication::Discard,
-                            },
-                            ryeos_state::objects::EnvironmentAuthority::None,
-                            Vec::new(),
-                        )
-                        .unwrap(),
-                        lifecycle_authority:
-                            ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
-                        stable_project_identity: Some(
-                            ryeos_app::launch_metadata::StableProjectIdentity::from_path(
-                                std::path::Path::new("/tmp/p"),
-                                "site:test",
-                            )
-                            .unwrap(),
-                        ),
-                        local_overlay_root: None,
-                        original_snapshot_hash: Some("a".repeat(64)),
-                        original_pushed_head_ref: None,
-                        state_root: None,
-                        current_site_id: "site:test".into(),
-                        origin_site_id: "site:test".into(),
-                        requested_by: EffectivePrincipal::Local(Principal {
-                            fingerprint: "fp".into(),
-                            scopes: vec![],
-                        }),
-                        execution_hints: ExecutionHints::default(),
-                        effective_caps: vec![],
-                        parent_delegation_caps: None,
-                        executor_ref: None,
-                        runtime_ref: None,
-                    }),
+        let sealed =
+            ryeos_app::thread_lifecycle::SealedRootExecutionRequest::
+                storage_test_fixture_with_project_identity(
+                    project_context.clone(),
+                    project_authority.clone(),
+                );
+        let signed_descriptor = |body: &str, seed: u8| {
+            let key = lillux::crypto::SigningKey::from_bytes(&[seed; 32]);
+            let document = lillux::signature::sign_content(body, &key, "#", None);
+            let header = lillux::signature::parse_signature_line(
+                document.lines().next().unwrap(),
+                "#",
+                None,
             )
             .unwrap();
+            (document, header.content_hash, header.signer_fingerprint)
+        };
+        let (runtime_document, runtime_hash, runtime_signer) =
+            signed_descriptor("runtime: fixture\n", 53);
+        let (protocol_document, protocol_hash, protocol_signer) =
+            signed_descriptor("protocol: fixture\n", 54);
+        let artifact_identity =
+            ryeos_state::objects::AdmittedLaunchArtifactIdentity::ManagedRuntime {
+                runtime_ref: sealed.runtime_ref().to_string(),
+                runtime_content_hash: runtime_hash,
+                runtime_signer_fingerprint: runtime_signer,
+                protocol_ref: "protocol:test/runtime".to_string(),
+                protocol_content_hash: protocol_hash,
+                protocol_signer_fingerprint: protocol_signer,
+                executor_ref: sealed.executor_ref().to_string(),
+                executor_content_hash: "c".repeat(64),
+                executor_bundle_manifest_hash: "d".repeat(64),
+                executor_bundle_signer_fingerprint: "3".repeat(64),
+            };
+        let execution_closure = ryeos_state::objects::AdmittedExecutionClosure::ManagedRuntime {
+            prepared_runtime_launch: json!({
+                "runtime_data": {},
+                "required_secrets": [],
+                "runtime_facts": {},
+                "binding_records": {},
+                "config_contributors": [],
+                "financial_authority": null,
+            }),
+            runtime_descriptor_document: runtime_document,
+            protocol_descriptor_document: protocol_document,
+            executor_blob_hash: "c".repeat(64),
+        };
+
+        let mut parent = make_create_params("P", "P");
+        parent.kind = "graph_run".to_string();
+        parent.item_ref = sealed.item_ref().to_string();
+        parent.executor_ref = sealed.executor_ref().to_string();
+        parent.launch_mode = "detached".to_string();
+        parent.requested_by = Some("session:test".to_string());
+        parent.project_root = Some(std::path::PathBuf::from("/tmp/p"));
+        parent.base_project_snapshot_hash = Some("a".repeat(64));
+        parent.project_authority = project_authority.clone();
+        parent.captured_history_policy = Some(sealed.captured_history_policy().clone());
+        let launch_metadata = RuntimeLaunchMetadata::default()
+            .with_native_resume(ryeos_engine::contracts::NativeResumeSpec::default())
+            .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::ManagedRuntime)
+            .with_resume_context(ResumeContext {
+                kind: "graph_run".into(),
+                item_ref: sealed.item_ref().to_string(),
+                ref_bindings: std::collections::BTreeMap::new(),
+                launch_mode: "detached".into(),
+                parameters: json!({}),
+                project_context,
+                project_authority: project_authority.clone(),
+                lifecycle_authority:
+                    ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE,
+                stable_project_identity: Some(
+                    ryeos_app::launch_metadata::StableProjectIdentity::from_path(
+                        std::path::Path::new("/tmp/p"),
+                        "site:test",
+                    )
+                    .unwrap(),
+                ),
+                local_overlay_root: None,
+                original_snapshot_hash: Some("a".repeat(64)),
+                original_pushed_head_ref: None,
+                state_root: None,
+                current_site_id: "site:test".into(),
+                origin_site_id: "site:test".into(),
+                requested_by: EffectivePrincipal::Local(Principal {
+                    fingerprint: "session:test".into(),
+                    scopes: vec![],
+                }),
+                execution_hints: Default::default(),
+                effective_caps: vec![],
+                parent_delegation_caps: None,
+                executor_ref: Some(sealed.executor_ref().to_string()),
+                runtime_ref: Some(sealed.runtime_ref().to_string()),
+            })
+            .with_admitted_artifact_identity(artifact_identity)
+            .with_admitted_execution_closure(execution_closure)
+            .with_sealed_root_request(sealed.clone());
+        state
+            .threads
+            .create_managed_root_for_test(&parent, &launch_metadata)
+            .unwrap();
+        state.threads.mark_running("P").unwrap();
+        let mut successor = new_successor_record("S", "P", Some("P"));
+        successor.kind = "graph_run".to_string();
+        successor.item_ref = sealed.item_ref().to_string();
+        successor.executor_ref = sealed.executor_ref().to_string();
+        successor.requested_by = Some("session:test".to_string());
+        successor.project_authority = project_authority;
         state
             .state_store
-            .create_follow_resume_successor(&new_successor_record("S", "P", Some("P")), "P", "P")
+            .create_follow_resume_successor(&successor, "P", "P")
             .unwrap();
         state.threads.mark_running("S").unwrap();
     }
@@ -3309,15 +3371,15 @@ mod tests {
         let (_tmp, state) = setup_app_state();
         state
             .threads
-            .create_thread_for_test(&make_create_params("Cfollow", "Cfollow"))
+            .create_thread_for_test(&make_create_params("T-Cfollow", "T-Cfollow"))
             .unwrap();
-        state.threads.mark_running("Cfollow").unwrap();
-        arm_waiting_follow(&state, "wk-aux", "Cfollow");
+        state.threads.mark_running("T-Cfollow").unwrap();
+        arm_waiting_follow(&state, "wk-aux", "T-Cfollow");
 
         // Auxiliary run riding the child's chain: own thread id, child's chain root.
         state
             .threads
-            .create_thread_for_test(&make_create_params("Kaux", "Cfollow"))
+            .create_thread_for_test(&make_create_params("Kaux", "T-Cfollow"))
             .unwrap();
         state.threads.mark_running("Kaux").unwrap();
         finalize_child(&state, "Kaux", "completed", Some(json!({ "positions": 1 })));
@@ -3346,7 +3408,12 @@ mod tests {
         );
 
         // The child's own terminal still settles the follow.
-        finalize_child(&state, "Cfollow", "completed", Some(json!({ "ok": true })));
+        finalize_child(
+            &state,
+            "T-Cfollow",
+            "completed",
+            Some(json!({ "ok": true })),
+        );
         let waiter = state
             .state_store
             .get_follow_waiter_by_key("wk-aux")
@@ -3359,7 +3426,7 @@ mod tests {
         );
         assert_eq!(
             waiter.children[0].terminal_thread_id.as_deref(),
-            Some("Cfollow"),
+            Some("T-Cfollow"),
             "the recorded terminal is the child, not the auxiliary"
         );
     }

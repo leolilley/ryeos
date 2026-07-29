@@ -524,7 +524,12 @@ fn build_project_tree(
 ) -> Result<ProjectTree> {
     let matcher = policy.matcher()?;
     let mut files = BTreeMap::new();
-    project_root.visit_regular_files(
+    let mut descriptor_bytes = 0_u64;
+    project_root.visit_regular_files_bounded(
+        lillux::DirectoryTraversalBudget::new(
+            ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
+            ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
+        ),
         |relative, _is_directory| {
             let rel = canonical_relative_path(relative)?;
             Ok(
@@ -533,6 +538,12 @@ fn build_project_tree(
             )
         },
         |relative, file| {
+            if files.len() >= ryeos_state::project_sync::MAX_PROJECT_TREE_FILES {
+                anyhow::bail!(
+                    "project snapshot exceeds {} regular files",
+                    ryeos_state::project_sync::MAX_PROJECT_TREE_FILES
+                );
+            }
             let rel = canonical_relative_path(relative)?;
             ryeos_state::project_sync::validate_project_manifest_path(
                 &rel,
@@ -547,8 +558,26 @@ fn build_project_tree(
                 size: blob.size,
                 normalized_mode: blob.normalized_mode,
             };
+            project_file.validate()?;
+            let object_bytes = lillux::canonical_json(&project_file.to_value())?.len() as u64;
+            descriptor_bytes = descriptor_bytes
+                .checked_add(object_bytes)
+                .and_then(|total| total.checked_add(rel.len() as u64))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("project snapshot descriptor byte count overflow")
+                })?;
+            if descriptor_bytes
+                > ryeos_state::project_materialization::MAX_PROJECT_TREE_DESCRIPTOR_BYTES
+            {
+                anyhow::bail!(
+                    "project snapshot exceeds {} descriptor bytes",
+                    ryeos_state::project_materialization::MAX_PROJECT_TREE_DESCRIPTOR_BYTES
+                );
+            }
             let file_hash = ctx.cas.store_object(&project_file.to_value())?;
-            files.insert(rel, file_hash);
+            if files.insert(rel.clone(), file_hash).is_some() {
+                anyhow::bail!("duplicate canonical project path during snapshot: {rel}");
+            }
             Ok(())
         },
     )?;

@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T23:40:19Z:8e6bab687751899f07eed60213093af81a5660f1ffb7be53be89b658d5a014a9:+KuRhSMlm3Ke+NSrksFQamTAYhWiRnTXyBKzfnSB4ze0mczkKPx6QAbOHsQ6trBRYReDlTXDwV/fsV7XLlOyBA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-28T15:40:40Z:9778bf3e953ecf9721caeb4a51f69779c5fec56155447841e38b12594800eb53:/8TW/EKYzCScCf/AutUlFNHD8CC6Ugc39F87/hia8nE+06P007OQyCETQ9kSTHNXbmIpSVMvW9vBho77cyN+Bw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 category: "ryeos/core/runtimes/python"
 version: "1.0.0"
 executor_id: "@subprocess"
@@ -66,13 +66,13 @@ config:
             raise SystemExit(f"RyeOS Python runtime: tool is not under .ai/tools: {tool_path}")
 
         rel = tool_path.relative_to(tools_root)
-        if len(rel.parts) < 2:
+        if not rel.parts:
             raise SystemExit(f"RyeOS Python runtime: invalid tool path under .ai/tools: {tool_path}")
 
-        bundle_tool_root = tools_root / rel.parts[0]
+        tool_namespace_root = tools_root / rel.parts[0] if len(rel.parts) > 1 else tools_root
         tool_dir = tool_path.parent
 
-        for path in reversed([tool_dir, bundle_tool_root, bundle_tool_root / "lib", runtime_lib]):
+        for path in reversed([tool_dir, tool_namespace_root, tool_namespace_root / "lib", runtime_lib]):
             prepend(path)
 
         sys.argv = [str(tool_path), "--project-path", project_path]

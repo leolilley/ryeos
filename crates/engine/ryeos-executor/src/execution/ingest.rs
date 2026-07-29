@@ -18,7 +18,12 @@ pub fn ingest_project_tree(
     let matcher = policy.matcher()?;
     let cas = authority.cas_store()?;
     let mut files = std::collections::BTreeMap::new();
-    project_root.visit_regular_files(
+    let mut descriptor_bytes = 0_u64;
+    project_root.visit_regular_files_bounded(
+        lillux::DirectoryTraversalBudget::new(
+            ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
+            ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
+        ),
         |relative, is_directory| {
             let rel = canonical_relative_path(relative)?;
             if ryeos_state::project_sync::is_project_snapshot_floor_excluded(&rel)
@@ -36,6 +41,12 @@ pub fn ingest_project_tree(
             Ok(false)
         },
         |relative, file| {
+            if files.len() >= ryeos_state::project_sync::MAX_PROJECT_TREE_FILES {
+                anyhow::bail!(
+                    "project capture exceeds {} regular files",
+                    ryeos_state::project_sync::MAX_PROJECT_TREE_FILES
+                );
+            }
             let rel = canonical_relative_path(relative)?;
             ryeos_state::project_sync::validate_project_manifest_path(
                 &rel,
@@ -50,6 +61,19 @@ pub fn ingest_project_tree(
                 normalized_mode: streamed.normalized_mode,
             };
             project_file.validate()?;
+            let object_bytes = lillux::canonical_json(&project_file.to_value())?.len() as u64;
+            descriptor_bytes = descriptor_bytes
+                .checked_add(object_bytes)
+                .and_then(|total| total.checked_add(rel.len() as u64))
+                .ok_or_else(|| anyhow::anyhow!("project capture descriptor byte count overflow"))?;
+            if descriptor_bytes
+                > ryeos_state::project_materialization::MAX_PROJECT_TREE_DESCRIPTOR_BYTES
+            {
+                anyhow::bail!(
+                    "project capture exceeds {} descriptor bytes",
+                    ryeos_state::project_materialization::MAX_PROJECT_TREE_DESCRIPTOR_BYTES
+                );
+            }
             let file_hash = cas.store_object(&project_file.to_value())?;
             if files.insert(rel.clone(), file_hash).is_some() {
                 anyhow::bail!("duplicate canonical project path during capture: {rel}");
@@ -84,10 +108,8 @@ pub fn materialize_project_file(
 ) -> Result<()> {
     authority.ensure_guard(guard)?;
     let cas = authority.cas_store()?;
-    let object = cas
-        .get_object(object_hash)?
+    let file = ryeos_state::project_materialization::load_project_file_bounded(&cas, object_hash)?
         .ok_or_else(|| anyhow::anyhow!("project_file object {object_hash} not found"))?;
-    let file = ProjectFile::from_value(&object)?;
     let size =
         cas.materialize_blob_to_new_file(&file.blob_hash, target_path, file.normalized_mode)?;
     if size != file.size {

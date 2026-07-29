@@ -4218,6 +4218,7 @@ owner = "ryeos-dev"
             vec![bundle_root()],
             std::path::Path::new("/nonexistent-operator-trust"),
         )
+        .unwrap()
     }
 
     /// Resolve a provider+model through the real strict loader for adapter fixtures.

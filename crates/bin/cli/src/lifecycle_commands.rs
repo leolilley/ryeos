@@ -414,7 +414,13 @@ fn run_node_gc_command(argv: &[String], console: &crate::tty::Console) -> Result
             "chain/recovery artifacts",
             (report.chain_ref_artifacts + report.pending_transitions).to_string(),
         ),
-        crate::tty::Row::key_value("runtime rows", report.runtime_rows.total_rows().to_string()),
+        crate::tty::Row::key_value(
+            "runtime rows",
+            report.runtime_rows.total_rows().map_or_else(
+                || "unavailable (incompatible schema)".to_string(),
+                |rows| rows.to_string(),
+            ),
+        ),
         crate::tty::Row::key_value(
             "thread runtime artifacts",
             report.thread_runtime_artifacts.to_string(),

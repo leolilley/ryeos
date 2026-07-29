@@ -37,6 +37,9 @@ pub struct ObjectClosureReport {
     pub malformed_objects: Vec<MalformedObject>,
     /// Objects with a kind this collector does not know how to traverse.
     pub unsupported_objects: Vec<UnsupportedObjectKind>,
+    /// Typed outer-schema mismatches retained for fail-closed callers that
+    /// must distinguish a clean-cut epoch boundary from malformed content.
+    incompatible_current_schemas: Vec<crate::objects::IncompatibleCurrentObjectSchema>,
 }
 
 impl ObjectClosureReport {
@@ -45,6 +48,15 @@ impl ObjectClosureReport {
             && self.missing_blobs.is_empty()
             && self.malformed_objects.is_empty()
             && self.unsupported_objects.is_empty()
+    }
+
+    pub(crate) fn decisive_incompatible_current_schema(
+        &self,
+    ) -> Option<&crate::objects::IncompatibleCurrentObjectSchema> {
+        self.incompatible_current_schemas
+            .iter()
+            .find(|mismatch| !mismatch.is_predecessor())
+            .or_else(|| self.incompatible_current_schemas.first())
     }
 }
 
@@ -620,10 +632,18 @@ fn collect_object_closure_from_source(
             continue;
         }
 
-        if let Err(reason) = validate_current_object(&value) {
-            report
-                .malformed_objects
-                .push(MalformedObject { hash, reason });
+        if let Err(error) = validate_current_object(&value) {
+            if let Some(mismatch) = error.chain().find_map(|cause| {
+                cause
+                    .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+                    .cloned()
+            }) {
+                report.incompatible_current_schemas.push(mismatch);
+            }
+            report.malformed_objects.push(MalformedObject {
+                hash,
+                reason: format!("{error:#}"),
+            });
             continue;
         }
 
@@ -920,13 +940,16 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                     "admitted_launch_capsule missing project_authority object".to_string()
                 })?;
             if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
-                push_required_object_edge(
-                    &Value::Object(project_authority.clone()),
-                    "snapshot_hash",
-                    ExpectedObject::Kind("project_snapshot"),
-                    None,
-                    &mut edges,
-                )?;
+                let authority = Value::Object(project_authority.clone());
+                for field in ["base_snapshot_hash", "snapshot_hash"] {
+                    push_required_object_edge(
+                        &authority,
+                        field,
+                        ExpectedObject::Kind("project_snapshot"),
+                        None,
+                        &mut edges,
+                    )?;
+                }
             }
         }
         "thread_event" => {
@@ -1084,11 +1107,11 @@ fn push_typed_hash(
 /// invariant checks as its authoritative reader. Link extraction alone is not
 /// validation: it must not make an old-schema or partially typed object a GC
 /// root merely because a few hash-shaped fields can be found.
-fn validate_current_object(value: &Value) -> Result<(), String> {
+fn validate_current_object(value: &Value) -> anyhow::Result<()> {
     let kind = value
         .get("kind")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing object kind".to_string())?;
+        .ok_or_else(|| anyhow::anyhow!("missing object kind"))?;
     let result: anyhow::Result<()> = match kind {
         "attestation" => crate::objects::Attestation::from_value(value).map(|_| ()),
         "chain_state" => serde_json::from_value::<crate::objects::ChainState>(value.clone())
@@ -1120,7 +1143,7 @@ fn validate_current_object(value: &Value) -> Result<(), String> {
         "item_source" => crate::objects::ItemSource::from_value(value).map(|_| ()),
         _ => return Ok(()),
     };
-    result.map_err(|error| format!("invalid {kind} object: {error:#}"))
+    result.with_context(|| format!("invalid {kind} object"))
 }
 
 /// Extract schema-defined links from one CAS object value.
@@ -1171,11 +1194,10 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
                     "admitted_launch_capsule missing project_authority object".to_string()
                 })?;
             if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
-                push_required_hash(
-                    &Value::Object(project_authority.clone()),
-                    "snapshot_hash",
-                    &mut links.object_hashes,
-                )?;
+                let authority = Value::Object(project_authority.clone());
+                for field in ["base_snapshot_hash", "snapshot_hash"] {
+                    push_required_hash(&authority, field, &mut links.object_hashes)?;
+                }
             }
             let execution_closure = value
                 .get("execution_closure")
@@ -1586,6 +1608,35 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(links.blob_hashes, vec![executable_blob_hash]);
+    }
+
+    #[test]
+    fn admitted_pinned_cow_capsule_reaches_base_and_operational_generations() {
+        let base_snapshot_hash = h("ba");
+        let operational_snapshot_hash = h("cd");
+        let links = object_links(&json!({
+            "kind": "admitted_launch_capsule",
+            "project_authority": {
+                "kind": "pinned_generation",
+                "base_snapshot_hash": base_snapshot_hash,
+                "snapshot_hash": operational_snapshot_hash
+            },
+            "execution_closure": {
+                "driver": "direct_item_executor",
+                "execution_plan": {},
+                "protocol_descriptor_document": "# signed",
+                "command": {
+                    "authority": {
+                        "executable_identity": {
+                            "blob_hash": h("de")
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(links.object_hashes.contains(&base_snapshot_hash));
+        assert!(links.object_hashes.contains(&operational_snapshot_hash));
     }
 
     #[test]

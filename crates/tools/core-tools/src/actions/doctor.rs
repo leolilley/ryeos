@@ -368,6 +368,7 @@ fn check_imports(
         project_context: ProjectContext::LocalPath {
             path: project_path.clone(),
         },
+        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: "site:doctor".into(),
         origin_site_id: "site:doctor".into(),
         execution_hints: Default::default(),

@@ -5,11 +5,139 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+
+/// Digest exactly the admitted number of bytes from an already-open regular
+/// inode and prove its descriptor identity remained stable.
+///
+/// The size check happens before body I/O, so replacing an admitted file with
+/// a huge or sparse file cannot make verification perform work beyond the
+/// sealed file size. A one-byte sentinel still detects growth during the read.
+pub fn digest_open_regular_file_stable_exact(
+    file: &mut File,
+    expected_bytes: u64,
+) -> Result<(String, std::fs::Metadata)> {
+    for attempt in 0..2 {
+        let before = file.metadata()?;
+        if before.len() != expected_bytes {
+            anyhow::bail!(
+                "regular file size {} differs from admitted size {expected_bytes}",
+                before.len()
+            );
+        }
+        let digest = digest_open_regular_file_exact(file, expected_bytes)?;
+        let after = file.metadata()?;
+        if after.len() == expected_bytes && same_regular_file_observation(&before, &after) {
+            return Ok((digest, after));
+        }
+        if attempt == 1 {
+            anyhow::bail!("regular file changed repeatedly while its content was being verified");
+        }
+    }
+    unreachable!("bounded stable exact-digest loop always returns")
+}
+
+/// Normalize one descriptor-observed regular file to RyeOS's portable
+/// project-snapshot mode contract. OS-specific permission inspection remains
+/// inside Lillux; callers consume only the stable 0o644/0o755 result.
+pub fn normalized_portable_regular_mode(metadata: &std::fs::Metadata) -> Result<u32> {
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        anyhow::bail!("portable regular-file mode inspection is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if !metadata.file_type().is_file() {
+            anyhow::bail!("portable mode source is not a regular file");
+        }
+        Ok(if metadata.permissions().mode() & 0o111 == 0 {
+            0o644
+        } else {
+            0o755
+        })
+    }
+}
+
+/// Match raw descriptor observations against one exact regular-file contract.
+///
+/// OS file-type bits and permission masks are Lillux vocabulary. Higher
+/// layers supply the observed descriptor facts and their content-addressed
+/// expectations without interpreting platform constants themselves.
+pub fn matches_regular_file_identity(
+    observed_size: u64,
+    observed_mode: u32,
+    observed_file_type: u32,
+    expected_size: u64,
+    expected_mode: u32,
+) -> bool {
+    #[cfg(not(unix))]
+    {
+        let _ = (
+            observed_size,
+            observed_mode,
+            observed_file_type,
+            expected_size,
+            expected_mode,
+        );
+        false
+    }
+    #[cfg(unix)]
+    {
+        observed_size == expected_size
+            && observed_file_type == libc::S_IFREG
+            && observed_mode & 0o7777 == expected_mode
+    }
+}
+
+fn same_regular_file_observation(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        before.dev() == after.dev()
+            && before.ino() == after.ino()
+            && before.len() == after.len()
+            && before.mode() == after.mode()
+            && before.mtime() == after.mtime()
+            && before.mtime_nsec() == after.mtime_nsec()
+            && before.ctime() == after.ctime()
+            && before.ctime_nsec() == after.ctime_nsec()
+    }
+    #[cfg(not(unix))]
+    {
+        before.len() == after.len()
+            && before.permissions().readonly() == after.permissions().readonly()
+            && before.modified().ok() == after.modified().ok()
+    }
+}
+
+fn digest_open_regular_file_exact(file: &mut File, expected_bytes: u64) -> Result<String> {
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut digest = sha2::Sha256::new();
+    use sha2::Digest as _;
+    let mut buffer = [0_u8; 1024 * 1024];
+    let mut remaining = expected_bytes;
+    while remaining > 0 {
+        let requested = usize::try_from(remaining.min(buffer.len() as u64))
+            .expect("bounded digest chunk always fits usize");
+        let read = file.read(&mut buffer[..requested])?;
+        if read == 0 {
+            anyhow::bail!("regular file ended before admitted size {expected_bytes} was consumed");
+        }
+        digest.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    let mut sentinel = [0_u8; 1];
+    if file.read(&mut sentinel)? != 0 {
+        anyhow::bail!("regular file grew beyond admitted size {expected_bytes}");
+    }
+    Ok(format!("{:x}", digest.finalize()))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinnedEntryType {
@@ -256,6 +384,29 @@ fn directory_names_bounded(
 }
 
 #[cfg(target_os = "linux")]
+fn directory_names_with_limit(
+    directory: &File,
+    max_entries: usize,
+) -> Result<Vec<std::ffi::OsString>> {
+    let fd_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+    let entries = std::fs::read_dir(&fd_path)
+        .with_context(|| format!("enumerate pinned directory {}", fd_path.display()))?;
+    let read_limit = max_entries.saturating_add(1);
+    let mut names = entries
+        .take(read_limit)
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    if names.len() > max_entries {
+        anyhow::bail!(
+            "secure directory traversal exceeds maximum entry count {max_entries} at {}",
+            fd_path.display()
+        );
+    }
+    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    Ok(names)
+}
+
+#[cfg(target_os = "linux")]
 fn directory_names(directory: &File) -> Result<Vec<std::ffi::OsString>> {
     directory_names_bounded(directory, None)
 }
@@ -282,6 +433,71 @@ pub struct PinnedRegularFile {
     pub path: PathBuf,
     pub name: OsString,
     pub file: File,
+}
+
+/// Hard limits for one descriptor-relative directory traversal.
+///
+/// `max_entries` counts every observed child name, including directories and
+/// entries later pruned by the caller. `max_depth` counts descendant directory
+/// components below the opened root. The budget is enforced before a
+/// directory's names are retained or a child directory is entered, so caller
+/// callbacks are not the resource boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectoryTraversalBudget {
+    pub max_entries: usize,
+    pub max_depth: usize,
+}
+
+#[cfg(unix)]
+struct DirectoryTraversalState {
+    remaining_entries: usize,
+    max_depth: usize,
+}
+
+impl DirectoryTraversalBudget {
+    pub const fn new(max_entries: usize, max_depth: usize) -> Self {
+        Self {
+            max_entries,
+            max_depth,
+        }
+    }
+}
+
+/// Apply an exact portable mode to one already-opened regular-file inode.
+///
+/// Authority-sensitive callers use this after create because the process
+/// umask may narrow the creation mode. The descriptor, rather than a pathname,
+/// remains the mutation authority throughout.
+pub fn set_open_regular_file_mode(file: &File, mode: u32) -> Result<()> {
+    #[cfg(not(unix))]
+    {
+        let _ = (file, mode);
+        anyhow::bail!("descriptor-relative regular-file permissions are unavailable")
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        if mode & !0o777 != 0 {
+            anyhow::bail!("regular-file mode contains non-portable bits: {mode:#o}");
+        }
+        let before = file.metadata()?;
+        if !before.file_type().is_file() {
+            anyhow::bail!("permission target is not a regular file");
+        }
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("set descriptor-relative regular-file permissions");
+        }
+        let after = file.metadata()?;
+        if !after.file_type().is_file() || after.mode() & 0o7777 != mode {
+            anyhow::bail!(
+                "descriptor-relative regular-file mode is {:#o}, expected {mode:#o}",
+                after.mode() & 0o7777
+            );
+        }
+        Ok(())
+    }
 }
 
 /// RAII advisory lock for a pinned directory inode. Directory-scoped writers
@@ -584,9 +800,47 @@ impl PinnedDirectory {
             &self.path,
             Path::new(""),
             &self.directory,
+            None,
+            0,
             &mut prune,
             &mut visit,
         )
+    }
+
+    /// Bounded form of [`Self::visit_regular_files`]. The traversal budget is
+    /// enforced inside Lillux and counts directories, regular files, pruned
+    /// entries, and unsupported entries alike.
+    pub fn visit_regular_files_bounded<P, V>(
+        &self,
+        budget: DirectoryTraversalBudget,
+        mut prune: P,
+        mut visit: V,
+    ) -> Result<()>
+    where
+        P: FnMut(&Path, bool) -> Result<bool>,
+        V: FnMut(&Path, File) -> Result<()>,
+    {
+        #[cfg(not(unix))]
+        {
+            let _ = (budget, &mut prune, &mut visit);
+            anyhow::bail!("descriptor-relative traversal is unavailable on this platform")
+        }
+        #[cfg(unix)]
+        {
+            let mut state = DirectoryTraversalState {
+                remaining_entries: budget.max_entries,
+                max_depth: budget.max_depth,
+            };
+            visit_from_open_directory(
+                &self.path,
+                Path::new(""),
+                &self.directory,
+                Some(&mut state),
+                0,
+                &mut prune,
+                &mut visit,
+            )
+        }
     }
 
     /// Enumerate immediate children from the pinned directory descriptor and
@@ -2127,54 +2381,53 @@ fn directory_names(_directory: &File) -> Result<Vec<std::ffi::OsString>> {
     anyhow::bail!("secure descriptor-relative directory walking is unavailable on this platform")
 }
 
-/// Open and read an existing regular file without following any path
-/// component. Missing files are errors; callers with optional semantics should
-/// establish absence separately from their typed namespace contract.
-pub fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>> {
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-        anyhow::bail!("secure no-follow file reading is unavailable on this platform");
-    }
-    #[cfg(unix)]
-    {
-        let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let directory = open_directory_no_follow(parent)?.ok_or_else(|| {
-            anyhow::anyhow!("secure file parent does not exist: {}", parent.display())
-        })?;
-        let name = path
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("secure file path has no filename"))?;
-        let name = std::ffi::CString::new(name.as_bytes())?;
-        let mut file = open_regular_at(&directory, &name, path)?
-            .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))?;
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        Ok(bytes)
-    }
+#[cfg(all(unix, not(target_os = "linux")))]
+fn directory_names_with_limit(
+    _directory: &File,
+    _max_entries: usize,
+) -> Result<Vec<std::ffi::OsString>> {
+    anyhow::bail!("secure descriptor-relative directory walking is unavailable on this platform")
 }
 
-/// Open an existing regular file without following links and refuse to read
-/// more than `max_bytes`. The limit is enforced against both metadata and the
-/// bytes actually read from the pinned descriptor.
-pub fn read_regular_file_bounded_no_follow(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+/// Open and read an optional regular file without following any path
+/// component.
+///
+/// `Ok(None)` is returned only when the file or one of its parent directories
+/// does not exist. Symlinks, special files, and unsafe path components are
+/// errors rather than absence. The returned bytes come from the descriptor
+/// opened by the same no-follow observation, so callers do not need a
+/// pathname metadata check followed by a separate read.
+pub fn read_optional_regular_file_no_follow(path: &Path) -> Result<Option<Vec<u8>>> {
+    read_optional_regular_file_bounded_no_follow(path, u64::MAX)
+}
+
+/// Open an optional regular file without following links and refuse to read
+/// more than `max_bytes`. Missing files or parents return `Ok(None)`;
+/// oversized or non-regular inputs are errors.
+pub fn read_optional_regular_file_bounded_no_follow(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>> {
     #[cfg(not(unix))]
     {
         let _ = (path, max_bytes);
-        anyhow::bail!("secure bounded no-follow file reading is unavailable on this platform");
+        anyhow::bail!(
+            "secure optional bounded no-follow file reading is unavailable on this platform"
+        );
     }
     #[cfg(unix)]
     {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let directory = open_directory_no_follow(parent)?.ok_or_else(|| {
-            anyhow::anyhow!("secure file parent does not exist: {}", parent.display())
-        })?;
+        let Some(directory) = open_directory_no_follow(parent)? else {
+            return Ok(None);
+        };
         let name = path
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("secure file path has no filename"))?;
         let name = std::ffi::CString::new(name.as_bytes())?;
-        let mut file = open_regular_at(&directory, &name, path)?
-            .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))?;
+        let Some(mut file) = open_regular_at(&directory, &name, path)? else {
+            return Ok(None);
+        };
         let metadata = file.metadata()?;
         if metadata.len() > max_bytes {
             anyhow::bail!("secure file exceeds {max_bytes} bytes: {}", path.display());
@@ -2186,8 +2439,145 @@ pub fn read_regular_file_bounded_no_follow(path: &Path, max_bytes: u64) -> Resul
         if bytes.len() as u64 > max_bytes {
             anyhow::bail!("secure file exceeds {max_bytes} bytes: {}", path.display());
         }
-        Ok(bytes)
+        Ok(Some(bytes))
     }
+}
+
+/// Classify one optional filesystem entry without following any path
+/// component or the final entry.
+///
+/// Missing parents/final entries return `Ok(None)`. Callers can distinguish a
+/// real regular file from directories, links, and special files without a
+/// pathname metadata/read race.
+pub fn inspect_optional_entry_no_follow(path: &Path) -> Result<Option<PinnedEntryType>> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        anyhow::bail!("secure optional entry inspection is unavailable on this platform");
+    }
+    #[cfg(unix)]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let Some(directory) = open_directory_no_follow(parent)? else {
+            return Ok(None);
+        };
+        let name = path
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("secure entry path has no filename"))?;
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe {
+            libc::fstatat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                &mut stat,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } != 0
+        {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| format!("inspect secure entry {}", path.display()));
+        }
+        let entry_type = match stat.st_mode & libc::S_IFMT {
+            libc::S_IFDIR => PinnedEntryType::Directory,
+            libc::S_IFREG => PinnedEntryType::Regular,
+            libc::S_IFLNK => PinnedEntryType::Symlink,
+            libc::S_IFCHR => PinnedEntryType::CharacterDevice,
+            libc::S_IFBLK => PinnedEntryType::BlockDevice,
+            libc::S_IFIFO => PinnedEntryType::Fifo,
+            libc::S_IFSOCK => PinnedEntryType::Socket,
+            _ => PinnedEntryType::Other,
+        };
+        Ok(Some(entry_type))
+    }
+}
+
+/// Open and read an existing regular file without following any path
+/// component. Missing files are errors.
+pub fn read_regular_file_no_follow(path: &Path) -> Result<Vec<u8>> {
+    read_optional_regular_file_no_follow(path)?
+        .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))
+}
+
+/// Open an existing regular file without following links and refuse to read
+/// more than `max_bytes`. The limit is enforced against both metadata and the
+/// bytes actually read from the pinned descriptor.
+pub fn read_regular_file_bounded_no_follow(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    read_optional_regular_file_bounded_no_follow(path, max_bytes)?
+        .ok_or_else(|| anyhow::anyhow!("secure file does not exist: {}", path.display()))
+}
+
+/// Read one already-open regular-file descriptor under an exact byte bound.
+///
+/// Directory walkers use this to keep descriptor-relative observation and
+/// allocation limits inside the Lillux OS boundary.
+pub fn read_open_regular_file_bounded(mut file: File, max_bytes: u64) -> Result<Vec<u8>> {
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        anyhow::bail!("open descriptor is not a regular file");
+    }
+    if metadata.len() > max_bytes {
+        anyhow::bail!("open regular file exceeds {max_bytes} bytes");
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(metadata.len()).unwrap_or(0));
+    std::io::Read::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        anyhow::bail!("open regular file exceeds {max_bytes} bytes");
+    }
+    Ok(bytes)
+}
+
+/// Read an already-open regular file whose descriptor length was observed by
+/// the caller before reserving memory.
+///
+/// The allocation is exactly `expected_bytes + 1`: the sentinel byte closes a
+/// concurrent-growth race without allowing `read_to_end` to grow the vector
+/// beyond the caller's reservation. The descriptor identity and metadata must
+/// remain stable across the read, and the sentinel must remain unused.
+pub fn read_open_regular_file_exact_bounded(
+    mut file: File,
+    expected_bytes: u64,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    if expected_bytes > max_bytes {
+        anyhow::bail!("expected regular-file length {expected_bytes} exceeds {max_bytes} bytes");
+    }
+    let before = file.metadata()?;
+    if !before.file_type().is_file() {
+        anyhow::bail!("open descriptor is not a regular file");
+    }
+    if before.len() != expected_bytes {
+        anyhow::bail!(
+            "open regular-file length is {}, expected {expected_bytes}",
+            before.len()
+        );
+    }
+    let allocation_bytes = expected_bytes
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("regular-file sentinel allocation overflow"))?;
+    let capacity = usize::try_from(allocation_bytes)
+        .context("regular-file sentinel allocation does not fit this platform")?;
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    std::io::Read::by_ref(&mut file)
+        .take(allocation_bytes)
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).ok() != Some(expected_bytes) {
+        anyhow::bail!(
+            "open regular-file length changed while reading (expected {expected_bytes}, read {})",
+            bytes.len()
+        );
+    }
+    let after = file.metadata()?;
+    if !same_regular_file_observation(&before, &after) {
+        anyhow::bail!("open regular-file identity or metadata changed while reading");
+    }
+    Ok(bytes)
 }
 
 /// UTF-8 variant of [`read_regular_file_no_follow`].
@@ -2268,7 +2658,55 @@ where
         let Some(directory) = open_directory_no_follow(root)? else {
             return Ok(false);
         };
-        visit_from_open_directory(root, Path::new(""), &directory, &mut prune, &mut visit)?;
+        visit_from_open_directory(
+            root,
+            Path::new(""),
+            &directory,
+            None,
+            0,
+            &mut prune,
+            &mut visit,
+        )?;
+        Ok(true)
+    }
+}
+
+/// Bounded form of [`visit_regular_files_no_follow`]. Missing roots return
+/// `false`; present roots fail before exceeding the supplied entry/depth
+/// budget.
+pub fn visit_regular_files_no_follow_bounded<P, V>(
+    root: &Path,
+    budget: DirectoryTraversalBudget,
+    mut prune: P,
+    mut visit: V,
+) -> Result<bool>
+where
+    P: FnMut(&Path, bool) -> Result<bool>,
+    V: FnMut(&Path, File) -> Result<()>,
+{
+    #[cfg(not(unix))]
+    {
+        let _ = (root, budget, &mut prune, &mut visit);
+        anyhow::bail!("secure no-follow directory walking is unavailable on this platform")
+    }
+    #[cfg(unix)]
+    {
+        let Some(directory) = open_directory_no_follow(root)? else {
+            return Ok(false);
+        };
+        let mut state = DirectoryTraversalState {
+            remaining_entries: budget.max_entries,
+            max_depth: budget.max_depth,
+        };
+        visit_from_open_directory(
+            root,
+            Path::new(""),
+            &directory,
+            Some(&mut state),
+            0,
+            &mut prune,
+            &mut visit,
+        )?;
         Ok(true)
     }
 }
@@ -2278,6 +2716,8 @@ fn visit_from_open_directory<P, V>(
     root: &Path,
     relative_directory: &Path,
     directory: &File,
+    mut budget: Option<&mut DirectoryTraversalState>,
+    depth: usize,
     prune: &mut P,
     visit: &mut V,
 ) -> Result<()>
@@ -2285,13 +2725,37 @@ where
     P: FnMut(&Path, bool) -> Result<bool>,
     V: FnMut(&Path, File) -> Result<()>,
 {
-    for name in directory_names(directory)? {
+    let names = if let Some(state) = budget.as_deref_mut() {
+        let names = directory_names_with_limit(directory, state.remaining_entries)?;
+        state.remaining_entries = state.remaining_entries.saturating_sub(names.len());
+        names
+    } else {
+        directory_names(directory)?
+    };
+    for name in names {
         let relative = relative_directory.join(&name);
         let display = root.join(&relative);
         let name_c = std::ffi::CString::new(name.as_bytes())?;
         if let Some(child_directory) = open_child_directory(directory, &name_c, &display)? {
             if !prune(&relative, true)? {
-                visit_from_open_directory(root, &relative, &child_directory, prune, visit)?;
+                if let Some(state) = budget.as_ref() {
+                    if depth >= state.max_depth {
+                        anyhow::bail!(
+                            "secure directory traversal exceeds maximum depth {} at {}",
+                            state.max_depth,
+                            display.display()
+                        );
+                    }
+                }
+                visit_from_open_directory(
+                    root,
+                    &relative,
+                    &child_directory,
+                    budget.as_deref_mut(),
+                    depth.saturating_add(1),
+                    prune,
+                    visit,
+                )?;
             }
             continue;
         }
@@ -2424,6 +2888,77 @@ fn restore_quarantined_regular(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_exact_digest_rejects_size_drift_before_body_work() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("value");
+        std::fs::write(&path, b"exact").unwrap();
+        let mut file = File::open(&path).unwrap();
+        let (digest, metadata) =
+            digest_open_regular_file_stable_exact(&mut file, b"exact".len() as u64).unwrap();
+        assert_eq!(digest, crate::sha256_hex(b"exact"));
+        assert_eq!(metadata.len(), b"exact".len() as u64);
+
+        let mut file = File::open(&path).unwrap();
+        assert!(digest_open_regular_file_stable_exact(&mut file, 1).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn optional_no_follow_file_contract_covers_absence_links_and_special_entries() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let regular = root.path().join("regular");
+        std::fs::write(&regular, b"value").unwrap();
+        assert_eq!(
+            read_optional_regular_file_no_follow(&regular).unwrap(),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            read_optional_regular_file_no_follow(&root.path().join("missing")).unwrap(),
+            None
+        );
+        assert_eq!(
+            read_optional_regular_file_no_follow(&root.path().join("missing-parent/value"))
+                .unwrap(),
+            None
+        );
+
+        let final_link = root.path().join("final-link");
+        symlink(&regular, &final_link).unwrap();
+        assert!(read_optional_regular_file_no_follow(&final_link).is_err());
+        assert_eq!(
+            inspect_optional_entry_no_follow(&final_link).unwrap(),
+            Some(PinnedEntryType::Symlink)
+        );
+
+        let real_parent = root.path().join("real-parent");
+        std::fs::create_dir(&real_parent).unwrap();
+        std::fs::write(real_parent.join("value"), b"nested").unwrap();
+        let parent_link = root.path().join("parent-link");
+        symlink(&real_parent, &parent_link).unwrap();
+        assert!(read_optional_regular_file_no_follow(&parent_link.join("value")).is_err());
+        assert!(inspect_optional_entry_no_follow(&parent_link.join("value")).is_err());
+
+        let directory = root.path().join("directory");
+        std::fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            inspect_optional_entry_no_follow(&directory).unwrap(),
+            Some(PinnedEntryType::Directory)
+        );
+        assert!(read_optional_regular_file_no_follow(&directory).is_err());
+
+        let fifo = root.path().join("fifo");
+        let fifo_c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+        assert_eq!(
+            inspect_optional_entry_no_follow(&fifo).unwrap(),
+            Some(PinnedEntryType::Fifo)
+        );
+        assert!(read_optional_regular_file_no_follow(&fifo).is_err());
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -2719,6 +3254,168 @@ mod tests {
 
         assert_eq!(names.len(), 3);
         assert!(names.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_regular_file_walk_accepts_the_exact_total_and_depth_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("root"), b"root").unwrap();
+        std::fs::write(dir.path().join("nested/leaf"), b"leaf").unwrap();
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let mut visited = Vec::new();
+
+        pinned
+            .visit_regular_files_bounded(
+                DirectoryTraversalBudget::new(3, 1),
+                |_relative, _directory| Ok(false),
+                |relative, _file| {
+                    visited.push(relative.to_path_buf());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        visited.sort();
+        assert_eq!(
+            visited,
+            vec![PathBuf::from("nested/leaf"), PathBuf::from("root")]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_regular_file_walk_counts_nested_and_pruned_entries_before_callbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["a", "b", "c"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+        }
+        let pinned = PinnedDirectory::open(dir.path()).unwrap().unwrap();
+        let mut callbacks = 0_usize;
+
+        let error = pinned
+            .visit_regular_files_bounded(
+                DirectoryTraversalBudget::new(2, 8),
+                |_relative, _directory| {
+                    callbacks += 1;
+                    Ok(true)
+                },
+                |_relative, _file| Ok(()),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("maximum entry count 2"), "{error}");
+        assert_eq!(callbacks, 0, "overflow must be rejected before callbacks");
+
+        std::fs::remove_dir_all(dir.path().join("c")).unwrap();
+        std::fs::write(dir.path().join("a/leaf"), b"leaf").unwrap();
+        let error = pinned
+            .visit_regular_files_bounded(
+                DirectoryTraversalBudget::new(2, 8),
+                |_relative, _directory| Ok(false),
+                |_relative, _file| Ok(()),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("maximum entry count 0"), "{error}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_regular_file_walk_rejects_depth_symlinks_and_special_entries() {
+        use std::os::unix::ffi::OsStrExt as _;
+        use std::os::unix::fs::symlink;
+
+        let deep = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(deep.path().join("one/two")).unwrap();
+        std::fs::write(deep.path().join("one/two/value"), b"value").unwrap();
+        let pinned = PinnedDirectory::open(deep.path()).unwrap().unwrap();
+        let error = pinned
+            .visit_regular_files_bounded(
+                DirectoryTraversalBudget::new(8, 1),
+                |_relative, _directory| Ok(false),
+                |_relative, _file| Ok(()),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("maximum depth 1"), "{error}");
+
+        let unsupported = tempfile::tempdir().unwrap();
+        std::fs::write(unsupported.path().join("target"), b"value").unwrap();
+        symlink("target", unsupported.path().join("link")).unwrap();
+        let pinned = PinnedDirectory::open(unsupported.path()).unwrap().unwrap();
+        assert!(pinned
+            .visit_regular_files_bounded(
+                DirectoryTraversalBudget::new(8, 1),
+                |_relative, _directory| Ok(false),
+                |_relative, _file| Ok(()),
+            )
+            .is_err());
+
+        std::fs::remove_file(unsupported.path().join("link")).unwrap();
+        let fifo =
+            std::ffi::CString::new(unsupported.path().join("pipe").as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let pinned = PinnedDirectory::open(unsupported.path()).unwrap().unwrap();
+        assert!(pinned
+            .visit_regular_files_bounded(
+                DirectoryTraversalBudget::new(8, 1),
+                |_relative, _directory| Ok(false),
+                |_relative, _file| Ok(()),
+            )
+            .is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bounded_regular_file_walk_reports_a_missing_root_without_callbacks() {
+        let root = std::env::temp_dir().join(format!(
+            "lillux-missing-walk-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let callbacks = std::cell::Cell::new(0_usize);
+        let present = visit_regular_files_no_follow_bounded(
+            &root,
+            DirectoryTraversalBudget::new(1, 1),
+            |_relative, _directory| {
+                callbacks.set(callbacks.get() + 1);
+                Ok(false)
+            },
+            |_relative, _file| {
+                callbacks.set(callbacks.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(!present);
+        assert_eq!(callbacks.get(), 0);
+    }
+
+    #[test]
+    fn exact_bounded_open_read_enforces_length_and_limit_before_body_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("value");
+        std::fs::write(&path, b"exact").unwrap();
+
+        let exact = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            read_open_regular_file_exact_bounded(exact, 5, 5).unwrap(),
+            b"exact"
+        );
+
+        let wrong_observation = std::fs::File::open(&path).unwrap();
+        assert!(read_open_regular_file_exact_bounded(wrong_observation, 4, 5).is_err());
+
+        let over_limit = std::fs::File::open(&path).unwrap();
+        assert!(read_open_regular_file_exact_bounded(over_limit, 5, 4).is_err());
+
+        let before_growth = std::fs::metadata(&path).unwrap().len();
+        std::fs::write(&path, b"exact-and-grown").unwrap();
+        let grown = std::fs::File::open(&path).unwrap();
+        assert!(read_open_regular_file_exact_bounded(grown, before_growth, 64).is_err());
     }
 
     #[cfg(target_os = "linux")]

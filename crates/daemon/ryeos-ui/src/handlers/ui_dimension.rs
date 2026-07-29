@@ -202,6 +202,7 @@ fn build_dimension_projection(
             space: match r.space {
                 ryeos_engine::contracts::ItemSpace::Bundle => "system".to_string(),
                 ryeos_engine::contracts::ItemSpace::Project => "project".to_string(),
+                ryeos_engine::contracts::ItemSpace::Node => "node".to_string(),
             },
             label: r.label.clone(),
             path: r.ai_root.display().to_string(),

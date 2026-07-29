@@ -2270,16 +2270,13 @@ impl Runner {
                         .await
                     {
                         Ok(request) => match self.callback.dispatch_action(*request).await {
-                            Ok(response) => {
-                                self.rendered_success(&tool_name, &response.result)
-                            }
+                            Ok(response) => self.rendered_success(&tool_name, &response.result),
                             Err(e) => {
-                                let body_str = serde_json::to_string(
-                                    &json!({"error": format!("{e:#}")}),
-                                )
-                                .unwrap_or_else(|_| {
-                                    "{\"error\":\"dispatch failed\"}".to_string()
-                                });
+                                let body_str =
+                                    serde_json::to_string(&json!({"error": format!("{e:#}")}))
+                                        .unwrap_or_else(|_| {
+                                            "{\"error\":\"dispatch failed\"}".to_string()
+                                        });
                                 Self::rendered_error_envelope(&tool_name, body_str)
                             }
                         },
@@ -2383,10 +2380,7 @@ impl Runner {
                         .collect();
                     let mut outcomes: std::collections::BTreeMap<
                         usize,
-                        Result<
-                            ryeos_runtime::callback_contract::CallbackDispatchResponse,
-                            String,
-                        >,
+                        Result<ryeos_runtime::callback_contract::CallbackDispatchResponse, String>,
                     > = std::collections::BTreeMap::new();
                     {
                         let mut join = tokio::task::JoinSet::new();
@@ -2406,9 +2400,9 @@ impl Runner {
                                     BatchWork::Dispatch(slot) => {
                                         slot.take().expect("dispatch slot spawns once")
                                     }
-                                    BatchWork::Immediate(_) => unreachable!(
-                                        "dispatch_indices selects only Dispatch work"
-                                    ),
+                                    BatchWork::Immediate(_) => {
+                                        unreachable!("dispatch_indices selects only Dispatch work")
+                                    }
                                 };
                                 let callback = self.callback.clone();
                                 join.spawn(tracing::Instrument::instrument(
@@ -2449,9 +2443,7 @@ impl Runner {
                     // cancellation only calls that actually dispatched fold;
                     // unadmitted calls are dropped exactly as the serial path
                     // drops undispatched ones.
-                    for (index, (call_id, tool_name, work)) in
-                        prepared.into_iter().enumerate()
-                    {
+                    for (index, (call_id, tool_name, work)) in prepared.into_iter().enumerate() {
                         let rendered = match work {
                             BatchWork::Immediate(body) => {
                                 Self::rendered_error_envelope(&tool_name, body)
@@ -2461,11 +2453,10 @@ impl Runner {
                                     self.rendered_success(&tool_name, &response.result)
                                 }
                                 Some(Err(e)) => {
-                                    let body =
-                                        serde_json::to_string(&json!({ "error": e }))
-                                            .unwrap_or_else(|_| {
-                                                "{\"error\":\"dispatch failed\"}".to_string()
-                                            });
+                                    let body = serde_json::to_string(&json!({ "error": e }))
+                                        .unwrap_or_else(|_| {
+                                            "{\"error\":\"dispatch failed\"}".to_string()
+                                        });
                                     Self::rendered_error_envelope(&tool_name, body)
                                 }
                                 None => {
@@ -2499,11 +2490,12 @@ impl Runner {
                         continue;
                     }
                     State::FiringHooks {
-                        occurrence: ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
-                            definition_ref: self.definition_ref.clone(),
-                            definition_hash: self.definition_hash.clone(),
-                            turn,
-                        },
+                        occurrence:
+                            ryeos_runtime::callback::HookDispatchOccurrence::DirectiveAfterStep {
+                                definition_ref: self.definition_ref.clone(),
+                                definition_hash: self.definition_hash.clone(),
+                                turn,
+                            },
                         context: json!({"turn": turn}),
                         resume_to: Box::new(State::CheckingContinuation),
                     }
@@ -3077,8 +3069,7 @@ impl Runner {
                 }
 
                 // Risk assessment before dispatch
-                let required_cap =
-                    format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
+                let required_cap = format!("ryeos.execute.tool.{}", dispatch_result.canonical_ref);
                 let risk = self.harness.assess(&required_cap);
                 if risk.blocked {
                     tracing::warn!(
@@ -3143,11 +3134,7 @@ impl Runner {
     /// Render a successful dispatch response into the model-visible result.
     /// Applies the cross-result guard (truncation + duplicate collapse), so it
     /// MUST be called in call order — the guard is ordering-sensitive state.
-    fn rendered_success(
-        &mut self,
-        tool_name: &str,
-        response_result: &Value,
-    ) -> RenderedToolResult {
+    fn rendered_success(&mut self, tool_name: &str, response_result: &Value) -> RenderedToolResult {
         // Model-visible bytes are ONLY the leaf dispatcher's `result` — never
         // the wrapping `thread` snapshot. Without this, the LLM saw the whole
         // {thread, result} envelope and the child-thread metadata leaked into
@@ -3817,11 +3804,7 @@ impl Runner {
         }
     }
 
-    fn compute_cost(
-        &self,
-        input_tokens: u64,
-        output_tokens: u64,
-    ) -> anyhow::Result<CostBreakdown> {
+    fn compute_cost(&self, input_tokens: u64, output_tokens: u64) -> anyhow::Result<CostBreakdown> {
         let Some(ref pricing) = self.provider_config.pricing else {
             return Ok(CostBreakdown {
                 usd: ryeos_runtime::envelope::UsdNanos::ZERO,
@@ -3863,12 +3846,16 @@ impl Runner {
         };
         // Rate-derived spend is exact from birth: rate × tokens in checked
         // i128 nanos, rounded toward positive infinity, never float math.
-        let input_cost =
-            ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(rates.input_per_million, input_tokens)
-                .map_err(|error| anyhow::anyhow!("input token pricing overflowed: {error}"))?;
-        let output_cost =
-            ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(rates.output_per_million, output_tokens)
-                .map_err(|error| anyhow::anyhow!("output token pricing overflowed: {error}"))?;
+        let input_cost = ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(
+            rates.input_per_million,
+            input_tokens,
+        )
+        .map_err(|error| anyhow::anyhow!("input token pricing overflowed: {error}"))?;
+        let output_cost = ryeos_runtime::envelope::UsdNanos::rate_per_million_mul_units_round_up(
+            rates.output_per_million,
+            output_tokens,
+        )
+        .map_err(|error| anyhow::anyhow!("output token pricing overflowed: {error}"))?;
         Ok(CostBreakdown {
             usd: input_cost
                 .checked_add(output_cost)
@@ -3888,7 +3875,9 @@ impl Runner {
             // The provider float quantizes into nanos here, at its entry; a
             // non-money figure (negative, non-finite) falls through to the
             // rate-derived path, as before.
-            if let Ok((usd, _rounded)) = ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(reported) {
+            if let Ok((usd, _rounded)) =
+                ryeos_runtime::envelope::UsdNanos::quantize_reported_f64_round_up(reported)
+            {
                 return Ok(CostBreakdown {
                     usd,
                     source: if usd.is_zero()
@@ -4056,7 +4045,10 @@ mod tests {
     #[test]
     fn lifecycle_bearing_batches_are_detected_anywhere_in_the_batch() {
         assert!(!batch_is_lifecycle_bearing(&[]));
-        assert!(!batch_is_lifecycle_bearing(&[tool_call("a"), tool_call("b")]));
+        assert!(!batch_is_lifecycle_bearing(&[
+            tool_call("a"),
+            tool_call("b")
+        ]));
         assert!(batch_is_lifecycle_bearing(&[tool_call("directive_return")]));
         assert!(batch_is_lifecycle_bearing(&[
             tool_call("a"),
@@ -4098,9 +4090,7 @@ mod tests {
         );
 
         let over_cap = RenderedToolResult {
-            content: "x".repeat(
-                ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES + 1,
-            ),
+            content: "x".repeat(ryeos_runtime::callback_client::TOOL_RESULT_INLINE_MAX_BYTES + 1),
             // The size cap dominates everything.
             result_guard_truncated: true,
             truncated_reason_override: Some("error_envelope"),

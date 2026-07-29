@@ -6,7 +6,7 @@ use super::{
     ExecutionProjectAuthority, ExecutionRecoveryAuthority,
 };
 
-pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 7;
+pub const ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION: u32 = 9;
 
 fn deserialize_required_nullable<'de, D, T>(
     deserializer: D,
@@ -130,9 +130,14 @@ impl AdmittedExecutionClosure {
     }
 }
 
+pub const MAX_ADMITTED_DESCRIPTOR_BYTES: u64 = 256 * 1024;
+
 fn validate_descriptor_document(label: &str, document: &str) -> anyhow::Result<()> {
-    const MAX_ADMITTED_DESCRIPTOR_BYTES: usize = 256 * 1024;
-    if document.is_empty() || document.len() > MAX_ADMITTED_DESCRIPTOR_BYTES {
+    if document.is_empty()
+        || u64::try_from(document.len())
+            .ok()
+            .is_none_or(|bytes| bytes > MAX_ADMITTED_DESCRIPTOR_BYTES)
+    {
         anyhow::bail!("{label} document must contain 1..={MAX_ADMITTED_DESCRIPTOR_BYTES} bytes");
     }
     if document.contains('\0') {
@@ -214,7 +219,7 @@ pub enum DirectExecutableIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "space", rename_all = "snake_case", deny_unknown_fields)]
-pub enum DirectWrapperSourceIdentity {
+pub enum DirectRootSourceIdentity {
     Project,
     Bundle {
         manifest_hash: String,
@@ -263,9 +268,9 @@ pub enum AdmittedLaunchArtifactIdentity {
     },
     DirectItemExecutor {
         executor_ref: String,
-        executor_item_content_hash: String,
-        executor_item_signer_fingerprint: Option<String>,
-        wrapper_source_identity: DirectWrapperSourceIdentity,
+        root_subject_source_content_digest: String,
+        root_subject_signer_fingerprint: Option<String>,
+        root_subject_source_identity: DirectRootSourceIdentity,
         protocol_ref: String,
         protocol_content_hash: String,
         protocol_signer_fingerprint: String,
@@ -322,9 +327,9 @@ impl AdmittedLaunchArtifactIdentity {
             }
             Self::DirectItemExecutor {
                 executor_ref,
-                executor_item_content_hash,
-                executor_item_signer_fingerprint,
-                wrapper_source_identity,
+                root_subject_source_content_digest,
+                root_subject_signer_fingerprint,
+                root_subject_source_identity,
                 protocol_ref,
                 protocol_content_hash,
                 protocol_signer_fingerprint,
@@ -333,22 +338,25 @@ impl AdmittedLaunchArtifactIdentity {
                 runtime_identity,
             } => {
                 validate_trimmed_control_free("executor ref", executor_ref, false)?;
-                validate_hash("executor item content hash", executor_item_content_hash)?;
-                if let Some(signer) = executor_item_signer_fingerprint {
-                    validate_signer("executor item signer", signer)?;
+                validate_hash(
+                    "root subject source content digest",
+                    root_subject_source_content_digest,
+                )?;
+                if let Some(signer) = root_subject_signer_fingerprint {
+                    validate_signer("root subject signer", signer)?;
                 }
-                match wrapper_source_identity {
-                    DirectWrapperSourceIdentity::Project => {}
-                    DirectWrapperSourceIdentity::Bundle {
+                match root_subject_source_identity {
+                    DirectRootSourceIdentity::Project => {}
+                    DirectRootSourceIdentity::Bundle {
                         manifest_hash,
                         manifest_signer_fingerprint,
                     } => {
-                        if executor_item_signer_fingerprint.is_none() {
-                            anyhow::bail!("bundle direct wrapper has no verified item signer");
+                        if root_subject_signer_fingerprint.is_none() {
+                            anyhow::bail!("bundle direct root has no verified subject signer");
                         }
-                        validate_hash("wrapper source manifest hash", manifest_hash)?;
+                        validate_hash("root source manifest hash", manifest_hash)?;
                         validate_signer(
-                            "wrapper source manifest signer",
+                            "root source manifest signer",
                             manifest_signer_fingerprint,
                         )?;
                     }
@@ -494,9 +502,12 @@ impl AdmittedLaunchCapsule {
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| anyhow::anyhow!("admitted launch capsule has no numeric schema"))?;
         if schema != u64::from(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION) {
-            anyhow::bail!(
-                "admitted launch capsule is not the exact current contract: stored schema={schema}, current schema={ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION}"
-            );
+            return Err(super::IncompatibleCurrentObjectSchema::new(
+                "admitted launch capsule",
+                schema,
+                ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            )
+            .into());
         }
         let capsule: Self =
             serde_json::from_value(value).context("deserialize current admitted launch capsule")?;
@@ -550,12 +561,18 @@ impl AdmittedLaunchCapsule {
         )
         .context("decode sealed invocation project authority")?;
         invocation_project_authority.validate()?;
+        if invocation_project_authority != self.project_authority {
+            anyhow::bail!(
+                "admitted launch capsule sealed invocation project authority differs from its outer authority"
+            );
+        }
         for invocation_field in [
             "parameters",
             "requested_by",
             "planning_principal",
             "project_context",
             "project_authority",
+            "project_binding_subject_authority",
             "usage_subject",
             "usage_subject_asserted_by",
         ] {
@@ -756,10 +773,12 @@ impl AdmittedLaunchCapsule {
     }
 
     /// Compare the immutable admission authority shared by continuation
-    /// segments. `sealed_invocation` records the birth segment's realization
-    /// and remains rooted in the original capsule; a later operational
-    /// invocation is validated separately and may point at the chain's next
-    /// pinned-COW realization without minting a replacement capsule.
+    /// segments. `exact_program` is already the canonical projection of the
+    /// sealed request with segment-local invocation stimulus, principal, usage,
+    /// and project realization removed. Each segment validates its complete
+    /// sealed invocation against its own resume ledger before this comparison;
+    /// comparing those per-segment envelopes to one another would reject
+    /// legitimate continuation inputs.
     pub fn same_continuation_admission(&self, other: &Self) -> anyhow::Result<bool> {
         self.validate()?;
         other.validate()?;
@@ -767,7 +786,6 @@ impl AdmittedLaunchCapsule {
             && self.kind == other.kind
             && self.exact_program == other.exact_program
             && self.exact_program_hash == other.exact_program_hash
-            && self.project_authority == other.project_authority
             && self.lifecycle_authority == other.lifecycle_authority
             && self.launch_driver == other.launch_driver
             && self.artifact_identity == other.artifact_identity
@@ -775,7 +793,10 @@ impl AdmittedLaunchCapsule {
             && self.accounting_scope == other.accounting_scope
             && self.effective_caps == other.effective_caps
             && self.runtime_ref == other.runtime_ref
-            && self.executor_ref == other.executor_ref)
+            && self.executor_ref == other.executor_ref
+            && self
+                .project_authority
+                .same_continuation_lineage(&other.project_authority)?)
     }
 }
 
@@ -828,6 +849,10 @@ mod tests {
             "project_authority".to_string(),
             serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
         );
+        object.insert(
+            "project_binding_subject_authority".to_string(),
+            serde_json::json!({"kind": "projectless"}),
+        );
         let (protocol_descriptor_document, protocol_content_hash, protocol_signer_fingerprint) =
             signed_descriptor("protocol: direct\n", 31);
         let execution_plan = serde_json::json!({"plan_id": "test"});
@@ -847,9 +872,9 @@ mod tests {
             launch_driver: ExecutionLaunchDriver::DirectItemExecutor,
             artifact_identity: AdmittedLaunchArtifactIdentity::DirectItemExecutor {
                 executor_ref: "tool:test/executor".to_string(),
-                executor_item_content_hash: "a".repeat(64),
-                executor_item_signer_fingerprint: Some("2".repeat(64)),
-                wrapper_source_identity: DirectWrapperSourceIdentity::Bundle {
+                root_subject_source_content_digest: "a".repeat(64),
+                root_subject_signer_fingerprint: Some("2".repeat(64)),
+                root_subject_source_identity: DirectRootSourceIdentity::Bundle {
                     manifest_hash: "b".repeat(64),
                     manifest_signer_fingerprint: "3".repeat(64),
                 },
@@ -903,6 +928,10 @@ mod tests {
         object.insert(
             "project_authority".to_string(),
             serde_json::to_value(ExecutionProjectAuthority::PROJECTLESS).unwrap(),
+        );
+        object.insert(
+            "project_binding_subject_authority".to_string(),
+            serde_json::json!({"kind": "projectless"}),
         );
         let (runtime_descriptor_document, runtime_content_hash, runtime_signer_fingerprint) =
             signed_descriptor("runtime: managed\n", 32);
@@ -983,6 +1012,9 @@ mod tests {
         );
 
         let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(error
+            .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+            .is_some());
         assert!(
             error.to_string().contains("not the exact current contract"),
             "unexpected error: {error:#}"
@@ -1016,6 +1048,23 @@ mod tests {
         });
         let decoded = AdmittedLaunchCapsule::from_current_value(expected.to_value()).unwrap();
         assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn capsule_rejects_divergent_inner_and_outer_project_authority() {
+        let mut capsule = direct_capsule(DirectExecutableIdentity::CapturedContent {
+            content_hash: "f".repeat(64),
+        });
+        capsule.project_authority =
+            ExecutionProjectAuthority::projectless(crate::objects::EnvironmentAuthority::Vault {
+                namespace: "test".to_string(),
+                name_authority: crate::objects::EnvironmentNameAuthority::DeclaredRequired,
+            })
+            .unwrap();
+        let error = capsule.validate().unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("sealed invocation project authority differs"));
     }
 
     #[test]
@@ -1116,8 +1165,8 @@ mod tests {
     }
 
     #[test]
-    fn source_only_wrapper_seals_distinct_source_and_provider_manifests() {
-        let wrapper_manifest_hash = "a".repeat(64);
+    fn source_only_root_seals_distinct_source_and_provider_manifests() {
+        let root_manifest_hash = "a".repeat(64);
         let provider_manifest_hash = "b".repeat(64);
         let mut capsule = direct_capsule(DirectExecutableIdentity::BundleExecutor {
             content_hash: "e".repeat(64),
@@ -1125,19 +1174,19 @@ mod tests {
             provider_manifest_signer_fingerprint: "5".repeat(64),
         });
         let AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-            wrapper_source_identity,
+            root_subject_source_identity,
             ..
         } = &mut capsule.artifact_identity
         else {
             unreachable!()
         };
-        *wrapper_source_identity = DirectWrapperSourceIdentity::Bundle {
-            manifest_hash: wrapper_manifest_hash.clone(),
+        *root_subject_source_identity = DirectRootSourceIdentity::Bundle {
+            manifest_hash: root_manifest_hash.clone(),
             manifest_signer_fingerprint: "6".repeat(64),
         };
 
         capsule.validate().unwrap();
-        assert_ne!(wrapper_manifest_hash, provider_manifest_hash);
+        assert_ne!(root_manifest_hash, provider_manifest_hash);
     }
 
     #[test]

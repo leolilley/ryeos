@@ -25,6 +25,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -34,6 +35,11 @@ use crate::runtime::{CompileContext, RuntimeHandler};
 use crate::trust::content_hash_after_signature;
 
 pub const KEY: &str = "verify_deps";
+const MAX_DEPENDENCY_FILES: usize = 4096;
+const MAX_DEPENDENCY_TRAVERSAL_ENTRIES: usize = MAX_DEPENDENCY_FILES * 2;
+const MAX_DEPENDENCY_TRAVERSAL_DEPTH: usize = 64;
+const MAX_DEPENDENCY_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_DEPENDENCY_AGGREGATE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -119,13 +125,19 @@ impl RuntimeHandler for VerifyDepsHandler {
 
         // Resolve base directory from scope.
         let (base, recursive) = resolve_base(&cfg, ctx)?;
-        let base = base
-            .canonicalize()
-            .map_err(|e| EngineError::InvalidRuntimeConfig {
-                path: base.display().to_string(),
-                reason: format!("could not canonicalise verify_deps base: {e}"),
-            })?;
-
+        if let Some((project_root, project_content)) = ctx.project_authority {
+            if base.starts_with(project_root) {
+                return verify_admitted_project_dependencies(
+                    &base,
+                    project_root,
+                    project_content,
+                    recursive,
+                    &cfg.exclude_dirs,
+                    &cfg.extensions,
+                    ctx,
+                );
+            }
+        }
         let extensions: HashSet<String> = cfg.extensions.iter().cloned().collect();
         if extensions.is_empty() {
             // Python iterates with `if filepath.suffix not in
@@ -134,7 +146,7 @@ impl RuntimeHandler for VerifyDepsHandler {
             return Ok(());
         }
 
-        walk_and_verify(&base, &base, recursive, &cfg.exclude_dirs, &extensions, ctx)?;
+        walk_and_verify(&base, recursive, &cfg.exclude_dirs, &extensions, ctx)?;
         Ok(())
     }
 }
@@ -176,95 +188,79 @@ fn resolve_base(
 /// directory entries with their `file_type()` reporting symlink-ness.
 fn walk_and_verify(
     base: &Path,
-    dir: &Path,
     recursive: bool,
     exclude_dirs: &HashSet<String>,
     extensions: &HashSet<String>,
     ctx: &CompileContext<'_>,
 ) -> Result<(), EngineError> {
-    let entries = std::fs::read_dir(dir).map_err(|e| EngineError::InvalidRuntimeConfig {
-        path: dir.display().to_string(),
-        reason: format!("verify_deps: could not read dir: {e}"),
+    let mut file_count = 0_usize;
+    let mut aggregate_bytes = 0_u64;
+    let present = lillux::visit_regular_files_no_follow_bounded(
+        base,
+        lillux::DirectoryTraversalBudget::new(
+            MAX_DEPENDENCY_TRAVERSAL_ENTRIES,
+            MAX_DEPENDENCY_TRAVERSAL_DEPTH,
+        ),
+        |relative, is_directory| {
+            if !is_directory {
+                return Ok(false);
+            }
+            Ok(!recursive
+                || relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| exclude_dirs.contains(name)))
+        },
+        |relative, file| {
+            file_count = file_count.saturating_add(1);
+            if file_count > MAX_DEPENDENCY_FILES {
+                anyhow::bail!("verify_deps exceeds {MAX_DEPENDENCY_FILES} regular files");
+            }
+            let path = base.join(relative);
+            let suffix = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .map(|extension| format!(".{extension}"))
+                .unwrap_or_default();
+            if !extensions.contains(&suffix) {
+                return Ok(());
+            }
+            let bytes = lillux::read_open_regular_file_bounded(file, MAX_DEPENDENCY_FILE_BYTES)?;
+            aggregate_bytes = aggregate_bytes
+                .checked_add(bytes.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("verify_deps byte count overflow"))?;
+            if aggregate_bytes > MAX_DEPENDENCY_AGGREGATE_BYTES {
+                anyhow::bail!(
+                    "verify_deps exceeds {MAX_DEPENDENCY_AGGREGATE_BYTES} aggregate bytes"
+                );
+            }
+            let content = std::str::from_utf8(&bytes)
+                .with_context(|| format!("verify_deps file is not UTF-8: {}", path.display()))?;
+            verify_file_content(&path, content, ctx)?;
+            Ok(())
+        },
+    )
+    .map_err(|error| match error.downcast::<EngineError>() {
+        Ok(error) => error,
+        Err(error) => EngineError::InvalidRuntimeConfig {
+            path: base.display().to_string(),
+            reason: format!("verify_deps secure walk failed: {error:#}"),
+        },
     })?;
-    for entry in entries {
-        let entry = entry.map_err(|e| EngineError::InvalidRuntimeConfig {
-            path: dir.display().to_string(),
-            reason: format!("verify_deps: dir entry error: {e}"),
-        })?;
-        let ftype = entry
-            .file_type()
-            .map_err(|e| EngineError::InvalidRuntimeConfig {
-                path: entry.path().display().to_string(),
-                reason: format!("verify_deps: could not stat: {e}"),
-            })?;
-        let path = entry.path();
-
-        if ftype.is_symlink() {
-            // Skip symlinks entirely — Python uses
-            // `followlinks=False` in os.walk; symlink handling for
-            // FILES is checked via canonicalisation below. For
-            // top-level symlinks we err on the side of skipping.
-            continue;
-        }
-
-        if ftype.is_dir() {
-            if !recursive {
-                continue;
-            }
-            let name = entry.file_name();
-            if exclude_dirs.contains(name.to_string_lossy().as_ref()) {
-                continue;
-            }
-            walk_and_verify(base, &path, recursive, exclude_dirs, extensions, ctx)?;
-            continue;
-        }
-
-        if !ftype.is_file() {
-            continue;
-        }
-
-        // Extension filter.
-        let suffix = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| format!(".{e}"))
-            .unwrap_or_default();
-        if !extensions.contains(&suffix) {
-            continue;
-        }
-
-        // Symlink escape guard (Python lines 1314-1319): the
-        // resolved real path must be inside `base`.
-        let real = path
-            .canonicalize()
-            .map_err(|e| EngineError::InvalidRuntimeConfig {
-                path: path.display().to_string(),
-                reason: format!("verify_deps: could not canonicalise: {e}"),
-            })?;
-        if !real.starts_with(base) {
-            return Err(EngineError::InvalidRuntimeConfig {
-                path: path.display().to_string(),
-                reason: format!(
-                    "verify_deps: symlink escape — {} resolves to {}",
-                    path.display(),
-                    real.display()
-                ),
-            });
-        }
-
-        verify_file(&path, ctx)?;
+    if !present {
+        return Err(EngineError::InvalidRuntimeConfig {
+            path: base.display().to_string(),
+            reason: "verify_deps base directory is absent".to_string(),
+        });
     }
     Ok(())
 }
 
-/// Read, parse signature, and verify content hash. Unsigned files
-/// warn but do not fail (`allow_unsigned=True` in Python).
-fn verify_file(path: &Path, ctx: &CompileContext<'_>) -> Result<(), EngineError> {
-    let content = std::fs::read_to_string(path).map_err(|e| EngineError::InvalidRuntimeConfig {
-        path: path.display().to_string(),
-        reason: format!("verify_deps: could not read file: {e}"),
-    })?;
-
+fn verify_file_content(
+    path: &Path,
+    content: &str,
+    ctx: &CompileContext<'_>,
+) -> Result<(), EngineError> {
     // Find a kind whose `formats` declares this extension. Iterate
     // deterministically (sorted by kind name) to guarantee a stable
     // pick if multiple kinds share an extension.
@@ -315,6 +311,85 @@ fn verify_file(path: &Path, ctx: &CompileContext<'_>) -> Result<(), EngineError>
             }
             tracing::debug!(file = %path.display(), "verify_deps: signature ok");
         }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_admitted_project_dependencies(
+    base: &Path,
+    project_root: &Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+    recursive: bool,
+    exclude_dirs: &HashSet<String>,
+    extensions: &[String],
+    ctx: &CompileContext<'_>,
+) -> Result<(), EngineError> {
+    let extension_set = extensions.iter().cloned().collect::<HashSet<_>>();
+    if extension_set.is_empty() {
+        return Ok(());
+    }
+    let prefix =
+        base.strip_prefix(project_root)
+            .map_err(|_| EngineError::InvalidRuntimeConfig {
+                path: base.display().to_string(),
+                reason: "admitted verify_deps base escaped project root".to_string(),
+            })?;
+    let entries = project_content.list_files(prefix, recursive, MAX_DEPENDENCY_FILES)?;
+    let mut aggregate_bytes = 0_u64;
+    for entry in entries {
+        if entry.relative_path.components().any(|component| {
+            let std::path::Component::Normal(component) = component else {
+                return true;
+            };
+            exclude_dirs.contains(component.to_string_lossy().as_ref())
+        }) {
+            continue;
+        }
+        let suffix = entry
+            .relative_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .unwrap_or_default();
+        if !extension_set.contains(&suffix) {
+            continue;
+        }
+        if entry.size > MAX_DEPENDENCY_FILE_BYTES {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: base.join(&entry.relative_path).display().to_string(),
+                reason: format!(
+                    "verify_deps: admitted dependency exceeds {MAX_DEPENDENCY_FILE_BYTES} bytes"
+                ),
+            });
+        }
+        aggregate_bytes = aggregate_bytes.checked_add(entry.size).ok_or_else(|| {
+            EngineError::InvalidRuntimeConfig {
+                path: base.display().to_string(),
+                reason: "verify_deps: admitted dependency byte count overflow".to_string(),
+            }
+        })?;
+        if aggregate_bytes > MAX_DEPENDENCY_AGGREGATE_BYTES {
+            return Err(EngineError::InvalidRuntimeConfig {
+                path: base.display().to_string(),
+                reason: format!(
+                    "verify_deps: admitted dependencies exceed {MAX_DEPENDENCY_AGGREGATE_BYTES} aggregate bytes"
+                ),
+            });
+        }
+        let project_relative = prefix.join(&entry.relative_path);
+        let bytes = project_content
+            .read_file(&project_relative, MAX_DEPENDENCY_FILE_BYTES)?
+            .ok_or_else(|| EngineError::InvalidRuntimeConfig {
+                path: base.join(&entry.relative_path).display().to_string(),
+                reason: "verify_deps: admitted dependency disappeared".to_string(),
+            })?;
+        let content =
+            std::str::from_utf8(&bytes).map_err(|error| EngineError::InvalidRuntimeConfig {
+                path: base.join(&entry.relative_path).display().to_string(),
+                reason: format!("verify_deps: admitted dependency is not UTF-8: {error}"),
+            })?;
+        verify_file_content(&base.join(&entry.relative_path), content, ctx)?;
     }
     Ok(())
 }
@@ -427,6 +502,7 @@ mod tests {
             trust_store: trust,
             node_trust_store: trust,
             project_root: None,
+            project_authority: None,
             root_trust_class: crate::resolution::TrustClass::TrustedBundle,
             host_env: &EMPTY_HOST_ENV,
         }

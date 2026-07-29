@@ -122,6 +122,7 @@ fn plan_ctx(project_dir: &Path) -> PlanContext {
         project_context: ProjectContext::LocalPath {
             path: project_dir.to_path_buf(),
         },
+        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: "site:test".into(),
         origin_site_id: "site:test".into(),
         execution_hints: ExecutionHints::default(),
