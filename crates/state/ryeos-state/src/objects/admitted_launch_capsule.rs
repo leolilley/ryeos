@@ -502,9 +502,12 @@ impl AdmittedLaunchCapsule {
             .and_then(serde_json::Value::as_u64)
             .ok_or_else(|| anyhow::anyhow!("admitted launch capsule has no numeric schema"))?;
         if schema != u64::from(ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION) {
-            anyhow::bail!(
-                "admitted launch capsule is not the exact current contract: stored schema={schema}, current schema={ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION}"
-            );
+            return Err(super::IncompatibleCurrentObjectSchema::new(
+                "admitted launch capsule",
+                schema,
+                ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+            )
+            .into());
         }
         let capsule: Self =
             serde_json::from_value(value).context("deserialize current admitted launch capsule")?;
@@ -1007,6 +1010,11 @@ mod tests {
         );
 
         let error = AdmittedLaunchCapsule::from_current_value(value).unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+                .is_some()
+        );
         assert!(
             error.to_string().contains("not the exact current contract"),
             "unexpected error: {error:#}"

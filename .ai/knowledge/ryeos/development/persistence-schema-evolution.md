@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-21T00:24:55Z:3de483ee2e9cd80ad3f98e032b96968e11ee637af91a4fb26c49c0e3428beee0:pTY2Gpbt2Bb0FYNAHGWJbb1KJnJoyR0DxecKDRvsV+EhQhUAlEmU5Q4GagoahzP3dMSB3WsXQ5aQJ7w7x3TLAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-29T01:42:53Z:d39977c04b8865321090c3798a65395fb055dfca15900b69dc40e70ddb8fb9f2:2K867OWjefWcwj752F8WtocoKza4WGj1UhJaZ6QEnZ53Q8lT1+Vx0oDa9weKoVISbE535K/EopQaR1WczDU2Dg==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "persistence-schema-evolution"
 title: "Persistence Schema Evolution"
 description: "Rules for immutable CAS wire identities, retained SQLite migrations, rebuildable projections, and explicit history retirement"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Persistence Schema Evolution
@@ -29,11 +29,13 @@ occupied. Removing old readers does not make the number reusable.
 
 The current clean-cut execution formats include:
 
-- thread snapshot schema 6;
+- thread snapshot schema 8;
 - project snapshot schema 5;
-- admitted launch capsule schema 2;
-- runtime launch metadata epoch 10; and
-- the standalone runtime project-authority envelope epoch 1.
+- admitted launch capsule schema 9;
+- runtime launch metadata epoch 15;
+- the standalone runtime project-authority envelope epoch 2; and
+- the owned runtime SQLite operator schema epoch 1 (encoded in the RyeOS
+  `PRAGMA application_id` family).
 
 The numbers identify independently evolving contracts. A change to a nested
 execution authority advances every enclosing durable contract whose bytes
@@ -74,6 +76,13 @@ objects are disposable.
 If the operator chooses to discard a whole local execution-history epoch, use:
 
 ```bash
+# Inspect the available retirement scope first.
+ryeos node gc \
+  --discard-thread-history \
+  --discard-project-heads \
+  --dry-run
+
+# Apply the explicitly confirmed clean cutover.
 ryeos node gc \
   --discard-thread-history \
   --discard-project-heads \
@@ -83,7 +92,29 @@ ryeos node gc \
 
 This is separate from normal retention and GC, requires the daemon to be
 stopped, and coordinates every thread-derived store under one durable recovery
-marker so interruption can be resumed. It retires thread roots and project
-heads before replacing incompatible runtime state. Physical CAS sweeping may
-happen in the same command or later. It does not remove project worktrees,
-bundles, vault values, operator/node identities, or signing keys.
+marker so interruption can be resumed. The transaction publishes that discard
+intent first, resets an incompatible runtime schema when required, retires
+chain and project HEADs, clears the remaining runtime execution state and
+scheduler fire history/projections, and only then completes the marker.
+Physical CAS sweeping may happen in the same command or later. It does not
+remove project worktrees, bundles, vault values, operator/node identities, or
+signing keys.
+
+For an incompatible runtime schema, dry-run reports its runtime-row count as
+unavailable rather than decoding rows or presenting a false zero. Authoritative
+chain/project HEADs and filesystem artifact counts remain inspectable before
+confirmation. The confirmed report also preserves that unavailable
+classification rather than claiming that the empty replacement schema's zero
+rows were the retired-row count. Dry-run acquires only the existing operator
+lock without rewriting it, copies the descriptor-pinned SQLite database and
+sidecars into a disposable inspection directory for runtime accounting, does
+the same for the scheduler database and sidecars, and opens SQLite only on
+those copies; the source runtime namespace is never a SQLite write target.
+
+Normal initialization and package installation never invoke this destructive
+transaction implicitly. After installing a release with a new clean-cut
+execution contract, daemon startup reports this exact command when retained
+history belongs to the previous contract. Run the dry-run, make the explicit
+retirement decision, apply the confirmed command, and then start the already
+installed daemon. Do not add predecessor readers or rewrite immutable CAS
+objects merely to make startup accept the old epoch.

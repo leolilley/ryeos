@@ -16,6 +16,8 @@ use crate::config::{Config, ConfigSources};
 use crate::runtime_db::{RuntimeDb, RuntimeThreadHistoryDiscardReport};
 use crate::state_lock::{StateLock, default_lock_path};
 
+pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str = "ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads";
+
 #[derive(Debug, Clone, Default)]
 pub struct OfflineThreadHistoryGcOptions {
     pub app_root: Option<PathBuf>,
@@ -78,7 +80,36 @@ pub struct ProjectionDiscardReport {
     pub superseded_instances_deleted: usize,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum RuntimeThreadHistoryAccounting {
+    Exact {
+        counts: RuntimeThreadHistoryDiscardReport,
+    },
+    UnavailableIncompatibleSchema,
+}
+
+impl RuntimeThreadHistoryAccounting {
+    pub fn total_rows(&self) -> Option<usize> {
+        match self {
+            Self::Exact { counts } => Some(counts.total_rows()),
+            Self::UnavailableIncompatibleSchema => None,
+        }
+    }
+}
+
+fn completed_runtime_accounting(
+    schema_reset_required: bool,
+    counts: RuntimeThreadHistoryDiscardReport,
+) -> RuntimeThreadHistoryAccounting {
+    if schema_reset_required {
+        RuntimeThreadHistoryAccounting::UnavailableIncompatibleSchema
+    } else {
+        RuntimeThreadHistoryAccounting::Exact { counts }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct OfflineThreadHistoryGcReport {
     pub app_root: PathBuf,
     pub dry_run: bool,
@@ -86,7 +117,7 @@ pub struct OfflineThreadHistoryGcReport {
     pub project_heads: usize,
     pub chain_ref_artifacts: usize,
     pub pending_transitions: usize,
-    pub runtime_rows: RuntimeThreadHistoryDiscardReport,
+    pub runtime_rows: RuntimeThreadHistoryAccounting,
     pub thread_runtime_artifacts: usize,
     pub scheduler_journal_artifacts: usize,
     pub scheduler_rows: ryeos_scheduler::db::SchedulerFireHistoryDiscardReport,
@@ -96,8 +127,10 @@ pub struct OfflineThreadHistoryGcReport {
 }
 
 impl OfflineThreadHistoryGcReport {
-    pub fn total_discarded_rows(&self) -> usize {
-        self.runtime_rows.total_rows() + self.scheduler_rows.total_rows()
+    pub fn total_discarded_rows(&self) -> Option<usize> {
+        self.runtime_rows
+            .total_rows()
+            .map(|runtime_rows| runtime_rows + self.scheduler_rows.total_rows())
     }
 }
 
@@ -138,8 +171,13 @@ fn run_offline_thread_history_gc_inner(
 
     // This is the outer ownership proof. A running daemon and every
     // cooperating standalone state service hold the same lock.
-    let _state_lock = StateLock::acquire(&default_lock_path(&config.app_root))
-        .context("offline thread-history GC requires the daemon to be stopped")?;
+    let state_lock_path = default_lock_path(&config.app_root);
+    let _state_lock = if options.dry_run {
+        StateLock::acquire_existing_read_only(&state_lock_path)
+    } else {
+        StateLock::acquire(&state_lock_path)
+    }
+    .context("offline thread-history GC requires the daemon to be stopped")?;
     let runtime_directory =
         lillux::PinnedDirectory::open(&runtime_state_dir)?.ok_or_else(|| {
             anyhow::anyhow!("runtime state is absent: {}", runtime_state_dir.display())
@@ -191,7 +229,7 @@ fn run_offline_thread_history_gc_inner(
         options.dry_run,
     )?;
     let scheduler_db_path = runtime_state_dir.join("scheduler.sqlite3");
-    let scheduler_db = open_scheduler_db(&scheduler_db_path, options.dry_run)?;
+    let scheduler_db = open_scheduler_db(&scheduler_db_path, &runtime_directory, options.dry_run)?;
 
     // Validate every participating namespace before publishing destructive
     // intent. The second pass performs the same descriptor-rooted checks while
@@ -211,14 +249,17 @@ fn run_offline_thread_history_gc_inner(
     } else {
         0
     };
-    let runtime_preview = if runtime_db.requires_explicit_history_reset() {
+    let runtime_schema_reset_required = runtime_db.requires_explicit_history_reset();
+    let runtime_preview = if runtime_schema_reset_required {
         // Strict no-backcompat means an incompatible layout is never decoded
         // merely to estimate destructive counts.
-        Default::default()
+        RuntimeThreadHistoryAccounting::UnavailableIncompatibleSchema
     } else {
-        runtime_db
-            .discard_all_thread_history(true)
-            .context("inspect daemon runtime thread rows")?
+        RuntimeThreadHistoryAccounting::Exact {
+            counts: runtime_db
+                .discard_all_thread_history(true)
+                .context("inspect daemon runtime thread rows")?,
+        }
     };
     let thread_runtime_preview = crate::state_store::discard_all_thread_runtime_files(
         &config.app_root,
@@ -229,7 +270,8 @@ fn run_offline_thread_history_gc_inner(
     let scheduler_journal_preview = discard_scheduler_fire_journals(&runtime_directory, true)
         .context("inspect scheduler fire journals")?;
     let scheduler_preview = match scheduler_db.as_ref() {
-        Some(db) => db
+        Some(opened) => opened
+            .db
             .discard_fire_history(true)
             .context("inspect scheduler fire projection")?,
         None => Default::default(),
@@ -349,7 +391,8 @@ fn run_offline_thread_history_gc_inner(
     let scheduler_journal_artifacts = discard_scheduler_fire_journals(&runtime_directory, false)
         .context("discard scheduler fire journals")?;
     let scheduler_rows = match scheduler_db.as_ref() {
-        Some(db) => db
+        Some(opened) => opened
+            .db
             .discard_fire_history(false)
             .context("discard scheduler fire projection")?,
         None => Default::default(),
@@ -395,7 +438,7 @@ fn run_offline_thread_history_gc_inner(
         project_heads,
         chain_ref_artifacts: authoritative.chain_ref_artifacts,
         pending_transitions: authoritative.pending_transitions,
-        runtime_rows,
+        runtime_rows: completed_runtime_accounting(runtime_schema_reset_required, runtime_rows),
         thread_runtime_artifacts,
         scheduler_journal_artifacts,
         scheduler_rows,
@@ -445,7 +488,7 @@ fn open_runtime_db(
     };
     if runtime_directory.is_same_directory(&parent)? {
         if dry_run {
-            RuntimeDb::open_existing_current_with_namespace_authority(
+            RuntimeDb::open_existing_for_explicit_history_reset_with_namespace_authority(
                 &config.db_path,
                 parent,
                 runtime_directory_lock.clone(),
@@ -458,33 +501,83 @@ fn open_runtime_db(
             )
         }
     } else if dry_run {
-        RuntimeDb::open_existing_current(&config.db_path)
+        RuntimeDb::open_existing_for_explicit_history_reset(&config.db_path)
     } else {
         RuntimeDb::open_for_explicit_history_reset(&config.db_path)
     }
     .with_context(|| format!("open runtime database {}", config.db_path.display()))
 }
 
-fn open_scheduler_db(path: &Path, dry_run: bool) -> Result<Option<ryeos_scheduler::SchedulerDb>> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
-                anyhow::bail!(
-                    "scheduler database must be a regular non-symlink file: {}",
-                    path.display()
-                );
-            }
-            if dry_run {
-                ryeos_scheduler::SchedulerDb::open_existing_current(path).map(Some)
-            } else {
-                ryeos_scheduler::SchedulerDb::open(path).map(Some)
-            }
+struct OpenedOfflineSchedulerDb {
+    db: ryeos_scheduler::SchedulerDb,
+    _inspection_copy: Option<crate::temp_dir_guard::TempDirGuard>,
+}
+
+fn open_scheduler_db(
+    path: &Path,
+    runtime_directory: &lillux::PinnedDirectory,
+    dry_run: bool,
+) -> Result<Option<OpenedOfflineSchedulerDb>> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if runtime_directory.path() != parent {
+        anyhow::bail!(
+            "scheduler database namespace authority path mismatch: selected={}, requested={}",
+            runtime_directory.path().display(),
+            parent.display()
+        );
+    }
+    let name = path.file_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "scheduler database path has no filename: {}",
+            path.display()
+        )
+    })?;
+    let existing = runtime_directory
+        .open_regular(name, false)
+        .with_context(|| {
+            format!(
+                "scheduler database must be a regular non-symlink file: {}",
+                path.display()
+            )
+        })?;
+
+    match (existing, dry_run) {
+        (None, true) => Ok(None),
+        (None, false) => ryeos_scheduler::SchedulerDb::open(path)
+            .map(|db| {
+                Some(OpenedOfflineSchedulerDb {
+                    db,
+                    _inspection_copy: None,
+                })
+            })
+            .context("create scheduler database for confirmed history retirement"),
+        (Some(file), false) => {
+            drop(file);
+            ryeos_scheduler::SchedulerDb::open(path)
+                .map(|db| {
+                    Some(OpenedOfflineSchedulerDb {
+                        db,
+                        _inspection_copy: None,
+                    })
+                })
+                .context("open scheduler database for confirmed history retirement")
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && dry_run => Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            ryeos_scheduler::SchedulerDb::open(path).map(Some)
+        (Some(file), true) => {
+            drop(file);
+            let (inspection_directory, inspection_guard) =
+                crate::runtime_db::create_sqlite_inspection_copy(
+                    runtime_directory,
+                    name,
+                    "scheduler",
+                )?;
+            let inspection_path = inspection_directory.path().join(name);
+            let db = ryeos_scheduler::SchedulerDb::open_existing_current(&inspection_path)
+                .context("open disposable scheduler database inspection copy")?;
+            Ok(Some(OpenedOfflineSchedulerDb {
+                db,
+                _inspection_copy: Some(inspection_guard),
+            }))
         }
-        Err(error) => Err(error.into()),
     }
 }
 
@@ -577,4 +670,89 @@ fn discard_scheduler_fire_journals(
             .context("scheduler fire-history artifact count overflow")?;
     }
     Ok(artifacts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn incompatible_runtime_accounting_is_explicitly_unavailable_not_zero() {
+        let accounting = RuntimeThreadHistoryAccounting::UnavailableIncompatibleSchema;
+        assert_eq!(accounting.total_rows(), None);
+        assert_eq!(
+            serde_json::to_value(accounting).unwrap(),
+            serde_json::json!({"status": "unavailable_incompatible_schema"})
+        );
+    }
+
+    #[test]
+    fn current_runtime_accounting_reports_exact_counts() {
+        let accounting = RuntimeThreadHistoryAccounting::Exact {
+            counts: RuntimeThreadHistoryDiscardReport {
+                thread_runtime: 3,
+                follow_waiters: 2,
+                ..RuntimeThreadHistoryDiscardReport::default()
+            },
+        };
+        assert_eq!(accounting.total_rows(), Some(5));
+        assert_eq!(serde_json::to_value(accounting).unwrap()["status"], "exact");
+    }
+
+    #[test]
+    fn confirmed_schema_reset_never_reports_post_reset_zero_as_exact() {
+        let accounting =
+            completed_runtime_accounting(true, RuntimeThreadHistoryDiscardReport::default());
+        assert!(matches!(
+            accounting,
+            RuntimeThreadHistoryAccounting::UnavailableIncompatibleSchema
+        ));
+    }
+
+    #[test]
+    fn scheduler_dry_run_opens_only_a_disposable_copy() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scheduler.sqlite3");
+        let scheduler = ryeos_scheduler::SchedulerDb::open(&path).unwrap();
+        scheduler.finish_fire_projection_rebuild().unwrap();
+        drop(scheduler);
+        let source_snapshot = || {
+            std::fs::read_dir(tmp.path())
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let name = entry.file_name();
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    (name, bytes)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let before = source_snapshot();
+        let directory = lillux::PinnedDirectory::open(tmp.path())
+            .unwrap()
+            .expect("scheduler parent exists");
+        let opened = open_scheduler_db(&path, &directory, true)
+            .unwrap()
+            .expect("scheduler inspection copy opens");
+        opened.db.discard_fire_history(true).unwrap();
+        assert_eq!(source_snapshot(), before);
+        drop(opened);
+        assert_eq!(source_snapshot(), before);
+    }
+
+    #[test]
+    fn scheduler_dry_run_preserves_missing_source() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("scheduler.sqlite3");
+        let directory = lillux::PinnedDirectory::open(tmp.path())
+            .unwrap()
+            .expect("scheduler parent exists");
+        assert!(
+            open_scheduler_db(&path, &directory, true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!path.exists());
+    }
 }

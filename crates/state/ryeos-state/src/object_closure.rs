@@ -37,6 +37,9 @@ pub struct ObjectClosureReport {
     pub malformed_objects: Vec<MalformedObject>,
     /// Objects with a kind this collector does not know how to traverse.
     pub unsupported_objects: Vec<UnsupportedObjectKind>,
+    /// Typed outer-schema mismatches retained for fail-closed callers that
+    /// must distinguish a clean-cut epoch boundary from malformed content.
+    incompatible_current_schemas: Vec<crate::objects::IncompatibleCurrentObjectSchema>,
 }
 
 impl ObjectClosureReport {
@@ -45,6 +48,15 @@ impl ObjectClosureReport {
             && self.missing_blobs.is_empty()
             && self.malformed_objects.is_empty()
             && self.unsupported_objects.is_empty()
+    }
+
+    pub(crate) fn decisive_incompatible_current_schema(
+        &self,
+    ) -> Option<&crate::objects::IncompatibleCurrentObjectSchema> {
+        self.incompatible_current_schemas
+            .iter()
+            .find(|mismatch| !mismatch.is_predecessor())
+            .or_else(|| self.incompatible_current_schemas.first())
     }
 }
 
@@ -620,10 +632,18 @@ fn collect_object_closure_from_source(
             continue;
         }
 
-        if let Err(reason) = validate_current_object(&value) {
-            report
-                .malformed_objects
-                .push(MalformedObject { hash, reason });
+        if let Err(error) = validate_current_object(&value) {
+            if let Some(mismatch) = error.chain().find_map(|cause| {
+                cause
+                    .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+                    .cloned()
+            }) {
+                report.incompatible_current_schemas.push(mismatch);
+            }
+            report.malformed_objects.push(MalformedObject {
+                hash,
+                reason: format!("{error:#}"),
+            });
             continue;
         }
 
@@ -1087,11 +1107,11 @@ fn push_typed_hash(
 /// invariant checks as its authoritative reader. Link extraction alone is not
 /// validation: it must not make an old-schema or partially typed object a GC
 /// root merely because a few hash-shaped fields can be found.
-fn validate_current_object(value: &Value) -> Result<(), String> {
+fn validate_current_object(value: &Value) -> anyhow::Result<()> {
     let kind = value
         .get("kind")
         .and_then(Value::as_str)
-        .ok_or_else(|| "missing object kind".to_string())?;
+        .ok_or_else(|| anyhow::anyhow!("missing object kind"))?;
     let result: anyhow::Result<()> = match kind {
         "attestation" => crate::objects::Attestation::from_value(value).map(|_| ()),
         "chain_state" => serde_json::from_value::<crate::objects::ChainState>(value.clone())
@@ -1123,7 +1143,7 @@ fn validate_current_object(value: &Value) -> Result<(), String> {
         "item_source" => crate::objects::ItemSource::from_value(value).map(|_| ()),
         _ => return Ok(()),
     };
-    result.map_err(|error| format!("invalid {kind} object: {error:#}"))
+    result.with_context(|| format!("invalid {kind} object"))
 }
 
 /// Extract schema-defined links from one CAS object value.

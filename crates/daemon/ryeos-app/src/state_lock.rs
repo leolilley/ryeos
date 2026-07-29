@@ -84,6 +84,30 @@ impl StateLock {
             Err(e) => Err(e).with_context(|| format!("acquire state lock {}", lock_path.display())),
         }
     }
+
+    /// Acquire the already-existing operator lock without creating or writing
+    /// any filesystem entry. Read-only inspections use this to prove daemon
+    /// exclusion without changing the inspected state namespace.
+    pub fn acquire_existing_read_only(lock_path: &Path) -> Result<Self> {
+        let file = File::open(lock_path)
+            .with_context(|| format!("open existing state lock file {}", lock_path.display()))?;
+        match flock_exclusive_nb(&file) {
+            Ok(()) => Ok(StateLock { _file: file }),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                let holder_pid = fs::read_to_string(lock_path)
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_else(|| "unknown".to_string());
+                bail!(
+                    "state lock held by another process (pid: {}); stop the daemon or other standalone service before proceeding",
+                    holder_pid
+                );
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("acquire existing state lock {}", lock_path.display())),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -171,6 +195,25 @@ mod tests {
             path,
             PathBuf::from("/var/lib/ryeosd/.ai/state/operator.lock")
         );
+    }
+
+    #[test]
+    fn read_only_acquire_preserves_existing_lock_file_and_never_creates_one() {
+        let tmpdir = TempDir::new().unwrap();
+        let missing = tmpdir.path().join("missing.lock");
+        assert!(StateLock::acquire_existing_read_only(&missing).is_err());
+        assert!(!missing.exists());
+
+        let lock_path = tmpdir.path().join("existing.lock");
+        fs::write(&lock_path, b"retained-holder\n").unwrap();
+        let before = fs::metadata(&lock_path).unwrap();
+        {
+            let _lock = StateLock::acquire_existing_read_only(&lock_path).unwrap();
+            assert_eq!(fs::read(&lock_path).unwrap(), b"retained-holder\n");
+        }
+        let after = fs::metadata(&lock_path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(fs::read(&lock_path).unwrap(), b"retained-holder\n");
     }
 
     #[test]

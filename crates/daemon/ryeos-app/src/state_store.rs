@@ -31,6 +31,21 @@ mod projection_access;
 
 use projection_access::committed_value;
 
+fn with_execution_schema_cutover_hint(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<ryeos_state::IncompatibleCurrentObjectSchema>())
+        .any(ryeos_state::IncompatibleCurrentObjectSchema::is_predecessor)
+    {
+        error.context(format!(
+            "authoritative execution history predates the exact current contract; RyeOS will not reinterpret or rewrite it in place. Stop the daemon and run `{}` to retire that history epoch, then restart",
+            crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND
+        ))
+    } else {
+        error
+    }
+}
+
 const MAX_THREAD_ARTIFACT_ITEMS: usize = 512;
 const MAX_THREAD_ARTIFACT_TYPE_BYTES: usize = 1024;
 const MAX_THREAD_ARTIFACT_METADATA_BYTES: usize = 256 * 1024;
@@ -2818,7 +2833,7 @@ impl StateStore {
                     head_trust,
                     recovery_observer,
                     &runtime_db,
-                )?
+                )
             }
             None => {
                 StateDb::open_with_projection_repair_sink_runtime_liveness_and_namespace_authority(
@@ -2828,9 +2843,10 @@ impl StateStore {
                     projection_health.clone(),
                     head_trust,
                     &runtime_db,
-                )?
+                )
             }
-        };
+        }
+        .map_err(with_execution_schema_cutover_hint)?;
         projection_health.observe_pending_transitions(state_db.pending_chain_transitions()?.len());
         let state_authority = state_db.pinned_authority()?;
         Ok(Self {
@@ -9596,6 +9612,36 @@ mod tests {
     use super::*;
     use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
     use tempfile::tempdir;
+
+    #[test]
+    fn immutable_execution_schema_mismatch_gets_the_explicit_cutover_command() {
+        let mismatch = anyhow::Error::new(ryeos_state::IncompatibleCurrentObjectSchema::new(
+            "thread snapshot",
+            7,
+            8,
+        ))
+        .context("decode current snapshot");
+        let error = with_execution_schema_cutover_hint(mismatch);
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.is::<ryeos_state::IncompatibleCurrentObjectSchema>())
+        );
+
+        let unrelated = with_execution_schema_cutover_hint(anyhow!("untrusted signed head"));
+        assert!(
+            !format!("{unrelated:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
+
+        let newer = with_execution_schema_cutover_hint(anyhow::Error::new(
+            ryeos_state::IncompatibleCurrentObjectSchema::new("thread snapshot", 9, 8),
+        ));
+        assert!(
+            !format!("{newer:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
+    }
 
     fn test_store() -> StateStore {
         let tmp = tempdir().expect("tempdir").keep();

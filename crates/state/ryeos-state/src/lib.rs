@@ -56,9 +56,9 @@ pub use objects::{
     CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,
     CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
     CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ChainState,
-    MAX_TERMINAL_DURATION_SECONDS, ThreadHistoryRetention, parse_canonical_timestamp,
-    thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot, thread_snapshot::ThreadUsage,
-    thread_snapshot::UsageSubject,
+    IncompatibleCurrentObjectSchema, MAX_TERMINAL_DURATION_SECONDS, ThreadHistoryRetention,
+    parse_canonical_timestamp, thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot,
+    thread_snapshot::ThreadUsage, thread_snapshot::UsageSubject,
 };
 pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,

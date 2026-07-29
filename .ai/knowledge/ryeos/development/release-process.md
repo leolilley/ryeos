@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-14T03:42:05Z:6376652de30c17f12c4f2d64dac07dcc8a510517567fded1479b9ad4d102d3ed:LXh8IhHYmD5+dBxQKwnOmBtTB3Q3m4X7GBbyoaRj1SFKQS6optuFrUkybwSNP1PaHPyD9J/n0P9R9W0uQO81AA==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-29T01:43:10Z:b943fe533b82461f7a1c4f38a06fc6a652c4a4d6eb0aa24897791edc27a18bb9:x+6bEhkAIK1mvaS3YmnJpiTGri4YEommNUurU7DnOd6/blr+Z1YtiwXBWtRMc0e5RBxlgd34jC4cUqK99f/gDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "release-process"
 title: "Release Process"
 description: "Checklist for cutting RyeOS releases from next to main without stale versions, tags, or install validation mistakes"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # RyeOS Release Process
@@ -377,7 +377,8 @@ intentionally bypasses the package manager/AUR flow while installing the same
 runtime layout:
 
 - binaries to `/usr/bin`;
-- bundle sources to `/usr/share/ryeos/{core,standard,ryeos-ui,web,hosted-node}`;
+- selected bundle sources to `/usr/share/ryeos/<bundle>` (default: the full set
+  defined by `scripts/pkg/bundle-sets.sh`);
 - initialized bundles under `~/.local/share/ryeos/.ai/bundles/...` after
   `ryeos init`.
 
@@ -389,15 +390,24 @@ Default behavior:
 
 The script will:
 
-1. populate/sign bundles unless `--skip-populate` is used;
-2. use `.dev-keys/PUBLISHER_DEV.pem` by default;
-3. stop an already-running daemon using `ryeos node status`;
-4. install `ryeos` and `ryeosd` into `/usr/bin`;
-5. optionally install `lillux` if it was built;
-6. install bundle sources under `/usr/share/ryeos`;
-7. move stale PATH shadows from `/usr/local/bin` and `~/.local/bin`;
-8. run `ryeos init --source /usr/share/ryeos ...`;
-9. restart the daemon only if it was running before the install.
+1. reuse already-built binaries and populated bundle sources by default;
+2. stop an already-running daemon using `ryeos node status`;
+3. install `ryeos` and `ryeosd` into `/usr/bin`;
+4. optionally install `lillux` if it was built;
+5. install the selected bundle sources under `/usr/share/ryeos`;
+6. move stale PATH shadows from `/usr/local/bin` and `~/.local/bin`;
+7. run `ryeos init --source /usr/share/ryeos ...`;
+8. restart the daemon only if it was running before the install.
+
+Bundle rebuilding/republishing is opt-in and expensive:
+
+```bash
+./scripts/pkg/install-local-direct.sh \
+  --populate --all --trust-source-publishers
+```
+
+Use `--populate --crates "<crate ...>"` for an explicit subset. The publisher
+key defaults to `.dev-keys/PUBLISHER_DEV.pem` only when population is requested.
 
 Important caveats:
 
@@ -422,15 +432,16 @@ Important caveats:
   ryeos node status
   ```
 
-- `--skip-populate` can preserve stale bundle binaries/signatures. Use it only
-  when intentionally reusing already-populated bundles.
+- The default can preserve stale bundle binaries/signatures if the checkout
+  artifacts were not refreshed first. Pass `--populate --all` or
+  `--populate --crates "<crate ...>"` when regeneration is required.
 - `--no-init` leaves initialized user state unchanged.
 - `--no-daemon-restart` leaves any daemon restart to you.
-- `--bundle-set hosted-node` intentionally installs only `core` and
-  `hosted-node`; do not use it for full local release validation unless testing
-  that lean layout.
+- `--bundle-set hosted-node` intentionally installs only `core`,
+  `central-auth`, and `hosted-node`; do not use it for full local release
+  validation unless testing that lean layout.
 
-## 9. Bundle signing implications
+## 11. Bundle signing implications
 
 For bundle source changes or Rust changes that affect bundled binaries,
 refresh/sign bundles as bundles:
@@ -463,7 +474,7 @@ ryeos sign knowledge:ryeos/development/release-process
 
 Do not confuse project item signing with bundle signing.
 
-## 10. Daemon startup and projection rebuild validation
+## 12. Daemon startup and state-cutover validation
 
 A release can pass `cargo check`, rebuild projection data, and still fail at
 daemon startup. Validate startup explicitly.
@@ -480,6 +491,37 @@ If startup is slow after a projection schema/epoch change, it may be doing a
 healthy one-time rebuild from CAS/refs. Do not kill it just because it is taking
 longer than a normal start.
 
+An immutable authoritative execution schema mismatch is different: the current
+release intentionally has no predecessor reader, and installation never
+discards history automatically. Startup reports the explicit offline cutover.
+Inspect it before confirming:
+
+```bash
+ryeos node gc \
+  --discard-thread-history \
+  --discard-project-heads \
+  --dry-run
+
+ryeos node gc \
+  --discard-thread-history \
+  --discard-project-heads \
+  --confirm-discard-thread-history \
+  --confirm-discard-project-heads
+
+ryeos start
+```
+
+For an incompatible runtime schema, the dry-run marks runtime-row counts
+unavailable rather than decoding rows or reporting a false zero; its other
+retirement counts remain available for the decision. The confirmed report
+retains that unavailable classification instead of reporting the empty
+post-reset schema as an exact zero.
+
+This retires the prior local execution-history/project-HEAD epoch while
+preserving worktrees, bundles, vault values, trust, and node/signing identity.
+Do not add compatibility readers or make the installer perform this destructive
+decision implicitly.
+
 Current startup/restart logic allows a long rebuild window.
 `install-local-direct.sh` gives restart roughly 930 seconds so `ryeos start` can
 report its own diagnostics.
@@ -489,6 +531,7 @@ Distinguish these cases:
 | Symptom | Interpretation |
 |---|---|
 | Long rebuild, then `ryeos node status` says `running` | Successful startup |
+| Exact-current-contract schema mismatch with cutover command | Explicit history retirement decision required |
 | `ryeos start` exits early | Startup failure |
 | No readiness after timeout | Investigate as failure |
 | Cargo/tests pass but daemon will not start | Runtime/startup bug remains |
@@ -505,7 +548,7 @@ or inspect its tail:
 tail -200 ~/.local/share/ryeos/.ai/state/ryeosd-start.stderr.log
 ```
 
-## 11. Final release checklist
+## 13. Final release checklist
 
 Before tagging:
 
