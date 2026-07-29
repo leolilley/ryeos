@@ -558,18 +558,15 @@ impl ExecutionProvenance {
             if !workspace_lifeline.owns_effective_path(effective_path) {
                 anyhow::bail!("pinned provenance lifeline does not own its effective project path");
             }
-            match pinned_materialization.verified() {
-                Some(materialization) => {
-                    if materialization.snapshot_hash() != snapshot_hash
-                        || !materialization.owns_path(effective_path)?
-                    {
-                        anyhow::bail!(
-                            "pinned provenance materialization proof contradicts its snapshot or path"
-                        );
-                    }
-                    materialization.ensure_root_binding()?;
+            if let Some(materialization) = pinned_materialization.verified() {
+                if materialization.snapshot_hash() != snapshot_hash
+                    || !materialization.owns_path(effective_path)?
+                {
+                    anyhow::bail!(
+                        "pinned provenance materialization proof contradicts its snapshot or path"
+                    );
                 }
-                None => {}
+                materialization.ensure_root_binding()?;
             }
         }
         match &mut self {

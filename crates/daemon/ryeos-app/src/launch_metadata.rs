@@ -1084,7 +1084,7 @@ impl RuntimeLaunchMetadata {
         let admitted_project_authority = self
             .sealed_root_request
             .as_ref()
-            .and_then(|_| self.resume_context.as_ref())
+            .and(self.resume_context.as_ref())
             .map(|resume| resume.project_authority.clone());
         Self {
             schema_version: self.schema_version,

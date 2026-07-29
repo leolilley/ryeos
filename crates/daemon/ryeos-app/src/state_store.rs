@@ -1167,17 +1167,28 @@ fn load_admitted_launch_capsule(
     Ok(capsule)
 }
 
+struct ContinuationCapsuleTransition<'a> {
+    chain_root_id: &'a str,
+    source_thread_id: &'a str,
+    launch_metadata: Option<&'a crate::launch_metadata::RuntimeLaunchMetadata>,
+    expected_result_snapshot_hash: Option<&'a str>,
+    kind: crate::launch_metadata::ContinuationAuthorityTransitionKind,
+}
+
 fn attach_continuation_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
     cas_guard: &ryeos_state::CasMutationGuard,
     inner: &Inner,
-    chain_root_id: &str,
-    source_thread_id: &str,
     snapshot: ThreadSnapshot,
-    launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
-    expected_result_snapshot_hash: Option<&str>,
-    transition_kind: crate::launch_metadata::ContinuationAuthorityTransitionKind,
+    transition: ContinuationCapsuleTransition<'_>,
 ) -> Result<(ThreadSnapshot, ThreadSnapshot)> {
+    let ContinuationCapsuleTransition {
+        chain_root_id,
+        source_thread_id,
+        launch_metadata,
+        expected_result_snapshot_hash,
+        kind,
+    } = transition;
     let source_snapshot =
         authoritative_snapshot_for_transition(inner, chain_root_id, source_thread_id)?;
     if let Some(successor_metadata) = launch_metadata {
@@ -1211,7 +1222,7 @@ fn attach_continuation_launch_capsule(
             source_resume,
             expected_result_snapshot_hash
                 .or(source_snapshot.result_project_snapshot_hash.as_deref()),
-            transition_kind,
+            kind,
         )?;
     }
     let source_capsule = source_snapshot
@@ -4745,12 +4756,14 @@ impl StateStore {
             &self.state_authority,
             permit.cas_guard(),
             &g,
-            chain_root_id,
-            source_thread_id,
             build_snapshot(&successor_with_upstream),
-            launch_metadata,
-            None,
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            ContinuationCapsuleTransition {
+                chain_root_id,
+                source_thread_id,
+                launch_metadata,
+                expected_result_snapshot_hash: None,
+                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            },
         )?;
         // Predecessor-immutability contract: terminal sources retain their
         // exact snapshot, while a running source is settled to `continued` in
@@ -5297,12 +5310,14 @@ impl StateStore {
             &self.state_authority,
             permit.cas_guard(),
             &g,
-            chain_root_id,
-            source_thread_id,
             build_continuation_snapshot(&successor_with_upstream, &successor_resume_context)?,
-            Some(&successor_meta),
-            source_result_snapshot_hash,
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            ContinuationCapsuleTransition {
+                chain_root_id,
+                source_thread_id,
+                launch_metadata: Some(&successor_meta),
+                expected_result_snapshot_hash: source_result_snapshot_hash,
+                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            },
         )?;
 
         // Runtime-db writes FIRST: insert the successor runtime row and seed its
@@ -5594,12 +5609,14 @@ impl StateStore {
             &self.state_authority,
             permit.cas_guard(),
             &g,
-            chain_root_id,
-            source_thread_id,
             base_successor_snapshot,
-            effective_launch_metadata.as_ref(),
-            None,
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            ContinuationCapsuleTransition {
+                chain_root_id,
+                source_thread_id,
+                launch_metadata: effective_launch_metadata.as_ref(),
+                expected_result_snapshot_hash: None,
+                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            },
         )?;
         let source_snapshot_updated = !is_terminal_status(&source_row.status);
         let source_snapshot_after = if source_snapshot_updated {
@@ -9689,8 +9706,12 @@ mod tests {
         };
         let expected = positioned_test_event("T-root", 0, 1, None, None);
         assert!(matches!(
-            classify_event_append_readback(Some(&unchanged), &predecessor, &[expected.clone()])
-                .unwrap(),
+            classify_event_append_readback(
+                Some(&unchanged),
+                &predecessor,
+                std::slice::from_ref(&expected)
+            )
+            .unwrap(),
             EventAppendCommitReadback::ProvenAbsent
         ));
 
