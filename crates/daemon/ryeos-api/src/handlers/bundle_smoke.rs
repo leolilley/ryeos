@@ -229,6 +229,7 @@ async fn run_entry(
         project_context: ProjectContext::LocalPath {
             path: source.to_path_buf(),
         },
+        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: site_id.clone(),
         origin_site_id,
         execution_hints: Default::default(),
@@ -288,6 +289,7 @@ async fn run_entry(
         usage_subject_asserted_by: None,
         previous_thread_id: None,
         root_admission: None,
+        root_dispatch_evidence: None,
         parent_execution_context: None,
     };
 

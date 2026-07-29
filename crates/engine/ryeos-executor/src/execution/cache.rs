@@ -4,17 +4,13 @@
 //! are stored. Skips re-materialization if the cache already has the
 //! matching project snapshot hash.
 
-#[cfg(unix)]
-use std::collections::HashMap;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{Read as _, Seek as _};
+use std::io::Read as _;
 #[cfg(unix)]
 use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
-use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
@@ -41,22 +37,6 @@ struct CompletionMarker {
     directories: BTreeSet<String>,
     files: BTreeMap<String, CachedTreeEntry>,
 }
-
-#[cfg(unix)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct FileIdentity {
-    device: u64,
-    inode: u64,
-    size: u64,
-    mode: u32,
-    modified_seconds: i64,
-    modified_nanoseconds: i64,
-    changed_seconds: i64,
-    changed_nanoseconds: i64,
-}
-
-#[cfg(unix)]
-static VERIFIED_FILE_IDENTITIES: OnceLock<Mutex<HashMap<FileIdentity, String>>> = OnceLock::new();
 
 /// Materialization cache backed by a directory on disk.
 ///
@@ -168,10 +148,10 @@ impl MaterializationCache {
         if unsafe { libc::flock(build_lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        // Every reused inode is content-verified once per process. The cached
-        // identity includes ctime as well as inode, size, mode, and mtime, so
-        // an in-place mutation invalidates the fast path even if the writer
-        // restores ordinary file metadata.
+        // Reuse is permitted only after hashing the opened regular file and
+        // checking its exact size, mode, and content address. No filesystem
+        // metadata or process-local observation cache stands in for that
+        // content proof.
         if let Some(existing) = parent.open_regular(target_name, false)? {
             let verified = verify_opened_cached_file(existing, &target, file)?;
             return Ok(VerifiedContentFile {
@@ -439,6 +419,48 @@ impl MaterializationCache {
         if observed != expected {
             anyhow::bail!(
                 "materialized generation {snapshot_hash} contradicts the authoritative CAS tree"
+            );
+        }
+        Ok(())
+    }
+
+    /// Validate only the signed-CAS-bound publication marker. Callers that
+    /// subsequently issue execution authority must still descriptor-walk the
+    /// realized tree exactly once. Keeping this check separate avoids doing
+    /// that full walk once here and again while minting the opaque pinned
+    /// materialization proof.
+    pub fn verify_completion_marker_for_tree(
+        &self,
+        cas: &lillux::cas::CasStore,
+        tree: &ryeos_state::objects::ProjectTree,
+        snapshot_hash: &str,
+    ) -> Result<()> {
+        let expected = expected_completion_marker(cas, tree, snapshot_hash)?;
+        let marker = read_completion_marker(
+            &self.cache_root.join(".complete").join(snapshot_hash),
+            snapshot_hash,
+        )?;
+        if marker != expected {
+            anyhow::bail!(
+                "materialization marker for {snapshot_hash} contradicts the authoritative CAS tree"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn verify_completion_marker_for_files(
+        &self,
+        files: &BTreeMap<String, ryeos_state::objects::ProjectFile>,
+        snapshot_hash: &str,
+    ) -> Result<()> {
+        let expected = expected_completion_marker_from_files(files, snapshot_hash)?;
+        let marker = read_completion_marker(
+            &self.cache_root.join(".complete").join(snapshot_hash),
+            snapshot_hash,
+        )?;
+        if marker != expected {
+            anyhow::bail!(
+                "materialization marker for {snapshot_hash} contradicts the authoritative CAS tree"
             );
         }
         Ok(())
@@ -838,7 +860,11 @@ fn inspect_pinned_tree(
 ) -> Result<CompletionMarker> {
     let mut directories = BTreeSet::new();
     let mut files = BTreeMap::new();
-    root.visit_regular_files(
+    root.visit_regular_files_bounded(
+        lillux::DirectoryTraversalBudget::new(
+            ryeos_state::project_sync::MAX_PROJECT_TREE_ENTRIES,
+            ryeos_state::project_sync::MAX_PROJECT_TREE_DEPTH,
+        ),
         |relative, directory| {
             if directory {
                 let path = relative.to_str().ok_or_else(|| {
@@ -862,14 +888,9 @@ fn inspect_pinned_tree(
                 )
             })?;
             ryeos_state::project_sync::validate_safe_relative_path(path)?;
-            let (blob_hash, metadata) = digest_verified_identity(&mut file)?;
-            #[cfg(unix)]
-            let normalized_mode = {
-                use std::os::unix::fs::PermissionsExt as _;
-                metadata.permissions().mode() & 0o777
-            };
-            #[cfg(not(unix))]
-            let normalized_mode = ryeos_state::objects::ProjectFile::REGULAR_MODE;
+            let expected_len = file.metadata()?.len();
+            let (blob_hash, metadata) = digest_verified_identity(&mut file, expected_len)?;
+            let normalized_mode = lillux::normalized_portable_regular_mode(&metadata)?;
             if !matches!(
                 normalized_mode,
                 ryeos_state::objects::ProjectFile::REGULAR_MODE
@@ -906,15 +927,25 @@ fn expected_completion_marker(
     tree: &ryeos_state::objects::ProjectTree,
     snapshot_hash: &str,
 ) -> Result<CompletionMarker> {
+    let mut files = BTreeMap::new();
+    for (relative, object_hash) in &tree.files {
+        let file =
+            ryeos_state::project_materialization::load_project_file_bounded(cas, object_hash)?
+                .ok_or_else(|| anyhow::anyhow!("project file object {object_hash} is absent"))?;
+        files.insert(relative.clone(), file);
+    }
+    expected_completion_marker_from_files(&files, snapshot_hash)
+}
+
+fn expected_completion_marker_from_files(
+    project_files: &BTreeMap<String, ryeos_state::objects::ProjectFile>,
+    snapshot_hash: &str,
+) -> Result<CompletionMarker> {
     validate_canonical_hash("materialization snapshot hash", snapshot_hash)?;
     let mut directories = BTreeSet::new();
     let mut files = BTreeMap::new();
-    for (relative, object_hash) in &tree.files {
+    for (relative, file) in project_files {
         ryeos_state::project_sync::validate_safe_relative_path(relative)?;
-        let value = cas
-            .get_object(object_hash)?
-            .ok_or_else(|| anyhow::anyhow!("project file object {object_hash} is absent"))?;
-        let file = ryeos_state::objects::ProjectFile::from_value(&value)?;
         let mut parent = Path::new(relative).parent();
         while let Some(path) = parent {
             if path.as_os_str().is_empty() {
@@ -926,7 +957,7 @@ fn expected_completion_marker(
         files.insert(
             relative.clone(),
             CachedTreeEntry {
-                blob_hash: file.blob_hash,
+                blob_hash: file.blob_hash.clone(),
                 size: file.size,
                 normalized_mode: file.normalized_mode,
             },
@@ -1081,66 +1112,11 @@ fn staging_snapshot_hash(name: &str, marker: bool) -> Option<&str> {
     Some(snapshot_hash)
 }
 
-#[cfg(unix)]
-fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
-    use std::os::unix::fs::MetadataExt as _;
-    FileIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        size: metadata.len(),
-        mode: metadata.mode(),
-        modified_seconds: metadata.mtime(),
-        modified_nanoseconds: metadata.mtime_nsec(),
-        changed_seconds: metadata.ctime(),
-        changed_nanoseconds: metadata.ctime_nsec(),
-    }
-}
-
-fn digest_verified_identity(file: &mut fs::File) -> Result<(String, fs::Metadata)> {
-    #[cfg(unix)]
-    let before_metadata = file.metadata()?;
-    #[cfg(unix)]
-    let before = file_identity(&before_metadata);
-    #[cfg(unix)]
-    if let Some(digest) = VERIFIED_FILE_IDENTITIES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("verified cache identity lock is poisoned"))?
-        .get(&before)
-        .cloned()
-    {
-        return Ok((digest, before_metadata));
-    }
-
-    file.seek(std::io::SeekFrom::Start(0))?;
-    let mut digest = sha2::Sha256::new();
-    use sha2::Digest as _;
-    let mut buffer = [0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    let digest = format!("{:x}", digest.finalize());
-
-    #[cfg(unix)]
-    {
-        let after_metadata = file.metadata()?;
-        let after = file_identity(&after_metadata);
-        if before != after {
-            anyhow::bail!("cache file changed while its content was being verified");
-        }
-        VERIFIED_FILE_IDENTITIES
-            .get_or_init(|| Mutex::new(HashMap::new()))
-            .lock()
-            .map_err(|_| anyhow::anyhow!("verified cache identity lock is poisoned"))?
-            .insert(after, digest.clone());
-        Ok((digest, after_metadata))
-    }
-    #[cfg(not(unix))]
-    Ok((digest, file.metadata()?))
+fn digest_verified_identity(
+    file: &mut fs::File,
+    expected_len: u64,
+) -> Result<(String, fs::Metadata)> {
+    lillux::secure_fs::digest_open_regular_file_stable_exact(file, expected_len)
 }
 
 fn remember_verified_descriptor(
@@ -1153,24 +1129,15 @@ fn remember_verified_descriptor(
         &metadata,
         expected,
     )?;
-    #[cfg(unix)]
-    VERIFIED_FILE_IDENTITIES
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .map_err(|_| anyhow::anyhow!("verified cache identity lock is poisoned"))?
-        .insert(file_identity(&metadata), expected.blob_hash.clone());
-    #[cfg(not(unix))]
-    {
-        let mut file = file;
-        let (actual, _metadata) = digest_verified_identity(&mut file)?;
-        if actual != expected.blob_hash {
-            anyhow::bail!(
-                "immutable content cache entry hashes to {}, expected {}: {}",
-                actual,
-                expected.blob_hash,
-                "<verified-content-descriptor>"
-            );
-        }
+    let mut descriptor = file.try_clone()?;
+    let (actual, _metadata) = digest_verified_identity(&mut descriptor, expected.size)?;
+    if actual != expected.blob_hash {
+        anyhow::bail!(
+            "immutable content cache entry hashes to {}, expected {}: {}",
+            actual,
+            expected.blob_hash,
+            "<verified-content-descriptor>"
+        );
     }
     Ok(())
 }
@@ -1196,7 +1163,7 @@ fn verify_opened_cached_file(
     expected: &ryeos_state::objects::ProjectFile,
 ) -> Result<fs::File> {
     verify_cached_file_metadata(path, &file.metadata()?, expected)?;
-    let (actual, metadata) = digest_verified_identity(&mut file)?;
+    let (actual, metadata) = digest_verified_identity(&mut file, expected.size)?;
     // Recheck the stable identity returned by hashing so a concurrent metadata
     // change cannot pass only the cheap preflight.
     verify_cached_file_metadata(path, &metadata, expected)?;

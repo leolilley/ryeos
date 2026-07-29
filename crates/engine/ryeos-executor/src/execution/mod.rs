@@ -14,6 +14,7 @@ pub mod launch_envelope;
 pub mod launch_preparation;
 pub mod lillux_bridge;
 pub mod limits;
+pub(crate) mod prepared_launch_cache;
 pub(crate) mod process_attachment;
 pub mod project_source;
 pub mod runner;
@@ -23,15 +24,14 @@ pub mod spawn_follow_child;
 pub mod thread_meta;
 pub mod workspace;
 
-use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use ryeos_app::runtime_db::WorkspaceState;
 
-use ryeos_state::objects::{ProjectSnapshotPolicy, ProjectTree};
+use ryeos_state::objects::ProjectTree;
 use ryeos_state::signer::Signer;
 
 use self::cache::MaterializationCache;
@@ -385,16 +385,11 @@ pub(crate) fn capture_tree_project_snapshot(
         .try_acquire()
         .map_err(|error| anyhow::anyhow!("cannot acquire CAS write permit: {error}"))?;
     let cas = publication.authority.cas_store()?;
-    let tree_value = cas
-        .get_object(&tree_hash)?
-        .ok_or_else(|| anyhow::anyhow!("project tree {tree_hash} is no longer present in CAS"))?;
-    let tree = ProjectTree::from_value(&tree_value)?;
-    let policy_value = cas.get_object(&policy_hash)?.ok_or_else(|| {
-        anyhow::anyhow!("project snapshot policy {policy_hash} is no longer present in CAS")
-    })?;
-    let policy = ProjectSnapshotPolicy::from_value(&policy_value)?;
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
-    ryeos_state::project_sync::validate_captured_policy_source(&cas, &tree, &policy)?;
+    ryeos_state::project_materialization::VerifiedProjectTreeClosure::load(
+        &cas,
+        &tree_hash,
+        &policy_hash,
+    )?;
     publication
         .staged_roots
         .as_mut()
@@ -455,42 +450,22 @@ pub fn checkout_project_lower(
     snapshot_hash: &str,
     target_dir: Option<&Path>,
     cache: &MaterializationCache,
-) -> Result<(PathBuf, std::fs::File)> {
+) -> Result<(
+    PathBuf,
+    std::fs::File,
+    ryeos_state::PinnedProjectMaterialization,
+)> {
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
-    let snapshot_value = cas
-        .get_object(snapshot_hash)?
-        .ok_or_else(|| anyhow::anyhow!("project snapshot {snapshot_hash} not found"))?;
-    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snapshot_value)?;
-    let tree_value = cas
-        .get_object(&snapshot.project_tree_hash)?
-        .ok_or_else(|| anyhow::anyhow!("project tree {} not found", snapshot.project_tree_hash))?;
-    let tree = ProjectTree::from_value(&tree_value)?;
-    let policy_value = cas
-        .get_object(&snapshot.effective_policy_hash)?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "project snapshot policy {} not found",
-                snapshot.effective_policy_hash
-            )
-        })?;
-    let policy = ProjectSnapshotPolicy::from_value(&policy_value)?;
-    ryeos_state::project_sync::validate_project_tree_paths(&tree, &policy)?;
-    ryeos_state::project_sync::validate_captured_policy_source(&cas, &tree, &policy)?;
-    let mut project_files = BTreeMap::new();
-    for (relative, object_hash) in &tree.files {
-        let object = cas
-            .get_object(object_hash)?
-            .ok_or_else(|| anyhow::anyhow!("project_file object {object_hash} not found"))?;
-        project_files.insert(
-            relative.clone(),
-            ryeos_state::objects::ProjectFile::from_value(&object)?,
-        );
-    }
+    let closure = ryeos_state::project_materialization::VerifiedProjectSnapshotClosure::load(
+        &cas,
+        snapshot_hash,
+    )?;
+    let project_files = closure.tree().files();
 
     let _build_lock = cache.generation_build_lock(snapshot_hash)?;
     if cache
-        .verify_complete_for_tree(&cas, &tree, snapshot_hash)
+        .verify_completion_marker_for_files(project_files, snapshot_hash)
         .is_err()
     {
         cache.discard_generation(snapshot_hash)?;
@@ -502,7 +477,7 @@ pub fn checkout_project_lower(
         ));
         let staging_root = cache_root.create_child(&staging_name, 0o700)?;
         let construction = (|| {
-            for (relative, project_file) in &project_files {
+            for (relative, project_file) in project_files {
                 let content = cache.ensure_content_file(&cas, project_file)?;
                 let (parent, name) = pinned_output_parent(&staging_root, relative)?;
                 content.link_to(&parent, &name)?;
@@ -529,12 +504,9 @@ pub fn checkout_project_lower(
         }
         construction?;
     }
-    cache.verify_complete_for_tree(&cas, &tree, snapshot_hash)?;
-
-    let lease = cache.generation_lease(snapshot_hash)?;
     let realized_path = if let Some(target_dir) = target_dir {
         let target_root = lillux::secure_fs::PinnedDirectory::open_or_create(target_dir)?;
-        for (relative, project_file) in &project_files {
+        for (relative, project_file) in project_files {
             let content = cache.ensure_content_file(&cas, project_file)?;
             let (parent, name) = pinned_output_parent(&target_root, relative)?;
             content.link_to(&parent, &name)?;
@@ -543,9 +515,49 @@ pub fn checkout_project_lower(
     } else {
         cache.cache_dir(snapshot_hash)
     };
+    let materialization = match ryeos_state::PinnedProjectMaterialization::verify_from_closure(
+        authority,
+        cas_mutation_guard,
+        &closure,
+        &realized_path,
+    ) {
+        Ok(materialization) => materialization,
+        Err(error) if target_dir.is_none() => {
+            // A valid marker beside a mutated generation is not authority.
+            // Rebuild once beneath the still-held construction lock, then
+            // mint the proof from the rebuilt descriptor tree.
+            cache.discard_generation(snapshot_hash)?;
+            let cache_root = cache.pinned_root()?;
+            let staging_name = std::ffi::OsString::from(format!(
+                "{snapshot_hash}.staging.{}.{}",
+                std::process::id(),
+                rand::random::<u32>()
+            ));
+            let staging_root = cache_root.create_child(&staging_name, 0o700)?;
+            for (relative, project_file) in project_files {
+                let content = cache.ensure_content_file(&cas, project_file)?;
+                let (parent, name) = pinned_output_parent(&staging_root, relative)?;
+                content.link_to(&parent, &name)?;
+            }
+            cache.publish_tree(&cache_root, &staging_name, &staging_root, snapshot_hash)?;
+            ryeos_state::PinnedProjectMaterialization::verify_from_closure(
+                authority,
+                cas_mutation_guard,
+                &closure,
+                &realized_path,
+            )
+            .with_context(|| {
+                format!(
+                    "rebuilt materialization remained invalid after prior verification failure: {error:#}"
+                )
+            })?
+        }
+        Err(error) => return Err(error),
+    };
+    let lease = cache.generation_lease(snapshot_hash)?;
     drop(_build_lock);
     cache.prune(128)?;
-    Ok((realized_path, lease))
+    Ok((realized_path, lease, materialization))
 }
 
 fn pinned_output_parent(
@@ -614,16 +626,13 @@ pub(crate) fn fold_back_outputs(
         .require_recovery()?
         .begin_staged_cas_roots_admitted(cas_mutation_guard, "workspace-foldback")?;
 
-    let pre_tree_obj = cas
-        .get_object(pre_tree_hash)?
-        .ok_or_else(|| anyhow::anyhow!("pre-execution project tree {pre_tree_hash} not found"))?;
-    let pre_tree = ProjectTree::from_value(&pre_tree_obj)?;
-    let policy_obj = cas
-        .get_object(policy_hash)?
-        .ok_or_else(|| anyhow::anyhow!("project snapshot policy {policy_hash} not found"))?;
-    let policy = ProjectSnapshotPolicy::from_value(&policy_obj)?;
-    ryeos_state::project_sync::validate_project_tree_paths(&pre_tree, &policy)?;
-    ryeos_state::project_sync::validate_captured_policy_source(&cas, &pre_tree, &policy)?;
+    let closure = ryeos_state::project_materialization::VerifiedProjectTreeClosure::load(
+        &cas,
+        pre_tree_hash,
+        policy_hash,
+    )?;
+    let pre_tree = closure.tree();
+    let policy = closure.policy();
 
     let layout = workspace::WorkspaceLayout::from_root(working_dir.to_path_buf());
     if !layout.lower.is_dir() || !layout.upper.is_dir() || !layout.work.is_dir() {
@@ -663,8 +672,8 @@ pub(crate) fn fold_back_outputs(
         cas_mutation_guard,
         &mut staged_roots,
         &lifecycle.upper,
-        &pre_tree,
-        &policy,
+        pre_tree,
+        policy,
         &lifecycle.response.mutations,
     )?
     else {
@@ -751,14 +760,16 @@ pub(crate) fn store_foldback_snapshot(
 ) -> Result<String> {
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
-    let current_snapshot_obj = cas.get_object(current_snapshot_hash)?.ok_or_else(|| {
+    let current_snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
+        &cas,
+        current_snapshot_hash,
+    )?
+    .ok_or_else(|| {
         anyhow::anyhow!(
             "current snapshot {} not found in CAS",
             current_snapshot_hash
         )
     })?;
-    let current_snapshot =
-        ryeos_state::objects::ProjectSnapshot::from_value(&current_snapshot_obj)?;
     let snapshot = ryeos_state::objects::ProjectSnapshot {
         project_tree_hash: new_tree_hash.to_string(),
         effective_policy_hash: current_snapshot.effective_policy_hash,
@@ -787,10 +798,11 @@ pub(crate) fn seal_callback_workspace_generation(
     let authority = pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
-    let snapshot_value = cas
-        .get_object(base_snapshot_hash)?
-        .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
-    let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&snapshot_value)?;
+    let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
+        &cas,
+        base_snapshot_hash,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("base project snapshot {base_snapshot_hash} is absent"))?;
     let workspace = workspace::WorkspaceLayout::from_lower(effective_lower)?;
     let workspace_id = workspace
         .root
@@ -906,10 +918,11 @@ pub fn recover_interrupted_workspace_freeze(
     let authority = pinned_state_authority(state)?;
     let guard = authority.acquire_shared_guard()?;
     let cas = authority.cas_store()?;
-    let base_value = cas
-        .get_object(&record.lower_snapshot)?
-        .ok_or_else(|| anyhow::anyhow!("freezing workspace base snapshot is absent"))?;
-    let base = ryeos_state::objects::ProjectSnapshot::from_value(&base_value)?;
+    let base = ryeos_state::project_materialization::load_project_snapshot_bounded(
+        &cas,
+        &record.lower_snapshot,
+    )?
+    .ok_or_else(|| anyhow::anyhow!("freezing workspace base snapshot is absent"))?;
     let permit = state
         .write_barrier
         .try_acquire()
@@ -1003,18 +1016,16 @@ pub(crate) fn ensure_control_tree_unchanged(
     }
     let read = state.acquire_cas_read()?;
     let load_tree = |snapshot_hash: &str| -> Result<ProjectTree> {
-        let value = read
-            .cas()
-            .get_object(snapshot_hash)?
-            .ok_or_else(|| anyhow::anyhow!("project snapshot {snapshot_hash} is absent"))?;
-        let snapshot = ryeos_state::objects::ProjectSnapshot::from_value(&value)?;
-        let tree = read
-            .cas()
-            .get_object(&snapshot.project_tree_hash)?
-            .ok_or_else(|| {
-                anyhow::anyhow!("project tree {} is absent", snapshot.project_tree_hash)
-            })?;
-        ProjectTree::from_value(&tree)
+        let snapshot = ryeos_state::project_materialization::load_project_snapshot_bounded(
+            read.cas(),
+            snapshot_hash,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("project snapshot {snapshot_hash} is absent"))?;
+        ryeos_state::project_materialization::load_project_tree_bounded(
+            read.cas(),
+            &snapshot.project_tree_hash,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("project tree {} is absent", snapshot.project_tree_hash))
     };
     let before = load_tree(before_snapshot_hash)?;
     let after = load_tree(after_snapshot_hash)?;

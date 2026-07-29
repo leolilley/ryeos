@@ -1,4 +1,4 @@
-<!-- ryeos:signed:2026-07-28T01:41:27Z:26d819c1d26b0b9da1964b5d1bf748c911607434b012c1875c871e0ffc5c0198:5roFgMtcw6PTlVdK7Usy3WEnAAz2dpxhlyoR3sy5D1S1cpR/81DyXQC0PTzCKBnFeGWBPIwfA+TZBdwQedr1Cw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
+<!-- ryeos:signed:2026-07-28T23:56:25Z:ea89d4eaf02858c22cd5589662ab3bc5d612649d67584e52a40de40ae779110b:u956yG6BseWJJ8xUAst7DNJ33AQSdfqepKugqzHNoSL4sEir2gKzD7MxH4CKiYrbZ+Ax87+4FozfbNM6YWncBw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: ryeos/future
 name: content-addressed-managed-runtime-workers
@@ -122,14 +122,24 @@ The initial class binds at least:
 - exact verified executor-chain attestation digest, including executable blob,
   manifest, signer, host triple, bundle/trust generation, and root-ambiguity
   proof;
+- exact verified boot-artifact closure for every host object the warm process
+  consumes before or while declaring `ready`: interpreter/runtime executable,
+  dynamic loader, shared libraries, CA material, resolver/proxy inputs, and
+  every other non-invocation host dependency opened or retained for the worker
+  lifetime. The closure may instead bind one immutable, verified host/image
+  generation containing all of those objects. An unsealed live dependency
+  makes the launch worker-ineligible; a changed generation drains the old pool
+  rather than revalidating it in place;
 - runtime protocol canonical ref and signed descriptor digest;
+- canonical digest of the exact retained tool inventory and stable serialized
+  tool schemas available inside the worker class;
 - host platform and architecture;
 - Lillux isolation backend and semantic policy identity;
 - RyeOS daemon/runtime protocol generation;
 - permitted callback protocol generation;
 - runtime configuration schema and full resolved static-config dependency
   proof, including positive sources, negative precedence probes,
-  project/operator generations, and node-policy generation.
+  project/node-local config generations, and node-policy generation.
 
 The class contains no secret values and no invocation principal.
 
@@ -146,7 +156,7 @@ be reused. It binds:
   `IsolationPolicy` network/environment/filesystem limits, callback-protocol
   ceiling, and every contributing node-policy generation;
 - node isolation-policy generation and Lillux policy identity;
-- operator secret namespace and opaque credential generation;
+- node-local secret namespace and opaque credential generation;
 - provider transport identity;
 - egress/isolation policy partition;
 - any hosted-tenant or outer-worker identity when those systems exist.
@@ -157,7 +167,7 @@ credential-generation identity so a connection is never reused across
 credential authority.
 
 Bearer API tokens sent as request headers remain invocation-scoped, but the
-initial conservative implementation should still partition by operator secret
+initial conservative implementation should still partition by node-local secret
 namespace/credential generation. That can be relaxed only after explicit
 cross-credential transport review. In particular, HTTP/2 header-compression
 state may retain representations of authorization headers inside a live
@@ -339,6 +349,8 @@ Initial eligibility should require:
 - no unmanaged descendants after lease settlement;
 - no runtime-owned durable state that exists only in process memory;
 - daemon-mediated accounting and callback events;
+- no per-invocation writable `state_root`, checkpoint ownership, or native
+  resume authority;
 - a pinned read-only project generation and stable
   principal/credential isolation partition;
 - an isolation backend that can preserve the class boundary for the process
@@ -351,6 +363,13 @@ snapshot is the only initial project-bearing surface. `LiveFs` is not
 content-addressed and is not initially eligible. A separately specified
 immutable hosted-deployment generation may become eligible later, but there is
 no undefined "stable hosted project" exception.
+
+Initial worker leases may consume daemon-mediated durable state only through
+authenticated callbacks whose effects are committed by RyeOS. Writable
+state/workspace handles, checkpoint-bearing execution, and native resume remain
+cold until Lillux exposes a separately specified, revocable per-lease authority
+that can be granted and withdrawn without widening the worker's process
+sandbox.
 
 ## Lifecycle
 
@@ -599,9 +618,11 @@ The current managed-runtime protocol injects callback/thread-auth credentials
 and declared secrets through per-process environment. A persistent worker
 cannot rotate process environment safely. Its boot environment therefore
 contains only worker-instance authority; every invocation callback token,
-thread-auth token, secret handle, project/state handle, and deadline arrives in
-the lease channel and is held only in that lease's state. The worker protocol
-must not emulate environment rotation with global process variables.
+thread-auth token, opaque secret handle, read-only admitted project identity,
+and deadline arrives in the lease channel and is held only in that lease's
+state. The initial protocol carries no writable project/state handle. The
+worker protocol must not emulate environment rotation with global process
+variables.
 
 ## Observability
 
@@ -687,7 +708,7 @@ Worker ids and thread ids belong in traces/audit, not unbounded metric labels.
 
 - Add bounded capacity, queueing, idle drain, upgrade drain, status, and
   metrics.
-- Publish an operator runbook and rollback procedure.
+- Publish a node operations runbook and rollback procedure.
 
 ## Acceptance gate
 

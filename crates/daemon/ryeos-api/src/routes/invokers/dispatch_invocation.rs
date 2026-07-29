@@ -154,7 +154,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             &project_path,
             &principal_id,
             &format!("dispatch-{}", ryeos_app::thread_lifecycle::new_thread_id()),
-            ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+            None,
         )
         .map_err(|error| {
             RouteDispatchError::BadRequest(format!("capture dispatch project: {error}"))
@@ -168,6 +168,8 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             project_context: ProjectContext::LocalPath {
                 path: project_ctx.effective_path.clone(),
             },
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
             current_site_id: site_id.clone(),
             origin_site_id,
             execution_hints: Default::default(),
@@ -212,6 +214,7 @@ impl CompiledRouteInvocation for CompiledDispatchInvoker {
             usage_subject_asserted_by: None,
             previous_thread_id: None,
             root_admission: None,
+            root_dispatch_evidence: None,
             parent_execution_context: None,
         };
 

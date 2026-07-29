@@ -93,7 +93,7 @@ pub async fn handle(
         &project_path,
         &ctx.fingerprint,
         &format!("command-{}", ryeos_app::thread_lifecycle::new_thread_id()),
-        ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+        None,
     )
     .map_err(|error| HandlerError::BadRequest(format!("capture command project: {error}")))?;
 
@@ -108,6 +108,7 @@ pub async fn handle(
         project_context: ProjectContext::LocalPath {
             path: project_ctx.effective_path.clone(),
         },
+        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: site_id.clone(),
         origin_site_id,
         execution_hints: Default::default(),
@@ -150,6 +151,7 @@ pub async fn handle(
         usage_subject_asserted_by: None,
         previous_thread_id: None,
         root_admission: None,
+        root_dispatch_evidence: None,
         parent_execution_context: None,
     };
 

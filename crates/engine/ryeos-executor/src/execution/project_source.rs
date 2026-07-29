@@ -111,12 +111,15 @@ pub struct ResolvedProjectContext {
     pub source: ProjectSource,
     /// CAS snapshot hash (set for PushedHead).
     pub snapshot_hash: Option<String>,
+    /// Opaque descriptor/content proof for a pinned CAS materialization.
+    /// Present exactly when `snapshot_hash` is present for a newly realized
+    /// context; consumers use this instead of trusting the temporary path.
+    pub pinned_materialization: Option<ryeos_state::PinnedProjectMaterialization>,
     /// Temp directory guard for cleanup (CAS checkout dir for PushedHead).
-    /// **Request-owned**: wrapped in `Arc<TempDirGuard>` so it can be
-    /// shared between the request runner (cleanup) and the engine cache
-    /// (user overlay). The project checkout guard is cloned into the
-    /// runner's `ExecutionGuard`; the directory is removed when the
-    /// last Arc holder drops.
+    /// **Request-owned**: wrapped in `Arc<TempDirGuard>` so the runner and
+    /// request-scoped launch components can share its lifetime. Engine and
+    /// resolution caches never retain the checkout; the directory is removed
+    /// when the request's last holder drops.
     pub temp_dir: Option<Arc<TempDirGuard>>,
     /// The **authoritative** engine for this request. For `LiveFs`, this
     /// is the daemon's startup engine. For `PushedHead`, this is a
@@ -154,6 +157,7 @@ impl ResolvedProjectContext {
             original_path,
             source: ProjectSource::PushedHead,
             snapshot_hash: None,
+            pinned_materialization: None,
             temp_dir: None,
             request_engine,
             captured_generation: None,
@@ -186,9 +190,33 @@ pub fn resolve_project_context(
     project_path: &std::path::Path,
     principal_id: &str,
     checkout_id: &str,
-    pinned_realization: PinnedContextRealization,
+    pinned_realization: Option<PinnedContextRealization>,
 ) -> Result<ResolvedProjectContext, ProjectSourceError> {
     let original_path = project_path.to_path_buf();
+    let pinned_realization = match (source, pinned_realization) {
+        (ProjectSource::LiveFs, None) => None,
+        (ProjectSource::LiveFs, Some(_)) => {
+            return Err(ProjectSourceError::Other(
+                "live project context cannot carry a pinned realization".to_string(),
+            ))
+        }
+        (
+            ProjectSource::PushedHead
+            | ProjectSource::Snapshot { .. }
+            | ProjectSource::CaptureLiveFullProject,
+            Some(realization),
+        ) => Some(realization),
+        (
+            ProjectSource::PushedHead
+            | ProjectSource::Snapshot { .. }
+            | ProjectSource::CaptureLiveFullProject,
+            None,
+        ) => {
+            return Err(ProjectSourceError::Other(
+                "pinned project context requires an explicit realization".to_string(),
+            ))
+        }
+    };
 
     let ctx = match source {
         ProjectSource::LiveFs => {
@@ -203,6 +231,7 @@ pub fn resolve_project_context(
                 original_path,
                 source: ProjectSource::LiveFs,
                 snapshot_hash: None,
+                pinned_materialization: None,
                 temp_dir: None,
                 request_engine: Arc::clone(&state.engine),
                 captured_generation: None,
@@ -243,7 +272,7 @@ pub fn resolve_project_context(
                 checkout_id,
                 source: ProjectSource::PushedHead,
                 captured_generation: None,
-                realization: pinned_realization,
+                realization: pinned_realization.expect("validated pinned realization"),
             })?
         }
         ProjectSource::Snapshot { hash } => {
@@ -258,7 +287,7 @@ pub fn resolve_project_context(
                 checkout_id,
                 source: source.clone(),
                 captured_generation: None,
-                realization: pinned_realization,
+                realization: pinned_realization.expect("validated pinned realization"),
             })?
         }
         ProjectSource::CaptureLiveFullProject => {
@@ -280,7 +309,7 @@ pub fn resolve_project_context(
                 checkout_id,
                 source: source.clone(),
                 captured_generation: Some(captured),
-                realization: pinned_realization,
+                realization: pinned_realization.expect("validated pinned realization"),
             })?
         }
     };
@@ -357,8 +386,7 @@ fn resolve_pinned_snapshot_context_admitted(
     authority.ensure_guard(cas_mutation_guard)?;
     let cas = authority.cas_store()?;
 
-    let snap_obj = cas
-        .get_object(snapshot_hash)
+    ryeos_state::project_materialization::load_project_snapshot_bounded(&cas, snapshot_hash)
         .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?
         .ok_or_else(|| {
             ProjectSourceError::CheckoutFailed(format!(
@@ -366,8 +394,6 @@ fn resolve_pinned_snapshot_context_admitted(
                 snapshot_hash
             ))
         })?;
-    ryeos_state::objects::ProjectSnapshot::from_value(&snap_obj)
-        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
     // ── 1. Realize the selected immutable filesystem contract ───────
     let runtime_cache = state.config.runtime_root().cache();
     let materialization_cache =
@@ -427,19 +453,23 @@ fn resolve_pinned_snapshot_context_admitted(
             }
             let lower = workspace.lower;
             (
-                Some(lower),
-                Some(Arc::new(TempDirGuard::new_workspace(workspace.root))),
+                Some(lower.clone()),
+                Some(Arc::new(
+                    TempDirGuard::new_workspace(workspace.root, lower)
+                        .map_err(|error| ProjectSourceError::CheckoutFailed(error.to_string()))?,
+                )),
             )
         }
     };
-    let (effective_path, generation_lease) = crate::execution::checkout_project_lower(
-        authority,
-        cas_mutation_guard,
-        snapshot_hash,
-        target_path.as_deref(),
-        &materialization_cache,
-    )
-    .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
+    let (effective_path, generation_lease, pinned_materialization) =
+        crate::execution::checkout_project_lower(
+            authority,
+            cas_mutation_guard,
+            snapshot_hash,
+            target_path.as_deref(),
+            &materialization_cache,
+        )
+        .map_err(|e| ProjectSourceError::CheckoutFailed(e.to_string()))?;
     let project_guard = match project_guard {
         Some(guard) => guard,
         None => Arc::new(TempDirGuard::new_borrowed_cache(effective_path.clone())),
@@ -478,9 +508,9 @@ fn resolve_pinned_snapshot_context_admitted(
         original_path,
         source,
         snapshot_hash: Some(snapshot_hash.to_string()),
-        // Request-owned: wrapped in Arc<TempDirGuard> so the
-        // runner and cache can both hold references. The project
-        // checkout is cleaned up when the last Arc drops.
+        pinned_materialization: Some(pinned_materialization),
+        // Request-owned: the runner and request-scoped launch components may
+        // share it, but no engine/resolution cache retains this checkout.
         temp_dir: Some(project_guard),
         request_engine,
         captured_generation,

@@ -119,6 +119,7 @@ fn ancestor_to_verified(a: &ryeos_engine::resolution::ResolvedAncestor) -> Verif
         trust_class: match a.trust_class {
             ryeos_engine::resolution::TrustClass::TrustedBundle => TrustClass::TrustedBundle,
             ryeos_engine::resolution::TrustClass::TrustedProject => TrustClass::TrustedProject,
+            ryeos_engine::resolution::TrustClass::TrustedNode => TrustClass::TrustedNode,
             ryeos_engine::resolution::TrustClass::UntrustedProject => TrustClass::UntrustedProject,
             ryeos_engine::resolution::TrustClass::Unsigned => TrustClass::Unsigned,
         },

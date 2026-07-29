@@ -155,9 +155,12 @@ pub enum PinnedChildProjectRealization {
 }
 
 /// Explicit project-authority transitions over one chain's private operational
-/// generation. The admitted launch capsule remains immutable; selecting a
-/// child's sealed pinned generation is distinct from advancing a running COW
-/// workspace, and checkpoint/continuation advances are restricted to COW.
+/// generation. Each segment's admitted launch capsule remains immutable; a
+/// continuation receives a new segment capsule at the transitioned authority
+/// while retaining the same base lineage and immutable program admission.
+/// Selecting a child's sealed pinned generation is distinct from advancing a
+/// running COW workspace, and checkpoint/continuation advances are restricted
+/// to COW.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationalProjectAuthorityTransition<'a> {
     InheritContinuation,
@@ -279,6 +282,11 @@ pub enum ExecutionProjectAuthority {
         stable_project_identity: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         display_path: Option<PathBuf>,
+        /// Immutable generation from which this pinned execution lineage
+        /// originated. COW continuation advances `snapshot_hash` while this
+        /// base remains stable.
+        base_snapshot_hash: String,
+        /// Current operational generation materialized for this transition.
         snapshot_hash: String,
         realization: PinnedProjectRealization,
         environment: EnvironmentAuthority,
@@ -367,9 +375,19 @@ impl ExecutionProjectAuthority {
             }
             OperationalProjectAuthorityTransition::SelectPinnedChildGeneration {
                 snapshot_hash,
-            } => self
-                .clone()
-                .with_pinned_snapshot_hash(snapshot_hash.to_string()),
+            } => {
+                let mut selected = self
+                    .clone()
+                    .with_pinned_snapshot_hash(snapshot_hash.to_string())?;
+                if let Self::PinnedGeneration {
+                    base_snapshot_hash, ..
+                } = &mut selected
+                {
+                    *base_snapshot_hash = snapshot_hash.to_string();
+                }
+                selected.validate()?;
+                Ok(selected)
+            }
             OperationalProjectAuthorityTransition::SealPinnedCowCheckpoint { snapshot_hash }
             | OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
                 result_snapshot_hash: snapshot_hash,
@@ -388,6 +406,50 @@ impl ExecutionProjectAuthority {
                 self.clone()
                     .with_pinned_snapshot_hash(snapshot_hash.to_string())
             }
+        }
+    }
+
+    /// Return whether two admitted continuation segments belong to the same
+    /// project-authority lineage.
+    ///
+    /// A pinned COW chain is the only authority whose private operational
+    /// generation may advance between segments. Every other authority field is
+    /// part of the immutable admission boundary: in particular, a continuation
+    /// cannot change its base snapshot, publication fence, environment source,
+    /// capability ceiling, or child policy.
+    pub fn same_continuation_lineage(&self, other: &Self) -> anyhow::Result<bool> {
+        self.validate()?;
+        other.validate()?;
+        match (self, other) {
+            (
+                Self::PinnedGeneration {
+                    stable_project_identity: left_identity,
+                    display_path: left_display_path,
+                    base_snapshot_hash: left_base,
+                    snapshot_hash: _,
+                    realization: left_realization @ PinnedProjectRealization::Cow { .. },
+                    environment: left_environment,
+                    capability_ceiling: left_capabilities,
+                    child_policy: left_child_policy,
+                },
+                Self::PinnedGeneration {
+                    stable_project_identity: right_identity,
+                    display_path: right_display_path,
+                    base_snapshot_hash: right_base,
+                    snapshot_hash: _,
+                    realization: right_realization @ PinnedProjectRealization::Cow { .. },
+                    environment: right_environment,
+                    capability_ceiling: right_capabilities,
+                    child_policy: right_child_policy,
+                },
+            ) => Ok(left_identity == right_identity
+                && left_display_path == right_display_path
+                && left_base == right_base
+                && left_realization == right_realization
+                && left_environment == right_environment
+                && left_capabilities == right_capabilities
+                && left_child_policy == right_child_policy),
+            _ => Ok(self == other),
         }
     }
 
@@ -506,6 +568,7 @@ impl ExecutionProjectAuthority {
         let authority = Self::PinnedGeneration {
             stable_project_identity,
             display_path,
+            base_snapshot_hash: snapshot_hash.clone(),
             snapshot_hash,
             realization,
             environment,
@@ -564,6 +627,7 @@ impl ExecutionProjectAuthority {
             Self::PinnedGeneration {
                 stable_project_identity,
                 display_path,
+                base_snapshot_hash,
                 snapshot_hash,
                 environment,
                 capability_ceiling,
@@ -575,6 +639,7 @@ impl ExecutionProjectAuthority {
                     stable_project_identity,
                     false,
                 )?;
+                validate_hash("project base snapshot hash", base_snapshot_hash)?;
                 if let Some(path) = display_path {
                     validate_absolute_normal_path("pinned project display path", path)?;
                 }
@@ -618,6 +683,13 @@ impl ExecutionProjectAuthority {
                     // admission. `snapshot_hash` may advance through private
                     // operational generations before terminal publication.
                 }
+                if matches!(realization, PinnedProjectRealization::ReadOnly)
+                    && base_snapshot_hash != snapshot_hash
+                {
+                    anyhow::bail!(
+                        "read-only pinned authority base must equal its operational generation"
+                    );
+                }
                 validate_capability_ceiling(capability_ceiling)
             }
         }
@@ -631,9 +703,78 @@ impl ExecutionProjectAuthority {
         }
     }
 
-    pub fn base_snapshot_projection(&self) -> Option<&str> {
+    /// Snapshot generation that authorizes this exact execution transition.
+    /// For COW lineages this advances while `subject_base_snapshot_hash`
+    /// remains fixed.
+    pub fn operational_snapshot_projection(&self) -> Option<&str> {
         match self {
             Self::PinnedGeneration { snapshot_hash, .. } => Some(snapshot_hash),
+            Self::Projectless { .. } | Self::LiveProject { .. } => None,
+        }
+    }
+
+    /// Stable execution-authority identity for content-addressed preparation
+    /// caches. Diagnostic realization paths are deliberately excluded from
+    /// pinned authority: the same admitted generation has the same preparation
+    /// semantics wherever its verified materialization lives.
+    ///
+    /// Live authority keeps its canonical root because that pathname is the
+    /// mutable content authority itself, not a disposable realization.
+    pub fn stable_cache_identity(&self) -> anyhow::Result<serde_json::Value> {
+        self.validate()?;
+        Ok(match self {
+            Self::Projectless { environment } => serde_json::json!({
+                "schema_version": 1,
+                "kind": "projectless",
+                "environment": environment,
+            }),
+            Self::LiveProject {
+                authority_id,
+                authored_project_identity,
+                canonical_root,
+                live_access,
+                environment,
+                capability_ceiling,
+                child_policy,
+            } => serde_json::json!({
+                "schema_version": 1,
+                "kind": "live_project",
+                "authority_id": authority_id,
+                "authored_project_identity": authored_project_identity,
+                "canonical_root": canonical_root,
+                "live_access": live_access,
+                "environment": environment,
+                "capability_ceiling": capability_ceiling,
+                "child_policy": child_policy,
+            }),
+            Self::PinnedGeneration {
+                stable_project_identity,
+                display_path: _,
+                base_snapshot_hash,
+                snapshot_hash,
+                realization,
+                environment,
+                capability_ceiling,
+                child_policy,
+            } => serde_json::json!({
+                "schema_version": 1,
+                "kind": "pinned_generation",
+                "stable_project_identity": stable_project_identity,
+                "base_snapshot_hash": base_snapshot_hash,
+                "snapshot_hash": snapshot_hash,
+                "realization": realization,
+                "environment": environment,
+                "capability_ceiling": capability_ceiling,
+                "child_policy": child_policy,
+            }),
+        })
+    }
+
+    pub fn subject_base_snapshot_hash(&self) -> Option<&str> {
+        match self {
+            Self::PinnedGeneration {
+                base_snapshot_hash, ..
+            } => Some(base_snapshot_hash),
             Self::Projectless { .. } | Self::LiveProject { .. } => None,
         }
     }
@@ -784,7 +925,11 @@ fn validate_sorted_relative_paths(label: &str, paths: &[String]) -> anyhow::Resu
 }
 
 fn validate_hash(label: &str, value: &str) -> anyhow::Result<()> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         anyhow::bail!("{label} must be a 64-character hexadecimal digest");
     }
     Ok(())
@@ -924,5 +1069,160 @@ mod tests {
         )
         .unwrap();
         assert!(pinned.authorized_live_write_root("project").is_err());
+    }
+
+    #[test]
+    fn cow_base_survives_multiple_advances_and_serialized_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let base = "a".repeat(64);
+        let generation_b = "b".repeat(64);
+        let generation_c = "c".repeat(64);
+        let authority = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            Some(root.path().to_path_buf()),
+            base.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let generation_b_authority = authority
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &generation_b,
+                },
+            )
+            .unwrap();
+        let restarted: ExecutionProjectAuthority =
+            serde_json::from_value(serde_json::to_value(&generation_b_authority).unwrap()).unwrap();
+        restarted.validate().unwrap();
+        assert_eq!(restarted.subject_base_snapshot_hash(), Some(base.as_str()));
+        assert_eq!(
+            restarted.operational_snapshot_projection(),
+            Some(generation_b.as_str())
+        );
+
+        let generation_c_authority = restarted
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &generation_c,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            generation_c_authority.subject_base_snapshot_hash(),
+            Some(base.as_str())
+        );
+        assert_eq!(
+            generation_c_authority.operational_snapshot_projection(),
+            Some(generation_c.as_str())
+        );
+    }
+
+    #[test]
+    fn pinned_stable_cache_identity_ignores_only_display_path() {
+        let generation = "a".repeat(64);
+        let left = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            Some(PathBuf::from("/tmp/materialization-left")),
+            generation.clone(),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        let right = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            Some(PathBuf::from("/tmp/materialization-right")),
+            generation,
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            left.stable_cache_identity().unwrap(),
+            right.stable_cache_identity().unwrap()
+        );
+
+        let advanced = right
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &"b".repeat(64),
+                },
+            )
+            .unwrap();
+        assert_ne!(
+            left.stable_cache_identity().unwrap(),
+            advanced.stable_cache_identity().unwrap()
+        );
+    }
+
+    #[test]
+    fn only_a_cow_operational_generation_may_change_within_a_continuation() {
+        let base = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            vec!["ryeos.read.project".to_string()],
+        )
+        .unwrap();
+        let advanced = base
+            .transition_operational_generation(
+                OperationalProjectAuthorityTransition::AdvancePinnedCowContinuation {
+                    result_snapshot_hash: &"b".repeat(64),
+                },
+            )
+            .unwrap();
+        assert!(base.same_continuation_lineage(&advanced).unwrap());
+
+        let different_base = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            None,
+            "c".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            },
+            EnvironmentAuthority::None,
+            vec!["ryeos.read.project".to_string()],
+        )
+        .unwrap();
+        assert!(!base.same_continuation_lineage(&different_base).unwrap());
+
+        let different_publication = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::RetainResult,
+            },
+            EnvironmentAuthority::None,
+            vec!["ryeos.read.project".to_string()],
+        )
+        .unwrap();
+        assert!(!base
+            .same_continuation_lineage(&different_publication)
+            .unwrap());
+
+        let read_only = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            None,
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            vec!["ryeos.read.project".to_string()],
+        )
+        .unwrap();
+        assert!(!base.same_continuation_lineage(&read_only).unwrap());
     }
 }

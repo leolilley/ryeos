@@ -17,22 +17,18 @@ use super::launch_preparation::PreparedRuntimeLaunch;
 
 struct CurrentTrust<'a> {
     node: &'a TrustStore,
-    project: TrustStore,
+    project: &'a TrustStore,
 }
 
 impl<'a> CurrentTrust<'a> {
-    fn load(
+    fn from_current_policy(
         engine: &'a ryeos_engine::engine::Engine,
-        effective_project_root: Option<&std::path::Path>,
-    ) -> Result<Self> {
-        let project = engine
-            .effective_request_snapshot(effective_project_root)
-            .context("load current project trust policy for admitted execution")?
-            .trust_store;
-        Ok(Self {
+        project_trust: &'a TrustStore,
+    ) -> Self {
+        Self {
             node: &engine.node_trust_store,
-            project,
-        })
+            project: project_trust,
+        }
     }
 
     fn validate(
@@ -55,13 +51,27 @@ impl<'a> CurrentTrust<'a> {
                     bail!("{label} signer is no longer project-trusted: {signer}");
                 }
             }
+            (ItemSpace::Node, TrustClass::TrustedNode, Some(signer)) => {
+                validate_signer(label, signer)?;
+                if !self.node.is_trusted(signer) {
+                    bail!("{label} signer is no longer node-trusted: {signer}");
+                }
+            }
             (
-                ItemSpace::Bundle | ItemSpace::Project,
+                ItemSpace::Bundle | ItemSpace::Project | ItemSpace::Node,
                 TrustClass::UntrustedProject,
                 Some(signer),
             ) => validate_signer(label, signer)?,
-            (ItemSpace::Bundle | ItemSpace::Project, TrustClass::Unsigned, None) => {}
-            (_, TrustClass::TrustedBundle | TrustClass::TrustedProject, None) => {
+            (
+                ItemSpace::Bundle | ItemSpace::Project | ItemSpace::Node,
+                TrustClass::Unsigned,
+                None,
+            ) => {}
+            (
+                _,
+                TrustClass::TrustedBundle | TrustClass::TrustedProject | TrustClass::TrustedNode,
+                None,
+            ) => {
                 bail!("{label} was admitted as trusted without a signer");
             }
             (_, TrustClass::UntrustedProject, None) => {
@@ -71,7 +81,11 @@ impl<'a> CurrentTrust<'a> {
                 bail!("{label} was admitted as unsigned but carries a signer");
             }
             (ItemSpace::Project, TrustClass::TrustedBundle, Some(_))
-            | (ItemSpace::Bundle, TrustClass::TrustedProject, Some(_)) => {
+            | (ItemSpace::Project, TrustClass::TrustedNode, Some(_))
+            | (ItemSpace::Bundle, TrustClass::TrustedProject, Some(_))
+            | (ItemSpace::Bundle, TrustClass::TrustedNode, Some(_))
+            | (ItemSpace::Node, TrustClass::TrustedBundle, Some(_))
+            | (ItemSpace::Node, TrustClass::TrustedProject, Some(_)) => {
                 bail!("{label} trust class contradicts its admitted source space");
             }
         }
@@ -87,6 +101,12 @@ fn validate_signer(label: &str, signer: &str) -> Result<()> {
 }
 
 fn validate_digest_node(policy: &CurrentTrust<'_>, node: &ResolutionDigestNode) -> Result<()> {
+    if node.source_space == ItemSpace::Node || node.trust_class == TrustClass::TrustedNode {
+        bail!(
+            "admitted general resolution authority `{}` uses config-only node authority",
+            node.resolved_ref
+        );
+    }
     if !lillux::valid_hash(&node.raw_content_digest) {
         bail!(
             "admitted resolution authority `{}` carries an invalid content digest",
@@ -115,6 +135,12 @@ fn validate_resolution_digest(
 }
 
 fn validate_resolution_node(policy: &CurrentTrust<'_>, node: &ResolvedAncestor) -> Result<()> {
+    if node.source_space == ItemSpace::Node || node.trust_class == TrustClass::TrustedNode {
+        bail!(
+            "admitted general resolution authority `{}` uses config-only node authority",
+            node.resolved_ref
+        );
+    }
     if !lillux::valid_hash(&node.raw_content_digest) {
         bail!(
             "admitted resolution authority `{}` carries an invalid content digest",
@@ -146,6 +172,7 @@ fn config_space(space: ItemSpaceWire) -> ItemSpace {
     match space {
         ItemSpaceWire::Bundle => ItemSpace::Bundle,
         ItemSpaceWire::Project => ItemSpace::Project,
+        ItemSpaceWire::Node => ItemSpace::Node,
     }
 }
 
@@ -153,6 +180,7 @@ fn config_trust(trust: TrustClassWire) -> TrustClass {
     match trust {
         TrustClassWire::TrustedBundle => TrustClass::TrustedBundle,
         TrustClassWire::TrustedProject => TrustClass::TrustedProject,
+        TrustClassWire::TrustedNode => TrustClass::TrustedNode,
         TrustClassWire::UntrustedProject => TrustClass::UntrustedProject,
         TrustClassWire::Unsigned => TrustClass::Unsigned,
     }
@@ -178,11 +206,11 @@ fn validate_config_contributor(
 
 pub(crate) fn validate_managed_current_trust(
     engine: &ryeos_engine::engine::Engine,
-    effective_project_root: Option<&std::path::Path>,
+    project_trust: &TrustStore,
     primary: &ResolutionOutput,
     prepared: &PreparedRuntimeLaunch,
 ) -> Result<()> {
-    let policy = CurrentTrust::load(engine, effective_project_root)?;
+    let policy = CurrentTrust::from_current_policy(engine, project_trust);
     validate_primary_resolution(&policy, primary)?;
     for (name, binding) in &prepared.binding_records {
         validate_resolution_digest(&policy, &binding.resolution)
@@ -196,12 +224,12 @@ pub(crate) fn validate_managed_current_trust(
 
 pub(crate) fn validate_direct_current_trust(
     engine: &ryeos_engine::engine::Engine,
-    effective_project_root: Option<&std::path::Path>,
+    project_trust: &TrustStore,
     primary: &ResolutionOutput,
     plan: &ryeos_engine::contracts::ExecutionPlan,
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
 ) -> Result<()> {
-    let policy = CurrentTrust::load(engine, effective_project_root)?;
+    let policy = CurrentTrust::from_current_policy(engine, project_trust);
     validate_primary_resolution(&policy, primary)?;
     validate_direct_plan_closure(primary, plan, capsule)?;
     for authority in &plan.executor_authorities {
@@ -216,9 +244,9 @@ fn validate_direct_plan_closure(
     capsule: &ryeos_state::objects::AdmittedLaunchCapsule,
 ) -> Result<()> {
     let ryeos_state::objects::AdmittedLaunchArtifactIdentity::DirectItemExecutor {
-        executor_item_content_hash,
-        executor_item_signer_fingerprint,
-        wrapper_source_identity,
+        root_subject_source_content_digest,
+        root_subject_signer_fingerprint,
+        root_subject_source_identity,
         runtime_identity,
         ..
     } = &capsule.artifact_identity
@@ -230,16 +258,15 @@ fn validate_direct_plan_closure(
             != ryeos_engine::canonical_ref::CanonicalRef::parse(&primary.root.resolved_ref)
                 .context("decode admitted direct root ref")?
                 .kind
-        || primary.root.source_content_digest != *executor_item_content_hash
-        || primary.root.signer_fingerprint != *executor_item_signer_fingerprint
+        || primary.root.source_content_digest != *root_subject_source_content_digest
+        || primary.root.signer_fingerprint != *root_subject_signer_fingerprint
     {
         bail!("admitted direct plan/artifact identity contradicts its exact root resolution");
     }
-    match (primary.root.source_space, wrapper_source_identity) {
-        (ItemSpace::Project, ryeos_state::objects::DirectWrapperSourceIdentity::Project)
-        | (ItemSpace::Bundle, ryeos_state::objects::DirectWrapperSourceIdentity::Bundle { .. }) => {
-        }
-        _ => bail!("admitted direct wrapper source contradicts its exact root resolution"),
+    match (primary.root.source_space, root_subject_source_identity) {
+        (ItemSpace::Project, ryeos_state::objects::DirectRootSourceIdentity::Project)
+        | (ItemSpace::Bundle, ryeos_state::objects::DirectRootSourceIdentity::Bundle { .. }) => {}
+        _ => bail!("admitted direct root source contradicts its exact root resolution"),
     }
     if plan.executor_chain.first() != Some(&plan.root_ref)
         || plan.executor_chain.len() != plan.executor_authorities.len() + 1
@@ -311,7 +338,7 @@ mod tests {
         )
     }
 
-    fn policy<'a>(node: &'a TrustStore, project: TrustStore) -> CurrentTrust<'a> {
+    fn policy<'a>(node: &'a TrustStore, project: &'a TrustStore) -> CurrentTrust<'a> {
         CurrentTrust { node, project }
     }
 
@@ -336,7 +363,7 @@ mod tests {
         let (fingerprint, admitted_signer) = signer(41);
         let node = TrustStore::empty();
         let admitted_project = TrustStore::from_signers(vec![admitted_signer]);
-        policy(&node, admitted_project)
+        policy(&node, &admitted_project)
             .validate(
                 "project root",
                 ItemSpace::Project,
@@ -345,7 +372,8 @@ mod tests {
             )
             .unwrap();
 
-        let error = policy(&node, TrustStore::empty())
+        let empty_project = TrustStore::empty();
+        let error = policy(&node, &empty_project)
             .validate(
                 "project root",
                 ItemSpace::Project,
@@ -360,7 +388,8 @@ mod tests {
     fn signed_untrusted_authority_does_not_gain_or_require_current_trust() {
         let (fingerprint, _) = signer(42);
         let node = TrustStore::empty();
-        policy(&node, TrustStore::empty())
+        let project = TrustStore::empty();
+        policy(&node, &project)
             .validate(
                 "signed project root",
                 ItemSpace::Project,
@@ -393,8 +422,8 @@ mod tests {
             policy_facts: Default::default(),
         };
 
-        let error =
-            validate_resolution_digest(&policy(&node, TrustStore::empty()), &digest).unwrap_err();
+        let project = TrustStore::empty();
+        let error = validate_resolution_digest(&policy(&node, &project), &digest).unwrap_err();
         assert!(error.to_string().contains("no longer node-trusted"));
         assert!(error.to_string().contains("config:test/reference"));
     }
@@ -412,8 +441,8 @@ mod tests {
         };
         let node = TrustStore::empty();
 
-        let error =
-            validate_plan_authority(&policy(&node, TrustStore::empty()), &authority).unwrap_err();
+        let project = TrustStore::empty();
+        let error = validate_plan_authority(&policy(&node, &project), &authority).unwrap_err();
         assert!(error.to_string().contains("no longer node-trusted"));
         assert!(error.to_string().contains("runtime:test/direct"));
     }

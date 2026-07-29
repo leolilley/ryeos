@@ -79,6 +79,7 @@ pub fn availability_for_endpoint(
 }
 
 /// Execution context passed to `execute_service`.
+#[derive(Clone)]
 pub struct ExecutionContext {
     /// Who's making this request (for audit).
     pub principal_fingerprint: String,
@@ -666,12 +667,30 @@ pub async fn execute_service_verified(
     };
 
     let dispatch_result = if let Some(project_binding) = project_binding {
+        let admitted_request_snapshot =
+            project_binding.admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)?;
+        let verified_attestation = match admitted_request_snapshot.as_ref() {
+            Some(authority) => ctx.engine.resolve_attested_under_admitted_authority(
+                &ctx.plan_ctx,
+                &verified.resolved.canonical_ref,
+                project_binding.execution_workspace().ok_or_else(|| {
+                    anyhow::anyhow!("content-addressed recorded service has no execution workspace")
+                })?,
+                authority,
+            ),
+            None => ctx
+                .engine
+                .verify_attested(&ctx.plan_ctx, verified.resolved.clone()),
+        }
+        .map_err(|error| {
+            anyhow::anyhow!("attest recorded service subject before persistence: {error}")
+        })?;
         let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution(
             &ctx.engine,
             &ctx.plan_ctx,
             &ctx.plan_ctx,
             project_binding,
-            verified.clone(),
+            verified_attestation,
             &state.node_history_policy,
             thread_profile,
             std::collections::BTreeMap::new(),

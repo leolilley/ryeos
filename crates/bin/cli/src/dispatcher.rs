@@ -288,10 +288,9 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     // Stream a live execution log for `execute` runs on a terminal, unless the
     // caller opted out. Piped/redirected output and `--no-stream`/`--json` get
     // the buffered JSON result (machine-friendly, unchanged behavior).
-    // `/execute/stream` requires a project_path (unlike `/execute`, which falls
-    // back to the app root), so fall back to the buffered path when none was
-    // resolved (`--no-project` / outside a project). `--stream`/`--no-stream`
-    // force the choice; otherwise auto-detect a terminal.
+    // Projectless execution is a first-class typed policy on both buffered and
+    // streaming routes. `--stream`/`--no-stream` force the choice; otherwise
+    // auto-detect a terminal.
     // A state-root override is carried only by the buffered `/execute` route
     // (whose response also echoes both roots as execution diagnostics), so it
     // forces the buffered path; forcing the stream on alongside it is a
@@ -306,11 +305,12 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
     let want_stream = resolved
         .stream
         .unwrap_or_else(|| console.capabilities().tty());
-    let stream_live = resolved.direct_execute
-        && !resolved.async_launch
-        && resolved.project_path.is_some()
-        && resolved.state_root.is_none()
-        && want_stream;
+    let stream_live = should_stream_direct_execute(
+        resolved.direct_execute,
+        resolved.async_launch,
+        resolved.state_root.is_some(),
+        want_stream,
+    );
     let command_label = resolved.command_label.clone();
     if stream_live {
         return post_to_daemon_streaming(
@@ -358,32 +358,26 @@ pub async fn run(cli: Cli, console: &crate::tty::Console) -> Result<(), CliError
 }
 
 fn execution_policy_value(project_backed: bool, accepted: bool) -> Value {
-    let project = if project_backed {
-        serde_json::json!({
-            "kind": "live_direct",
-            "access": "read_write",
-            "child_policy": { "kind": "inherit" },
-        })
+    let response = if accepted {
+        ryeos_app::execution_policy::ExecutionResponse::Accepted
     } else {
-        serde_json::json!({ "kind": "projectless" })
+        ryeos_app::execution_policy::ExecutionResponse::Wait
     };
-    serde_json::json!({
-        "schema_version": 2,
-        "ownership": "daemon_owned",
-        "recovery": "restart_recoverable",
-        "response": if accepted { "accepted" } else { "wait" },
-        "target": { "kind": "here" },
-        "environment": if project_backed {
-            serde_json::json!({
-                "kind": "project_overlay",
-                "include_operator_vault": true,
-                "name_policy": { "kind": "declared_required" },
-            })
-        } else {
-            serde_json::json!({ "kind": "none" })
-        },
-        "project": project,
-    })
+    let policy = if project_backed {
+        ryeos_app::execution_policy::ExecutionPolicy::local_live(response)
+    } else {
+        ryeos_app::execution_policy::ExecutionPolicy::projectless(response)
+    };
+    serde_json::to_value(policy).expect("typed execution policy serialization cannot fail")
+}
+
+fn should_stream_direct_execute(
+    direct_execute: bool,
+    async_launch: bool,
+    has_state_root: bool,
+    want_stream: bool,
+) -> bool {
+    direct_execute && !async_launch && !has_state_root && want_stream
 }
 
 fn should_show_tty_screen(rest: &[String], stdout_is_tty: bool) -> bool {
@@ -1513,6 +1507,18 @@ mod tests {
             rest_with_global_no_project(&s(&["execute", "item:x", "--no-project"]), true),
             s(&["execute", "item:x", "--no-project"])
         );
+    }
+
+    #[test]
+    fn direct_execute_streaming_is_project_agnostic_and_respects_typed_controls() {
+        // Project selection is deliberately absent from this decision: both
+        // project-backed and projectless direct execution use the same live
+        // route when the execution controls permit it.
+        assert!(should_stream_direct_execute(true, false, false, true));
+        assert!(!should_stream_direct_execute(false, false, false, true));
+        assert!(!should_stream_direct_execute(true, true, false, true));
+        assert!(!should_stream_direct_execute(true, false, true, true));
+        assert!(!should_stream_direct_execute(true, false, false, false));
     }
 
     #[test]

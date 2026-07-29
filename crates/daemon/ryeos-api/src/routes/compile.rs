@@ -32,6 +32,7 @@ pub struct RouteDispatchContext {
     pub body_raw: Vec<u8>,
     pub principal: RoutePrincipal,
     pub state: ryeos_app::state::AppState,
+    pub launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
     /// Webhook dedupe store — passed through to invokers that need it
     /// (currently only the `hmac` auth verifier). Lives on
     /// `ApiState`, not `AppState`.

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Structured engine errors.
 ///
@@ -6,6 +7,8 @@ use std::path::PathBuf;
 /// concrete variant — no silent fallbacks, no "try another format" paths.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("{0}")]
+    Shared(Arc<EngineError>),
     // ── Ref parsing ──────────────────────────────────────────────────
     #[error("malformed ref `{input}`: {reason}")]
     MalformedRef { input: String, reason: String },

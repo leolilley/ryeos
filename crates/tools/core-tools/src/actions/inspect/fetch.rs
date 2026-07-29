@@ -64,6 +64,11 @@ pub fn run_fetch(params: FetchParams, engine: &Engine) -> Result<Value> {
                 path: p.to_path_buf(),
             })
             .unwrap_or(ProjectContext::None),
+        subject_resolution_authority: if project_path.is_some() {
+            ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs
+        } else {
+            ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+        },
         current_site_id: "site:local".into(),
         origin_site_id: "site:local".into(),
         execution_hints: ExecutionHints::default(),

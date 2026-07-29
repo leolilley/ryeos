@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::ignore::IgnoreMatcher;
-use crate::objects::{ProjectSnapshotPolicy, ProjectTree, SourceManifest};
+use crate::objects::{ProjectFile, ProjectSnapshotPolicy, ProjectTree, SourceManifest};
+
+const PROJECT_CONFIG_POLICY_SOURCE: &str = "project_config";
 
 /// Scope declared by a project snapshot.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -23,6 +25,10 @@ pub enum ProjectSyncScope {
 }
 
 pub const PROJECT_SNAPSHOT_CONFIG_RELATIVE: &str = ".ai/config/execution/project-snapshot.yaml";
+pub const MAX_PROJECT_SNAPSHOT_CONFIG_BYTES: u64 = 1024 * 1024;
+pub const MAX_PROJECT_TREE_FILES: usize = 100_000;
+pub const MAX_PROJECT_TREE_ENTRIES: usize = MAX_PROJECT_TREE_FILES * 2;
+pub const MAX_PROJECT_TREE_DEPTH: usize = 64;
 
 /// Content identity used when a project deliberately has no authored snapshot
 /// policy. Absence is part of the captured policy, not an omitted fact.
@@ -38,7 +44,7 @@ pub fn absent_project_snapshot_source_hashes(
 ) -> Result<std::collections::BTreeMap<String, String>> {
     let mut source_hashes = std::collections::BTreeMap::new();
     source_hashes.insert(
-        "project_config".to_string(),
+        PROJECT_CONFIG_POLICY_SOURCE.to_string(),
         absent_project_snapshot_config_hash(),
     );
     let node_patterns = node_matcher.canonical_patterns().to_vec();
@@ -61,9 +67,26 @@ pub fn validate_captured_policy_source(
     tree: &ProjectTree,
     policy: &ProjectSnapshotPolicy,
 ) -> Result<()> {
+    let mut captured_files = std::collections::BTreeMap::new();
+    if let Some(object_hash) = tree.files.get(PROJECT_SNAPSHOT_CONFIG_RELATIVE) {
+        let file = crate::project_materialization::load_project_file_bounded(cas, object_hash)?
+            .ok_or_else(|| anyhow::anyhow!("captured policy ProjectFile is absent"))?;
+        captured_files.insert(PROJECT_SNAPSHOT_CONFIG_RELATIVE.to_owned(), file);
+    }
+    validate_captured_policy_source_from_files(tree, policy, &captured_files)
+}
+
+/// Validate the captured project-policy source against already-decoded,
+/// bounded ProjectFile descriptors. Policy-source semantics live here; CAS
+/// transport and descriptor bounds remain with project materialization.
+pub fn validate_captured_policy_source_from_files(
+    tree: &ProjectTree,
+    policy: &ProjectSnapshotPolicy,
+    captured_files: &std::collections::BTreeMap<String, ProjectFile>,
+) -> Result<()> {
     let expected = policy
         .source_hashes
-        .get("project_config")
+        .get(PROJECT_CONFIG_POLICY_SOURCE)
         .ok_or_else(|| anyhow::anyhow!("project snapshot policy omitted project-config state"))?;
     let captured = tree.files.get(PROJECT_SNAPSHOT_CONFIG_RELATIVE);
     if expected == &absent_project_snapshot_config_hash() {
@@ -73,13 +96,12 @@ pub fn validate_captured_policy_source(
         );
         return Ok(());
     }
-    let object_hash = captured.ok_or_else(|| {
+    captured.ok_or_else(|| {
         anyhow::anyhow!("project snapshot policy source disappeared during capture")
     })?;
-    let object = cas
-        .get_object(object_hash)?
+    let file = captured_files
+        .get(PROJECT_SNAPSHOT_CONFIG_RELATIVE)
         .ok_or_else(|| anyhow::anyhow!("captured policy ProjectFile is absent"))?;
-    let file = crate::objects::ProjectFile::from_value(&object)?;
     anyhow::ensure!(
         &file.blob_hash == expected,
         "project snapshot policy changed during capture (policy={}, tree={})",
@@ -133,9 +155,9 @@ pub fn capture_snapshot_policy_from_pinned(
         std::path::Path::new(PROJECT_SNAPSHOT_CONFIG_RELATIVE),
     )?;
     let (config, project_source_hash) = match config_file {
-        Some(mut file) => {
-            let mut bytes = Vec::new();
-            std::io::Read::read_to_end(&mut file, &mut bytes)?;
+        Some(file) => {
+            let bytes =
+                lillux::read_open_regular_file_bounded(file, MAX_PROJECT_SNAPSHOT_CONFIG_BYTES)?;
             let config: ProjectSnapshotConfig = serde_yaml::from_slice(&bytes)
                 .map_err(|error| anyhow::anyhow!("invalid project snapshot policy: {error}"))?;
             anyhow::ensure!(
@@ -151,7 +173,10 @@ pub fn capture_snapshot_policy_from_pinned(
 
     let mut source_hashes = absent_project_snapshot_source_hashes(node_matcher)?;
     if let Some(project_source_hash) = project_source_hash {
-        source_hashes.insert("project_config".to_string(), project_source_hash);
+        source_hashes.insert(
+            PROJECT_CONFIG_POLICY_SOURCE.to_string(),
+            project_source_hash,
+        );
     }
 
     ProjectSnapshotPolicy::new(
@@ -450,9 +475,31 @@ pub fn validate_project_tree_paths(
     policy: &ProjectSnapshotPolicy,
 ) -> Result<()> {
     policy.validate()?;
+    if tree.files.len() > MAX_PROJECT_TREE_FILES {
+        anyhow::bail!("project tree exceeds {MAX_PROJECT_TREE_FILES} regular files");
+    }
+    let mut directories = std::collections::BTreeSet::new();
     let matcher = policy.matcher()?;
     for rel_path in tree.files.keys() {
         validate_project_manifest_path(rel_path, policy.sync_scope, Some(&matcher))?;
+        let path = std::path::Path::new(rel_path);
+        let directory_depth = path.components().count().saturating_sub(1);
+        if directory_depth > MAX_PROJECT_TREE_DEPTH {
+            anyhow::bail!(
+                "project tree path exceeds maximum depth {MAX_PROJECT_TREE_DEPTH}: {rel_path}"
+            );
+        }
+        let mut parent = path.parent();
+        while let Some(directory) = parent {
+            if directory.as_os_str().is_empty() {
+                break;
+            }
+            directories.insert(directory.to_path_buf());
+            parent = directory.parent();
+        }
+        if tree.files.len().saturating_add(directories.len()) > MAX_PROJECT_TREE_ENTRIES {
+            anyhow::bail!("project tree exceeds {MAX_PROJECT_TREE_ENTRIES} filesystem entries");
+        }
     }
     Ok(())
 }

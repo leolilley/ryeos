@@ -45,6 +45,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -59,6 +60,17 @@ use ryeos_engine::protocol_vocabulary::CallbackChannel;
 use ryeos_engine::runtime_registry::VerifiedRuntime;
 
 use crate::dispatch_error::DispatchError;
+
+fn resolution_project_root<'a>(
+    subject_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
+    execution_workspace: &'a Path,
+) -> Option<&'a Path> {
+    (!matches!(
+        subject_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ))
+    .then_some(execution_workspace)
+}
 use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
 use crate::execution::launch;
 use crate::executor::{
@@ -330,6 +342,11 @@ pub struct DispatchRequest<'a> {
     /// carries this unchanged until it reaches the subject that will actually
     /// be persisted; leaves reject any identity or schema mismatch.
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
+    /// Opaque terminal-route classification emitted by the same synchronous
+    /// preflight that created `root_admission`. When present, dispatch can
+    /// validate secondary-binding applicability without walking the exact
+    /// admitted route again.
+    pub root_dispatch_evidence: Option<RootDispatchEvidence>,
     /// Trusted parent context for callback-dispatched child executions. This is
     /// consumed only if schema-driven dispatch reaches a managed, method, or
     /// terminal subprocess launch; in-process services ignore it.
@@ -467,17 +484,22 @@ pub(crate) struct VerifiedHop {
 /// `execution` block, even for non-terminator hops (registry/alias),
 /// so the loop can capture it on the first hop as the root subject
 /// profile.
+#[cfg(test)]
 pub(crate) fn resolve_dispatch_hop(
     current_ref: &CanonicalRef,
     ctx: &ExecutionContext,
 ) -> Result<VerifiedHop, DispatchError> {
-    resolve_dispatch_hop_with_verified(current_ref, ctx, None)
+    resolve_dispatch_hop_with_verified(current_ref, ctx, None, None)
 }
 
 fn resolve_dispatch_hop_with_verified(
     current_ref: &CanonicalRef,
     ctx: &ExecutionContext,
     preverified: Option<VerifiedItem>,
+    admitted: Option<(
+        &Path,
+        &ryeos_engine::engine::AdmittedRequestAuthoritySnapshot,
+    )>,
 ) -> Result<VerifiedHop, DispatchError> {
     // **B4 fast-path**: if the schema for the ref's kind already
     // declares "no execution block" (config, V5.3 knowledge, …),
@@ -512,14 +534,22 @@ fn resolve_dispatch_hop_with_verified(
             }
             (Some(verified), None)
         } else {
-            match ctx.engine.resolve(&ctx.plan_ctx, current_ref) {
-                Ok(resolved) => {
-                    let v = ctx.engine.verify(&ctx.plan_ctx, resolved).map_err(|e| {
-                        DispatchError::InvalidRef(
-                            current_ref.to_string(),
-                            format!("verification failed: {e}"),
-                        )
-                    })?;
+            let resolved = match admitted {
+                Some((project_root, admitted)) => {
+                    ctx.engine.resolve_verified_under_admitted_authority(
+                        &ctx.plan_ctx,
+                        current_ref,
+                        project_root,
+                        admitted,
+                    )
+                }
+                None => ctx
+                    .engine
+                    .resolve(&ctx.plan_ctx, current_ref)
+                    .and_then(|resolved| ctx.engine.verify(&ctx.plan_ctx, resolved)),
+            };
+            match resolved {
+                Ok(v) => {
                     tracing::debug!(
                         item_ref = %current_ref,
                         trust_class = ?v.trust_class,
@@ -893,6 +923,7 @@ fn verified_from(
         trust_class: match a.trust_class {
             ryeos_engine::resolution::TrustClass::TrustedBundle => TrustClass::TrustedBundle,
             ryeos_engine::resolution::TrustClass::TrustedProject => TrustClass::TrustedProject,
+            ryeos_engine::resolution::TrustClass::TrustedNode => TrustClass::TrustedNode,
             ryeos_engine::resolution::TrustClass::UntrustedProject => TrustClass::UntrustedProject,
             ryeos_engine::resolution::TrustClass::Unsigned => TrustClass::Unsigned,
         },
@@ -983,6 +1014,7 @@ fn project_corpus(
     kind: &str,
     request: &DispatchRequest<'_>,
     ctx: &ExecutionContext,
+    admitted_root: Option<&ryeos_app::thread_lifecycle::RootExecutionAdmission>,
 ) -> Result<
     (
         std::collections::BTreeMap<String, ryeos_runtime::method_wire::VerifiedItem>,
@@ -1001,15 +1033,92 @@ fn project_corpus(
                 detail: "corpus method dispatched for a kind with no registered schema".into(),
             })?;
 
+    let resolution_project_root = resolution_project_root(
+        &ctx.plan_ctx.subject_resolution_authority,
+        request.project_path,
+    );
     let engine_roots = ctx
         .engine
-        .resolution_roots(Some(request.project_path.to_path_buf()));
-    let request_snapshot = ctx
-        .engine
-        .effective_request_snapshot(Some(request.project_path))
-        .map_err(|e| DispatchError::Internal(anyhow::anyhow!("corpus parser dispatcher: {e}")))?;
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    if ctx
+        .plan_ctx
+        .subject_resolution_authority
+        .operational_generation()
+        .is_some()
+        && request.root_admission.is_none()
+    {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "content-addressed method dispatch has no admitted root authority"
+        )));
+    }
+    let admitted_snapshot =
+        admitted_root.and_then(|admission| admission.admitted_request_snapshot());
+    let request_snapshot = match admitted_snapshot {
+        Some(admitted) => {
+            let project_root = resolution_project_root.ok_or_else(|| {
+                DispatchError::Internal(anyhow::anyhow!(
+                    "admitted corpus request has no project root"
+                ))
+            })?;
+            ctx.engine
+                .effective_request_snapshot_under_admitted_authority(project_root, admitted)
+        }
+        None if ctx
+            .plan_ctx
+            .subject_resolution_authority
+            .operational_generation()
+            .is_some() =>
+        {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "content-addressed corpus request has no admitted project authority"
+            )));
+        }
+        None => ctx
+            .engine
+            .effective_request_snapshot(
+                resolution_project_root,
+                &ctx.plan_ctx.subject_resolution_authority,
+            )
+            .map(Arc::new),
+    }
+    .map_err(|e| DispatchError::Internal(anyhow::anyhow!("corpus parser dispatcher: {e}")))?;
 
-    let refs = ryeos_engine::item_resolution::enumerate_kind_refs(&engine_roots, kind_schema, kind);
+    let project_authority = match (admitted_snapshot, resolution_project_root) {
+        (Some(admitted), Some(project_root)) => Some((
+            project_root,
+            admitted
+                .project_content_for_root(project_root)
+                .map_err(|error| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "admitted corpus project content: {error}"
+                    ))
+                })?,
+        )),
+        (Some(_), None) => {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "admitted corpus project content has no project root"
+            )));
+        }
+        (None, _) => None,
+    };
+
+    let refs = match project_authority {
+        Some((project_root, content)) => {
+            ryeos_engine::item_resolution::enumerate_kind_refs_under_project_authority(
+                &engine_roots,
+                kind_schema,
+                kind,
+                project_root,
+                content,
+            )
+            .map_err(|error| {
+                DispatchError::Internal(anyhow::anyhow!("admitted corpus enumeration: {error}"))
+            })?
+        }
+        None => {
+            ryeos_engine::item_resolution::enumerate_kind_refs(&engine_roots, kind_schema, kind)
+        }
+    };
 
     let mut items_by_ref: std::collections::BTreeMap<String, VerifiedItem> =
         std::collections::BTreeMap::new();
@@ -1019,13 +1128,26 @@ fn project_corpus(
         // Tolerant per-item projection: a malformed body still yields the
         // item (so `validate` reports it); a bad signature is a hard error
         // (so the corpus method fails loudly rather than looking clean).
-        let projection = ryeos_engine::resolution::resolve_item_for_corpus(
-            cref,
-            &ctx.engine.kinds,
-            &request_snapshot.parser_dispatcher,
-            &engine_roots,
-            &request_snapshot.trust_store,
-        )
+        let projection = match project_authority {
+            Some((project_root, content)) => {
+                ryeos_engine::resolution::resolve_item_for_corpus_under_project_authority(
+                    cref,
+                    &ctx.engine.kinds,
+                    &request_snapshot.parser_dispatcher,
+                    &engine_roots,
+                    &request_snapshot.trust_store,
+                    project_root,
+                    content,
+                )
+            }
+            None => ryeos_engine::resolution::resolve_item_for_corpus(
+                cref,
+                &ctx.engine.kinds,
+                &request_snapshot.parser_dispatcher,
+                &engine_roots,
+                &request_snapshot.trust_store,
+            ),
+        }
         .map_err(|e| {
             DispatchError::InvalidRef(cref.to_string(), format!("corpus projection failed: {e}"))
         })?;
@@ -1086,6 +1208,17 @@ fn project_method_payload(
     request: &DispatchRequest<'_>,
     admitted_root: Option<&ryeos_app::thread_lifecycle::RootExecutionAdmission>,
 ) -> Result<Value, DispatchError> {
+    if ctx
+        .plan_ctx
+        .subject_resolution_authority
+        .operational_generation()
+        .is_some()
+        && admitted_root.is_none()
+    {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "content-addressed method payload has no admitted root authority"
+        )));
+    }
     let payload = match method_decl.scope {
         MethodScope::SingleRoot => {
             let resolution_output = if let Some(admission) = admitted_root {
@@ -1106,7 +1239,13 @@ fn project_method_payload(
             } else {
                 let request_snapshot = ctx
                     .engine
-                    .effective_request_snapshot(Some(request.project_path))
+                    .effective_request_snapshot(
+                        resolution_project_root(
+                            &ctx.plan_ctx.subject_resolution_authority,
+                            request.project_path,
+                        ),
+                        &ctx.plan_ctx.subject_resolution_authority,
+                    )
                     .map_err(|e| {
                         DispatchError::InvalidRef(
                             canonical_ref.to_string(),
@@ -1169,59 +1308,366 @@ fn project_method_payload(
                 ));
             }
 
-            let (items_by_ref, edges) = project_corpus(kind, request, ctx)?;
+            let (items_by_ref, edges) = project_corpus(kind, request, ctx, admitted_root)?;
             serde_json::json!({ "items_by_ref": items_by_ref, "edges": edges })
         }
     };
     Ok(payload)
 }
 
-pub(crate) fn method_runtime_config_snapshot(
+#[derive(Debug, Clone)]
+pub(crate) struct MethodRuntimeConfigSnapshot {
+    pub(crate) values: BTreeMap<String, Value>,
+    dependency_proofs: BTreeMap<String, ryeos_runtime::verified_loader::ConfigDependencyProof>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MethodRuntimeConfigProofStatus {
+    Current,
+    MutableAuthorityChanged,
+    ImmutableAuthorityMismatch,
+}
+
+impl MethodRuntimeConfigSnapshot {
+    pub(crate) fn identity_digest(&self) -> anyhow::Result<String> {
+        let proof_digests = self
+            .dependency_proofs
+            .iter()
+            .map(|(name, proof)| Ok((name.clone(), proof.identity_digest()?)))
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "values": &self.values,
+            "dependency_proofs": proof_digests,
+        });
+        let canonical = lillux::canonical_json(&value)?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    pub(crate) fn revalidate_against_status(
+        &self,
+        engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+        node_config_root: Option<&Path>,
+        node_trusted_keys_dir: &Path,
+        materialization: Option<&ryeos_app::resolution_cache::ResolutionMaterializationBinding>,
+    ) -> MethodRuntimeConfigProofStatus {
+        if let Some(materialization) = materialization {
+            match materialization.authoritative_project_content() {
+                Ok(Some((project_root, project_content))) => {
+                    let Ok(node_trust_identity) =
+                        ryeos_runtime::verified_loader::VerifiedLoader::node_trust_identity_from(
+                            node_trusted_keys_dir,
+                        )
+                    else {
+                        return MethodRuntimeConfigProofStatus::MutableAuthorityChanged;
+                    };
+                    let mut status = MethodRuntimeConfigProofStatus::Current;
+                    for proof in self.dependency_proofs.values() {
+                        let proof_status = if !proof
+                            .trust_identities_match(None, &node_trust_identity)
+                        {
+                            MethodRuntimeConfigProofStatus::MutableAuthorityChanged
+                        } else {
+                            match proof.revalidate_under_project_authority_status(
+                                    Some(project_root),
+                                    node_config_root,
+                                    Some(project_content),
+                                ) {
+                                    ryeos_runtime::verified_loader::ConfigDependencyProofStatus::Current => {
+                                        MethodRuntimeConfigProofStatus::Current
+                                    }
+                                    ryeos_runtime::verified_loader::ConfigDependencyProofStatus::MutableAuthorityChanged => {
+                                        MethodRuntimeConfigProofStatus::MutableAuthorityChanged
+                                    }
+                                    ryeos_runtime::verified_loader::ConfigDependencyProofStatus::ImmutableAuthorityMismatch => {
+                                        MethodRuntimeConfigProofStatus::ImmutableAuthorityMismatch
+                                    }
+                                }
+                        };
+                        status = combine_method_runtime_config_status(status, proof_status);
+                        if status == MethodRuntimeConfigProofStatus::ImmutableAuthorityMismatch {
+                            return status;
+                        }
+                    }
+                    return status;
+                }
+                Ok(None) => {
+                    // Live and projectless bindings carry no immutable project
+                    // content. They must use the mutable/current identity path
+                    // below; the presence of a binding is not itself proof of
+                    // an authoritative project tree.
+                }
+                Err(_) => {
+                    return MethodRuntimeConfigProofStatus::ImmutableAuthorityMismatch;
+                }
+            }
+        }
+        let Some((project_root, effective_trust_identity, node_trust_identity)) =
+            method_config_revalidation_context(
+                engine_roots,
+                node_config_root,
+                node_trusted_keys_dir,
+            )
+        else {
+            return if self.dependency_proofs.is_empty() {
+                MethodRuntimeConfigProofStatus::Current
+            } else {
+                MethodRuntimeConfigProofStatus::MutableAuthorityChanged
+            };
+        };
+        if self.dependency_proofs.values().all(|proof| {
+            proof.trust_identities_match(effective_trust_identity.as_deref(), &node_trust_identity)
+                && proof.revalidate_mutable_against(project_root.as_deref(), node_config_root, true)
+        }) {
+            MethodRuntimeConfigProofStatus::Current
+        } else {
+            MethodRuntimeConfigProofStatus::MutableAuthorityChanged
+        }
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        serde_json::to_vec(&self.values)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX)
+            .saturating_add(
+                self.dependency_proofs
+                    .iter()
+                    .fold(0usize, |total, (name, proof)| {
+                        total
+                            .saturating_add(name.capacity())
+                            .saturating_add(proof.estimated_bytes())
+                    }),
+            )
+    }
+}
+
+fn combine_method_runtime_config_status(
+    left: MethodRuntimeConfigProofStatus,
+    right: MethodRuntimeConfigProofStatus,
+) -> MethodRuntimeConfigProofStatus {
+    use MethodRuntimeConfigProofStatus::{
+        Current, ImmutableAuthorityMismatch, MutableAuthorityChanged,
+    };
+    match (left, right) {
+        (ImmutableAuthorityMismatch, _) | (_, ImmutableAuthorityMismatch) => {
+            ImmutableAuthorityMismatch
+        }
+        (MutableAuthorityChanged, _) | (_, MutableAuthorityChanged) => MutableAuthorityChanged,
+        (Current, Current) => Current,
+    }
+}
+
+fn method_config_revalidation_context(
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    node_config_root: Option<&Path>,
+    node_trusted_keys_dir: &Path,
+) -> Option<(Option<PathBuf>, Option<String>, String)> {
+    let project_root = engine_roots
+        .ordered
+        .iter()
+        .find(|root| root.space == ryeos_engine::contracts::ItemSpace::Project)
+        .and_then(|root| root.ai_root.parent())
+        .map(Path::to_path_buf);
+    let loader =
+        verified_loader_for_method_runtime(engine_roots, node_config_root, node_trusted_keys_dir)
+            .ok()?;
+    Some((
+        project_root,
+        Some(loader.effective_trust_identity()),
+        loader.node_trust_identity(),
+    ))
+}
+
+pub(crate) fn method_runtime_config_snapshot_with_proof(
     kind: &str,
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
-    state: &AppState,
+    node_config_root: Option<&Path>,
+    node_trusted_keys_dir: &Path,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
-) -> Result<BTreeMap<String, Value>, DispatchError> {
+) -> Result<MethodRuntimeConfigSnapshot, DispatchError> {
+    method_runtime_config_snapshot_with_proof_from_authority(
+        kind,
+        requirements,
+        engine_roots,
+        node_config_root,
+        node_trusted_keys_dir,
+        launch_timings,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn method_runtime_config_snapshot_with_proof_under_project_authority(
+    kind: &str,
+    requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    node_config_root: Option<&Path>,
+    node_trusted_keys_dir: &Path,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    project_root: &Path,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+) -> Result<MethodRuntimeConfigSnapshot, DispatchError> {
+    method_runtime_config_snapshot_with_proof_from_authority(
+        kind,
+        requirements,
+        engine_roots,
+        node_config_root,
+        node_trusted_keys_dir,
+        launch_timings,
+        Some((project_root, project_content)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn method_runtime_config_snapshot_with_proof_from_authority(
+    kind: &str,
+    requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    node_config_root: Option<&Path>,
+    node_trusted_keys_dir: &Path,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    project_authority: Option<(
+        &Path,
+        &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<MethodRuntimeConfigSnapshot, DispatchError> {
     if requirements.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(MethodRuntimeConfigSnapshot {
+            values: BTreeMap::new(),
+            dependency_proofs: BTreeMap::new(),
+        });
     }
     let _runtime_config_timer = launch_timings
         .map(|timings| timings.nested("background_dispatch", "method_runtime_config_snapshot"));
 
-    let loader = verified_loader_for_method_runtime(
+    let loader = verified_loader_for_method_runtime_under_authority(
         engine_roots,
-        &state.config.runtime_root().trusted_keys_dir(),
+        node_config_root,
+        node_trusted_keys_dir,
+        project_authority,
     )
     .map_err(|e| DispatchError::Internal(anyhow::anyhow!("runtime config loader: {e}")))?;
 
-    let mut snapshots = BTreeMap::new();
+    let mut values = BTreeMap::new();
+    let mut dependency_proofs = BTreeMap::new();
     for (name, requirement) in requirements {
-        let value = loader
-            .load_config_strict_signed::<Value>(&requirement.path)
-            .map_err(|e| {
-                DispatchError::Internal(anyhow::anyhow!(
-                    "loading method runtime config `{}` at `{}`: {e}",
-                    name,
-                    requirement.path
-                ))
-            })?
-            .ok_or_else(|| DispatchError::SchemaMisconfigured {
-                kind: kind.to_string(),
-                detail: format!(
-                    "method requires runtime config `{}` at `{}`, but no config file was found",
-                    name, requirement.path
+        let snapshot = match project_authority {
+            Some((_root, content)) => loader
+                .load_config_strict_signed_with_proof_under_project_authority::<Value>(
+                    &requirement.path,
+                    content,
                 ),
-            })?;
-        snapshots.insert(name.clone(), value);
+            None => loader.load_config_strict_signed_with_proof::<Value>(&requirement.path),
+        }
+        .map_err(|e| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "loading method runtime config `{}` at `{}`: {e}",
+                name,
+                requirement.path
+            ))
+        })?
+        .ok_or_else(|| DispatchError::SchemaMisconfigured {
+            kind: kind.to_string(),
+            detail: format!(
+                "method requires runtime config `{}` at `{}`, but no config file was found",
+                name, requirement.path
+            ),
+        })?;
+        values.insert(name.clone(), snapshot.value);
+        dependency_proofs.insert(name.clone(), snapshot.dependency_proof);
     }
 
-    Ok(snapshots)
+    Ok(MethodRuntimeConfigSnapshot {
+        values,
+        dependency_proofs,
+    })
+}
+
+async fn method_runtime_config_snapshot_off_thread(
+    kind: &str,
+    requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    engine: &ryeos_engine::engine::Engine,
+    state: &AppState,
+    launch_timings: Option<ryeos_app::launch_stage_timings::LaunchStageTimings>,
+    admitted_root: Option<&ryeos_app::thread_lifecycle::RootExecutionAdmission>,
+    subject_authority: &ryeos_engine::contracts::SubjectResolutionAuthority,
+) -> Result<BTreeMap<String, Value>, DispatchError> {
+    if subject_authority.operational_generation().is_some() && admitted_root.is_none() {
+        return Err(DispatchError::Internal(anyhow::anyhow!(
+            "content-addressed method runtime config has no admitted root authority"
+        )));
+    }
+    let kind = kind.to_owned();
+    let requirements = requirements.clone();
+    let engine_roots = engine_roots.clone();
+    let node_config_root = engine.node_config_root();
+    let trusted_keys_dir = state.config.runtime_root().trusted_keys_dir();
+    let materialization = admitted_root
+        .map(|admission| admission.resolution_materialization_binding())
+        .transpose()
+        .map_err(DispatchError::Internal)?;
+    tokio::task::spawn_blocking(move || {
+        let snapshot = match materialization
+            .as_ref()
+            .map(|binding| binding.authoritative_project_content())
+            .transpose()
+            .map_err(DispatchError::Internal)?
+            .flatten()
+        {
+            Some((project_root, content)) => {
+                method_runtime_config_snapshot_with_proof_under_project_authority(
+                    &kind,
+                    &requirements,
+                    &engine_roots,
+                    node_config_root.as_deref(),
+                    &trusted_keys_dir,
+                    launch_timings.as_ref(),
+                    project_root,
+                    content,
+                )
+            }
+            None => method_runtime_config_snapshot_with_proof(
+                &kind,
+                &requirements,
+                &engine_roots,
+                node_config_root.as_deref(),
+                &trusted_keys_dir,
+                launch_timings.as_ref(),
+            ),
+        }?;
+        Ok(snapshot.values)
+    })
+    .await
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "method runtime config blocking worker failed: {error}"
+        ))
+    })?
 }
 
 fn verified_loader_for_method_runtime(
     engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    node_config_root: Option<&Path>,
     node_trusted_keys_dir: &Path,
+) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
+    verified_loader_for_method_runtime_under_authority(
+        engine_roots,
+        node_config_root,
+        node_trusted_keys_dir,
+        None,
+    )
+}
+
+fn verified_loader_for_method_runtime_under_authority(
+    engine_roots: &ryeos_engine::item_resolution::ResolutionRoots,
+    node_config_root: Option<&Path>,
+    node_trusted_keys_dir: &Path,
+    project_authority: Option<(
+        &Path,
+        &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+    )>,
 ) -> anyhow::Result<ryeos_runtime::verified_loader::VerifiedLoader> {
     let project_root = engine_roots
         .ordered
@@ -1232,8 +1678,7 @@ fn verified_loader_for_method_runtime(
                 .parent()
                 .map(|pp| pp.to_path_buf())
                 .unwrap_or_else(|| r.ai_root.clone())
-        })
-        .ok_or_else(|| anyhow::anyhow!("no project root in engine resolution roots"))?;
+        });
 
     let bundle_roots: Vec<PathBuf> = engine_roots
         .ordered
@@ -1247,11 +1692,40 @@ fn verified_loader_for_method_runtime(
         })
         .collect();
 
-    Ok(ryeos_runtime::verified_loader::VerifiedLoader::new(
-        project_root,
-        bundle_roots,
-        node_trusted_keys_dir,
-    ))
+    match (project_root, project_authority) {
+        (Some(project_root), Some((authority_root, content))) => {
+            if project_root != authority_root {
+                anyhow::bail!(
+                    "method runtime project root differs from admitted project authority"
+                );
+            }
+            ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config_under_project_authority(
+                project_root,
+                content,
+                node_config_root.map(Path::to_path_buf),
+                bundle_roots,
+                node_trusted_keys_dir,
+            )
+        }
+        (Some(project_root), None) => {
+            ryeos_runtime::verified_loader::VerifiedLoader::new_with_node_config(
+                project_root,
+                node_config_root.map(Path::to_path_buf),
+                bundle_roots,
+                node_trusted_keys_dir,
+            )
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("admitted method runtime project authority has no project root")
+        }
+        (None, None) => {
+            ryeos_runtime::verified_loader::VerifiedLoader::new_projectless_with_node_config(
+                node_config_root.map(Path::to_path_buf),
+                bundle_roots,
+                node_trusted_keys_dir,
+            )
+        }
+    }
 }
 
 // Execution plumbing: each argument is a distinct leg of the thread's
@@ -1303,9 +1777,13 @@ pub(crate) async fn dispatch_method(
 
     // Resolution roots are needed both for payload projection and for the
     // launch/inventory step below, so compute them once at this scope.
+    let resolution_project_root = resolution_project_root(
+        &ctx.plan_ctx.subject_resolution_authority,
+        request.project_path,
+    );
     let engine_roots = ctx
         .engine
-        .resolution_roots(Some(request.project_path.to_path_buf()));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
 
     // Payload projection (single-root resolution+trust / corpus build) is
     // deferred via `project_method_payload`: for `validate_only` it runs
@@ -1364,13 +1842,17 @@ pub(crate) async fn dispatch_method(
             request,
             request.root_admission.as_ref(),
         )?;
-        method_runtime_config_snapshot(
+        method_runtime_config_snapshot_off_thread(
             kind,
             &method_decl.runtime_config,
             &engine_roots,
+            &ctx.engine,
             state,
-            request.launch_timings.as_ref(),
-        )?;
+            request.launch_timings.clone(),
+            request.root_admission.as_ref(),
+            &ctx.plan_ctx.subject_resolution_authority,
+        )
+        .await?;
         return Ok(json!({
             "validated": true,
             "item_ref": canonical_ref.to_string(),
@@ -1400,24 +1882,57 @@ pub(crate) async fn dispatch_method(
         }
         admission.clone()
     } else {
-        ryeos_app::thread_lifecycle::admit_verified_root_execution(
+        let project_binding = ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
+            &ctx.engine,
+            &ctx.plan_ctx,
+            &request.provenance,
+        )
+        .map_err(DispatchError::Internal)?;
+        let admitted_request_snapshot = project_binding
+            .admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)
+            .map_err(DispatchError::Internal)?;
+        let history_attestation = match admitted_request_snapshot.as_ref() {
+            Some(authority) => ctx.engine.resolve_attested_under_admitted_authority(
+                &ctx.plan_ctx,
+                &history_subject.resolved.canonical_ref,
+                project_binding.execution_workspace().ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "content-addressed method root has no execution workspace"
+                    ))
+                })?,
+                authority,
+            ),
+            None => ctx
+                .engine
+                .verify_attested(&ctx.plan_ctx, history_subject.resolved.clone()),
+        }
+        .map_err(|error| {
+            DispatchError::Internal(anyhow::anyhow!("attest method history subject: {error}"))
+        })?;
+        ryeos_app::thread_lifecycle::admit_verified_root_execution_with_timings(
             &ctx.engine,
             &ctx.plan_ctx,
             &ctx.plan_ctx,
-            ryeos_app::thread_lifecycle::AdmittedProjectBinding::from_provenance(
-                &ctx.engine,
-                &ctx.plan_ctx,
-                &request.provenance,
-            )
-            .map_err(DispatchError::Internal)?,
-            history_subject.clone(),
+            project_binding,
+            history_attestation,
             &state.node_history_policy,
             thread_profile_str.to_string(),
             request.ref_bindings.clone(),
             request.usage_subject.clone(),
             request.usage_subject_asserted_by.clone(),
+            request.launch_timings.as_ref(),
+            Some(&*state.resolution_cache),
+            None,
+            admitted_request_snapshot,
         )
-        .map_err(DispatchError::Internal)?
+        .map_err(|error| {
+            map_dispatch_root_resolution_validation_error(
+                error,
+                &canonical_ref.to_string(),
+                ctx,
+                state,
+            )
+        })?
     };
 
     // Accepted launch is an admission acknowledgement, so every rejection
@@ -1506,7 +2021,7 @@ pub(crate) async fn dispatch_method(
                     .project_root_projection()
                     .map(std::path::Path::to_path_buf),
                 base_project_snapshot_hash: project_authority
-                    .base_snapshot_projection()
+                    .operational_snapshot_projection()
                     .map(str::to_owned),
                 project_authority,
                 usage_subject: request.usage_subject.clone(),
@@ -1514,24 +2029,15 @@ pub(crate) async fn dispatch_method(
                 captured_history_policy: None,
             })
     } else {
-        let resolved_method = ResolvedExecutionRequest {
-            kind: thread_profile_str.to_string(),
-            item_ref: method_subject.item_ref.clone(),
-            executor_ref: executor_ref.clone(),
-            launch_mode: request.launch_mode.to_string(),
-            current_site_id: ctx.plan_ctx.current_site_id.clone(),
-            origin_site_id: ctx.plan_ctx.origin_site_id.clone(),
-            target_site_id: None,
-            requested_by: Some(request.acting_principal.to_string()),
-            usage_subject: request.usage_subject.clone(),
-            usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
-            parameters: request.params.clone(),
-            ref_bindings: request.ref_bindings.clone(),
-            root_raw_content_digest: history_subject.resolved.raw_content_digest.clone(),
-            resolved_item: history_subject.resolved.clone(),
-            plan_context: ctx.plan_ctx.clone(),
-            root_admission: Some(root_admission.clone()),
-        };
+        let resolved_method = root_admission
+            .execution_request(
+                ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
+                    &runtime_item_ref,
+                ),
+                request.launch_mode.to_string(),
+                request.params.clone(),
+            )
+            .map_err(DispatchError::Internal)?;
         state.threads.create_root_thread_with_id(
             &thread_id,
             &resolved_method,
@@ -1705,13 +2211,17 @@ pub(crate) async fn dispatch_method(
             socket_path: state.config.uds_path.clone(),
             token: cap.token.clone(),
         };
-        let runtime_config = method_runtime_config_snapshot(
+        let runtime_config = method_runtime_config_snapshot_off_thread(
             kind,
             &method_decl.runtime_config,
             &engine_roots,
+            &ctx.engine,
             state,
-            request.launch_timings.as_ref(),
-        )?;
+            request.launch_timings.clone(),
+            Some(&root_admission),
+            &ctx.plan_ctx.subject_resolution_authority,
+        )
+        .await?;
 
         let envelope = ryeos_engine::method_wire::MethodCallEnvelope {
             schema_version: ryeos_engine::method_wire::METHOD_CALL_SCHEMA_VERSION,
@@ -2662,6 +3172,7 @@ async fn dispatch_via_method_executor(
         usage_subject_asserted_by: request.usage_subject_asserted_by.clone(),
         previous_thread_id: request.previous_thread_id.clone(),
         root_admission: request.root_admission.clone(),
+        root_dispatch_evidence: request.root_dispatch_evidence.clone(),
         parent_execution_context: request.parent_execution_context.clone(),
     };
 
@@ -2800,6 +3311,11 @@ pub(crate) fn mint_runtime_capability_caps(
             )
             .map_err(|err| err.to_string())?
             .manifest
+        }
+        ryeos_engine::contracts::ItemSpace::Node => {
+            return Err(
+                "node-local configuration cannot supply runtime capability authority".to_string(),
+            );
         }
     };
     manifest.runtime_authority.validate()?;
@@ -3062,6 +3578,12 @@ fn derive_manifest_runtime_caps(
             ryeos_engine::contracts::ItemSpace::Project => {
                 ryeos_engine::resolution::TrustClass::TrustedProject
             }
+            ryeos_engine::contracts::ItemSpace::Node => {
+                return Err(DispatchError::InvalidRef(
+                    item_ref.to_string(),
+                    "node-local configuration cannot be dispatched as a tool".to_string(),
+                ));
+            }
         },
         &ctx.engine,
     )
@@ -3166,6 +3688,7 @@ pub fn dispatch_daemon_owned(
     let usage_subject_asserted_by = request.usage_subject_asserted_by.clone();
     let previous_thread_id = request.previous_thread_id.clone();
     let root_admission = request.root_admission.clone();
+    let root_dispatch_evidence = request.root_dispatch_evidence.clone();
     let parent_execution_context = request.parent_execution_context.clone();
     let ctx = ExecutionContext {
         principal_fingerprint: ctx.principal_fingerprint.clone(),
@@ -3194,6 +3717,7 @@ pub fn dispatch_daemon_owned(
             usage_subject_asserted_by,
             previous_thread_id,
             root_admission,
+            root_dispatch_evidence,
             parent_execution_context,
         };
         Box::pin(dispatch_inner(
@@ -3300,6 +3824,32 @@ async fn dispatch_inner(
     if let Some(admission) = request.root_admission.as_ref() {
         admission.validate().map_err(DispatchError::Internal)?;
     }
+    match (
+        request.root_dispatch_evidence.as_ref(),
+        request.root_admission.as_ref(),
+    ) {
+        (Some(evidence), Some(admission)) => {
+            evidence.validate(admission, item_ref, request, ctx)?
+        }
+        (Some(_), None) => {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "root dispatch evidence has no exact root admission"
+            )));
+        }
+        (None, _) => {}
+    }
+    if verified_root.is_none() {
+        if let (Some(evidence), Some(admission)) = (
+            request.root_dispatch_evidence.as_ref(),
+            request.root_admission.as_ref(),
+        ) {
+            if can_reuse_root_dispatch_evidence(admission)
+                && evidence.requested_subject.resolved.canonical_ref == current_ref
+            {
+                verified_root = Some(evidence.requested_subject.clone());
+            }
+        }
+    }
 
     // Secondary execution identities are independently authorized before any
     // binding resolution or launch preparation. Their slot declarations are
@@ -3331,9 +3881,21 @@ async fn dispatch_inner(
     }
 
     if !request.ref_bindings.is_empty() {
-        if let LaunchContractApplicability::NonEnvelope { class } =
-            launch_contract_applicability(item_ref, ctx)?
-        {
+        let applicability = match (
+            request.root_dispatch_evidence.as_ref(),
+            request.root_admission.as_ref(),
+        ) {
+            (Some(evidence), Some(admission)) if can_reuse_root_dispatch_evidence(admission) => {
+                evidence.applicability().clone()
+            }
+            _ => match request.root_admission.as_ref() {
+                Some(admission) => {
+                    launch_contract_applicability_from_admission(item_ref, ctx, admission)?
+                }
+                None => launch_contract_applicability(item_ref, ctx)?,
+            },
+        };
+        if let LaunchContractApplicability::NonEnvelope { class } = applicability {
             return Err(DispatchError::RefBindingNotApplicable {
                 class: class.as_str().to_owned(),
             });
@@ -3428,10 +3990,18 @@ async fn dispatch_inner(
             (admission.verified_subject().resolved.canonical_ref == current_ref)
                 .then(|| admission.verified_subject().clone())
         });
+        let admitted_hop_authority = request.root_admission.as_ref().and_then(|admission| {
+            admission.admitted_request_snapshot().and_then(|snapshot| {
+                admission
+                    .execution_workspace()
+                    .map(|root| (root, snapshot.as_ref()))
+            })
+        });
         let hop = resolve_dispatch_hop_with_verified(
             &current_ref,
             ctx,
             verified_root.take().or(admitted_verified),
+            admitted_hop_authority,
         )?;
 
         // Destructure up front so the match on `next` (which moves
@@ -3538,12 +4108,150 @@ pub enum LaunchContractApplicability {
     NonEnvelope { class: RootDispatchClass },
 }
 
+/// Process-local proof that launch-contract applicability was classified by
+/// the same exact preflight that admitted the root. Its fields are private so
+/// callers can carry but cannot manufacture route evidence.
+#[derive(Debug, Clone)]
+pub struct RootDispatchEvidence {
+    applicability: LaunchContractApplicability,
+    requested_subject: VerifiedItem,
+    admitted_subject_ref: CanonicalRef,
+    admitted_subject_digest: String,
+}
+
+impl RootDispatchEvidence {
+    fn new(
+        applicability: LaunchContractApplicability,
+        requested_subject: &VerifiedItem,
+        admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+    ) -> Self {
+        Self {
+            applicability,
+            requested_subject: requested_subject.clone(),
+            admitted_subject_ref: admission.verified_subject().resolved.canonical_ref.clone(),
+            admitted_subject_digest: admission
+                .verified_subject()
+                .resolved
+                .raw_content_digest
+                .clone(),
+        }
+    }
+
+    pub fn applicability(&self) -> &LaunchContractApplicability {
+        &self.applicability
+    }
+
+    fn replace_requested_subject(&mut self, requested_subject: &VerifiedItem) {
+        self.requested_subject = requested_subject.clone();
+    }
+
+    fn validate(
+        &self,
+        admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+        item_ref: &str,
+        request: &DispatchRequest<'_>,
+        ctx: &ExecutionContext,
+    ) -> Result<(), DispatchError> {
+        admission.validate().map_err(DispatchError::Internal)?;
+        if !std::sync::Arc::ptr_eq(&ctx.engine, admission.request_engine()) {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "root dispatch evidence engine differs from the admitted request engine"
+            )));
+        }
+        if admission.ref_bindings() != &request.ref_bindings {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "root dispatch request ref bindings differ from exact preflight admission"
+            )));
+        }
+        let requested_ref = CanonicalRef::parse(item_ref)
+            .map_err(|error| DispatchError::InvalidRef(item_ref.to_owned(), error.to_string()))?;
+        if requested_ref != self.requested_subject.resolved.canonical_ref
+            && requested_ref != self.admitted_subject_ref
+        {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "root dispatch evidence caller ref `{}` differs from requested `{}` and admitted `{}` preflight subjects",
+                requested_ref,
+                self.requested_subject.resolved.canonical_ref,
+                self.admitted_subject_ref
+            )));
+        }
+        if self.requested_subject.resolved.canonical_ref == self.admitted_subject_ref
+            && self.requested_subject.resolved.raw_content_digest != self.admitted_subject_digest
+        {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "root dispatch evidence requested-subject digest differs from exact admission"
+            )));
+        }
+        let subject = &admission.verified_subject().resolved;
+        if subject.canonical_ref != self.admitted_subject_ref
+            || subject.raw_content_digest != self.admitted_subject_digest
+        {
+            return Err(DispatchError::Internal(anyhow::anyhow!(
+                "root dispatch evidence subject differs from exact preflight admission"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn can_reuse_root_dispatch_evidence(
+    admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+) -> bool {
+    use ryeos_engine::contracts::SubjectResolutionAuthority;
+
+    match &admission.plan_context().subject_resolution_authority {
+        SubjectResolutionAuthority::Projectless
+        | SubjectResolutionAuthority::PinnedGeneration { .. } => true,
+        SubjectResolutionAuthority::CowWorkspace { .. } => {
+            admission.admitted_request_snapshot().is_some()
+        }
+        SubjectResolutionAuthority::LiveFs => false,
+    }
+}
+
 /// Resolve the actual terminal protocol boundary. This deliberately follows
 /// aliases/delegates and checks the selected protocol's callback shape; a
 /// managed lifecycle label alone does not imply LaunchEnvelope construction.
 pub fn launch_contract_applicability(
     item_ref: &str,
     ctx: &ExecutionContext,
+) -> Result<LaunchContractApplicability, DispatchError> {
+    launch_contract_applicability_with_evidence(item_ref, ctx, None, None)
+}
+
+/// Classify the launch contract from an already-admitted root and its exact
+/// project authority. Every admitted caller consumes the exact root evidence;
+/// pinned/COW terminal hops additionally consume the admitted snapshot rather
+/// than reopening the materialized checkout.
+pub fn launch_contract_applicability_from_admission(
+    item_ref: &str,
+    ctx: &ExecutionContext,
+    root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
+) -> Result<LaunchContractApplicability, DispatchError> {
+    root_admission.validate().map_err(DispatchError::Internal)?;
+    let admitted_hop_authority = root_admission
+        .admitted_request_snapshot()
+        .and_then(|snapshot| {
+            root_admission
+                .execution_workspace()
+                .map(|root| (root, snapshot.as_ref()))
+        });
+    launch_contract_applicability_with_evidence(
+        item_ref,
+        ctx,
+        Some(root_admission.verified_subject().clone()),
+        admitted_hop_authority,
+    )
+}
+
+fn launch_contract_applicability_with_evidence(
+    item_ref: &str,
+    ctx: &ExecutionContext,
+    admitted_root: Option<VerifiedItem>,
+    admitted_hop_authority: Option<(
+        &Path,
+        &ryeos_engine::engine::AdmittedRequestAuthoritySnapshot,
+    )>,
 ) -> Result<LaunchContractApplicability, DispatchError> {
     const MAX_HOPS: usize = 8;
     let mut visited = HashSet::new();
@@ -3563,7 +4271,15 @@ pub fn launch_contract_applicability(
                 visited,
             });
         }
-        let hop = resolve_dispatch_hop(&current, ctx)?;
+        let admitted_verified = admitted_root.as_ref().and_then(|verified| {
+            (verified.resolved.canonical_ref == current).then(|| verified.clone())
+        });
+        let hop = resolve_dispatch_hop_with_verified(
+            &current,
+            ctx,
+            admitted_verified,
+            admitted_hop_authority,
+        )?;
         match hop.next {
             HopAction::FollowAlias(next) => {
                 current = next;
@@ -3619,28 +4335,158 @@ pub fn launch_contract_applicability(
     })
 }
 
-/// Threadless admission pass for accepted/SSE launch producers. The live
-/// launcher repeats this preparation authoritatively immediately before its
-/// durable audit and spawn; no prepared runtime data crosses this seam.
-pub fn admit_launch_contract(
+/// Threadless admission pass for a pushed immutable launch.
+///
+/// Static preparation uses the same authority-safe resolution/config/preparer
+/// caches as live launch. No prepared value crosses the persistence seam:
+/// live launch performs its current dynamic gates and consumes a cache hit
+/// only when every signed authority leg is identical.
+#[allow(clippy::too_many_arguments)]
+pub async fn admit_launch_contract(
     applicability: &LaunchContractApplicability,
-    primary: &ResolvedItem,
+    root_admission: &ryeos_app::thread_lifecycle::RootExecutionAdmission,
     ref_bindings: &BTreeMap<String, String>,
+    lifecycle_authority: &ryeos_state::objects::ExecutionLifecycleAuthority,
     provenance: &ryeos_app::execution_provenance::ExecutionProvenance,
     ctx: &ExecutionContext,
     state: &AppState,
 ) -> Result<(), DispatchError> {
-    let Some(prepared) = prepare_launch_contract(
-        applicability,
-        primary,
-        ref_bindings,
-        provenance.effective_path(),
-        ctx,
-    )?
-    else {
-        return Ok(());
+    let runtime = match applicability {
+        LaunchContractApplicability::NonEnvelope { class } => {
+            if ref_bindings.is_empty() {
+                return Ok(());
+            }
+            return Err(DispatchError::RefBindingNotApplicable {
+                class: class.as_str().to_owned(),
+            });
+        }
+        LaunchContractApplicability::ManagedEnvelope { runtime } => runtime.as_ref(),
     };
-    let mut names = primary.metadata.required_secrets.clone();
+    let protocol =
+        require_callback_runtime_protocol(&ctx.engine, runtime, "threadless admission")?.clone();
+    let subject_authority = root_admission
+        .plan_context()
+        .subject_resolution_authority
+        .clone();
+    let resolution_project_root =
+        resolution_project_root(&subject_authority, provenance.effective_path());
+    let roots = ctx
+        .engine
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
+    let request_snapshot = match root_admission.admitted_request_snapshot() {
+        Some(admitted) => ctx
+            .engine
+            .effective_request_snapshot_under_admitted_authority(
+                resolution_project_root.ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "admitted pinned launch has no effective project root"
+                    ))
+                })?,
+                admitted,
+            ),
+        None => ctx
+            .engine
+            .effective_request_snapshot(resolution_project_root, &subject_authority)
+            .map(std::sync::Arc::new),
+    }
+    .map_err(|error| DispatchError::LaunchPreparationFailed {
+        code: "launch_parser_registry_failed".to_owned(),
+        message: error.to_string(),
+        classification: "configuration".to_owned(),
+        binding: None,
+        details: Box::new(BTreeMap::new()),
+    })?;
+    let executor_ref = format!(
+        "native:{}",
+        strip_binary_ref_prefix(&runtime.yaml.binary_ref)?
+    );
+    let bundle_roots = roots
+        .ordered
+        .iter()
+        .filter(|root| root.space == ryeos_engine::contracts::ItemSpace::Bundle)
+        .map(|root| {
+            root.ai_root
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| root.ai_root.clone())
+        })
+        .collect::<Vec<_>>();
+    let attestation_engine = ctx.engine.clone();
+    let attestation_executor_ref = executor_ref.clone();
+    let executor_attestation = tokio::task::spawn_blocking(move || {
+        crate::execution::launch::verify_native_executor_chain_attestation_for_engine(
+            &attestation_engine,
+            &bundle_roots,
+            &attestation_executor_ref,
+            ryeos_engine::resolution::TrustClass::TrustedBundle,
+            None,
+        )
+    })
+    .await
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "threadless executor attestation worker failed: {error}"
+        ))
+    })?
+    .map_err(|error| DispatchError::RuntimeMaterializationFailed {
+        executor_ref: executor_ref.clone(),
+        detail: error.to_string(),
+    })?;
+    let executor_chain_identity = executor_attestation.identity_digest().map_err(|error| {
+        DispatchError::RuntimeMaterializationFailed {
+            executor_ref: executor_ref.clone(),
+            detail: error.to_string(),
+        }
+    })?;
+    let cache_materialization = root_admission
+        .resolution_materialization_binding()
+        .map_err(DispatchError::Internal)?;
+    let binding_generation_identity = ctx.engine.registered_bundle_generation_fingerprint();
+    let binding_plan_context_identity = [
+        request_snapshot.request_engine_generation_identity.as_str(),
+        request_snapshot.registry_fingerprint.as_str(),
+        request_snapshot.effective_trust_identity.as_str(),
+    ]
+    .join("\u{1f}");
+    let prepared = crate::execution::launch_preparation::prepare_runtime_launch_cached(
+        crate::execution::launch_preparation::PrepareRuntimeLaunchRequest {
+            engine: &ctx.engine,
+            runtime,
+            primary: root_admission.resolution_output(),
+            ref_bindings,
+            roots: &roots,
+            parsers: &request_snapshot.parser_dispatcher,
+            trust_store: &request_snapshot.trust_store,
+            principal: &ctx.plan_ctx.requested_by,
+            subject_resolution_authority: &subject_authority,
+            resolution_cache: Some(
+                crate::execution::launch_preparation::PreparedResolutionCacheContext {
+                    cache: &state.resolution_cache,
+                    materialization: &cache_materialization,
+                    generation_identity: &binding_generation_identity,
+                    plan_context_identity: &binding_plan_context_identity,
+                },
+            ),
+            ref_binding_resolution_timings: None,
+        },
+        crate::execution::launch_preparation::PreparedLaunchSkeletonAuthority {
+            subject_resolution_authority: &subject_authority,
+            execution_project_authority: provenance.project_authority(),
+            lifecycle_authority,
+            protocol: &protocol,
+            executor_chain_identity: &executor_chain_identity,
+            request_engine_generation_identity: &request_snapshot
+                .request_engine_generation_identity,
+            effective_trust_identity: &request_snapshot.effective_trust_identity,
+        },
+    )
+    .await?;
+    let mut names = root_admission
+        .verified_subject()
+        .resolved
+        .metadata
+        .required_secrets
+        .clone();
     names.extend(
         prepared
             .required_secrets
@@ -3665,7 +4511,11 @@ pub fn admit_launch_contract(
                 .next()
                 .unwrap_or_else(|| "unknown".to_owned());
             DispatchError::RequiredSecretMissing {
-                item_ref: primary.canonical_ref.to_string(),
+                item_ref: root_admission
+                    .verified_subject()
+                    .resolved
+                    .canonical_ref
+                    .to_string(),
                 env_var: name.clone(),
                 source_kind: "launch_preparation".to_owned(),
                 source_name: "symbolic_requirement".to_owned(),
@@ -3693,9 +4543,9 @@ pub fn admit_launch_contract(
     })
 }
 
-/// Execute the generic, threadless launch-contract preparation pass without
-/// reading secret values. Environment diagnostics use this to discover the
-/// validated symbolic secret set; admission adds the availability check.
+/// Resolve symbolic launch requirements for diagnostics without reading
+/// secret values. This is intentionally a one-shot diagnostic surface;
+/// execution admission uses [`admit_launch_contract`] and the shared caches.
 pub fn prepare_launch_contract(
     applicability: &LaunchContractApplicability,
     primary: &ResolvedItem,
@@ -3714,12 +4564,17 @@ pub fn prepare_launch_contract(
         }
         LaunchContractApplicability::ManagedEnvelope { runtime } => runtime,
     };
+    let resolution_project_root =
+        resolution_project_root(&ctx.plan_ctx.subject_resolution_authority, project_path);
     let roots = ctx
         .engine
-        .resolution_roots(Some(project_path.to_path_buf()));
+        .resolution_roots(resolution_project_root.map(Path::to_path_buf));
     let request_snapshot = ctx
         .engine
-        .effective_request_snapshot(Some(project_path))
+        .effective_request_snapshot(
+            resolution_project_root,
+            &ctx.plan_ctx.subject_resolution_authority,
+        )
         .map_err(|error| DispatchError::LaunchPreparationFailed {
             code: "launch_parser_registry_failed".to_owned(),
             message: error.to_string(),
@@ -3752,6 +4607,8 @@ pub fn prepare_launch_contract(
             parsers: &request_snapshot.parser_dispatcher,
             trust_store: &request_snapshot.trust_store,
             principal: &ctx.plan_ctx.requested_by,
+            subject_resolution_authority: &ctx.plan_ctx.subject_resolution_authority,
+            resolution_cache: None,
             ref_binding_resolution_timings: None,
         },
     )
@@ -3784,13 +4641,25 @@ impl RootDispatchClass {
 
 /// Synchronous public-route admission. `requested_subject` is the exact
 /// caller-named item used for route capability/secret checks. `root_admission`
-/// is the possibly different terminal/root subject that will own the durable
-/// row (for example, the target behind a method-dispatch wrapper).
+/// carries the complete admitted root closure and history policy. Persistent
+/// classes additionally bind an executor route and consume it as durable
+/// execution authority; in-process callers retain the unrouted admission as an
+/// exact threadless resolution handoff, never with a pre-minted thread
+/// identity.
 #[derive(Debug, Clone)]
 pub struct RootDispatchPreflight {
     pub class: RootDispatchClass,
     pub requested_subject: VerifiedItem,
     pub root_admission: Option<ryeos_app::thread_lifecycle::RootExecutionAdmission>,
+    pub root_dispatch_evidence: RootDispatchEvidence,
+}
+
+impl RootDispatchPreflight {
+    fn rebind_requested_subject(&mut self, requested_subject: VerifiedItem) {
+        self.root_dispatch_evidence
+            .replace_requested_subject(&requested_subject);
+        self.requested_subject = requested_subject;
+    }
 }
 
 // Route class, requested/root evidence, usage attribution, bindings, and daemon
@@ -3798,6 +4667,8 @@ pub struct RootDispatchPreflight {
 #[allow(clippy::too_many_arguments)]
 fn finish_root_dispatch_preflight(
     class: RootDispatchClass,
+    applicability: LaunchContractApplicability,
+    executor_route: Option<ryeos_app::thread_lifecycle::RootExecutionRoute<'_>>,
     requested_subject: VerifiedItem,
     root_subject: VerifiedItem,
     thread_profile: String,
@@ -3805,16 +4676,75 @@ fn finish_root_dispatch_preflight(
     usage_subject: Option<&ryeos_state::UsageSubject>,
     usage_subject_asserted_by: Option<&str>,
     project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    cached_root_attestation: Option<
+        &std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
+    >,
+    cached_root_closure: Option<&std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>>,
+    admitted_request_snapshot: Option<
+        std::sync::Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>,
+    >,
     ctx: &ExecutionContext,
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<RootDispatchPreflight, DispatchError> {
+    if !ref_bindings.is_empty() {
+        if let LaunchContractApplicability::NonEnvelope { class } = &applicability {
+            return Err(DispatchError::RefBindingNotApplicable {
+                class: class.as_str().to_owned(),
+            });
+        }
+    }
+    let subject_authority = project_binding.subject_resolution_authority().clone();
+    let admitted_root_ref = root_subject.resolved.canonical_ref.to_string();
+    let cached_root_matches = cached_root_attestation.is_some_and(|attestation| {
+        attestation.verified_subject().resolved.canonical_ref == root_subject.resolved.canonical_ref
+    });
+    let root_attestation = match cached_root_attestation.filter(|_| cached_root_matches) {
+        Some(attestation) => match admitted_request_snapshot.as_ref() {
+            Some(authority) => ctx
+                .engine
+                .reissue_verified_attestation_under_admitted_authority(
+                    &ctx.plan_ctx,
+                    attestation,
+                    &subject_authority,
+                    authority,
+                ),
+            None => ctx.engine.reissue_verified_attestation(
+                &ctx.plan_ctx,
+                attestation,
+                &subject_authority,
+            ),
+        },
+        None => match admitted_request_snapshot.as_ref() {
+            Some(authority) => {
+                let project_root = project_binding.execution_workspace().ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "content-addressed root attestation has no execution workspace"
+                    ))
+                })?;
+                ctx.engine.resolve_attested_under_admitted_authority(
+                    &ctx.plan_ctx,
+                    &root_subject.resolved.canonical_ref,
+                    project_root,
+                    authority,
+                )
+            }
+            None => ctx
+                .engine
+                .verify_attested(&ctx.plan_ctx, root_subject.resolved),
+        },
+    }
+    .map_err(|error| {
+        DispatchError::Internal(anyhow::anyhow!(
+            "attest exact root dispatch subject: {error}"
+        ))
+    })?;
     let root_admission = ryeos_app::thread_lifecycle::admit_verified_root_execution_with_timings(
         &ctx.engine,
         &ctx.plan_ctx,
         &ctx.plan_ctx,
         project_binding.clone(),
-        root_subject,
+        root_attestation,
         &state.node_history_policy,
         thread_profile,
         ref_bindings.clone(),
@@ -3822,14 +4752,367 @@ fn finish_root_dispatch_preflight(
         usage_subject_asserted_by.map(str::to_string),
         launch_timings,
         Some(&*state.resolution_cache),
-        state.engine_cache.system_install_generation(),
+        cached_root_closure.filter(|_| cached_root_matches).cloned(),
+        admitted_request_snapshot,
     )
-    .map_err(DispatchError::Internal)?;
+    .map_err(|error| {
+        map_dispatch_root_resolution_validation_error(error, &admitted_root_ref, ctx, state)
+    })?;
+    let root_admission = match executor_route {
+        Some(route) => root_admission
+            .with_executor_route(route)
+            .map_err(DispatchError::Internal)?,
+        None => root_admission,
+    };
+    let root_dispatch_evidence =
+        RootDispatchEvidence::new(applicability, &requested_subject, &root_admission);
     Ok(RootDispatchPreflight {
         class,
         requested_subject,
         root_admission: Some(root_admission),
+        root_dispatch_evidence,
     })
+}
+
+fn admit_request_authority(
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    ctx: &ExecutionContext,
+) -> Result<
+    Option<std::sync::Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
+    DispatchError,
+> {
+    project_binding
+        .admit_request_authority_snapshot(&ctx.engine, &ctx.plan_ctx)
+        .map_err(DispatchError::Internal)
+}
+
+fn cached_root_dispatch_subject(
+    canonical_ref: &CanonicalRef,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    admitted_request_snapshot: Option<&ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>,
+) -> Result<
+    Option<(
+        VerifiedItem,
+        std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
+        std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
+    )>,
+    DispatchError,
+> {
+    let project_root = match &ctx.plan_ctx.project_context {
+        ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
+        ryeos_engine::contracts::ProjectContext::SnapshotHash { .. }
+        | ryeos_engine::contracts::ProjectContext::ProjectRef { .. } => {
+            project_binding.execution_workspace()
+        }
+        ryeos_engine::contracts::ProjectContext::None => None,
+    };
+    let subject_authority = project_binding.subject_resolution_authority().clone();
+    let key = match admitted_request_snapshot {
+        Some(authority) => ryeos_app::resolution_cache::build_resolution_cache_key_from_snapshot(
+            &ctx.engine,
+            canonical_ref,
+            project_root,
+            authority
+                .authority_snapshot_for_root(project_root.ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "admitted pinned root cache lookup has no project root"
+                    ))
+                })?)
+                .map_err(|error| DispatchError::Internal(anyhow::anyhow!(error)))?,
+        ),
+        None => {
+            ryeos_app::resolution_cache::build_resolution_cache_key(
+                &ctx.engine,
+                canonical_ref,
+                subject_authority.clone(),
+                project_root,
+            )
+            .map_err(DispatchError::Internal)?
+            .0
+        }
+    };
+    let cache_materialization = project_binding
+        .resolution_materialization_binding()
+        .map_err(DispatchError::Internal)?;
+    let (closure, outcome) = state
+        .resolution_cache
+        .get_admitted(&key, &cache_materialization)
+        .map_err(DispatchError::Internal)?;
+    let typed_outcome = match outcome {
+        ryeos_app::resolution_cache::LookupOutcome::Hit => {
+            ryeos_app::resolution_cache::ResolutionCacheOutcome::Hit
+        }
+        ryeos_app::resolution_cache::LookupOutcome::Miss => {
+            ryeos_app::resolution_cache::ResolutionCacheOutcome::Miss
+        }
+        ryeos_app::resolution_cache::LookupOutcome::Stale => {
+            ryeos_app::resolution_cache::ResolutionCacheOutcome::Stale
+        }
+    };
+    ryeos_app::resolution_cache::emit_resolution_cache_metric(
+        ryeos_app::resolution_cache::ResolutionCacheMetric::Root,
+        ryeos_app::resolution_cache::ResolutionCachePhase::PreResolve,
+        typed_outcome,
+        None,
+        0,
+    );
+    let Some(closure) = closure else {
+        return Ok(None);
+    };
+    let Some(attestation) = closure.verified_attestation().cloned() else {
+        return Ok(None);
+    };
+    let verified_result = match admitted_request_snapshot {
+        Some(authority) => ctx
+            .engine
+            .consume_verified_attestation_under_admitted_authority(
+                &ctx.plan_ctx,
+                &attestation,
+                &subject_authority,
+                authority,
+            ),
+        None => {
+            ctx.engine
+                .consume_verified_attestation(&ctx.plan_ctx, &attestation, &subject_authority)
+        }
+    };
+    let verified = match verified_result {
+        Ok(verified) => verified,
+        Err(error) => {
+            state.resolution_cache.discard_if_same(&key, &closure);
+            ryeos_app::resolution_cache::emit_resolution_cache_metric(
+                ryeos_app::resolution_cache::ResolutionCacheMetric::Root,
+                ryeos_app::resolution_cache::ResolutionCachePhase::PreResolve,
+                ryeos_app::resolution_cache::ResolutionCacheOutcome::Stale,
+                Some(
+                    ryeos_app::resolution_cache::ResolutionCacheReason::AttestationRevalidationFailed,
+                ),
+                0,
+            );
+            tracing::debug!(error = %error, "root resolution attestation revalidation failed");
+            return Ok(None);
+        }
+    };
+    Ok(Some((verified, attestation, closure)))
+}
+
+#[derive(Debug, Clone)]
+struct ValidatedDispatchRoot {
+    subject: VerifiedItem,
+    attestation: std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
+    closure: std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
+    admitted_request_snapshot:
+        Option<std::sync::Arc<ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>>,
+}
+
+fn map_engine_root_resolution_error(
+    error: &ryeos_engine::error::EngineError,
+    requested_root: &str,
+) -> Option<DispatchError> {
+    use ryeos_engine::error::EngineError;
+
+    match error {
+        EngineError::Shared(error) => map_engine_root_resolution_error(error, requested_root),
+        EngineError::ComposedValueContractViolation {
+            canonical_ref,
+            report,
+        } => Some(DispatchError::ComposedValueContractViolation {
+            canonical_ref: canonical_ref.clone(),
+            error_count: report.errors.len(),
+            warning_count: report.warnings.len(),
+            details: crate::dispatch_error::ContractViolationDetails::from_report(report),
+        }),
+        EngineError::UnsupportedKind { kind } => Some(DispatchError::SchemaMisconfigured {
+            kind: kind.clone(),
+            detail: error.to_string(),
+        }),
+        EngineError::KindNotExecutable { kind } => Some(DispatchError::NotRootExecutable {
+            kind: kind.clone(),
+            detail: error.to_string(),
+        }),
+        EngineError::ItemNotFound { .. }
+        | EngineError::ItemResolutionUnavailable { .. }
+        | EngineError::AmbiguousResolution { .. }
+        | EngineError::PinnedVersionNotFound { .. }
+        | EngineError::NoExtensionsForKind { .. }
+        | EngineError::SchemaLoaderError { .. }
+        | EngineError::ParserNotRegistered { .. }
+        | EngineError::SignatureMissing { .. }
+        | EngineError::SignatureVerificationFailed { .. }
+        | EngineError::UntrustedSigner { .. }
+        | EngineError::ContentHashMismatch { .. }
+        | EngineError::InvalidMetadata { .. }
+        | EngineError::EffectiveItemNotFound { .. }
+        | EngineError::EffectiveItemWrongKind { .. }
+        | EngineError::EffectiveItemUntrusted { .. }
+        | EngineError::EffectiveItemCompositionFailed { .. }
+        | EngineError::EffectiveItemParseFailed { .. }
+        | EngineError::MetadataAnchoringFailed { .. } => Some(DispatchError::InvalidRef(
+            requested_root.to_string(),
+            error.to_string(),
+        )),
+        _ => None,
+    }
+}
+
+fn map_root_resolution_validation_error(
+    error: anyhow::Error,
+    requested_root: &str,
+) -> DispatchError {
+    for cause in error.chain() {
+        if let Some(engine_error) = cause.downcast_ref::<ryeos_engine::error::EngineError>() {
+            if let Some(mapped) = map_engine_root_resolution_error(engine_error, requested_root) {
+                return mapped;
+            }
+        }
+    }
+    DispatchError::Internal(error)
+}
+
+fn map_dispatch_root_resolution_validation_error(
+    error: anyhow::Error,
+    requested_root: &str,
+    ctx: &ExecutionContext,
+    state: &AppState,
+) -> DispatchError {
+    let service_terminator = CanonicalRef::parse(requested_root)
+        .ok()
+        .and_then(|item_ref| ctx.engine.kinds.get(&item_ref.kind))
+        .and_then(|schema| schema.execution())
+        .and_then(|execution| execution.terminator.as_ref())
+        .is_some_and(|terminator| {
+            matches!(
+                terminator,
+                TerminatorDecl::InProcess {
+                    registry: InProcessRegistryKind::Services
+                }
+            )
+        });
+    if service_terminator {
+        for cause in error.chain() {
+            if let Some(ryeos_engine::error::EngineError::ItemNotFound {
+                searched_spaces, ..
+            }) = cause.downcast_ref::<ryeos_engine::error::EngineError>()
+            {
+                let mut installed_bundles: Vec<String> = state
+                    .node_config
+                    .bundles
+                    .iter()
+                    .map(|bundle| bundle.name.clone())
+                    .collect();
+                installed_bundles.sort();
+                return DispatchError::ServiceNotInstalled {
+                    service_ref: requested_root.to_string(),
+                    installed_bundles,
+                    searched_spaces: searched_spaces.clone(),
+                };
+            }
+        }
+    }
+    map_root_resolution_validation_error(error, requested_root)
+}
+
+fn validate_root_resolution_inner(
+    canonical_ref: &CanonicalRef,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<ValidatedDispatchRoot, DispatchError> {
+    if let Some(schema) = ctx.engine.kinds.get(&canonical_ref.kind) {
+        if schema.execution().is_none() {
+            return Err(DispatchError::NotRootExecutable {
+                kind: canonical_ref.kind.clone(),
+                detail: "schema has no `execution:` block".to_string(),
+            });
+        }
+    }
+    let admitted_request_snapshot = admit_request_authority(project_binding, ctx)?;
+    let cached = cached_root_dispatch_subject(
+        canonical_ref,
+        project_binding,
+        ctx,
+        state,
+        admitted_request_snapshot.as_deref(),
+    )?;
+    let (root_attestation, prevalidated_closure) = match cached {
+        Some((_, attestation, closure)) => (attestation, Some(closure)),
+        None => {
+            let attestation = match admitted_request_snapshot.as_ref() {
+                Some(authority) => {
+                    let project_root = project_binding.execution_workspace().ok_or_else(|| {
+                        DispatchError::Internal(anyhow::anyhow!(
+                            "content-addressed root validation has no execution workspace"
+                        ))
+                    })?;
+                    ctx.engine.resolve_attested_under_admitted_authority(
+                        &ctx.plan_ctx,
+                        canonical_ref,
+                        project_root,
+                        authority,
+                    )
+                }
+                None => ctx.engine.resolve_attested(&ctx.plan_ctx, canonical_ref),
+            }
+            .map_err(|error| {
+                map_dispatch_root_resolution_validation_error(
+                    anyhow::Error::new(error)
+                        .context("attest exact caller-named root before resolution validation"),
+                    &canonical_ref.to_string(),
+                    ctx,
+                    state,
+                )
+            })?;
+            (std::sync::Arc::new(attestation), None)
+        }
+    };
+    let validated = ryeos_app::thread_lifecycle::validate_verified_root_resolution_with_timings(
+        &ctx.engine,
+        &ctx.plan_ctx,
+        project_binding,
+        root_attestation,
+        launch_timings,
+        Some(&*state.resolution_cache),
+        prevalidated_closure,
+        admitted_request_snapshot,
+    )
+    .map_err(|error| {
+        map_dispatch_root_resolution_validation_error(error, &canonical_ref.to_string(), ctx, state)
+    })?;
+    let attestation = validated
+        .resolution_closure()
+        .verified_attestation()
+        .cloned()
+        .ok_or_else(|| {
+            DispatchError::Internal(anyhow::anyhow!(
+                "validated root resolution has no opaque closure attestation"
+            ))
+        })?;
+    Ok(ValidatedDispatchRoot {
+        subject: validated.verified_subject().clone(),
+        attestation,
+        closure: validated.resolution_closure().clone(),
+        admitted_request_snapshot: validated.admitted_request_snapshot().cloned(),
+    })
+}
+
+/// Validate the caller-named root's complete attested resolution closure
+/// without applying any local executor-route gates. The API invokes this
+/// before target-site forwarding; local route preflight consumes the same
+/// cache entry rather than running a second cold resolution pipeline.
+pub fn preflight_root_resolution(
+    item_ref: &str,
+    project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
+    ctx: &ExecutionContext,
+    state: &AppState,
+    launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
+) -> Result<VerifiedItem, DispatchError> {
+    let canonical_ref = CanonicalRef::parse(item_ref)
+        .map_err(|error| DispatchError::InvalidRef(item_ref.to_string(), error.to_string()))?;
+    validate_root_resolution_inner(&canonical_ref, project_binding, ctx, state, launch_timings)
+        .map(|validated| validated.subject)
 }
 
 /// Preflight the dispatch route for accepted/background launch.
@@ -3873,6 +5156,12 @@ pub fn preflight_root_dispatch(
         .map_err(|e| DispatchError::InvalidRef(item_ref.to_string(), e.to_string()))?;
     let mut requested_subject: Option<VerifiedItem> = None;
     let mut root_subject: Option<(VerifiedItem, String)> = None;
+    let validated_root =
+        validate_root_resolution_inner(&current_ref, project_binding, ctx, state, launch_timings)?;
+    let admitted_request_snapshot = validated_root.admitted_request_snapshot.clone();
+    let cached_root_attestation = Some(validated_root.attestation);
+    let cached_root_closure = Some(validated_root.closure);
+    let mut cached_root_subject = Some(validated_root.subject);
 
     let caller_root_executable = ctx
         .engine
@@ -3964,7 +5253,23 @@ pub fn preflight_root_dispatch(
 
         let hop_timer = launch_timings
             .map(|timings| timings.nested("preflight_admission", "hop_resolve_and_verify"));
-        let hop = resolve_dispatch_hop(&current_ref, ctx);
+        let admitted_hop_authority = match admitted_request_snapshot.as_deref() {
+            Some(snapshot) => Some((
+                project_binding.execution_workspace().ok_or_else(|| {
+                    DispatchError::Internal(anyhow::anyhow!(
+                        "admitted request snapshot has no execution workspace"
+                    ))
+                })?,
+                snapshot,
+            )),
+            None => None,
+        };
+        let hop = resolve_dispatch_hop_with_verified(
+            &current_ref,
+            ctx,
+            cached_root_subject.take(),
+            admitted_hop_authority,
+        );
         drop(hop_timer);
         let hop = hop?;
         let VerifiedHop {
@@ -4006,11 +5311,32 @@ pub fn preflight_root_dispatch(
         match next {
             HopAction::Terminate(terminator, hop_profile) => match terminator {
                 TerminatorDecl::InProcess { .. } => {
-                    return Ok(RootDispatchPreflight {
-                        class: RootDispatchClass::InProcess,
-                        requested_subject: admitted_requested_subject,
-                        root_admission: None,
-                    });
+                    let (subject, profile) = root_subject.clone().ok_or_else(|| {
+                        DispatchError::InvalidRef(
+                            hop_ref.to_string(),
+                            "in-process root did not resolve and verify".to_string(),
+                        )
+                    })?;
+                    return finish_root_dispatch_preflight(
+                        RootDispatchClass::InProcess,
+                        LaunchContractApplicability::NonEnvelope {
+                            class: RootDispatchClass::InProcess,
+                        },
+                        None,
+                        admitted_requested_subject,
+                        subject,
+                        profile,
+                        ref_bindings,
+                        usage_subject,
+                        usage_subject_asserted_by,
+                        project_binding,
+                        cached_root_attestation.as_ref(),
+                        cached_root_closure.as_ref(),
+                        admitted_request_snapshot.clone(),
+                        ctx,
+                        state,
+                        launch_timings,
+                    );
                 }
                 TerminatorDecl::Subprocess { protocol_ref } => {
                     let protocol =
@@ -4043,27 +5369,20 @@ pub fn preflight_root_dispatch(
                                 if let Some(executor_id) =
                                     v.resolved.metadata.executor_id.as_deref()
                                 {
-                                    let project_root = match &ctx.plan_ctx.project_context {
-                                        ryeos_engine::contracts::ProjectContext::LocalPath {
-                                            path,
-                                        } => Some(path.clone()),
-                                        _ => None,
-                                    };
-                                    let terminal = ctx
-                                        .engine
-                                        .resolve_terminal_executor(
-                                            &v.resolved.source_path,
-                                            executor_id,
-                                            &v.resolved.kind,
-                                            project_root,
-                                        )
-                                        .map_err(|e| DispatchError::SchemaMisconfigured {
-                                            kind: v.resolved.kind.clone(),
-                                            detail: format!(
-                                                "failed to resolve executor-chain terminal for \
-                                                 '{hop_ref}': {e}"
-                                            ),
-                                        })?;
+                                    let terminal = resolve_terminal_executor_for_subject(
+                                        &ctx.engine,
+                                        &v.resolved,
+                                        executor_id,
+                                        project_binding.execution_workspace(),
+                                        admitted_request_snapshot.as_deref(),
+                                    )
+                                    .map_err(|e| DispatchError::SchemaMisconfigured {
+                                        kind: v.resolved.kind.clone(),
+                                        detail: format!(
+                                            "failed to resolve executor-chain terminal for \
+                                             '{hop_ref}': {e}"
+                                        ),
+                                    })?;
                                     if terminal.kind
                                         == ryeos_engine::plan_builder::TerminalExecutorKind::MethodDispatch
                                     {
@@ -4116,14 +5435,21 @@ pub fn preflight_root_dispatch(
                                             state,
                                             launch_timings,
                                         )?;
-                                        target.requested_subject =
-                                            admitted_requested_subject.clone();
+                                        target.rebind_requested_subject(
+                                            admitted_requested_subject.clone(),
+                                        );
                                         return Ok(target);
                                     }
                                 }
                             }
                             return finish_root_dispatch_preflight(
                                 RootDispatchClass::TerminalSubprocess,
+                                LaunchContractApplicability::NonEnvelope {
+                                    class: RootDispatchClass::TerminalSubprocess,
+                                },
+                                Some(
+                                    ryeos_app::thread_lifecycle::RootExecutionRoute::RootExecutorChain,
+                                ),
                                 admitted_requested_subject,
                                 verified.clone().ok_or_else(|| {
                                     DispatchError::InvalidRef(
@@ -4136,6 +5462,9 @@ pub fn preflight_root_dispatch(
                                 usage_subject,
                                 usage_subject_asserted_by,
                                 project_binding,
+                                cached_root_attestation.as_ref(),
+                                cached_root_closure.as_ref(),
+                                admitted_request_snapshot.clone(),
                                 ctx,
                                 state,
                                 launch_timings,
@@ -4185,8 +5514,41 @@ pub fn preflight_root_dispatch(
                                 } else {
                                     RootDispatchClass::ManagedSubprocess
                                 };
+                            let applicability = if class == RootDispatchClass::ManagedNonEnvelope {
+                                LaunchContractApplicability::NonEnvelope { class }
+                            } else {
+                                let runtime = hop_runtime
+                                        .clone()
+                                        .or_else(|| {
+                                            ctx.engine.runtimes.lookup_by_ref(&hop_ref).cloned()
+                                        })
+                                        .ok_or_else(|| DispatchError::SchemaMisconfigured {
+                                            kind: hop_ref.kind.clone(),
+                                            detail: format!(
+                                                "managed envelope path `{hop_ref}` has no selected runtime"
+                                            ),
+                                        })?;
+                                LaunchContractApplicability::ManagedEnvelope {
+                                    runtime: Box::new(runtime),
+                                }
+                            };
+                            let executor_route = match hop_runtime.as_ref() {
+                                Some(runtime) if subject.resolved.canonical_ref == runtime.canonical_ref => {
+                                    ryeos_app::thread_lifecycle::RootExecutionRoute::RuntimeDescriptorExecutor(
+                                        &runtime.canonical_ref,
+                                    )
+                                }
+                                Some(runtime) => {
+                                    ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
+                                        &runtime.canonical_ref,
+                                    )
+                                }
+                                None => ryeos_app::thread_lifecycle::RootExecutionRoute::DirectNativeExecutor,
+                            };
                             return finish_root_dispatch_preflight(
                                 class,
+                                applicability,
+                                Some(executor_route),
                                 admitted_requested_subject,
                                 subject,
                                 profile,
@@ -4194,6 +5556,9 @@ pub fn preflight_root_dispatch(
                                 usage_subject,
                                 usage_subject_asserted_by,
                                 project_binding,
+                                cached_root_attestation.as_ref(),
+                                cached_root_closure.as_ref(),
+                                admitted_request_snapshot.clone(),
                                 ctx,
                                 state,
                                 launch_timings,
@@ -4237,6 +5602,14 @@ pub fn preflight_root_dispatch(
                 strip_binary_ref_prefix(&verified_runtime.yaml.binary_ref)?;
                 return finish_root_dispatch_preflight(
                     RootDispatchClass::MethodDispatch,
+                    LaunchContractApplicability::NonEnvelope {
+                        class: RootDispatchClass::MethodDispatch,
+                    },
+                    Some(
+                        ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
+                            &verified_runtime.canonical_ref,
+                        ),
+                    ),
                     admitted_requested_subject,
                     verified.ok_or_else(|| {
                         DispatchError::InvalidRef(
@@ -4252,12 +5625,67 @@ pub fn preflight_root_dispatch(
                     usage_subject,
                     usage_subject_asserted_by,
                     project_binding,
+                    cached_root_attestation.as_ref(),
+                    cached_root_closure.as_ref(),
+                    admitted_request_snapshot.clone(),
                     ctx,
                     state,
                     launch_timings,
                 );
             }
         }
+    }
+}
+
+/// Resolve an executor chain under the executable subject's exact resolution
+/// authority, which is independent from the workspace admitted for execution.
+///
+/// A bundle-only subject can legitimately execute inside a project workspace,
+/// but its executor chain remains projectless and must never receive that
+/// workspace as an overlay root. Project subjects retain the admitted
+/// materialization proof when one exists.
+pub(super) fn resolve_terminal_executor_for_subject(
+    engine: &ryeos_engine::engine::Engine,
+    subject: &ResolvedItem,
+    executor_ref: &str,
+    execution_project_root: Option<&Path>,
+    admitted_request_snapshot: Option<&ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>,
+) -> Result<ryeos_engine::plan_builder::ResolvedTerminalExecutor, ryeos_engine::error::EngineError>
+{
+    if matches!(
+        subject.subject_resolution_authority,
+        ryeos_engine::contracts::SubjectResolutionAuthority::Projectless
+    ) {
+        return engine.resolve_terminal_executor(
+            &subject.source_path,
+            executor_ref,
+            &subject.kind,
+            None,
+            &ryeos_engine::contracts::SubjectResolutionAuthority::Projectless,
+        );
+    }
+    match admitted_request_snapshot {
+        Some(authority) => {
+            let project_root = execution_project_root.ok_or_else(|| {
+                ryeos_engine::error::EngineError::Internal(
+                    "content-addressed terminal resolution has no project root".to_string(),
+                )
+            })?;
+            engine.resolve_terminal_executor_under_admitted_authority(
+                &subject.source_path,
+                executor_ref,
+                &subject.kind,
+                project_root,
+                authority,
+            )
+        }
+        None => engine.resolve_terminal_executor(
+            &subject.source_path,
+            executor_ref,
+            &subject.kind,
+            execution_project_root.map(Path::to_path_buf),
+            &subject.subject_resolution_authority,
+        ),
     }
 }
 
@@ -4317,7 +5745,7 @@ async fn dispatch_by(
         TerminatorDecl::InProcess {
             registry: InProcessRegistryKind::Services,
         } => {
-            if request.root_admission.is_some() {
+            if request.root_admission.is_some() && request.pre_minted_thread_id.is_some() {
                 return Err(DispatchError::Internal(anyhow::anyhow!(
                     "threaded root admission resolved to an in-process terminator; refusing to acknowledge a pre-minted id without its admitted row"
                 )));
@@ -4360,6 +5788,90 @@ mod tests {
         assert_eq!(error.code(), "launch_cancelled");
         assert_eq!(error.http_status(), axum::http::StatusCode::CONFLICT);
         assert!(!error.to_string().contains("T-"));
+    }
+
+    #[test]
+    fn root_resolution_preserves_structured_composed_contract_failure() {
+        use ryeos_engine::contracts::{
+            InstanceValidationReport, InstanceViolation, InstanceViolationCode,
+        };
+
+        let report = InstanceValidationReport {
+            errors: vec![InstanceViolation {
+                path: "runtime.mode".to_string(),
+                code: InstanceViolationCode::EnumMismatch,
+                expected: "\"wait\"".to_string(),
+                found: "\"detached\"".to_string(),
+            }],
+            warnings: vec![InstanceViolation {
+                path: "extra".to_string(),
+                code: InstanceViolationCode::UnexpectedField,
+                expected: "<none>".to_string(),
+                found: "value".to_string(),
+            }],
+        };
+        let error = anyhow::Error::new(
+            ryeos_engine::error::EngineError::ComposedValueContractViolation {
+                canonical_ref: "work:example/root".to_string(),
+                report,
+            },
+        )
+        .context("admitted root resolution failed");
+
+        match map_root_resolution_validation_error(error, "work:example/root") {
+            DispatchError::ComposedValueContractViolation {
+                canonical_ref,
+                error_count,
+                warning_count,
+                details,
+            } => {
+                assert_eq!(canonical_ref, "work:example/root");
+                assert_eq!(error_count, 1);
+                assert_eq!(warning_count, 1);
+                assert_eq!(details.errors[0].path, "runtime.mode");
+                assert_eq!(details.warnings[0].path, "extra");
+            }
+            other => panic!("expected structured composed-contract failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn root_resolution_preserves_caller_and_configuration_error_classes() {
+        let missing = anyhow::Error::new(ryeos_engine::error::EngineError::ItemNotFound {
+            canonical_ref: "work:example/root".to_string(),
+            searched_spaces: vec!["project".to_string(), "bundle".to_string()],
+        });
+        assert!(matches!(
+            map_root_resolution_validation_error(missing, "work:example/root"),
+            DispatchError::InvalidRef(ref item_ref, _) if item_ref == "work:example/root"
+        ));
+
+        let untrusted =
+            anyhow::Error::new(ryeos_engine::error::EngineError::EffectiveItemUntrusted {
+                canonical_ref: "work:example/root".to_string(),
+                fingerprint: "sha256:untrusted".to_string(),
+            });
+        assert!(matches!(
+            map_root_resolution_validation_error(untrusted, "work:example/root"),
+            DispatchError::InvalidRef(ref item_ref, _) if item_ref == "work:example/root"
+        ));
+
+        let non_executable =
+            anyhow::Error::new(ryeos_engine::error::EngineError::KindNotExecutable {
+                kind: "config".to_string(),
+            });
+        assert!(matches!(
+            map_root_resolution_validation_error(non_executable, "config:example/root"),
+            DispatchError::NotRootExecutable { ref kind, .. } if kind == "config"
+        ));
+
+        let invariant = anyhow::Error::new(ryeos_engine::error::EngineError::Internal(
+            "attestation digest drift".to_string(),
+        ));
+        assert!(matches!(
+            map_root_resolution_validation_error(invariant, "work:example/root"),
+            DispatchError::Internal(_)
+        ));
     }
 
     #[test]
@@ -4455,12 +5967,52 @@ metadata:
       key: name
 "##;
 
+    const SERVICE_KIND_SCHEMA_BODY: &str = r##"category: "engine/kinds/service"
+version: "1.0.0"
+location:
+  directory: services
+resolution: []
+effective_trust:
+  include_references: false
+execution:
+  terminator:
+    kind: in_process
+    registry: services
+  thread_profile:
+    name: service_run
+    root_executable: true
+    supports_interrupt: false
+    supports_continuation: false
+formats:
+  - extensions: [".yaml", ".yml"]
+    parser: parser:ryeos/core/yaml/yaml
+    signature:
+      prefix: "#"
+composer: handler:ryeos/core/identity
+composed_value_contract:
+  root_type: mapping
+  required: {}
+metadata:
+  rules:
+    name:
+      from: path
+      key: name
+"##;
+
     fn write_runtime_kind_schema(kinds_dir: &Path) {
         let runtime_dir = kinds_dir.join("runtime");
         fs::create_dir_all(&runtime_dir).unwrap();
         let signed =
             lillux::signature::sign_content(RUNTIME_KIND_SCHEMA_BODY, &signing_key(), "#", None);
         fs::write(runtime_dir.join("runtime.kind-schema.yaml"), signed).unwrap();
+    }
+
+    fn write_service_kind_schema(kinds_dir: &Path) {
+        let service_dir = kinds_dir.join("service");
+        fs::create_dir_all(&service_dir).unwrap();
+        let signed =
+            lillux::signature::sign_content(SERVICE_KIND_SCHEMA_BODY, &signing_key(), "#", None);
+        fs::write(service_dir.join("service.kind-schema.yaml"), signed).unwrap();
     }
 
     fn build_test_engine_with_trust(
@@ -4497,6 +6049,8 @@ metadata:
             project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: project_path,
             },
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: Default::default(),
@@ -4516,6 +6070,205 @@ metadata:
             )),
             plan_ctx: test_plan_context(bundle_root),
             requested_call: None,
+        }
+    }
+
+    fn exact_root_applicability_context(
+        project_root: PathBuf,
+        authority: ryeos_engine::contracts::SubjectResolutionAuthority,
+    ) -> ExecutionContext {
+        let kinds_dir = tempdir();
+        write_service_kind_schema(&kinds_dir);
+        let node_trust_store = trust_store();
+        let kinds = KindRegistry::load_base(&[kinds_dir], &node_trust_store)
+            .expect("load service kind schema");
+        let engine = Engine::new(
+            kinds,
+            ParserDispatcher::new(
+                ParserRegistry::empty(),
+                std::sync::Arc::new(ryeos_engine::handlers::HandlerRegistry::empty()),
+            ),
+            Vec::new(),
+        )
+        .with_trust_store(node_trust_store.clone())
+        .with_node_trust_store(node_trust_store);
+        ExecutionContext {
+            principal_fingerprint: "fp:test".into(),
+            caller_scopes: vec!["*".into()],
+            engine: std::sync::Arc::new(engine),
+            plan_ctx: ryeos_engine::contracts::PlanContext {
+                requested_by: ryeos_engine::contracts::EffectivePrincipal::Local(
+                    ryeos_engine::contracts::Principal {
+                        fingerprint: "fp:test".into(),
+                        scopes: vec!["*".into()],
+                    },
+                ),
+                project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
+                    path: project_root,
+                },
+                subject_resolution_authority: authority,
+                current_site_id: "site:test".into(),
+                origin_site_id: "site:test".into(),
+                execution_hints: Default::default(),
+                validate_only: false,
+            },
+            requested_call: None,
+        }
+    }
+
+    fn admitted_service_fixture(
+        project_root: &Path,
+        authority: ryeos_engine::contracts::SubjectResolutionAuthority,
+        source_bytes: &[u8],
+    ) -> VerifiedItem {
+        let source_path = project_root.join(".ai/services/example/status.yaml");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, source_bytes).unwrap();
+        let canonical_ref = CanonicalRef::parse("service:example/status").unwrap();
+        VerifiedItem {
+            resolved: ResolvedItem {
+                canonical_ref: canonical_ref.clone(),
+                kind: canonical_ref.kind.clone(),
+                source_path,
+                source_space: ItemSpace::Project,
+                resolved_from: "project".into(),
+                shadowed: Vec::new(),
+                probed_absent: Vec::new(),
+                materialized_project_root: Some(project_root.to_path_buf()),
+                subject_resolution_authority: authority,
+                raw_content_digest: lillux::sha256_hex(source_bytes),
+                content_hash: lillux::sha256_hex(source_bytes),
+                signature_header: None,
+                source_format: ryeos_engine::contracts::ResolvedSourceFormat {
+                    extension: ".yaml".into(),
+                    parser: "parser:ryeos/core/yaml/yaml".into(),
+                    signature: ryeos_engine::contracts::SignatureEnvelope {
+                        prefix: "#".into(),
+                        suffix: None,
+                        after_shebang: false,
+                    },
+                },
+                metadata: Default::default(),
+            },
+            signer: None,
+            trust_class: ryeos_engine::contracts::TrustClass::Trusted,
+            pinned_version: None,
+        }
+    }
+
+    #[test]
+    fn method_wrapper_rebinds_route_evidence_to_outer_requested_subject() {
+        let root = tempdir();
+        let authority = ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+            snapshot_hash: "a".repeat(64),
+        };
+        let admitted =
+            admitted_service_fixture(&root, authority.clone(), b"name: admitted-target\n");
+        let mut wrapper = admitted_service_fixture(&root, authority, b"name: admitted-wrapper\n");
+        wrapper.resolved.canonical_ref = CanonicalRef::parse("tool:example/wrapper").unwrap();
+        wrapper.resolved.kind = "tool".to_string();
+
+        let mut preflight = RootDispatchPreflight {
+            class: RootDispatchClass::MethodDispatch,
+            requested_subject: admitted.clone(),
+            root_admission: None,
+            root_dispatch_evidence: RootDispatchEvidence {
+                applicability: LaunchContractApplicability::NonEnvelope {
+                    class: RootDispatchClass::MethodDispatch,
+                },
+                requested_subject: admitted.clone(),
+                admitted_subject_ref: admitted.resolved.canonical_ref.clone(),
+                admitted_subject_digest: admitted.resolved.raw_content_digest.clone(),
+            },
+        };
+
+        preflight.rebind_requested_subject(wrapper.clone());
+
+        assert_eq!(
+            preflight.requested_subject.resolved.canonical_ref,
+            wrapper.resolved.canonical_ref
+        );
+        assert_eq!(
+            preflight
+                .root_dispatch_evidence
+                .requested_subject
+                .resolved
+                .canonical_ref,
+            wrapper.resolved.canonical_ref
+        );
+        assert_eq!(
+            preflight
+                .root_dispatch_evidence
+                .requested_subject
+                .resolved
+                .raw_content_digest,
+            wrapper.resolved.raw_content_digest
+        );
+        assert_eq!(
+            preflight.root_dispatch_evidence.admitted_subject_ref,
+            admitted.resolved.canonical_ref
+        );
+        assert!(matches!(
+            preflight.root_dispatch_evidence.applicability,
+            LaunchContractApplicability::NonEnvelope {
+                class: RootDispatchClass::MethodDispatch
+            }
+        ));
+    }
+
+    #[test]
+    fn immutable_applicability_consumes_exact_admitted_root_after_path_mutation() {
+        let generation = "a".repeat(64);
+        let authorities = [
+            ryeos_engine::contracts::SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: generation.clone(),
+            },
+            ryeos_engine::contracts::SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash: "b".repeat(64),
+                current_operational_generation: generation,
+            },
+        ];
+
+        for authority in authorities {
+            let root = tempdir();
+            let admitted_bytes = b"name: admitted\n";
+            let admitted = admitted_service_fixture(&root, authority.clone(), admitted_bytes);
+            let admitted_digest = admitted.resolved.raw_content_digest.clone();
+            let source_path = admitted.resolved.source_path.clone();
+            let ctx = exact_root_applicability_context(root.clone(), authority);
+
+            fs::write(&source_path, b"name: replaced\n").unwrap();
+
+            let hop = resolve_dispatch_hop_with_verified(
+                &admitted.resolved.canonical_ref,
+                &ctx,
+                Some(admitted.clone()),
+                None,
+            )
+            .expect("admitted root remains the exact dispatch hop");
+            assert_eq!(
+                hop.verified.as_ref().unwrap().resolved.raw_content_digest,
+                admitted_digest
+            );
+            assert_ne!(
+                lillux::sha256_hex(&fs::read(&source_path).unwrap()),
+                admitted_digest,
+                "fixture must prove the mutable path now contains different bytes"
+            );
+
+            let applicability = launch_contract_applicability_with_evidence(
+                "service:example/status",
+                &ctx,
+                Some(admitted),
+                None,
+            )
+            .expect("applicability must consume admitted evidence without reopening the path");
+            assert!(matches!(
+                applicability,
+                LaunchContractApplicability::NonEnvelope {
+                    class: RootDispatchClass::InProcess
+                }
+            ));
         }
     }
 
@@ -4561,9 +6314,12 @@ metadata:
             source_space,
             resolved_from: source_space.as_str().into(),
             shadowed: Vec::new(),
+            probed_absent: Vec::new(),
             materialized_project_root: (source_space
                 == ryeos_engine::contracts::ItemSpace::Project)
                 .then(|| source_root.to_path_buf()),
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
             raw_content_digest: ryeos_engine::item_resolution::content_hash(source_body),
             content_hash: ryeos_engine::item_resolution::content_hash(&source),
             signature_header: Some(signature_header),
@@ -5602,6 +7358,8 @@ requires:
             project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
                 path: std::env::temp_dir(),
             },
+            subject_resolution_authority:
+                ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: Default::default(),
@@ -5674,6 +7432,7 @@ requires:
                 default: default.map(|s| s.to_string()),
             }),
             methods,
+            augmentation_methods: BTreeMap::new(),
             launch_augmentations: Vec::new(),
         }
     }

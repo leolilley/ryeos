@@ -353,6 +353,10 @@ struct ExecutorChainResolutionContext<'a> {
     roots: &'a ResolutionRoots,
     trust_store: &'a TrustStore,
     node_trust_store: Option<&'a TrustStore>,
+    project_authority: Option<(
+        &'a Path,
+        &'a dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 }
 
 // ── Chain walker ────────────────────────────────────────────────────────
@@ -377,6 +381,7 @@ fn resolve_executor_chain(
         roots,
         trust_store,
         node_trust_store,
+        project_authority,
     } = context;
     let mut current_id = starting_executor_id.to_owned();
     let mut visited: Vec<String> = Vec::new();
@@ -449,15 +454,31 @@ fn resolve_executor_chain(
                 kind: ref_.kind.clone(),
             })?;
 
-        let (source_path, source_space, matched_ext) =
-            crate::item_resolution::resolve_item(roots, kind_schema, &ref_)?;
-
-        let content = std::fs::read_to_string(&source_path).map_err(|e| {
-            EngineError::Internal(format!(
-                "failed to read executor tool {}: {e}",
-                source_path.display()
-            ))
-        })?;
+        let resolution = match project_authority {
+            Some((project_root, project_content)) => {
+                crate::item_resolution::resolve_item_full_under_project_authority(
+                    roots,
+                    kind_schema,
+                    &ref_,
+                    project_root,
+                    project_content,
+                )?
+            }
+            None => crate::item_resolution::resolve_item_full(roots, kind_schema, &ref_)?,
+        };
+        let content = match project_authority {
+            Some((project_root, project_content)) => {
+                crate::item_resolution::read_resolved_source_under_project_authority(
+                    &resolution,
+                    project_root,
+                    project_content,
+                )?
+            }
+            None => crate::item_resolution::read_item_source_no_follow(&resolution.winner_path)?,
+        };
+        let source_path = resolution.winner_path;
+        let source_space = resolution.winner_space;
+        let matched_ext = resolution.matched_ext;
 
         let source_format = kind_schema
             .resolved_format_for(&matched_ext)
@@ -494,6 +515,9 @@ fn resolve_executor_chain(
             }
             (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Project) => {
                 crate::resolution::TrustClass::TrustedProject
+            }
+            (ContractTrustClass::Trusted, crate::contracts::ItemSpace::Node) => {
+                crate::resolution::TrustClass::TrustedNode
             }
             (ContractTrustClass::Untrusted, _) => crate::resolution::TrustClass::UntrustedProject,
             (ContractTrustClass::Unsigned, _) => crate::resolution::TrustClass::Unsigned,
@@ -655,6 +679,58 @@ pub fn resolve_terminal_executor(
     roots: &ResolutionRoots,
     trust_store: &TrustStore,
 ) -> Result<ResolvedTerminalExecutor, EngineError> {
+    resolve_terminal_executor_with_project_authority(
+        starting_executor_id,
+        root_source_path,
+        root_kind,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        None,
+    )
+}
+
+/// Resolve an executor terminal with every project hop and precedence probe
+/// sourced from admitted project content.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_terminal_executor_under_project_authority(
+    starting_executor_id: &str,
+    root_source_path: &Path,
+    root_kind: &str,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    project_root: &Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+) -> Result<ResolvedTerminalExecutor, EngineError> {
+    resolve_terminal_executor_with_project_authority(
+        starting_executor_id,
+        root_source_path,
+        root_kind,
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+        Some((project_root, project_content)),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_terminal_executor_with_project_authority(
+    starting_executor_id: &str,
+    root_source_path: &Path,
+    root_kind: &str,
+    kinds: &KindRegistry,
+    parsers: &ParserDispatcher,
+    roots: &ResolutionRoots,
+    trust_store: &TrustStore,
+    project_authority: Option<(
+        &Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<ResolvedTerminalExecutor, EngineError> {
     let terminal = resolve_executor_chain(
         starting_executor_id,
         root_source_path,
@@ -665,6 +741,7 @@ pub fn resolve_terminal_executor(
             roots,
             trust_store,
             node_trust_store: None,
+            project_authority,
         },
     )?;
     let last = terminal.intermediates.last().ok_or_else(|| {
@@ -780,6 +857,10 @@ pub struct BuildPlanInput<'a> {
     pub trust_store: &'a TrustStore,
     pub node_trust_store: &'a TrustStore,
     pub host_env: &'a HostEnvBindings,
+    pub project_authority: Option<(
+        &'a Path,
+        &'a dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
 }
 
 #[tracing::instrument(
@@ -800,6 +881,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         trust_store,
         node_trust_store,
         host_env,
+        project_authority,
     } = input;
     let resolved = &item.resolved;
     let canonical_ref = resolved.canonical_ref.to_string();
@@ -809,12 +891,54 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
     // intermediate (Step 2a below). Kept outside the inner scope so
     // `root_parsed` is available after validation.
     let root_parsed = {
-        let content = std::fs::read_to_string(&resolved.source_path).map_err(|e| {
-            EngineError::Internal(format!(
-                "failed to read tool source for schema validation {}: {e}",
-                resolved.source_path.display()
-            ))
-        })?;
+        let content = match project_authority {
+            Some((project_root, project_content))
+                if resolved.source_space == crate::contracts::ItemSpace::Project =>
+            {
+                let relative = resolved
+                    .source_path
+                    .strip_prefix(project_root)
+                    .map_err(|_| {
+                        EngineError::Internal(format!(
+                            "project root source {} is outside admitted root {}",
+                            resolved.source_path.display(),
+                            project_root.display()
+                        ))
+                    })?;
+                let bytes = project_content
+                    .read_file(relative, crate::item_resolution::MAX_ITEM_SOURCE_BYTES)?
+                    .ok_or_else(|| {
+                        EngineError::Internal(format!(
+                            "project root source disappeared from admitted content: {}",
+                            relative.display()
+                        ))
+                    })?;
+                String::from_utf8(bytes).map_err(|error| {
+                    EngineError::Internal(format!(
+                        "project root source {} is not UTF-8: {error}",
+                        resolved.source_path.display()
+                    ))
+                })?
+            }
+            _ => String::from_utf8(
+                lillux::read_regular_file_bounded_no_follow(
+                    &resolved.source_path,
+                    crate::item_resolution::MAX_ITEM_SOURCE_BYTES,
+                )
+                .map_err(|error| {
+                    EngineError::Internal(format!(
+                        "failed to securely read tool source for schema validation {}: {error:#}",
+                        resolved.source_path.display()
+                    ))
+                })?,
+            )
+            .map_err(|error| {
+                EngineError::Internal(format!(
+                    "tool source for schema validation {} is not UTF-8: {error}",
+                    resolved.source_path.display()
+                ))
+            })?,
+        };
         let actual = crate::item_resolution::content_hash(&content);
         if actual != resolved.content_hash {
             return Err(EngineError::ContentHashMismatch {
@@ -869,6 +993,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
             roots,
             trust_store,
             node_trust_store: Some(node_trust_store),
+            project_authority,
         },
     )?;
 
@@ -959,6 +1084,7 @@ pub fn build_plan(input: BuildPlanInput<'_>) -> Result<ExecutionPlan, EngineErro
         node_trust_store,
         roots,
         root_trust_class,
+        project_authority,
     )?;
 
     // Step 5: Build plan node
@@ -1067,6 +1193,7 @@ fn widen_root_trust_class(
     match (trust_class, source_space) {
         (ContractTrustClass::Trusted, ItemSpace::Bundle) => TrustClass::TrustedBundle,
         (ContractTrustClass::Trusted, ItemSpace::Project) => TrustClass::TrustedProject,
+        (ContractTrustClass::Trusted, ItemSpace::Node) => TrustClass::TrustedNode,
         (ContractTrustClass::Untrusted, _) => TrustClass::UntrustedProject,
         (ContractTrustClass::Unsigned, _) => TrustClass::Unsigned,
     }
@@ -1310,7 +1437,9 @@ metadata:
             source_space: ItemSpace::Project,
             resolved_from: "test".to_string(),
             shadowed: vec![],
+            probed_absent: vec![],
             materialized_project_root: project_dir,
+            subject_resolution_authority: crate::contracts::SubjectResolutionAuthority::LiveFs,
             raw_content_digest: content_hash.clone(),
             content_hash,
             signature_header: None,
@@ -1335,6 +1464,11 @@ metadata:
     }
 
     fn test_plan_context(project_dir: Option<PathBuf>) -> PlanContext {
+        let subject_resolution_authority = if project_dir.is_some() {
+            crate::contracts::SubjectResolutionAuthority::LiveFs
+        } else {
+            crate::contracts::SubjectResolutionAuthority::Projectless
+        };
         PlanContext {
             requested_by: EffectivePrincipal::Local(Principal {
                 fingerprint: "fp:test".into(),
@@ -1344,6 +1478,7 @@ metadata:
                 Some(p) => ProjectContext::LocalPath { path: p },
                 None => ProjectContext::None,
             },
+            subject_resolution_authority,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1447,6 +1582,7 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            project_authority: None,
         })
         .unwrap();
 
@@ -1496,6 +1632,7 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            project_authority: None,
         })
         .unwrap_err();
 
@@ -1564,6 +1701,7 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            project_authority: None,
         })
         .unwrap_err();
 
@@ -1608,6 +1746,7 @@ config:
             trust_store: &TrustStore::empty(),
             node_trust_store: &TrustStore::empty(),
             host_env: &HostEnvBindings::default(),
+            project_authority: None,
         })
         .unwrap_err();
 
@@ -1679,6 +1818,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::NoRuntimeConfig { .. }));
@@ -1730,6 +1870,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
         )
         .unwrap_err();
         // Cardinality::Singleton on RuntimeConfigHandler catches this
@@ -1781,6 +1922,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, EngineError::ReservedEnvKey { .. }));
@@ -1826,6 +1968,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
         )
         .unwrap();
 
@@ -1882,6 +2025,7 @@ config:
             &ts,
             &roots,
             ResolutionTrustClass::TrustedBundle,
+            None,
         )
         .unwrap_err();
         assert!(
@@ -1971,6 +2115,7 @@ config:
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            project_authority: None,
         })
         .unwrap_err();
 
@@ -2168,6 +2313,7 @@ category: ryeos/core/subprocess\n";
             trust_store: &ts,
             node_trust_store: &ts,
             host_env: &HostEnvBindings::default(),
+            project_authority: None,
         })
         .expect("build_plan should succeed for valid 3-hop chain");
 

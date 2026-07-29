@@ -113,7 +113,7 @@ impl SchedulerContext for AppSchedulerContext {
             &project_path_buf,
             &spec.requester_fingerprint,
             &format!("schedule-{thread_id}"),
-            ryeos_executor::execution::project_source::PinnedContextRealization::Cow,
+            None,
         )
         .map_err(|error| anyhow::anyhow!("resolve scheduled live project authority: {error}"))?;
         let original_root_kind = CanonicalRef::parse(&spec.item_ref)
@@ -147,6 +147,7 @@ impl SchedulerContext for AppSchedulerContext {
                 project_context: ryeos_engine::contracts::ProjectContext::LocalPath {
                     path: project_ctx.effective_path.clone(),
                 },
+                subject_resolution_authority: provenance.subject_resolution_authority(),
                 current_site_id: site_id.clone(),
                 origin_site_id: site_id,
                 execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
@@ -201,6 +202,7 @@ impl SchedulerContext for AppSchedulerContext {
             usage_subject_asserted_by: None,
             previous_thread_id: None,
             root_admission: Some(root_admission),
+            root_dispatch_evidence: None,
             parent_execution_context: None,
         };
 

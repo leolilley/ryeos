@@ -728,7 +728,7 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        let provenance = ExecutionProvenance::root_pushed_head(
+        let provenance = ExecutionProvenance::root_pushed_head_for_test(
             tmp.path().to_path_buf(),
             PathBuf::from("/original"),
             engine.clone(),

@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-07-16T02:18:47Z:54cb175baf6f0426edf3949de2f9d574f6d0fa4035791c97e3b940b8c3dd2fd7:EykCTu/OBMvrQOWnXajfigwwfNhl0ryj7sXnCuowsX5u1NjrMS/u2Vcn5B7eEvQtS3Ka7h4c9jD0kdexw5BnAA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-28T23:59:20Z:c601dbae028b2659f253e8aa697a91abbc71f8c00b0ee56be1f979cc3b60dc3d:qu5LvqBv9AzP3mbvnfPtgpvFIgUSpht14k6bR2AOcIL2/nJgCGDnYIuSk/VyuZGsxHZNE/esh23H2ktMbY4aDw==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "build-and-test"
 title: "Build, Test, and Local Install Runbook"
 description: "LLM-facing commands for building, signing bundles, testing, and local packaged installs"
 entry_type: reference
-version: "1.3.0"
+version: "1.4.0"
 ```
 
 # Build, Test, and Local Install Runbook
@@ -18,11 +18,12 @@ test, refresh bundles, or install this checkout locally.
 | Goal | Command |
 |---|---|
 | Full gate | `./scripts/gate.sh` |
-| Rebuild/sign bundles only | `./scripts/gate.sh --no-tests` |
+| Rebuild/sign bundles only | `./scripts/gate.sh --refresh-bundles --no-tests` |
+| Rebuild/sign bundles, then run full gate | `./scripts/gate.sh --refresh-bundles` |
 | Forward nextest args | `./scripts/gate.sh -p ryeos-cli` |
-| Fresh repo-local daemon | `./scripts/dev-up.sh` |
-| Fast packaged-layout install | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
-| Verify source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
+| Fresh repo-local daemon | initialize/start with `--app-root .local/ryeos` (commands below) |
+| Fast packaged-layout install from already-built artifacts | `./scripts/pkg/install-local-direct.sh --trust-source-publishers` |
+| Verify core/standard source bundles | `target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core`<br>`target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core` |
 
 Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
 
@@ -32,19 +33,24 @@ Prereqs: Rust stable, `cargo-nextest`, Linux, and usually `HOSTNAME` set.
 ./scripts/gate.sh
 ```
 
-`gate.sh` is the CI/human default. It runs `scripts/populate-bundles.sh`, then
-`cargo nextest run --workspace --no-fail-fast`.
+`gate.sh` is the CI/human default for tests. By default it runs
+`cargo nextest run --workspace --no-fail-fast` without rebuilding bundles.
+Bundle authoring is intentionally explicit because it performs a full release
+build and rewrites derived signed bundle state.
 
-Use `--no-tests` when you only need bundle bin/CAS/signature state refreshed:
+Use `--refresh-bundles` when the change affects bundle-owned source, binaries,
+CAS state, or signatures. Add `--no-tests` only when you need that authoring
+refresh without the test gate:
 
 ```bash
-./scripts/gate.sh --no-tests
+./scripts/gate.sh --refresh-bundles --no-tests
 ```
 
 ## Bundle refresh rules
 
-Run `scripts/populate-bundles.sh` through `gate.sh` unless you have a reason to
-call it directly:
+Run `scripts/populate-bundles.sh` through the explicit
+`gate.sh --refresh-bundles` surface unless you have a reason to call it
+directly:
 
 ```bash
 ./scripts/populate-bundles.sh \
@@ -89,13 +95,14 @@ target/release/ryeos init \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
 ```
 
-Repo-local dev system space, matching `scripts/dev-up.sh`:
+Repo-local dev app root:
 
 ```bash
 target/release/ryeos init \
-  --system-space-dir .local/ryeos \
+  --app-root .local/ryeos \
   --source bundles \
   --trust-file .dev-keys/PUBLISHER_DEV_TRUST.toml
+target/release/ryeos start --app-root .local/ryeos
 ```
 
 If a daemon is running against that system space, stop it before init and start
@@ -116,10 +123,23 @@ without running `makepkg`/`yay`:
 ./scripts/pkg/install-local-direct.sh --trust-source-publishers
 ```
 
-It populates bundles, stops a running daemon before replacing files, installs
-`ryeos`/`ryeosd` to `/usr/bin`, installs bundle sources under
-`/usr/share/ryeos/{core,standard}`, runs `ryeos init`, verifies the initialized
-bundle state, and restarts the daemon if it was running before.
+By default it uses already-built checkout artifacts: it stops a running daemon
+before replacing files, installs `ryeos`/`ryeosd` to `/usr/bin`, installs bundle sources under
+`/usr/share/ryeos/<bundle>` for every bundle in the selected set (the default is
+the full set defined by `scripts/pkg/bundle-sets.sh`), runs `ryeos init`,
+verifies the initialized bundle state, and restarts the daemon if it was
+running before.
+
+To rebuild and republish the complete bundle set as part of the install, opt in
+explicitly:
+
+```bash
+./scripts/pkg/install-local-direct.sh \
+  --populate --all --trust-source-publishers
+```
+
+Use `--populate --crates "<crate ...>"` instead when only named bundle-owned
+binaries need rebuilding.
 
 Important: bundle-owned binaries (`ryeos-core-tools`, parsers, composers,
 runtimes, `ryeos-tui`, etc.) belong inside signed bundle bin trees under
@@ -148,7 +168,7 @@ work around it by adding kind-specific CLI dispatch logic.
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `hash mismatch` | Bundle binary/CAS manifest stale | `./scripts/gate.sh --no-tests` |
+| `hash mismatch` | Bundle binary/CAS manifest stale | `./scripts/gate.sh --refresh-bundles --no-tests` |
 | `no kind schema roots found` | Core bundle not initialized in active system space | `ryeos init --source bundles ...` |
 | `signature ... not in trust store` | Wrong signing key or missing trust file | Repopulate with `.dev-keys/PUBLISHER_DEV.pem`, init with `PUBLISHER_DEV_TRUST.toml` |
 | `failed to acquire state lock` | Another daemon owns state | `ryeos stop --force`, then retry |
@@ -158,8 +178,7 @@ work around it by adding kind-specific CLI dispatch logic.
 
 | Script | Use it for | Notes |
 |---|---|---|
-| `scripts/gate.sh` | canonical validation | builds/signs bundles, then nextest |
+| `scripts/gate.sh` | canonical validation | nextest by default; builds/signs bundles first only with `--refresh-bundles` |
 | `scripts/populate-bundles.sh` | bundle authoring refresh | derived state only; safe to rerun |
-| `scripts/dev-up.sh` | isolated repo-local daemon | uses `.local/ryeos` system space |
-| `scripts/pkg/install-local-direct.sh` | fast local packaged install | uses `/usr/bin` + `/usr/share/ryeos` |
+| `scripts/pkg/install-local-direct.sh` | fast local packaged install | uses `/usr/bin` + `/usr/share/ryeos`; populates only with explicit `--populate` |
 | `scripts/smoke-execute-stream.sh` | signed `/execute/stream` SSE smoke | needs URL, key, audience |

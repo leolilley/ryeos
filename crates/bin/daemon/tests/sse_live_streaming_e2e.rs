@@ -447,8 +447,12 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
 
     let first = events.first().expect("at least one event");
     assert_eq!(
-        first.event, "stream_started",
-        "first event is stream_started"
+        first.event, "execution_planning",
+        "first event is execution_planning"
+    );
+    assert!(
+        events.iter().any(|event| event.event == "stream_started"),
+        "durable stream handoff must follow execution planning"
     );
 
     let terminal = events

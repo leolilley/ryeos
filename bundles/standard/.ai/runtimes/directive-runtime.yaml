@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-27T01:32:37Z:0829716817446117489bf3854a5e9a0b61d12be5733f39af80d9ff2b176eefc8:jKc59sEmSdycusmxEaAz8vYqKNy2K6me7ZjJrThuN3CL9O0CJ6pgJyUS2TJ/0GFFOiIyR9/1tHNmX5QmIcGDBQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-28T12:15:12Z:eac322969e37f8918bb6901cdafd51eb43e9dbca67eb2db777577165255fe5f5:WCMY5CAKe+wSwrEPTIQMQVoZgP1LVIkAKic6Lcmc0Vf05SH/WpIG6vo+NoVmezu4kHpu79XyAFX24R442/LIDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 kind: runtime
 serves: directive
 default: true
@@ -30,6 +30,7 @@ launch_contract:
     kind: handler
     handler: handler:ryeos/standard/directive-launch
     config: {}
+    execution_cache: content_addressed
   config_inputs:
     model_routing:
       kind: item
@@ -39,9 +40,11 @@ launch_contract:
       allowed_spaces:
         - bundle
         - project
+        - node
       allowed_trust:
         - trusted_bundle
         - trusted_project
+        - trusted_node
     model_providers:
       kind: catalog
       prefix: ryeos-runtime/model-providers
@@ -49,8 +52,10 @@ launch_contract:
       entry_merge: deep_merge
       allowed_spaces:
         - bundle
+        - node
       allowed_trust:
         - trusted_bundle
+        - trusted_node
     execution:
       kind: item
       id: ryeos-runtime/execution
@@ -59,9 +64,11 @@ launch_contract:
       allowed_spaces:
         - bundle
         - project
+        - node
       allowed_trust:
         - trusted_bundle
         - trusted_project
+        - trusted_node
   financial_authority:
     kind: provider_accounting_authority_v1
   secret_policy:

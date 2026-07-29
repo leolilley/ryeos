@@ -1,11 +1,11 @@
-<!-- ryeos:signed:2026-06-15T04:48:21Z:6401cb6a9f5fc8ec2f8663b41d5a22e86ad8249316f44b6432eef4280ae838b9:vQ5TnFq4MEIihEEkTqEUI146plFzX9ORoql9ZK1zTf/GDmQgIrkagqAGa6h0C91cpxzDNuGFVk7Cd7oTh400Dg==:64f806fe8f81efdecf5245e1b1941aeecfe3a56ff1826adc1214538ab69953ca -->
+<!-- ryeos:signed:2026-07-28T23:56:25Z:910f7a90559c18d2cd746ac5e5f9f16b0274c8bb3c8f76cae1096a2751109edc:5tYX8PHj2OxTUavUK1MBPX5wtxN12vRGHLo417EwiSp9S0Ac0fDwxLQbzPEcG1HLLbPhubJqGJHgsrPZoc/PAQ==:8faa64a253fbe14970a4ef4f65ed9725c5163ba4defd74591599424c412efb96 -->
 ```yaml
 category: "ryeos/development"
 name: "signing"
 title: "Signing Rules"
 description: "Short rules for bundle signing, project item signing, keys, and recovery"
 entry_type: reference
-version: "1.1.0"
+version: "1.2.0"
 ```
 
 # Signing Rules
@@ -70,7 +70,7 @@ head -1 bundles/standard/.ai/config/ryeos-runtime/model-providers/zen.yaml
 For stale signatures, stale bundle binaries, stale CAS, or wrong-key signing:
 
 ```bash
-./scripts/gate.sh --no-tests
+./scripts/gate.sh --refresh-bundles --no-tests
 
 target/release/ryeos-core-tools bundle-verify bundles/core --registry-root bundles/core
 target/release/ryeos-core-tools bundle-verify bundles/standard --registry-root bundles/core

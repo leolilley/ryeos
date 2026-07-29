@@ -147,6 +147,7 @@ pub enum EdgeKind {
 pub enum TrustClass {
     TrustedBundle,
     TrustedProject,
+    TrustedNode,
     UntrustedProject,
     Unsigned,
 }

@@ -1068,13 +1068,10 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
     // Hold the followed directive inside its provider call long enough to
     // exercise the running-thread input path. The second response covers the
     // additional turn if the queued interrupt is folded before the child settles.
-    let mock = MockProvider::start_with_response_delay(
-        vec![
-            MockResponse::Text("first child turn".into()),
-            MockResponse::Text("interrupted child turn".into()),
-        ],
-        Duration::from_secs(3),
-    )
+    let mock = MockProvider::start_blocked(vec![
+        MockResponse::Text("first child turn".into()),
+        MockResponse::Text("interrupted child turn".into()),
+    ])
     .await;
     let mock_url = mock.base_url.clone();
 
@@ -1206,6 +1203,7 @@ async fn graph_follow_live_input_records_service_under_the_callers_exact_project
         service_id, child.thread_id,
         "the service audit root is distinct from the unchanged target child"
     );
+    mock.release_responses();
 
     let input_text = "incorporate this public ARC observation";
     let completion_deadline = Instant::now() + Duration::from_secs(90);

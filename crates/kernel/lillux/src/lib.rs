@@ -31,9 +31,15 @@ pub use cas::{
 pub use locks::{with_exclusive_file_lock, ExclusiveFileLock, SharedFileLock};
 pub use secure_fs::{
     collect_directory_tree_no_follow, collect_regular_files_no_follow,
+    digest_open_regular_file_stable_exact, inspect_optional_entry_no_follow,
+    matches_regular_file_identity, normalized_portable_regular_mode,
+    read_open_regular_file_bounded, read_open_regular_file_exact_bounded,
+    read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
     read_regular_file_bounded_no_follow, read_regular_file_no_follow,
-    read_regular_file_to_string_no_follow, visit_regular_files_no_follow, NoFollowDirectoryTree,
-    PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryLock, PinnedRegularFile,
+    read_regular_file_to_string_no_follow, set_open_regular_file_mode,
+    visit_regular_files_no_follow, visit_regular_files_no_follow_bounded, DirectoryTraversalBudget,
+    NoFollowDirectoryTree, PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryLock,
+    PinnedEntryType, PinnedRegularFile,
 };
 
 pub use identity::envelope::{

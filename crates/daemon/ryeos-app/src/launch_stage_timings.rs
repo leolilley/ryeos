@@ -12,6 +12,48 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchProjectSourceClass {
+    Projectless,
+    LiveFs,
+    PushedHead,
+    Snapshot,
+    CaptureLive,
+}
+
+impl LaunchProjectSourceClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Projectless => "projectless",
+            Self::LiveFs => "live_fs",
+            Self::PushedHead => "pushed_head",
+            Self::Snapshot => "snapshot",
+            Self::CaptureLive => "capture_live",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchProjectRealizationClass {
+    Isolated,
+    Live,
+    ReadOnly,
+    Cow,
+}
+
+impl LaunchProjectRealizationClass {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Isolated => "isolated",
+            Self::Live => "live",
+            Self::ReadOnly => "read_only",
+            Self::Cow => "cow",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LaunchStageInterval {
     pub stage: &'static str,
@@ -33,6 +75,10 @@ pub struct LaunchStageTimingSnapshot {
     pub item_ref_kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_class: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_source_class: Option<LaunchProjectSourceClass>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_realization_class: Option<LaunchProjectRealizationClass>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub augmentation_child_thread_ids: Vec<String>,
     pub total_us: u64,
@@ -49,6 +95,8 @@ struct LaunchStageTimingState {
     thread_id: Option<String>,
     item_ref_kind: Option<String>,
     launch_class: Option<String>,
+    project_source_class: Option<LaunchProjectSourceClass>,
+    project_realization_class: Option<LaunchProjectRealizationClass>,
     augmentation_child_thread_ids: Vec<String>,
     top_level: Vec<LaunchStageInterval>,
     nested: Vec<LaunchStageInterval>,
@@ -173,6 +221,28 @@ impl LaunchStageTimings {
             .get_or_insert_with(|| launch_class.to_owned());
     }
 
+    /// Record bounded project-authority dimensions without exposing paths,
+    /// snapshot hashes, principals, or other high-cardinality authority data.
+    pub fn set_project_dimensions(
+        &self,
+        project_source_class: LaunchProjectSourceClass,
+        project_realization_class: LaunchProjectRealizationClass,
+    ) {
+        let mut state = self.state.lock().unwrap_or_else(|poisoned| {
+            tracing::warn!(
+                request_trace_id = %self.request_trace_id,
+                "launch timing mutex was poisoned; recovering"
+            );
+            poisoned.into_inner()
+        });
+        state
+            .project_source_class
+            .get_or_insert(project_source_class);
+        state
+            .project_realization_class
+            .get_or_insert(project_realization_class);
+    }
+
     /// Record an augmentation worker identity so daemon and child timing
     /// records can be joined without comparing timestamps across processes.
     pub fn record_augmentation_child_thread_id(&self, thread_id: &str) {
@@ -241,12 +311,14 @@ impl LaunchStageTimings {
         });
         let accounted_union_us = interval_union_us(&state.top_level);
         LaunchStageTimingSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             clock_domain: "daemon_monotonic",
             request_trace_id: self.request_trace_id.to_string(),
             thread_id: state.thread_id.clone(),
             item_ref_kind: state.item_ref_kind.clone(),
             launch_class: state.launch_class.clone(),
+            project_source_class: state.project_source_class.clone(),
+            project_realization_class: state.project_realization_class.clone(),
             augmentation_child_thread_ids: state.augmentation_child_thread_ids.clone(),
             total_us,
             accounted_union_us,
@@ -272,6 +344,8 @@ impl LaunchStageTimings {
                 thread_id = snapshot.thread_id.as_deref(),
                 item_ref_kind = snapshot.item_ref_kind.as_deref(),
                 launch_class = snapshot.launch_class.as_deref(),
+                project_source_class = snapshot.project_source_class.map(LaunchProjectSourceClass::as_str),
+                project_realization_class = snapshot.project_realization_class.map(LaunchProjectRealizationClass::as_str),
                 total_us = snapshot.total_us,
                 accounted_union_us = snapshot.accounted_union_us,
                 critical_path_us = snapshot.critical_path_us,
@@ -546,7 +620,7 @@ mod tests {
         timings.record_augmentation_child_thread_id("T-child-b");
 
         let snapshot = timings.snapshot();
-        assert_eq!(snapshot.schema_version, 2);
+        assert_eq!(snapshot.schema_version, 3);
         assert_eq!(
             snapshot.augmentation_child_thread_ids,
             vec!["T-child-a".to_string(), "T-child-b".to_string()]
@@ -558,10 +632,29 @@ mod tests {
         let timings = LaunchStageTimings::new_request();
         timings.set_launch_dimensions("directive", "gateway_stream");
         timings.set_launch_dimensions("runtime", "managed_runtime");
+        timings.set_project_dimensions(
+            LaunchProjectSourceClass::PushedHead,
+            LaunchProjectRealizationClass::ReadOnly,
+        );
+        timings.set_project_dimensions(
+            LaunchProjectSourceClass::LiveFs,
+            LaunchProjectRealizationClass::Live,
+        );
 
         let snapshot = timings.snapshot();
         assert_eq!(snapshot.item_ref_kind.as_deref(), Some("directive"));
         assert_eq!(snapshot.launch_class.as_deref(), Some("gateway_stream"));
+        assert_eq!(
+            snapshot.project_source_class,
+            Some(LaunchProjectSourceClass::PushedHead)
+        );
+        assert_eq!(
+            snapshot.project_realization_class,
+            Some(LaunchProjectRealizationClass::ReadOnly)
+        );
+        let serialized = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(serialized["project_source_class"], "pushed_head");
+        assert_eq!(serialized["project_realization_class"], "read_only");
     }
 
     #[test]

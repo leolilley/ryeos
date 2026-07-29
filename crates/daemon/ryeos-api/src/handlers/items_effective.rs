@@ -104,6 +104,10 @@ pub async fn handle(req: Request, _ctx: HandlerContext, state: Arc<AppState>) ->
                 item_ref,
                 expected_kind: req.expected_kind,
                 project_root: project_root.clone(),
+                subject_resolution_authority:
+                    ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                        project_root.as_deref(),
+                    ),
             })?;
 
             // A surface and every view it binds are one coherent read. Keep

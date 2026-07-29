@@ -1,5 +1,8 @@
 use std::borrow::Cow;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -7,8 +10,8 @@ use serde_json::Value;
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
 use crate::contracts::{
-    EngineContext, ExecutionCompletion, ExecutionHints, ExecutionPlan, PlanContext, ResolvedItem,
-    VerifiedItem,
+    EngineContext, ExecutionCompletion, ExecutionHints, ExecutionPlan, PlanContext, ProjectContext,
+    ResolvedItem, SubjectResolutionAuthority, VerifiedItem,
 };
 use crate::error::EngineError;
 use crate::item_resolution::{ResolutionRoot, ResolutionRoots};
@@ -26,6 +29,7 @@ pub struct EffectiveItemRequest {
     pub item_ref: CanonicalRef,
     pub expected_kind: Option<String>,
     pub project_root: Option<PathBuf>,
+    pub subject_resolution_authority: SubjectResolutionAuthority,
 }
 
 /// Source metadata for an effective item.
@@ -84,6 +88,727 @@ pub struct EffectiveRequestSnapshot {
     /// Process-local identity of the immutable admitted engine/bundle
     /// generation backing this snapshot.
     pub request_engine_generation_identity: String,
+    /// Typed content authority whose verified trust/parser values this
+    /// snapshot represents. No disposable project pathname is retained.
+    pub subject_resolution_authority: SubjectResolutionAuthority,
+}
+
+impl EffectiveRequestSnapshot {
+    fn estimated_size_bytes(&self) -> usize {
+        self.trust_store
+            .estimated_size_bytes()
+            .saturating_add(self.parser_dispatcher.parser_tools.estimated_size_bytes())
+            .saturating_add(self.registry_fingerprint.capacity())
+            .saturating_add(self.effective_trust_identity.capacity())
+            .saturating_add(self.request_engine_generation_identity.capacity())
+            .saturating_add(
+                serde_json::to_vec(&self.subject_resolution_authority)
+                    .map(|bytes| bytes.len())
+                    .unwrap_or(IMMUTABLE_REQUEST_CACHE_MAX_ENTRY_BYTES.saturating_add(1)),
+            )
+    }
+}
+
+/// Reduced authority identity projected from one coherent request snapshot.
+///
+/// The complete snapshot is also path-independent: parser descriptors are
+/// parsed values and dispatch through installed handler identities. This view
+/// exists for downstream keys that do not need the dispatcher itself.
+#[derive(Debug, Clone)]
+pub struct EffectiveRequestAuthoritySnapshot {
+    pub trust_store: TrustStore,
+    pub registry_fingerprint: String,
+    pub effective_trust_identity: String,
+    pub request_engine_generation_identity: String,
+    pub subject_resolution_authority: SubjectResolutionAuthority,
+}
+
+/// Proof-bearing handle for path-independent immutable request authority.
+///
+/// Construction is restricted to
+/// [`Engine::admit_request_authority_snapshot`], which validates an
+/// opaque state-issued materialization proof before consulting the
+/// content-addressed cache. Callers may inspect the snapshot needed to derive
+/// downstream cache keys, but cannot mint this handle from a pathname and
+/// claimed digest.
+#[derive(Debug, Clone)]
+pub struct AdmittedRequestAuthoritySnapshot {
+    request: Arc<EffectiveRequestSnapshot>,
+    authority: EffectiveRequestAuthoritySnapshot,
+    project_root: PathBuf,
+    materialization: ryeos_state::PinnedProjectMaterialization,
+}
+
+impl AdmittedRequestAuthoritySnapshot {
+    fn snapshot(&self) -> &EffectiveRequestAuthoritySnapshot {
+        &self.authority
+    }
+
+    fn request_snapshot(&self) -> &EffectiveRequestSnapshot {
+        self.request.as_ref()
+    }
+
+    fn request_snapshot_arc(&self) -> Arc<EffectiveRequestSnapshot> {
+        Arc::clone(&self.request)
+    }
+
+    fn content_proof_generation(&self, project_root: &Path) -> Result<String, EngineError> {
+        self.validate_root_binding(project_root)?;
+        let generation = self
+            .authority
+            .subject_resolution_authority
+            .operational_generation()
+            .ok_or_else(|| {
+                EngineError::Internal(
+                    "admitted content proof has no operational generation".to_string(),
+                )
+            })?;
+        if self.materialization.snapshot_hash() != generation {
+            return Err(EngineError::Internal(
+                "admitted content proof generation differs from its materialization".to_string(),
+            ));
+        }
+        Ok(generation.to_string())
+    }
+
+    pub fn authority_snapshot_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<&EffectiveRequestAuthoritySnapshot, EngineError> {
+        self.validate_root_binding(project_root)?;
+        Ok(&self.authority)
+    }
+
+    pub fn project_content_for_root(
+        &self,
+        project_root: &Path,
+    ) -> Result<&dyn crate::project_content::AuthoritativeProjectContent, EngineError> {
+        self.validate_root_binding(project_root)?;
+        Ok(&self.materialization)
+    }
+
+    pub fn validate_project_file_for_root(
+        &self,
+        project_root: &Path,
+        source_path: &Path,
+        content_hash: &str,
+    ) -> Result<bool, EngineError> {
+        let content = self.project_content_for_root(project_root)?;
+        let relative = source_path.strip_prefix(project_root).map_err(|_| {
+            EngineError::Internal(format!(
+                "project dependency {} is outside admitted root {}",
+                source_path.display(),
+                project_root.display()
+            ))
+        })?;
+        content.validates_file(relative, content_hash)
+    }
+
+    pub fn validate_project_absence_for_root(
+        &self,
+        project_root: &Path,
+        source_path: &Path,
+    ) -> Result<bool, EngineError> {
+        let content = self.project_content_for_root(project_root)?;
+        let relative = source_path.strip_prefix(project_root).map_err(|_| {
+            EngineError::Internal(format!(
+                "project absence {} is outside admitted root {}",
+                source_path.display(),
+                project_root.display()
+            ))
+        })?;
+        content.validates_absence(relative)
+    }
+
+    fn validate_resolution_dependencies(
+        &self,
+        project_root: &Path,
+        output: &crate::resolution::ResolutionOutput,
+        probed_absent: &[crate::contracts::ProbedAbsence],
+    ) -> Result<(), EngineError> {
+        for dependency in std::iter::once(&output.root)
+            .chain(output.ancestors.iter())
+            .chain(output.referenced_items.iter())
+            .filter(|dependency| dependency.source_space == crate::contracts::ItemSpace::Project)
+        {
+            if !self.validate_project_file_for_root(
+                project_root,
+                &dependency.source_path,
+                &dependency.source_content_digest,
+            )? {
+                return Err(EngineError::Internal(format!(
+                    "project dependency {} differs from admitted content authority",
+                    dependency.source_path.display()
+                )));
+            }
+        }
+        for absence in probed_absent
+            .iter()
+            .filter(|absence| absence.space == crate::contracts::ItemSpace::Project)
+        {
+            if !self.validate_project_absence_for_root(project_root, &absence.path)? {
+                return Err(EngineError::Internal(format!(
+                    "project absence {} differs from admitted content authority",
+                    absence.path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_root_binding(&self, project_root: &Path) -> Result<(), EngineError> {
+        if self.project_root != project_root
+            || !self
+                .materialization
+                .owns_path(project_root)
+                .map_err(|error| EngineError::Internal(error.to_string()))?
+        {
+            return Err(EngineError::Internal(
+                "admitted request authority was paired with a different materialization"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn authority_snapshot_from_request(
+    request: &EffectiveRequestSnapshot,
+) -> EffectiveRequestAuthoritySnapshot {
+    EffectiveRequestAuthoritySnapshot {
+        trust_store: request.trust_store.clone(),
+        registry_fingerprint: request.registry_fingerprint.clone(),
+        effective_trust_identity: request.effective_trust_identity.clone(),
+        request_engine_generation_identity: request.request_engine_generation_identity.clone(),
+        subject_resolution_authority: request.subject_resolution_authority.clone(),
+    }
+}
+
+fn project_root_from_context(context: &PlanContext) -> Option<&Path> {
+    match &context.project_context {
+        ProjectContext::LocalPath { path } => Some(path.as_path()),
+        ProjectContext::None
+        | ProjectContext::ProjectRef { .. }
+        | ProjectContext::SnapshotHash { .. } => None,
+    }
+}
+
+fn resolution_error_to_engine(
+    error: crate::resolution::ResolutionError,
+    requested_root: &CanonicalRef,
+) -> EngineError {
+    use crate::resolution::ResolutionError;
+
+    match error {
+        ResolutionError::IntegrityFailure { item_ref, reason } => {
+            EngineError::EffectiveItemUntrusted {
+                canonical_ref: item_ref,
+                fingerprint: reason,
+            }
+        }
+        ResolutionError::MissingItem { item_ref, .. } => EngineError::EffectiveItemNotFound {
+            canonical_ref: item_ref,
+        },
+        ResolutionError::ComposedValueContractViolation {
+            item_ref, report, ..
+        } => EngineError::ComposedValueContractViolation {
+            canonical_ref: item_ref,
+            report,
+        },
+        other => EngineError::EffectiveItemCompositionFailed {
+            canonical_ref: requested_root.to_string(),
+            reason: other.to_string(),
+        },
+    }
+}
+
+const STATIC_VERIFICATION_CACHE_CAPACITY: usize = 512;
+const STATIC_VERIFICATION_CACHE_MAX_PENDING: usize = 512;
+const STATIC_VERIFICATION_CACHE_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
+const ENGINE_RESOLVED_SUBJECT_PROOF_CAPACITY: usize = 2048;
+const ENGINE_RESOLVED_SUBJECT_PROOF_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
+const IMMUTABLE_REQUEST_CACHE_CAPACITY: usize = 256;
+const IMMUTABLE_REQUEST_CACHE_MAX_PENDING: usize = 256;
+const IMMUTABLE_REQUEST_CACHE_IDLE_TTL: Duration = Duration::from_secs(10 * 60);
+const IMMUTABLE_REQUEST_CACHE_MAX_ENTRY_BYTES: usize = 16 * 1024 * 1024;
+const IMMUTABLE_REQUEST_CACHE_MAX_TOTAL_BYTES: usize = 128 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+struct ImmutableRequestSnapshotCache {
+    slots: HashMap<String, ImmutableRequestSnapshotCacheEntry>,
+    lru: VecDeque<String>,
+    pending: HashMap<String, Arc<ImmutableRequestSnapshotPending>>,
+    total_bytes: usize,
+}
+
+#[derive(Debug)]
+struct ImmutableRequestSnapshotCacheEntry {
+    request: Arc<EffectiveRequestSnapshot>,
+    estimated_bytes: usize,
+    last_touched: Instant,
+}
+
+#[derive(Debug, Default)]
+struct ImmutableRequestSnapshotPending {
+    result: Mutex<Option<Result<Arc<EffectiveRequestSnapshot>, Arc<EngineError>>>>,
+    ready: Condvar,
+}
+
+struct ImmutableRequestSnapshotFillGuard {
+    cache: Arc<Mutex<ImmutableRequestSnapshotCache>>,
+    key: String,
+    pending: Arc<ImmutableRequestSnapshotPending>,
+    completed: bool,
+}
+
+impl ImmutableRequestSnapshotFillGuard {
+    fn finish(mut self, request: Arc<EffectiveRequestSnapshot>) {
+        complete_immutable_request_pending(&self.cache, &self.key, &self.pending, Ok(request));
+        self.completed = true;
+    }
+
+    fn fail(mut self, error: EngineError) -> Arc<EngineError> {
+        let error = Arc::new(error);
+        complete_immutable_request_pending(
+            &self.cache,
+            &self.key,
+            &self.pending,
+            Err(error.clone()),
+        );
+        self.completed = true;
+        error
+    }
+}
+
+impl Drop for ImmutableRequestSnapshotFillGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            complete_immutable_request_pending(
+                &self.cache,
+                &self.key,
+                &self.pending,
+                Err(Arc::new(EngineError::Internal(
+                    "immutable request cache fill ended without publishing its result".to_owned(),
+                ))),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ImmutableRequestCacheOutcome {
+    Hit,
+    Miss,
+    Bypass,
+    Eviction,
+}
+
+impl ImmutableRequestCacheOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass => "bypass",
+            Self::Eviction => "eviction",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ImmutableRequestCacheReason {
+    Ready,
+    SingleFlight,
+    Cold,
+    PendingCapacity,
+    Capacity,
+    IdleTtl,
+}
+
+impl ImmutableRequestCacheReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::SingleFlight => "single_flight",
+            Self::Cold => "cold",
+            Self::PendingCapacity => "pending_capacity",
+            Self::Capacity => "capacity",
+            Self::IdleTtl => "idle_ttl",
+        }
+    }
+}
+
+fn emit_immutable_request_cache_metric(
+    outcome: ImmutableRequestCacheOutcome,
+    reason: ImmutableRequestCacheReason,
+) {
+    tracing::info!(
+        target: "ryeos.metrics",
+        metric = "immutable_request_snapshot_cache",
+        outcome = outcome.as_str(),
+        reason = reason.as_str(),
+        "immutable request snapshot cache metric"
+    );
+}
+
+fn complete_immutable_request_pending(
+    cache: &Arc<Mutex<ImmutableRequestSnapshotCache>>,
+    key: &str,
+    pending: &Arc<ImmutableRequestSnapshotPending>,
+    result: Result<Arc<EffectiveRequestSnapshot>, Arc<EngineError>>,
+) {
+    let mut state = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *pending
+        .result
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+    if state
+        .pending
+        .get(key)
+        .is_some_and(|current| Arc::ptr_eq(current, pending))
+    {
+        state.pending.remove(key);
+    }
+    drop(state);
+    pending.ready.notify_all();
+}
+
+fn sweep_immutable_request_cache(state: &mut ImmutableRequestSnapshotCache) {
+    let now = Instant::now();
+    let stale = state
+        .slots
+        .iter()
+        .filter_map(|(key, entry)| {
+            (now.saturating_duration_since(entry.last_touched) >= IMMUTABLE_REQUEST_CACHE_IDLE_TTL)
+                .then(|| key.clone())
+        })
+        .collect::<Vec<_>>();
+    for key in stale {
+        remove_immutable_request_entry(state, &key);
+        emit_immutable_request_cache_metric(
+            ImmutableRequestCacheOutcome::Eviction,
+            ImmutableRequestCacheReason::IdleTtl,
+        );
+    }
+}
+
+fn remove_immutable_request_entry(state: &mut ImmutableRequestSnapshotCache, key: &str) -> usize {
+    let Some(entry) = state.slots.remove(key) else {
+        return 0;
+    };
+    state.total_bytes = state.total_bytes.saturating_sub(entry.estimated_bytes);
+    if let Some(position) = state.lru.iter().position(|candidate| candidate == key) {
+        state.lru.remove(position);
+    }
+    entry.estimated_bytes
+}
+
+fn touch_immutable_request_lru(state: &mut ImmutableRequestSnapshotCache, key: &str) {
+    if let Some(position) = state.lru.iter().position(|candidate| candidate == key) {
+        state.lru.remove(position);
+    }
+    state.lru.push_back(key.to_owned());
+}
+
+#[derive(Default)]
+struct StaticVerificationCache {
+    slots: HashMap<String, StaticVerificationCacheEntry>,
+    lru: VecDeque<String>,
+    pending: HashMap<String, Arc<StaticVerificationPending>>,
+}
+
+struct StaticVerificationCacheEntry {
+    evidence: Arc<StaticVerificationEvidence>,
+    last_touched: Instant,
+}
+
+#[derive(Default)]
+struct StaticVerificationPending {
+    result: Mutex<Option<Result<Arc<StaticVerificationEvidence>, Arc<EngineError>>>>,
+    ready: Condvar,
+}
+
+struct StaticVerificationFillGuard {
+    key: String,
+    pending: Arc<StaticVerificationPending>,
+    completed: bool,
+}
+
+impl StaticVerificationFillGuard {
+    fn finish(mut self, evidence: Arc<StaticVerificationEvidence>) {
+        complete_static_verification_pending(&self.key, &self.pending, Ok(evidence));
+        self.completed = true;
+    }
+
+    fn fail(mut self, error: EngineError) -> Arc<EngineError> {
+        let error = Arc::new(error);
+        complete_static_verification_pending(&self.key, &self.pending, Err(error.clone()));
+        self.completed = true;
+        error
+    }
+}
+
+impl Drop for StaticVerificationFillGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            complete_static_verification_pending(
+                &self.key,
+                &self.pending,
+                Err(Arc::new(EngineError::Internal(
+                    "static verification cache fill ended without publishing its result".to_owned(),
+                ))),
+            );
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StaticVerificationEvidence {
+    signer: Option<crate::contracts::SignerFingerprint>,
+    trust_class: crate::contracts::TrustClass,
+    pinned_version: Option<crate::contracts::PinnedVersion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StaticVerificationCacheOutcome {
+    Hit,
+    Miss,
+    Bypass,
+}
+
+impl StaticVerificationCacheOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass => "bypass",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StaticVerificationCacheReason {
+    Ready,
+    SingleFlight,
+    PendingCapacity,
+    Cold,
+}
+
+impl StaticVerificationCacheReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::SingleFlight => "single_flight",
+            Self::PendingCapacity => "pending_capacity",
+            Self::Cold => "cold",
+        }
+    }
+}
+
+fn emit_static_verification_cache_metric(
+    outcome: StaticVerificationCacheOutcome,
+    reason: StaticVerificationCacheReason,
+) {
+    tracing::info!(
+        target: "ryeos.metrics",
+        metric = "static_verification_cache",
+        outcome = outcome.as_str(),
+        reason = reason.as_str(),
+        "static verification cache metric"
+    );
+}
+
+fn complete_static_verification_pending(
+    key: &str,
+    pending: &Arc<StaticVerificationPending>,
+    result: Result<Arc<StaticVerificationEvidence>, Arc<EngineError>>,
+) {
+    let mut cache = static_verification_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *pending
+        .result
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+    if cache
+        .pending
+        .get(key)
+        .is_some_and(|current| Arc::ptr_eq(current, pending))
+    {
+        cache.pending.remove(key);
+    }
+    drop(cache);
+    pending.ready.notify_all();
+}
+
+fn sweep_static_verification_cache(cache: &mut StaticVerificationCache) {
+    let now = Instant::now();
+    let stale = cache
+        .slots
+        .iter()
+        .filter(|(_, entry)| {
+            now.duration_since(entry.last_touched) >= STATIC_VERIFICATION_CACHE_IDLE_TTL
+        })
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in stale {
+        cache.slots.remove(&key);
+        if let Some(position) = cache.lru.iter().position(|candidate| candidate == &key) {
+            cache.lru.remove(position);
+        }
+    }
+}
+
+fn touch_static_verification_lru(cache: &mut StaticVerificationCache, key: &str) {
+    if let Some(position) = cache.lru.iter().position(|candidate| candidate == key) {
+        cache.lru.remove(position);
+    }
+    cache.lru.push_back(key.to_owned());
+}
+
+fn static_verification_cache() -> &'static Mutex<StaticVerificationCache> {
+    static CACHE: OnceLock<Mutex<StaticVerificationCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(StaticVerificationCache::default()))
+}
+
+#[derive(Default)]
+struct EngineResolvedSubjectProofs {
+    slots: HashMap<String, Instant>,
+    lru: VecDeque<String>,
+}
+
+fn engine_resolved_subject_proofs() -> &'static Mutex<EngineResolvedSubjectProofs> {
+    static PROOFS: OnceLock<Mutex<EngineResolvedSubjectProofs>> = OnceLock::new();
+    PROOFS.get_or_init(|| Mutex::new(EngineResolvedSubjectProofs::default()))
+}
+
+fn read_current_subject_source(item: &ResolvedItem) -> Result<String, EngineError> {
+    crate::item_resolution::read_item_source_no_follow(&item.source_path)
+}
+
+fn relocate_verified_subject_for_current_root(
+    verified: &mut VerifiedItem,
+    current_project_root: Option<&Path>,
+    authority: &SubjectResolutionAuthority,
+) -> Result<(), EngineError> {
+    if !matches!(
+        authority,
+        SubjectResolutionAuthority::PinnedGeneration { .. }
+            | SubjectResolutionAuthority::CowWorkspace { .. }
+    ) {
+        return Ok(());
+    }
+    let Some(current_root) = current_project_root else {
+        return Ok(());
+    };
+    let Some(admitted_root) = verified.resolved.materialized_project_root.as_deref() else {
+        return Err(EngineError::Internal(
+            "pinned verified subject has no admitted materialized root".to_string(),
+        ));
+    };
+    if admitted_root == current_root {
+        return Ok(());
+    }
+    let relocate = |path: &Path| -> Result<PathBuf, EngineError> {
+        let relative = path.strip_prefix(admitted_root).map_err(|_| {
+            EngineError::Internal(format!(
+                "pinned verified project path {} is outside admitted root {}",
+                path.display(),
+                admitted_root.display()
+            ))
+        })?;
+        Ok(current_root.join(relative))
+    };
+    if verified.resolved.source_space == crate::contracts::ItemSpace::Project {
+        verified.resolved.source_path = relocate(&verified.resolved.source_path)?;
+    }
+    for candidate in &mut verified.resolved.shadowed {
+        if candidate.space == crate::contracts::ItemSpace::Project {
+            candidate.path = relocate(&candidate.path)?;
+        }
+    }
+    for absence in &mut verified.resolved.probed_absent {
+        if absence.space == crate::contracts::ItemSpace::Project {
+            absence.path = relocate(&absence.path)?;
+        }
+    }
+    verified.resolved.materialized_project_root = Some(current_root.to_path_buf());
+    Ok(())
+}
+
+/// Opaque engine-produced proof carrying one exact verified subject.
+///
+/// This is static verification evidence, not execution authority. Its fields
+/// are private and it is not serializable; only `Engine` can construct or
+/// consume it.
+pub struct VerifiedArtifactAttestation {
+    verified_subject: Arc<VerifiedItem>,
+    source_bytes: Arc<[u8]>,
+    subject_digest: String,
+    engine_generation_identity: String,
+    trust_identity: String,
+    request_registry_fingerprint: String,
+    subject_resolution_authority: SubjectResolutionAuthority,
+    /// Present only when this subject was selected and read through an opaque
+    /// admitted project-content authority. Pathname-minted evidence cannot be
+    /// upgraded into this proof.
+    admitted_content_generation: Option<String>,
+    resolution_closure_digest: Option<String>,
+}
+
+/// Opaque engine-produced resolution closure. Only the engine's canonical
+/// resolution pipeline can construct this value.
+pub struct VerifiedResolutionClosure {
+    output: crate::resolution::ResolutionOutput,
+    probed_absent: Vec<crate::contracts::ProbedAbsence>,
+    attestation: VerifiedArtifactAttestation,
+}
+
+impl VerifiedResolutionClosure {
+    pub fn into_parts(
+        self,
+    ) -> (
+        crate::resolution::ResolutionOutput,
+        Vec<crate::contracts::ProbedAbsence>,
+        VerifiedArtifactAttestation,
+    ) {
+        (self.output, self.probed_absent, self.attestation)
+    }
+}
+
+impl std::fmt::Debug for VerifiedArtifactAttestation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VerifiedArtifactAttestation")
+            .field(
+                "canonical_ref",
+                &self.verified_subject.resolved.canonical_ref,
+            )
+            .field(
+                "subject_resolution_authority",
+                &self.subject_resolution_authority,
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl VerifiedArtifactAttestation {
+    /// Exact static evidence carried by this engine-produced attestation.
+    ///
+    /// This remains evidence rather than execution authority: admission must
+    /// still call [`Engine::consume_verified_attestation`] under the current
+    /// engine, trust, and typed subject authority.
+    pub fn verified_subject(&self) -> &VerifiedItem {
+        self.verified_subject.as_ref()
+    }
+
+    /// Whole admitted source bytes read by the engine at verification time.
+    /// Keeping these bytes lets immutable cache hits seal the exact source
+    /// without reopening a disposable materialization path.
+    pub fn source_bytes(&self) -> &[u8] {
+        self.source_bytes.as_ref()
+    }
 }
 
 /// Concrete native engine.
@@ -140,7 +865,7 @@ pub struct Engine {
     /// Operator-owned `.ai/` root. This is intentionally excluded from
     /// ordinary item resolution and is admitted only for signed launch-config
     /// inputs, between an active project and installed bundles.
-    operator_ai_root: Option<PathBuf>,
+    node_config_ai_root: Option<PathBuf>,
 
     /// Generation guard shared with launch preparation. It is inert for
     /// directly-constructed test engines and active for node engines.
@@ -158,6 +883,10 @@ pub struct Engine {
     /// Shared only by clones of this admitted engine generation. Cache keys
     /// also include the effective generation/trust identities.
     parser_overlay_cache: std::sync::Arc<crate::parser_overlay_cache::ParserOverlayCache>,
+    /// Immutable pinned-generation request state. Trust and parser registries
+    /// retain verified values and installed handler identities, not disposable
+    /// project paths, so the complete snapshot is content-addressed.
+    immutable_request_snapshot_cache: Arc<Mutex<ImmutableRequestSnapshotCache>>,
 }
 
 /// Read-only engine view bound to one verified installed-bundle generation.
@@ -275,13 +1004,16 @@ impl Engine {
             host_env: crate::runtime::HostEnvBindings::default(),
             bundle_roots,
             registered_bundle_roots: Vec::new(),
-            operator_ai_root: None,
+            node_config_ai_root: None,
             isolation_generation: std::sync::Arc::new(crate::isolation::IsolationRuntime::default()),
             request_trust_base: None,
             request_trust_overlay_identity: None,
             parser_overlay_cache: std::sync::Arc::new(
                 crate::parser_overlay_cache::ParserOverlayCache::default(),
             ),
+            immutable_request_snapshot_cache: Arc::new(Mutex::new(
+                ImmutableRequestSnapshotCache::default(),
+            )),
         }
     }
 
@@ -324,6 +1056,13 @@ impl Engine {
         }
     }
 
+    /// Monotonic daemon generation used only for cache retirement ordering.
+    /// Authority remains the full fingerprint above; fixture engines have no
+    /// daemon epoch and therefore rely on normal bounded eviction.
+    pub fn registered_bundle_generation_epoch(&self) -> Option<u64> {
+        self.isolation_generation.registered_generation_identity()
+    }
+
     /// Assert the daemon-only executor-cache binding invariant without
     /// widening normal engine authority APIs. Fixture/standalone engines have
     /// no registry-owned root identities and use the per-ref probe namespace.
@@ -338,9 +1077,18 @@ impl Engine {
         );
     }
 
-    pub fn with_operator_ai_root(mut self, operator_ai_root: PathBuf) -> Self {
-        self.operator_ai_root = Some(operator_ai_root);
+    pub fn with_node_config_ai_root(mut self, node_config_ai_root: PathBuf) -> Self {
+        self.node_config_ai_root = Some(node_config_ai_root);
         self
+    }
+
+    /// Typed node-local config root. Consumers must use this explicit
+    /// authority and never infer node precedence from a display label.
+    pub fn node_config_root(&self) -> Option<PathBuf> {
+        self.node_config_ai_root
+            .as_ref()
+            .and_then(|ai_root| ai_root.parent())
+            .map(Path::to_path_buf)
     }
 
     fn checked_bundle_generation<T>(
@@ -431,6 +1179,67 @@ impl Engine {
         }
     }
 
+    /// Reconstruct only the current trust-policy view for an already-admitted
+    /// execution.
+    ///
+    /// Recovery consumes sealed parser/kind/runtime semantics and must not
+    /// rebuild a complete request snapshot from today's registries. This
+    /// method therefore reloads only operator/project signer authority. For a
+    /// content-addressed project, project keys come from the exact admitted
+    /// materialization rather than its disposable pathname.
+    pub fn effective_trust_store_for_current_policy(
+        &self,
+        project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+        materialization: Option<&ryeos_state::PinnedProjectMaterialization>,
+    ) -> Result<TrustStore, EngineError> {
+        self.checked_bundle_generation(|| {
+            subject_resolution_authority
+                .validate_for_materialized_root(project_root)
+                .map_err(|error| EngineError::Internal(error.to_string()))?;
+            match subject_resolution_authority.operational_generation() {
+                Some(generation) => {
+                    let root = project_root.ok_or_else(|| {
+                        EngineError::Internal(
+                            "content-addressed trust policy has no project root".to_string(),
+                        )
+                    })?;
+                    let materialization = materialization.ok_or_else(|| {
+                        EngineError::Internal(
+                            "content-addressed trust policy has no admitted materialization"
+                                .to_string(),
+                        )
+                    })?;
+                    if materialization.snapshot_hash() != generation
+                        || !materialization
+                            .owns_path(root)
+                            .map_err(|error| EngineError::Internal(error.to_string()))?
+                    {
+                        return Err(EngineError::Internal(
+                            "content-addressed trust policy materialization contradicts its authority"
+                                .to_string(),
+                        ));
+                    }
+                    let trust_base = self
+                        .request_trust_base
+                        .as_ref()
+                        .unwrap_or(&self.trust_store);
+                    trust_base.with_project_keys_from_content(materialization)
+                }
+                None => {
+                    if materialization.is_some() {
+                        return Err(EngineError::Internal(
+                            "non-content-addressed trust policy received a pinned materialization"
+                                .to_string(),
+                        ));
+                    }
+                    self.effective_trust_store(project_root)
+                        .map(Cow::into_owned)
+                }
+            }
+        })
+    }
+
     /// Capture the trust store, parser dispatcher, and downstream registry
     /// fingerprint from one coherent request snapshot.
     ///
@@ -440,14 +1249,302 @@ impl Engine {
     pub fn effective_request_snapshot(
         &self,
         project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
-        self.checked_bundle_generation(|| self.effective_request_snapshot_current(project_root))
+        self.checked_bundle_generation(|| {
+            self.effective_request_snapshot_current(project_root, subject_resolution_authority)
+        })
+    }
+
+    /// Reuse the complete immutable request snapshot admitted through the
+    /// opaque state proof. Parser descriptors are parsed values and dispatch
+    /// through the installed handler registry; they retain no disposable
+    /// project pathname.
+    pub fn effective_request_snapshot_under_admitted_authority(
+        &self,
+        project_root: &Path,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<Arc<EffectiveRequestSnapshot>, EngineError> {
+        self.checked_bundle_generation(|| {
+            admitted.validate_root_binding(project_root)?;
+            let authority = admitted.snapshot();
+            authority
+                .subject_resolution_authority
+                .validate_for_materialized_root(Some(project_root))
+                .map_err(|error| EngineError::Internal(error.to_string()))?;
+            if authority.request_engine_generation_identity
+                != self.request_engine_generation_identity()
+            {
+                return Err(EngineError::Internal(
+                    "admitted request authority belongs to a retired engine generation".to_string(),
+                ));
+            }
+            if authority
+                .subject_resolution_authority
+                .operational_generation()
+                .is_none()
+            {
+                return Err(EngineError::Internal(
+                    "admitted request snapshot has no content-addressed operational generation"
+                        .to_string(),
+                ));
+            }
+            Ok(admitted.request_snapshot_arc())
+        })
+    }
+
+    fn immutable_request_cache_key(
+        &self,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<String, EngineError> {
+        let base = self
+            .request_trust_base
+            .as_ref()
+            .unwrap_or(&self.trust_store)
+            .fingerprint();
+        let authority = serde_json::to_string(subject_resolution_authority).map_err(|error| {
+            EngineError::Internal(format!(
+                "serialize admitted request subject authority: {error}"
+            ))
+        })?;
+        Ok([
+            self.request_engine_generation_identity(),
+            authority,
+            base,
+            self.request_trust_overlay_identity
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+        ]
+        .join("\u{1f}"))
+    }
+
+    /// Admit one immutable request snapshot into the warm authority cache.
+    /// The opaque state proof is the only insertion path; a caller holding only
+    /// a pathname and claimed snapshot hash can perform a cold verification but
+    /// cannot poison the content-addressed fast path.
+    pub fn admit_request_authority_snapshot(
+        &self,
+        project_root: &Path,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+        materialization: &ryeos_state::PinnedProjectMaterialization,
+    ) -> Result<AdmittedRequestAuthoritySnapshot, EngineError> {
+        let Some(operational_generation) = subject_resolution_authority.operational_generation()
+        else {
+            return Err(EngineError::Internal(
+                "request authority admission requires a content-addressed operational generation"
+                    .to_string(),
+            ));
+        };
+        if materialization.snapshot_hash() != operational_generation
+            || !materialization
+                .owns_path(project_root)
+                .map_err(|error| EngineError::Internal(error.to_string()))?
+        {
+            return Err(EngineError::Internal(
+                "pinned request authority proof contradicts its snapshot or project root"
+                    .to_string(),
+            ));
+        }
+        self.checked_bundle_generation(|| {
+            let key = self.immutable_request_cache_key(subject_resolution_authority)?;
+            let pending_owner = loop {
+                let lookup = {
+                    let mut cache = self
+                        .immutable_request_snapshot_cache
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    sweep_immutable_request_cache(&mut cache);
+                    if let Some(request) = cache.slots.get_mut(&key).map(|entry| {
+                        entry.last_touched = Instant::now();
+                        entry.request.clone()
+                    }) {
+                        touch_immutable_request_lru(&mut cache, &key);
+                        Some(Ok(request))
+                    } else if let Some(pending) = cache.pending.get(&key) {
+                        Some(Err(pending.clone()))
+                    } else if cache.pending.len() >= IMMUTABLE_REQUEST_CACHE_MAX_PENDING {
+                        None
+                    } else {
+                        let pending = Arc::new(ImmutableRequestSnapshotPending::default());
+                        cache.pending.insert(key.clone(), pending.clone());
+                        break Some(pending);
+                    }
+                };
+                match lookup {
+                    Some(Ok(request)) => {
+                        emit_immutable_request_cache_metric(
+                            ImmutableRequestCacheOutcome::Hit,
+                            ImmutableRequestCacheReason::Ready,
+                        );
+                        let authority = authority_snapshot_from_request(request.as_ref());
+                        return Ok(AdmittedRequestAuthoritySnapshot {
+                            request,
+                            authority,
+                            project_root: project_root.to_path_buf(),
+                            materialization: materialization.clone(),
+                        });
+                    }
+                    Some(Err(pending)) => {
+                        let mut completed = pending
+                            .result
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        while completed.is_none() {
+                            completed = pending
+                                .ready
+                                .wait(completed)
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        }
+                        match completed
+                            .as_ref()
+                            .expect("completed immutable request fill has an outcome")
+                        {
+                            Ok(request) => {
+                                let request = request.clone();
+                                emit_immutable_request_cache_metric(
+                                    ImmutableRequestCacheOutcome::Hit,
+                                    ImmutableRequestCacheReason::SingleFlight,
+                                );
+                                let authority = authority_snapshot_from_request(request.as_ref());
+                                return Ok(AdmittedRequestAuthoritySnapshot {
+                                    request,
+                                    authority,
+                                    project_root: project_root.to_path_buf(),
+                                    materialization: materialization.clone(),
+                                });
+                            }
+                            Err(error) => return Err(EngineError::Shared(error.clone())),
+                        }
+                    }
+                    None => break None,
+                }
+            };
+            if pending_owner.is_none() {
+                emit_immutable_request_cache_metric(
+                    ImmutableRequestCacheOutcome::Bypass,
+                    ImmutableRequestCacheReason::PendingCapacity,
+                );
+                let request = Arc::new(self.effective_request_snapshot_from_materialization(
+                    materialization,
+                    subject_resolution_authority,
+                )?);
+                let authority = authority_snapshot_from_request(request.as_ref());
+                return Ok(AdmittedRequestAuthoritySnapshot {
+                    request,
+                    authority,
+                    project_root: project_root.to_path_buf(),
+                    materialization: materialization.clone(),
+                });
+            }
+            let pending_owner = pending_owner.expect("checked above");
+            let fill_guard = ImmutableRequestSnapshotFillGuard {
+                cache: Arc::clone(&self.immutable_request_snapshot_cache),
+                key: key.clone(),
+                pending: pending_owner,
+                completed: false,
+            };
+            let request = match self.effective_request_snapshot_from_materialization(
+                materialization,
+                subject_resolution_authority,
+            ) {
+                Ok(request) => Arc::new(request),
+                Err(error) => return Err(EngineError::Shared(fill_guard.fail(error))),
+            };
+            let authority = authority_snapshot_from_request(request.as_ref());
+            let estimated_bytes = request.estimated_size_bytes();
+            {
+                let mut cache = self
+                    .immutable_request_snapshot_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if estimated_bytes <= IMMUTABLE_REQUEST_CACHE_MAX_ENTRY_BYTES {
+                    while cache.slots.len() >= IMMUTABLE_REQUEST_CACHE_CAPACITY
+                        || cache.total_bytes.saturating_add(estimated_bytes)
+                            > IMMUTABLE_REQUEST_CACHE_MAX_TOTAL_BYTES
+                    {
+                        let Some(oldest) = cache.lru.pop_front() else {
+                            break;
+                        };
+                        remove_immutable_request_entry(&mut cache, &oldest);
+                        emit_immutable_request_cache_metric(
+                            ImmutableRequestCacheOutcome::Eviction,
+                            ImmutableRequestCacheReason::Capacity,
+                        );
+                    }
+                }
+                if estimated_bytes <= IMMUTABLE_REQUEST_CACHE_MAX_ENTRY_BYTES
+                    && cache.total_bytes.saturating_add(estimated_bytes)
+                        <= IMMUTABLE_REQUEST_CACHE_MAX_TOTAL_BYTES
+                {
+                    cache.total_bytes = cache.total_bytes.saturating_add(estimated_bytes);
+                    cache.slots.insert(
+                        key.clone(),
+                        ImmutableRequestSnapshotCacheEntry {
+                            request: Arc::clone(&request),
+                            estimated_bytes,
+                            last_touched: Instant::now(),
+                        },
+                    );
+                    touch_immutable_request_lru(&mut cache, &key);
+                } else {
+                    emit_immutable_request_cache_metric(
+                        ImmutableRequestCacheOutcome::Bypass,
+                        ImmutableRequestCacheReason::Capacity,
+                    );
+                }
+            }
+            fill_guard.finish(Arc::clone(&request));
+            emit_immutable_request_cache_metric(
+                ImmutableRequestCacheOutcome::Miss,
+                ImmutableRequestCacheReason::Cold,
+            );
+            Ok(AdmittedRequestAuthoritySnapshot {
+                request,
+                authority,
+                project_root: project_root.to_path_buf(),
+                materialization: materialization.clone(),
+            })
+        })
+    }
+
+    /// Return the coherent trust/parser/generation identity needed at an
+    /// admission boundary. The proof-less API always rebuilds from current
+    /// filesystem state; only an opaque admitted handle may use the
+    /// path-independent immutable cache.
+    pub fn effective_request_authority_snapshot(
+        &self,
+        project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<EffectiveRequestAuthoritySnapshot, EngineError> {
+        self.checked_bundle_generation(|| {
+            self.effective_request_authority_snapshot_current(
+                project_root,
+                subject_resolution_authority,
+            )
+        })
+    }
+
+    fn effective_request_authority_snapshot_current(
+        &self,
+        project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<EffectiveRequestAuthoritySnapshot, EngineError> {
+        subject_resolution_authority
+            .validate_for_materialized_root(project_root)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        let snapshot =
+            self.effective_request_snapshot_current(project_root, subject_resolution_authority)?;
+        Ok(authority_snapshot_from_request(&snapshot))
     }
 
     fn effective_request_snapshot_current(
         &self,
         project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<EffectiveRequestSnapshot, EngineError> {
+        subject_resolution_authority
+            .validate_for_materialized_root(project_root)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
         let trust_store = self.effective_trust_store(project_root)?.into_owned();
         let parser_dispatcher =
             self.effective_parser_dispatcher_with_trust(project_root, &trust_store)?;
@@ -461,6 +1558,44 @@ impl Engine {
             registry_fingerprint,
             effective_trust_identity,
             request_engine_generation_identity,
+            subject_resolution_authority: subject_resolution_authority.clone(),
+        })
+    }
+
+    /// Build the complete project request snapshot from the authoritative CAS
+    /// closure retained by a state-issued materialization proof. No project
+    /// pathname is reopened, so a concurrent checkout mutation cannot poison a
+    /// content-addressed snapshot key.
+    fn effective_request_snapshot_from_materialization(
+        &self,
+        materialization: &ryeos_state::PinnedProjectMaterialization,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<EffectiveRequestSnapshot, EngineError> {
+        subject_resolution_authority
+            .validate_for_materialized_root(Some(materialization.path()))
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+
+        let trust_base = self
+            .request_trust_base
+            .as_ref()
+            .unwrap_or(&self.trust_store);
+        let trust_store = trust_base.with_project_keys_from_content(materialization)?;
+        let parser_tools = self
+            .parser_dispatcher
+            .parser_tools
+            .with_project_overlay_from_content(materialization, &trust_store, &self.kinds)?;
+        let parser_dispatcher = self.parser_dispatcher.with_parser_tools(parser_tools);
+        let registry_fingerprint =
+            self.fingerprint_for(parser_dispatcher.parser_tools.fingerprint());
+        let effective_trust_identity = self.effective_trust_identity(&trust_store);
+        let request_engine_generation_identity = self.request_engine_generation_identity();
+        Ok(EffectiveRequestSnapshot {
+            trust_store,
+            parser_dispatcher,
+            registry_fingerprint,
+            effective_trust_identity,
+            request_engine_generation_identity,
+            subject_resolution_authority: subject_resolution_authority.clone(),
         })
     }
 
@@ -533,11 +1668,51 @@ impl Engine {
         ctx: &PlanContext,
         item_ref: &CanonicalRef,
     ) -> Result<ResolvedItem, EngineError> {
+        ctx.subject_resolution_authority
+            .validate_for_project_context(&ctx.project_context)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
         // Materialize project context
         let project_root = match &ctx.project_context {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.clone()),
             _ => None,
         };
+        let request_snapshot = self.effective_request_snapshot_current(
+            project_root.as_deref(),
+            &ctx.subject_resolution_authority,
+        )?;
+        self.resolve_current_with_request_snapshot(ctx, item_ref, project_root, &request_snapshot)
+    }
+
+    fn resolve_current_with_request_snapshot(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: Option<PathBuf>,
+        request_snapshot: &EffectiveRequestSnapshot,
+    ) -> Result<ResolvedItem, EngineError> {
+        self.resolve_current_with_request_snapshot_and_source(
+            ctx,
+            item_ref,
+            project_root,
+            request_snapshot,
+            None,
+        )
+        .map(|(resolved, _source)| resolved)
+    }
+
+    fn resolve_current_with_request_snapshot_and_source(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: Option<PathBuf>,
+        request_snapshot: &EffectiveRequestSnapshot,
+        project_content: Option<&dyn crate::project_content::AuthoritativeProjectContent>,
+    ) -> Result<(ResolvedItem, String), EngineError> {
+        if request_snapshot.subject_resolution_authority != ctx.subject_resolution_authority {
+            return Err(EngineError::Internal(
+                "request snapshot authority differs from resolution context".to_string(),
+            ));
+        }
 
         // Kind schemas are system-only — no project overlay
         let kind_schema =
@@ -553,15 +1728,36 @@ impl Engine {
         tracing::debug!(item_ref = %item_ref, "resolving item");
 
         // Resolve to file path + space + matched extension (with clash diagnostics)
-        let result = crate::item_resolution::resolve_item_full(&roots, kind_schema, item_ref)?;
+        let result = match (project_root.as_deref(), project_content) {
+            (Some(project_root), Some(project_content)) => {
+                crate::item_resolution::resolve_item_full_under_project_authority(
+                    &roots,
+                    kind_schema,
+                    item_ref,
+                    project_root,
+                    project_content,
+                )?
+            }
+            (_, None) => crate::item_resolution::resolve_item_full(&roots, kind_schema, item_ref)?,
+            (None, Some(_)) => {
+                return Err(EngineError::Internal(
+                    "authoritative project content has no project root".to_string(),
+                ));
+            }
+        };
 
         // Read file content
-        let content = std::fs::read_to_string(&result.winner_path).map_err(|e| {
-            EngineError::Internal(format!(
-                "failed to read {}: {e}",
-                result.winner_path.display()
-            ))
-        })?;
+        let content = match (project_root.as_deref(), project_content) {
+            (Some(project_root), Some(project_content)) => {
+                crate::item_resolution::read_resolved_source_under_project_authority(
+                    &result,
+                    project_root,
+                    project_content,
+                )?
+            }
+            (_, None) => crate::item_resolution::read_item_source_no_follow(&result.winner_path)?,
+            (None, Some(_)) => unreachable!("checked above"),
+        };
 
         // Compute content hash
         let hash = crate::item_resolution::content_hash(&content);
@@ -595,7 +1791,6 @@ impl Engine {
         // — the boot dispatcher overlaid by this project's
         // `.ai/parsers/` if any. Then apply extraction rules from
         // the schema.
-        let request_snapshot = self.effective_request_snapshot_current(project_root.as_deref())?;
         let parsed = request_snapshot.parser_dispatcher.dispatch(
             &source_format.parser,
             &content,
@@ -634,19 +1829,102 @@ impl Engine {
             "resolved item"
         );
 
-        Ok(ResolvedItem {
+        let resolved = ResolvedItem {
             canonical_ref: item_ref.clone(),
             kind: item_ref.kind.clone(),
             source_path: result.winner_path,
             source_space: result.winner_space,
             resolved_from: result.winner_label,
             shadowed: result.shadowed,
-            materialized_project_root: project_root,
+            probed_absent: result.probed_absent,
+            materialized_project_root: project_root.clone(),
+            subject_resolution_authority: ctx.subject_resolution_authority.clone(),
             raw_content_digest,
             content_hash: hash,
             signature_header,
             source_format,
             metadata,
+        };
+        self.record_engine_resolved_subject(&resolved, project_root.as_deref())?;
+        Ok((resolved, content))
+    }
+
+    /// Resolve and verify one dispatch hop under an opaque admitted project
+    /// snapshot. Parser/trust state comes from the content-addressed request
+    /// snapshot, while the selected project source and every
+    /// precedence-affecting project absence must agree with that authority.
+    pub fn resolve_verified_under_admitted_authority(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: &Path,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<VerifiedItem, EngineError> {
+        self.resolve_verified_source_under_admitted_authority(ctx, item_ref, project_root, admitted)
+            .map(|(verified, _source)| verified)
+    }
+
+    fn resolve_verified_source_under_admitted_authority(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: &Path,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<(VerifiedItem, String), EngineError> {
+        self.checked_bundle_generation(|| {
+            admitted.validate_root_binding(project_root)?;
+            let request_snapshot = admitted.request_snapshot();
+            let project_content = admitted.project_content_for_root(project_root)?;
+            let (resolved, source) = self.resolve_current_with_request_snapshot_and_source(
+                ctx,
+                item_ref,
+                Some(project_root.to_path_buf()),
+                request_snapshot,
+                Some(project_content),
+            )?;
+            let request_authority = authority_snapshot_from_request(request_snapshot);
+            let verified = self.verify_static_cached_with_source_under_authority(
+                ctx,
+                resolved,
+                &source,
+                &request_authority,
+            )?;
+            Ok((verified, source))
+        })
+    }
+
+    /// Resolve, verify, and attest one canonical subject directly from an
+    /// admitted project-content authority. No caller-supplied `ResolvedItem`
+    /// and no project-path read participates in the attestation.
+    pub fn resolve_attested_under_admitted_authority(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+        project_root: &Path,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        let (verified_subject, source) = self.resolve_verified_source_under_admitted_authority(
+            ctx,
+            item_ref,
+            project_root,
+            admitted,
+        )?;
+        let request_authority = admitted.authority_snapshot_for_root(project_root)?;
+        let subject_digest = self.attested_subject_digest(
+            &verified_subject.resolved,
+            Some(project_root),
+            &ctx.subject_resolution_authority,
+        )?;
+        Ok(VerifiedArtifactAttestation {
+            verified_subject: Arc::new(verified_subject),
+            source_bytes: Arc::from(source.into_bytes()),
+            subject_digest,
+            engine_generation_identity: self.request_engine_generation_identity(),
+            trust_identity: request_authority.effective_trust_identity.clone(),
+            request_registry_fingerprint: request_authority.registry_fingerprint.clone(),
+            subject_resolution_authority: ctx.subject_resolution_authority.clone(),
+            admitted_content_generation: Some(admitted.content_proof_generation(project_root)?),
+            resolution_closure_digest: None,
         })
     }
 
@@ -654,25 +1932,1015 @@ impl Engine {
     ///
     /// Trust is the configured store plus keys explicitly declared by this
     /// request's project root.
+    #[tracing::instrument(
+        name = "engine:verify_item",
+        skip(self, ctx, item),
+        fields(canonical_ref = %item.canonical_ref)
+    )]
     pub fn verify(
         &self,
         ctx: &PlanContext,
         item: ResolvedItem,
     ) -> Result<VerifiedItem, EngineError> {
+        self.verify_static_cached(ctx, item)
+    }
+
+    /// Resolve, verify, and attest one live/projectless canonical subject
+    /// without exposing a caller-assembled resolved/verified pair across the
+    /// admission boundary.
+    ///
+    /// Mutable authority is deliberately handled by [`Engine::verify_attested`]:
+    /// it re-resolves the canonical ref, compares the exact subject digest, and
+    /// verifies the source bytes it seals. Content-addressed pinned/COW callers
+    /// must use [`Engine::resolve_attested_under_admitted_authority`] instead.
+    pub fn resolve_attested(
+        &self,
+        ctx: &PlanContext,
+        item_ref: &CanonicalRef,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        if ctx
+            .subject_resolution_authority
+            .operational_generation()
+            .is_some()
+        {
+            return Err(EngineError::Internal(
+                "content-addressed subject attestation requires admitted project authority"
+                    .to_string(),
+            ));
+        }
+        let resolved = self.resolve(ctx, item_ref)?;
+        self.verify_attested(ctx, resolved)
+    }
+
+    /// Verify one exact subject and seal the resulting evidence into an
+    /// engine-owned attestation for a later admission boundary.
+    pub fn verify_attested(
+        &self,
+        ctx: &PlanContext,
+        item: ResolvedItem,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        ctx.subject_resolution_authority
+            .validate_for_project_context(&ctx.project_context)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        if item.subject_resolution_authority != ctx.subject_resolution_authority {
+            return Err(EngineError::Internal(
+                "resolved item carries different subject authority from its planning context"
+                    .to_string(),
+            ));
+        }
+        let project_root = project_root_from_context(ctx);
+        if matches!(
+            ctx.subject_resolution_authority,
+            SubjectResolutionAuthority::LiveFs | SubjectResolutionAuthority::CowWorkspace { .. }
+        ) {
+            // A mutable project can change resolution precedence while an old
+            // public `ResolvedItem` remains in the bounded proof cache. Always
+            // resolve the canonical subject again before minting opaque
+            // admission evidence; proof-cache membership is only a safe fast
+            // path for immutable projectless/pinned authorities.
+            let current = self.resolve(ctx, &item.canonical_ref)?;
+            if self.resolved_subject_digest(&current, project_root)?
+                != self.resolved_subject_digest(&item, project_root)?
+            {
+                return Err(EngineError::Internal(
+                    "verified artifact attestation subject was not produced by the current mutable resolution"
+                        .to_string(),
+                ));
+            }
+        } else {
+            self.ensure_engine_resolved_subject(&item, ctx)?;
+        }
+        let source = read_current_subject_source(&item)?;
+        let verified_subject = Arc::new(self.verify_static_cached_with_source(ctx, item, &source)?);
+        let request_authority = self.effective_request_authority_snapshot(
+            project_root,
+            &ctx.subject_resolution_authority,
+        )?;
+        let subject_digest = self.attested_subject_digest(
+            &verified_subject.resolved,
+            project_root,
+            &ctx.subject_resolution_authority,
+        )?;
+        Ok(VerifiedArtifactAttestation {
+            verified_subject,
+            source_bytes: Arc::from(source.into_bytes()),
+            subject_digest,
+            engine_generation_identity: self.request_engine_generation_identity(),
+            trust_identity: request_authority.effective_trust_identity,
+            request_registry_fingerprint: request_authority.registry_fingerprint,
+            subject_resolution_authority: ctx.subject_resolution_authority.clone(),
+            admitted_content_generation: None,
+            resolution_closure_digest: None,
+        })
+    }
+
+    /// Apply the current generation/trust gate and consume an exact opaque
+    /// attestation. No caller-supplied `ResolvedItem` participates here.
+    pub fn consume_verified_attestation(
+        &self,
+        ctx: &PlanContext,
+        attestation: &VerifiedArtifactAttestation,
+        expected_subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<VerifiedItem, EngineError> {
+        let request_authority = self.effective_request_authority_snapshot(
+            project_root_from_context(ctx),
+            expected_subject_resolution_authority,
+        )?;
+        self.consume_verified_attestation_under_authority(
+            ctx,
+            attestation,
+            expected_subject_resolution_authority,
+            &request_authority,
+            true,
+        )
+    }
+
+    /// Consume attestation evidence under an immutable authority handle minted
+    /// from a state-issued materialization proof. This is the path-independent
+    /// warm boundary; it cannot be reached with a caller-constructed snapshot.
+    pub fn consume_verified_attestation_under_admitted_authority(
+        &self,
+        ctx: &PlanContext,
+        attestation: &VerifiedArtifactAttestation,
+        expected_subject_resolution_authority: &SubjectResolutionAuthority,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<VerifiedItem, EngineError> {
+        let project_root = project_root_from_context(ctx)
+            .or(attestation
+                .verified_subject
+                .resolved
+                .materialized_project_root
+                .as_deref())
+            .ok_or_else(|| {
+                EngineError::Internal(
+                    "admitted pinned attestation has no materialized project root".to_string(),
+                )
+            })?;
+        admitted.validate_root_binding(project_root)?;
+        let expected_content_generation = admitted.content_proof_generation(project_root)?;
+        if attestation.admitted_content_generation.as_deref()
+            != Some(expected_content_generation.as_str())
+        {
+            return Err(EngineError::Internal(
+                "verified artifact attestation was not minted from the admitted project content authority"
+                    .to_string(),
+            ));
+        }
+        self.consume_verified_attestation_under_authority(
+            ctx,
+            attestation,
+            expected_subject_resolution_authority,
+            admitted.snapshot(),
+            false,
+        )
+    }
+
+    fn consume_verified_attestation_under_authority(
+        &self,
+        ctx: &PlanContext,
+        attestation: &VerifiedArtifactAttestation,
+        expected_subject_resolution_authority: &SubjectResolutionAuthority,
+        request_authority: &EffectiveRequestAuthoritySnapshot,
+        revalidate_mutable_path: bool,
+    ) -> Result<VerifiedItem, EngineError> {
+        expected_subject_resolution_authority
+            .validate_for_project_context(&ctx.project_context)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        if &request_authority.subject_resolution_authority != expected_subject_resolution_authority
+        {
+            return Err(EngineError::Internal(
+                "request authority differs from expected subject authority".to_string(),
+            ));
+        }
+        if &attestation.subject_resolution_authority != expected_subject_resolution_authority {
+            return Err(EngineError::Internal(
+                "verified artifact attestation carries different subject authority".to_string(),
+            ));
+        }
+        if &ctx.subject_resolution_authority != expected_subject_resolution_authority {
+            return Err(EngineError::Internal(
+                "planning context carries different subject authority from the admitted attestation"
+                    .to_string(),
+            ));
+        }
+        let project_root = project_root_from_context(ctx);
+        if attestation.engine_generation_identity != self.request_engine_generation_identity()
+            || attestation.trust_identity != request_authority.effective_trust_identity
+            || attestation.request_registry_fingerprint != request_authority.registry_fingerprint
+        {
+            return Err(EngineError::Internal(
+                "verified artifact attestation is stale under current engine/trust authority"
+                    .to_string(),
+            ));
+        }
+        if revalidate_mutable_path
+            && matches!(
+                expected_subject_resolution_authority,
+                SubjectResolutionAuthority::LiveFs
+                    | SubjectResolutionAuthority::CowWorkspace { .. }
+            )
+        {
+            let current =
+                self.resolve(ctx, &attestation.verified_subject.resolved.canonical_ref)?;
+            let current_digest = self.attested_subject_digest(
+                &current,
+                project_root,
+                expected_subject_resolution_authority,
+            )?;
+            if current_digest != attestation.subject_digest {
+                return Err(EngineError::Internal(
+                    "verified artifact attestation source or resolution precedence changed before admission"
+                        .to_string(),
+                ));
+            }
+        }
+        let current_digest = self.attested_subject_digest(
+            &attestation.verified_subject.resolved,
+            project_root,
+            expected_subject_resolution_authority,
+        )?;
+        if current_digest != attestation.subject_digest {
+            return Err(EngineError::Internal(
+                "verified artifact attestation subject identity is inconsistent".to_string(),
+            ));
+        }
+        let mut verified = attestation.verified_subject.as_ref().clone();
+        relocate_verified_subject_for_current_root(
+            &mut verified,
+            project_root,
+            expected_subject_resolution_authority,
+        )?;
+        Ok(verified)
+    }
+
+    /// Re-issue engine-owned static evidence after applying the same current
+    /// generation/trust/typed-authority gate as admission. This is used by an
+    /// immutable resolution-cache hit to cross a later admission boundary
+    /// without reopening the already-attested source pathname.
+    pub fn reissue_verified_attestation(
+        &self,
+        ctx: &PlanContext,
+        attestation: &VerifiedArtifactAttestation,
+        expected_subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        self.consume_verified_attestation(ctx, attestation, expected_subject_resolution_authority)?;
+        Ok(VerifiedArtifactAttestation {
+            verified_subject: attestation.verified_subject.clone(),
+            source_bytes: attestation.source_bytes.clone(),
+            subject_digest: attestation.subject_digest.clone(),
+            engine_generation_identity: attestation.engine_generation_identity.clone(),
+            trust_identity: attestation.trust_identity.clone(),
+            request_registry_fingerprint: attestation.request_registry_fingerprint.clone(),
+            subject_resolution_authority: attestation.subject_resolution_authority.clone(),
+            admitted_content_generation: attestation.admitted_content_generation.clone(),
+            resolution_closure_digest: attestation.resolution_closure_digest.clone(),
+        })
+    }
+
+    /// Re-issue cached evidence under a proof-bearing immutable request
+    /// authority without reopening the disposable materialization.
+    pub fn reissue_verified_attestation_under_admitted_authority(
+        &self,
+        ctx: &PlanContext,
+        attestation: &VerifiedArtifactAttestation,
+        expected_subject_resolution_authority: &SubjectResolutionAuthority,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        self.consume_verified_attestation_under_admitted_authority(
+            ctx,
+            attestation,
+            expected_subject_resolution_authority,
+            admitted,
+        )?;
+        Ok(VerifiedArtifactAttestation {
+            verified_subject: attestation.verified_subject.clone(),
+            source_bytes: attestation.source_bytes.clone(),
+            subject_digest: attestation.subject_digest.clone(),
+            engine_generation_identity: attestation.engine_generation_identity.clone(),
+            trust_identity: attestation.trust_identity.clone(),
+            request_registry_fingerprint: attestation.request_registry_fingerprint.clone(),
+            subject_resolution_authority: attestation.subject_resolution_authority.clone(),
+            admitted_content_generation: attestation.admitted_content_generation.clone(),
+            resolution_closure_digest: attestation.resolution_closure_digest.clone(),
+        })
+    }
+
+    /// Bind static subject evidence to the exact resolution/composition
+    /// closure and its negative probes. This remains evidence, not execution
+    /// authority; admission still applies current principal and policy gates.
+    fn bind_verified_attestation_to_resolution(
+        &self,
+        ctx: &PlanContext,
+        mut attestation: VerifiedArtifactAttestation,
+        output: &crate::resolution::ResolutionOutput,
+        probed_absent: &[crate::contracts::ProbedAbsence],
+        resolution_root: Option<&Path>,
+        expected_subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<VerifiedArtifactAttestation, EngineError> {
+        self.consume_verified_attestation(
+            ctx,
+            &attestation,
+            expected_subject_resolution_authority,
+        )?;
+        attestation.resolution_closure_digest = Some(self.resolution_closure_digest(
+            output,
+            probed_absent,
+            resolution_root,
+            expected_subject_resolution_authority,
+        )?);
+        Ok(attestation)
+    }
+
+    /// Run the canonical engine-owned resolution pipeline and bind its exact
+    /// positive/negative closure to the root's opaque static attestation.
+    pub fn resolve_verified_resolution_closure(
+        &self,
+        ctx: &PlanContext,
+        root_attestation: &VerifiedArtifactAttestation,
+        materialized_project_root: Option<PathBuf>,
+    ) -> Result<VerifiedResolutionClosure, EngineError> {
+        let subject_resolution_authority = &ctx.subject_resolution_authority;
+        let verified_root =
+            self.consume_verified_attestation(ctx, root_attestation, subject_resolution_authority)?;
+        let request_snapshot = self.effective_request_snapshot(
+            materialized_project_root.as_deref(),
+            subject_resolution_authority,
+        )?;
+        let roots = self.resolution_roots(materialized_project_root.clone());
+        let (output, probed_absent) = crate::resolution::run_resolution_pipeline_with_probes(
+            &verified_root.resolved.canonical_ref,
+            &self.kinds,
+            &request_snapshot.parser_dispatcher,
+            &roots,
+            &request_snapshot.trust_store,
+            &self.composers,
+        )
+        .map_err(|error| {
+            resolution_error_to_engine(error, &verified_root.resolved.canonical_ref)
+        })?;
+        if output.root.resolved_ref != verified_root.resolved.canonical_ref.to_string()
+            || output.root.source_space != verified_root.resolved.source_space
+            || output.root.raw_content_digest != verified_root.resolved.raw_content_digest
+            || output.root.source_content_digest != verified_root.resolved.content_hash
+        {
+            return Err(EngineError::Internal(
+                "canonical resolution closure root differs from its verified root subject"
+                    .to_string(),
+            ));
+        }
+        let attestation = self.bind_verified_attestation_to_resolution(
+            ctx,
+            self.reissue_verified_attestation(ctx, root_attestation, subject_resolution_authority)?,
+            &output,
+            &probed_absent,
+            materialized_project_root.as_deref(),
+            subject_resolution_authority,
+        )?;
+        Ok(VerifiedResolutionClosure {
+            output,
+            probed_absent,
+            attestation,
+        })
+    }
+
+    /// Resolve and attest one root entirely under an opaque, state-issued
+    /// project-content authority. Project parser/trust inputs come from the
+    /// admitted request snapshot, and every project resolution positive and
+    /// absence is checked against the same authoritative tree before the
+    /// closure can cross admission.
+    pub fn resolve_verified_resolution_closure_under_admitted_authority(
+        &self,
+        ctx: &PlanContext,
+        root_attestation: &VerifiedArtifactAttestation,
+        materialized_project_root: PathBuf,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<VerifiedResolutionClosure, EngineError> {
+        let subject_resolution_authority = &ctx.subject_resolution_authority;
+        let verified_root = self.consume_verified_attestation_under_admitted_authority(
+            ctx,
+            root_attestation,
+            subject_resolution_authority,
+            admitted,
+        )?;
+        let request_snapshot = self.effective_request_snapshot_under_admitted_authority(
+            &materialized_project_root,
+            admitted,
+        )?;
+        let roots = self.resolution_roots(Some(materialized_project_root.clone()));
+        let project_content = admitted.project_content_for_root(&materialized_project_root)?;
+        let (output, probed_absent) =
+            crate::resolution::run_resolution_pipeline_with_probes_under_project_authority(
+                &verified_root.resolved.canonical_ref,
+                &self.kinds,
+                &request_snapshot.parser_dispatcher,
+                &roots,
+                &request_snapshot.trust_store,
+                &self.composers,
+                &materialized_project_root,
+                project_content,
+            )
+            .map_err(|error| {
+                resolution_error_to_engine(error, &verified_root.resolved.canonical_ref)
+            })?;
+        if output.root.resolved_ref != verified_root.resolved.canonical_ref.to_string()
+            || output.root.source_space != verified_root.resolved.source_space
+            || output.root.raw_content_digest != verified_root.resolved.raw_content_digest
+            || output.root.source_content_digest != verified_root.resolved.content_hash
+        {
+            return Err(EngineError::Internal(
+                "canonical resolution closure root differs from its verified root subject"
+                    .to_string(),
+            ));
+        }
+        admitted.validate_resolution_dependencies(
+            &materialized_project_root,
+            &output,
+            &probed_absent,
+        )?;
+        let mut attestation = self.reissue_verified_attestation_under_admitted_authority(
+            ctx,
+            root_attestation,
+            subject_resolution_authority,
+            admitted,
+        )?;
+        attestation.resolution_closure_digest = Some(self.resolution_closure_digest(
+            &output,
+            &probed_absent,
+            Some(&materialized_project_root),
+            subject_resolution_authority,
+        )?);
+        Ok(VerifiedResolutionClosure {
+            output,
+            probed_absent,
+            attestation,
+        })
+    }
+
+    pub fn validate_attested_resolution_closure(
+        &self,
+        attestation: &VerifiedArtifactAttestation,
+        output: &crate::resolution::ResolutionOutput,
+        probed_absent: &[crate::contracts::ProbedAbsence],
+        resolution_root: Option<&Path>,
+        expected_subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<(), EngineError> {
+        let expected = self.resolution_closure_digest(
+            output,
+            probed_absent,
+            resolution_root,
+            expected_subject_resolution_authority,
+        )?;
+        if attestation.resolution_closure_digest.as_deref() != Some(expected.as_str()) {
+            return Err(EngineError::Internal(
+                "verified artifact attestation does not bind the admitted resolution closure"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn verify_static_cached(
+        &self,
+        ctx: &PlanContext,
+        item: ResolvedItem,
+    ) -> Result<VerifiedItem, EngineError> {
+        let source = read_current_subject_source(&item)?;
+        self.verify_static_cached_with_source(ctx, item, &source)
+    }
+
+    fn verify_static_cached_with_source(
+        &self,
+        ctx: &PlanContext,
+        item: ResolvedItem,
+        source: &str,
+    ) -> Result<VerifiedItem, EngineError> {
+        ctx.subject_resolution_authority
+            .validate_for_project_context(&ctx.project_context)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        if item.subject_resolution_authority != ctx.subject_resolution_authority {
+            return Err(EngineError::Internal(
+                "resolved item authority differs from verification context".to_string(),
+            ));
+        }
         let project_root = match &ctx.project_context {
             crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
             _ => None,
         };
-        let trust_store = self.effective_trust_store(project_root)?;
-        let result = crate::trust::verify_resolved_item(item, &trust_store);
-        if let Ok(ref verified) = result {
-            tracing::debug!(
-                item_ref = %verified.resolved.canonical_ref,
-                trust_class = ?verified.trust_class,
-                "verified item"
+        let request_authority = self.effective_request_authority_snapshot(
+            project_root,
+            &ctx.subject_resolution_authority,
+        )?;
+        self.verify_static_cached_with_source_under_authority(ctx, item, source, &request_authority)
+    }
+
+    fn verify_static_cached_with_source_under_authority(
+        &self,
+        ctx: &PlanContext,
+        item: ResolvedItem,
+        source: &str,
+        request_authority: &EffectiveRequestAuthoritySnapshot,
+    ) -> Result<VerifiedItem, EngineError> {
+        if request_authority.subject_resolution_authority != ctx.subject_resolution_authority {
+            return Err(EngineError::Internal(
+                "request verification authority differs from planning context".to_string(),
+            ));
+        }
+        let project_root = match &ctx.project_context {
+            crate::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
+            _ => None,
+        };
+        let current_content_hash = crate::item_resolution::content_hash(source);
+        if current_content_hash != item.content_hash {
+            return Err(EngineError::ContentHashMismatch {
+                canonical_ref: item.canonical_ref.to_string(),
+                expected: item.content_hash.clone(),
+                actual: current_content_hash,
+            });
+        }
+        let subject_digest = self.resolved_subject_digest(&item, project_root)?;
+        let key_material = serde_json::json!({
+            "schema_version": 1,
+            "engine_generation_identity": self.request_engine_generation_identity(),
+            "trust_identity": &request_authority.effective_trust_identity,
+            "subject_digest": subject_digest,
+        });
+        let key = lillux::canonical_json(&key_material)
+            .map(|canonical| lillux::sha256_hex(canonical.as_bytes()))
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        let pending_owner = loop {
+            let lookup = {
+                let mut cache = static_verification_cache()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                sweep_static_verification_cache(&mut cache);
+                if let Some(evidence) = cache.slots.get_mut(&key).map(|entry| {
+                    entry.last_touched = Instant::now();
+                    entry.evidence.clone()
+                }) {
+                    touch_static_verification_lru(&mut cache, &key);
+                    Some(Ok(evidence))
+                } else if let Some(pending) = cache.pending.get(&key) {
+                    Some(Err(pending.clone()))
+                } else if cache.pending.len() >= STATIC_VERIFICATION_CACHE_MAX_PENDING {
+                    None
+                } else {
+                    let pending = Arc::new(StaticVerificationPending::default());
+                    cache.pending.insert(key.clone(), pending.clone());
+                    break Some(pending);
+                }
+            };
+            match lookup {
+                Some(Ok(evidence)) => {
+                    let verified = VerifiedItem {
+                        resolved: item,
+                        signer: evidence.signer.clone(),
+                        trust_class: evidence.trust_class,
+                        pinned_version: evidence.pinned_version.clone(),
+                    };
+                    tracing::debug!(
+                        item_ref = %verified.resolved.canonical_ref,
+                        "static item verification attestation cache hit"
+                    );
+                    emit_static_verification_cache_metric(
+                        StaticVerificationCacheOutcome::Hit,
+                        StaticVerificationCacheReason::Ready,
+                    );
+                    return Ok(verified);
+                }
+                Some(Err(pending)) => {
+                    let mut completed = pending
+                        .result
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    while completed.is_none() {
+                        completed = pending
+                            .ready
+                            .wait(completed)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                    match completed
+                        .as_ref()
+                        .expect("completed static verification fill has an outcome")
+                    {
+                        Ok(evidence) => {
+                            let verified = VerifiedItem {
+                                resolved: item,
+                                signer: evidence.signer.clone(),
+                                trust_class: evidence.trust_class,
+                                pinned_version: evidence.pinned_version.clone(),
+                            };
+                            emit_static_verification_cache_metric(
+                                StaticVerificationCacheOutcome::Hit,
+                                StaticVerificationCacheReason::SingleFlight,
+                            );
+                            return Ok(verified);
+                        }
+                        Err(error) => return Err(EngineError::Shared(error.clone())),
+                    }
+                }
+                None => break None,
+            }
+        };
+        if pending_owner.is_none() {
+            emit_static_verification_cache_metric(
+                StaticVerificationCacheOutcome::Bypass,
+                StaticVerificationCacheReason::PendingCapacity,
+            );
+            return crate::trust::verify_resolved_item_content_with_hash(
+                item,
+                source,
+                &current_content_hash,
+                &request_authority.trust_store,
             );
         }
-        result
+        let pending_owner = pending_owner.expect("checked above");
+        let fill_guard = StaticVerificationFillGuard {
+            key: key.clone(),
+            pending: pending_owner,
+            completed: false,
+        };
+        let verified = match crate::trust::verify_resolved_item_content_with_hash(
+            item,
+            source,
+            &current_content_hash,
+            &request_authority.trust_store,
+        ) {
+            Ok(verified) => verified,
+            Err(error) => return Err(EngineError::Shared(fill_guard.fail(error))),
+        };
+        let evidence = Arc::new(StaticVerificationEvidence {
+            signer: verified.signer.clone(),
+            trust_class: verified.trust_class,
+            pinned_version: verified.pinned_version.clone(),
+        });
+        {
+            let mut cache = static_verification_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !cache.slots.contains_key(&key) {
+                while cache.slots.len() >= STATIC_VERIFICATION_CACHE_CAPACITY {
+                    let Some(oldest) = cache.lru.pop_front() else {
+                        break;
+                    };
+                    cache.slots.remove(&oldest);
+                }
+                cache.lru.push_back(key.clone());
+                cache.slots.insert(
+                    key.clone(),
+                    StaticVerificationCacheEntry {
+                        evidence: evidence.clone(),
+                        last_touched: Instant::now(),
+                    },
+                );
+            }
+        }
+        fill_guard.finish(evidence);
+        emit_static_verification_cache_metric(
+            StaticVerificationCacheOutcome::Miss,
+            StaticVerificationCacheReason::Cold,
+        );
+        tracing::debug!(
+            item_ref = %verified.resolved.canonical_ref,
+            trust_class = ?verified.trust_class,
+            "verified item"
+        );
+        Ok(verified)
+    }
+
+    fn attested_subject_digest(
+        &self,
+        item: &ResolvedItem,
+        project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<String, EngineError> {
+        let resolution_root_identity = match subject_resolution_authority {
+            SubjectResolutionAuthority::Projectless => serde_json::Value::Null,
+            SubjectResolutionAuthority::LiveFs => {
+                serde_json::to_value(project_root.ok_or_else(|| {
+                    EngineError::Internal("live attestation has no canonical project root".into())
+                })?)
+                .map_err(|error| EngineError::Internal(error.to_string()))?
+            }
+            SubjectResolutionAuthority::PinnedGeneration { snapshot_hash } => {
+                serde_json::json!({"snapshot_hash": snapshot_hash})
+            }
+            SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash,
+                current_operational_generation,
+            } => serde_json::json!({
+                "base_snapshot_hash": base_snapshot_hash,
+                "current_operational_generation": current_operational_generation,
+            }),
+        };
+        let stable_subject_root = match subject_resolution_authority {
+            SubjectResolutionAuthority::Projectless => None,
+            SubjectResolutionAuthority::LiveFs => project_root,
+            SubjectResolutionAuthority::PinnedGeneration { .. }
+            | SubjectResolutionAuthority::CowWorkspace { .. } => {
+                item.materialized_project_root.as_deref().or(project_root)
+            }
+        };
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "verified_subject_digest": self.resolved_subject_digest(item, stable_subject_root)?,
+            "subject_resolution_authority": subject_resolution_authority,
+            "resolution_root_identity": resolution_root_identity,
+        });
+        let canonical = lillux::canonical_json(&value)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    fn resolution_closure_digest(
+        &self,
+        output: &crate::resolution::ResolutionOutput,
+        probed_absent: &[crate::contracts::ProbedAbsence],
+        resolution_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
+    ) -> Result<String, EngineError> {
+        let stable_path = |path: &Path| {
+            resolution_root
+                .and_then(|root| path.strip_prefix(root).ok())
+                .map(|relative| serde_json::json!({"project_relative": relative}))
+                .unwrap_or_else(|| serde_json::json!({"exact": path}))
+        };
+        let stable_item = |item: &crate::resolution::ResolvedAncestor| {
+            let mut value = serde_json::to_value(item)
+                .map_err(|error| EngineError::Internal(error.to_string()))?;
+            let object = value.as_object_mut().ok_or_else(|| {
+                EngineError::Internal(
+                    "resolution ancestor did not serialize to an object".to_string(),
+                )
+            })?;
+            object.insert("source_path".to_string(), stable_path(&item.source_path));
+            Ok::<_, EngineError>(value)
+        };
+        let root = stable_item(&output.root)?;
+        let ancestors = output
+            .ancestors
+            .iter()
+            .map(stable_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        let referenced_items = output
+            .referenced_items
+            .iter()
+            .map(stable_item)
+            .collect::<Result<Vec<_>, _>>()?;
+        let references_edges = output
+            .references_edges
+            .iter()
+            .map(|edge| {
+                let mut value = serde_json::to_value(edge)
+                    .map_err(|error| EngineError::Internal(error.to_string()))?;
+                let object = value.as_object_mut().ok_or_else(|| {
+                    EngineError::Internal(
+                        "resolution edge did not serialize to an object".to_string(),
+                    )
+                })?;
+                object.insert(
+                    "from_source_path".to_string(),
+                    stable_path(&edge.from_source_path),
+                );
+                object.insert(
+                    "to_source_path".to_string(),
+                    stable_path(&edge.to_source_path),
+                );
+                Ok::<_, EngineError>(value)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let absences = probed_absent
+            .iter()
+            .map(|absence| {
+                serde_json::json!({
+                    "space": absence.space,
+                    "path": stable_path(&absence.path),
+                })
+            })
+            .collect::<Vec<_>>();
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "engine_generation_identity": self.request_engine_generation_identity(),
+            "subject_resolution_authority": subject_resolution_authority,
+            "root": root,
+            "ancestors": ancestors,
+            "references_edges": references_edges,
+            "referenced_items": referenced_items,
+            "step_outputs": &output.step_outputs,
+            "effective_trust_class": output.effective_trust_class,
+            "composed": &output.composed,
+            "probed_absent": absences,
+        });
+        let canonical = lillux::canonical_json(&value)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    fn resolved_subject_digest(
+        &self,
+        item: &ResolvedItem,
+        project_root: Option<&Path>,
+    ) -> Result<String, EngineError> {
+        let source_path =
+            self.stable_subject_path(&item.source_path, item.source_space, project_root);
+        let shadowed = item
+            .shadowed
+            .iter()
+            .map(|candidate| {
+                serde_json::json!({
+                    "label": &candidate.label,
+                    "space": candidate.space,
+                    "path": self.stable_subject_path(
+                        &candidate.path,
+                        candidate.space,
+                        project_root,
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        let probed_absent = item
+            .probed_absent
+            .iter()
+            .map(|absence| {
+                serde_json::json!({
+                    "space": absence.space,
+                    "path": self.stable_subject_path(
+                        &absence.path,
+                        absence.space,
+                        project_root,
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
+        let materialized_project_root = match item.materialized_project_root.as_deref() {
+            None => serde_json::Value::Null,
+            Some(materialized) if Some(materialized) == project_root => {
+                serde_json::json!({"matches_context_root": true})
+            }
+            Some(materialized) => {
+                serde_json::json!({"matches_context_root": false, "exact": materialized})
+            }
+        };
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "canonical_ref": item.canonical_ref.to_string(),
+            "kind": &item.kind,
+            "source_path": source_path,
+            "source_space": item.source_space,
+            "resolved_from": &item.resolved_from,
+            "shadowed": shadowed,
+            "probed_absent": probed_absent,
+            "materialized_project_root": materialized_project_root,
+            "subject_resolution_authority": &item.subject_resolution_authority,
+            "raw_content_digest": &item.raw_content_digest,
+            "content_hash": &item.content_hash,
+            "signature_header": &item.signature_header,
+            "source_format": &item.source_format,
+            "metadata": &item.metadata,
+        });
+        let canonical = lillux::canonical_json(&value)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    fn engine_resolved_subject_proof_key(
+        &self,
+        item: &ResolvedItem,
+        project_root: Option<&Path>,
+    ) -> Result<String, EngineError> {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "engine_generation_identity": self.request_engine_generation_identity(),
+            "subject_digest": self.resolved_subject_digest(item, project_root)?,
+        });
+        let canonical = lillux::canonical_json(&value)
+            .map_err(|error| EngineError::Internal(error.to_string()))?;
+        Ok(lillux::sha256_hex(canonical.as_bytes()))
+    }
+
+    fn record_engine_resolved_subject(
+        &self,
+        item: &ResolvedItem,
+        project_root: Option<&Path>,
+    ) -> Result<(), EngineError> {
+        let key = self.engine_resolved_subject_proof_key(item, project_root)?;
+        let now = Instant::now();
+        let mut proofs = engine_resolved_subject_proofs()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let stale = proofs
+            .slots
+            .iter()
+            .filter(|(_, touched)| {
+                now.duration_since(**touched) >= ENGINE_RESOLVED_SUBJECT_PROOF_IDLE_TTL
+            })
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for stale_key in stale {
+            proofs.slots.remove(&stale_key);
+            if let Some(position) = proofs
+                .lru
+                .iter()
+                .position(|candidate| candidate == &stale_key)
+            {
+                proofs.lru.remove(position);
+            }
+        }
+        if !proofs.slots.contains_key(&key) {
+            while proofs.slots.len() >= ENGINE_RESOLVED_SUBJECT_PROOF_CAPACITY {
+                let Some(oldest) = proofs.lru.pop_front() else {
+                    break;
+                };
+                proofs.slots.remove(&oldest);
+            }
+        } else if let Some(position) = proofs.lru.iter().position(|candidate| candidate == &key) {
+            proofs.lru.remove(position);
+        }
+        proofs.slots.insert(key.clone(), now);
+        proofs.lru.push_back(key);
+        Ok(())
+    }
+
+    fn ensure_engine_resolved_subject(
+        &self,
+        item: &ResolvedItem,
+        context: &PlanContext,
+    ) -> Result<(), EngineError> {
+        let project_root = project_root_from_context(context);
+        let key = self.engine_resolved_subject_proof_key(item, project_root)?;
+        let proof_is_current = {
+            let mut proofs = engine_resolved_subject_proofs()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match proofs.slots.get(&key).copied() {
+                Some(touched) if touched.elapsed() < ENGINE_RESOLVED_SUBJECT_PROOF_IDLE_TTL => {
+                    proofs.slots.insert(key.clone(), Instant::now());
+                    if let Some(position) =
+                        proofs.lru.iter().position(|candidate| candidate == &key)
+                    {
+                        proofs.lru.remove(position);
+                    }
+                    proofs.lru.push_back(key.clone());
+                    true
+                }
+                Some(_) => {
+                    proofs.slots.remove(&key);
+                    if let Some(position) =
+                        proofs.lru.iter().position(|candidate| candidate == &key)
+                    {
+                        proofs.lru.remove(position);
+                    }
+                    false
+                }
+                None => false,
+            }
+        };
+        if proof_is_current {
+            return Ok(());
+        }
+        // Bounded proof-cache eviction is never an authority failure. Re-run
+        // the canonical resolver and require an exact subject digest before
+        // minting the opaque attestation.
+        let current = self.resolve(context, &item.canonical_ref)?;
+        let current_digest = self.resolved_subject_digest(&current, project_root)?;
+        let supplied_digest = self.resolved_subject_digest(item, project_root)?;
+        if current_digest != supplied_digest {
+            return Err(EngineError::Internal(
+                "verified artifact attestation subject was not produced by the current engine resolution"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn stable_subject_path(
+        &self,
+        path: &Path,
+        space: crate::contracts::ItemSpace,
+        project_root: Option<&Path>,
+    ) -> serde_json::Value {
+        if space == crate::contracts::ItemSpace::Project {
+            if let Some(relative) = project_root.and_then(|root| path.strip_prefix(root).ok()) {
+                return serde_json::json!({"space": "project", "relative": relative});
+            }
+        } else if let Some((index, relative)) =
+            self.bundle_roots
+                .iter()
+                .enumerate()
+                .find_map(|(index, root)| {
+                    path.strip_prefix(root)
+                        .ok()
+                        .map(|relative| (index, relative))
+                })
+        {
+            return serde_json::json!({
+                "space": "bundle",
+                "root_index": index,
+                "relative": relative,
+            });
+        }
+        // Synthetic/test engines and explicitly external sources retain their
+        // exact path. This cannot create a false cross-root cache hit.
+        serde_json::json!({"space": space, "exact": path})
     }
 
     /// Resolve, verify, compose, and return an effective item value.
@@ -707,7 +2975,10 @@ impl Engine {
 
         let roots = self.resolution_roots(request.project_root.clone());
         let project_root = request.project_root.as_deref();
-        let request_snapshot = self.effective_request_snapshot_current(project_root)?;
+        let request_snapshot = self.effective_request_snapshot_current(
+            project_root,
+            &request.subject_resolution_authority,
+        )?;
         let output = crate::resolution::run_effective_item_pipeline(
             &request.item_ref,
             &self.kinds,
@@ -716,45 +2987,7 @@ impl Engine {
             &request_snapshot.trust_store,
             &self.composers,
         )
-        .map_err(|e| {
-            // Map resolution pipeline errors to typed effective-item
-            // error variants so consumers can branch on error code.
-            use crate::resolution::ResolutionError;
-            match &e {
-                ResolutionError::StepFailed { .. } => EngineError::EffectiveItemCompositionFailed {
-                    canonical_ref: ref_str.clone(),
-                    reason: e.to_string(),
-                },
-                ResolutionError::CycleDetected { .. }
-                | ResolutionError::MaxDepthExceeded { .. } => {
-                    EngineError::EffectiveItemCompositionFailed {
-                        canonical_ref: ref_str.clone(),
-                        reason: e.to_string(),
-                    }
-                }
-                ResolutionError::IntegrityFailure { reason, .. } => {
-                    EngineError::EffectiveItemUntrusted {
-                        canonical_ref: ref_str.clone(),
-                        fingerprint: reason.clone(),
-                    }
-                }
-                ResolutionError::MissingItem { item_ref, .. } => {
-                    EngineError::EffectiveItemNotFound {
-                        canonical_ref: item_ref.clone(),
-                    }
-                }
-                ResolutionError::ComposedValueContractViolation {
-                    item_ref, report, ..
-                } => EngineError::ComposedValueContractViolation {
-                    canonical_ref: item_ref.clone(),
-                    report: report.clone(),
-                },
-                _ => EngineError::EffectiveItemCompositionFailed {
-                    canonical_ref: ref_str.clone(),
-                    reason: e.to_string(),
-                },
-            }
-        })?;
+        .map_err(|error| resolution_error_to_engine(error, &request.item_ref))?;
 
         let trust_class = output.effective_trust_class;
         let trusted = matches!(
@@ -847,7 +3080,10 @@ impl Engine {
             _ => None,
         };
         let roots = self.resolution_roots(project_root.clone());
-        let request_snapshot = self.effective_request_snapshot_current(project_root.as_deref())?;
+        let request_snapshot = self.effective_request_snapshot_current(
+            project_root.as_deref(),
+            &ctx.subject_resolution_authority,
+        )?;
 
         crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
             item,
@@ -861,6 +3097,72 @@ impl Engine {
             trust_store: &request_snapshot.trust_store,
             node_trust_store: &self.node_trust_store,
             host_env: &self.host_env,
+            project_authority: None,
+        })
+    }
+
+    /// Build an execution plan whose root, executor chain, project config, and
+    /// precedence probes are all sourced from one admitted project-content
+    /// authority.
+    pub fn build_plan_under_admitted_authority(
+        &self,
+        ctx: &PlanContext,
+        item: &VerifiedItem,
+        parameters: &Value,
+        hints: &ExecutionHints,
+        project_root: &Path,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<ExecutionPlan, EngineError> {
+        self.checked_bundle_generation(|| {
+            crate::scope::check_execution_scope(&ctx.requested_by)?;
+            admitted.validate_root_binding(project_root)?;
+            if item.resolved.subject_resolution_authority != ctx.subject_resolution_authority {
+                return Err(EngineError::Internal(
+                    "verified plan root carries different admitted subject authority".to_string(),
+                ));
+            }
+            if item.resolved.source_space == crate::contracts::ItemSpace::Project
+                && !admitted.validate_project_file_for_root(
+                    project_root,
+                    &item.resolved.source_path,
+                    &item.resolved.content_hash,
+                )?
+            {
+                return Err(EngineError::Internal(
+                    "verified plan root differs from admitted project content".to_string(),
+                ));
+            }
+            for absence in item
+                .resolved
+                .probed_absent
+                .iter()
+                .filter(|absence| absence.space == crate::contracts::ItemSpace::Project)
+            {
+                if !admitted.validate_project_absence_for_root(project_root, &absence.path)? {
+                    return Err(EngineError::Internal(format!(
+                        "verified plan root absence {} differs from admitted project content",
+                        absence.path.display()
+                    )));
+                }
+            }
+            let request_snapshot =
+                self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
+            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let project_content = admitted.project_content_for_root(project_root)?;
+            crate::plan_builder::build_plan(crate::plan_builder::BuildPlanInput {
+                item,
+                parameters,
+                hints,
+                ctx,
+                kinds: &self.kinds,
+                parsers: &request_snapshot.parser_dispatcher,
+                roots: &roots,
+                registry_fingerprint: &request_snapshot.registry_fingerprint,
+                trust_store: &request_snapshot.trust_store,
+                node_trust_store: &self.node_trust_store,
+                host_env: &self.host_env,
+                project_authority: Some((project_root, project_content)),
+            })
         })
     }
 
@@ -877,6 +3179,7 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         self.checked_bundle_generation(|| {
             self.resolve_terminal_executor_current(
@@ -884,6 +3187,36 @@ impl Engine {
                 root_executor_id,
                 root_kind,
                 project_root,
+                subject_resolution_authority,
+            )
+        })
+    }
+
+    /// Resolve the typed executor terminal under admitted project content.
+    pub fn resolve_terminal_executor_under_admitted_authority(
+        &self,
+        root_source_path: &Path,
+        root_executor_id: &str,
+        root_kind: &str,
+        project_root: &Path,
+        admitted: &AdmittedRequestAuthoritySnapshot,
+    ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
+        self.checked_bundle_generation(|| {
+            admitted.validate_root_binding(project_root)?;
+            let request_snapshot =
+                self.effective_request_snapshot_under_admitted_authority(project_root, admitted)?;
+            let roots = self.resolution_roots(Some(project_root.to_path_buf()));
+            let project_content = admitted.project_content_for_root(project_root)?;
+            crate::plan_builder::resolve_terminal_executor_under_project_authority(
+                root_executor_id,
+                root_source_path,
+                root_kind,
+                &self.kinds,
+                &request_snapshot.parser_dispatcher,
+                &roots,
+                &request_snapshot.trust_store,
+                project_root,
+                project_content,
             )
         })
     }
@@ -894,9 +3227,13 @@ impl Engine {
         root_executor_id: &str,
         root_kind: &str,
         project_root: Option<PathBuf>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<crate::plan_builder::ResolvedTerminalExecutor, EngineError> {
         let roots = self.resolution_roots(project_root.clone());
-        let request_snapshot = self.effective_request_snapshot_current(project_root.as_deref())?;
+        let request_snapshot = self.effective_request_snapshot_current(
+            project_root.as_deref(),
+            subject_resolution_authority,
+        )?;
         crate::plan_builder::resolve_terminal_executor(
             root_executor_id,
             root_source_path,
@@ -947,14 +3284,17 @@ impl Engine {
         ResolutionRoots::from_flat(project_ai, system_ai)
     }
 
-    /// Add operator configuration to launch-config lookup only. Keeping this
+    /// Add node-local configuration to launch-config lookup only. Keeping this
     /// separate prevents mutable node state from becoming a general item root.
     pub fn launch_config_roots(&self, roots: &ResolutionRoots) -> ResolutionRoots {
         let mut ordered = roots.ordered.clone();
-        let Some(operator_ai_root) = &self.operator_ai_root else {
+        let Some(node_config_ai_root) = &self.node_config_ai_root else {
             return ResolutionRoots { ordered };
         };
-        if ordered.iter().any(|root| root.ai_root == *operator_ai_root) {
+        if ordered
+            .iter()
+            .any(|root| root.ai_root == *node_config_ai_root)
+        {
             return ResolutionRoots { ordered };
         }
         let position = ordered
@@ -964,9 +3304,9 @@ impl Engine {
         ordered.insert(
             position,
             ResolutionRoot {
-                space: crate::contracts::ItemSpace::Project,
-                label: "operator".to_string(),
-                ai_root: operator_ai_root.clone(),
+                space: crate::contracts::ItemSpace::Node,
+                label: "node-config".to_string(),
+                ai_root: node_config_ai_root.clone(),
             },
         );
         ResolutionRoots { ordered }
@@ -974,8 +3314,8 @@ impl Engine {
 
     /// Composite cache fingerprint over the kind registry and the
     /// **boot-time** parser tool registry. Use
-    /// `effective_registry_fingerprint(project_root)` for per-request
-    /// fingerprints that include the project's parser overlay.
+    /// `effective_registry_fingerprint(project_root, authority)` for
+    /// per-request fingerprints that include the project's parser overlay.
     pub fn registry_fingerprint(&self) -> String {
         self.fingerprint_for(self.parser_dispatcher.parser_tools.fingerprint())
     }
@@ -988,9 +3328,10 @@ impl Engine {
     pub fn effective_registry_fingerprint(
         &self,
         project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<String, EngineError> {
         Ok(self
-            .effective_request_snapshot(project_root)?
+            .effective_request_snapshot(project_root, subject_resolution_authority)?
             .registry_fingerprint)
     }
 
@@ -1027,9 +3368,10 @@ impl Engine {
     pub fn effective_parser_dispatcher(
         &self,
         project_root: Option<&Path>,
+        subject_resolution_authority: &SubjectResolutionAuthority,
     ) -> Result<ParserDispatcher, EngineError> {
         Ok(self
-            .effective_request_snapshot(project_root)?
+            .effective_request_snapshot(project_root, subject_resolution_authority)?
             .parser_dispatcher)
     }
 
@@ -1249,11 +3591,146 @@ formats:
                 scopes: vec!["execute".into()],
             }),
             project_context: ProjectContext::None,
+            subject_resolution_authority: SubjectResolutionAuthority::Projectless,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
             validate_only: false,
         }
+    }
+
+    fn immutable_request_fixture() -> Arc<EffectiveRequestSnapshot> {
+        Arc::new(EffectiveRequestSnapshot {
+            trust_store: TrustStore::empty(),
+            parser_dispatcher: crate::parsers::dispatcher::ParserDispatcher::new(
+                crate::parsers::registry::ParserRegistry::empty(),
+                Arc::new(crate::handlers::registry::HandlerRegistry::empty()),
+            ),
+            registry_fingerprint: "registry".to_string(),
+            effective_trust_identity: "trust".to_string(),
+            request_engine_generation_identity: "engine".to_string(),
+            subject_resolution_authority: SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: "a".repeat(64),
+            },
+        })
+    }
+
+    #[test]
+    fn immutable_request_pending_publishes_one_shared_result_and_cleans_up() {
+        let cache = Arc::new(Mutex::new(ImmutableRequestSnapshotCache::default()));
+        let pending = Arc::new(ImmutableRequestSnapshotPending::default());
+        cache
+            .lock()
+            .unwrap()
+            .pending
+            .insert("key".to_string(), Arc::clone(&pending));
+        let request = immutable_request_fixture();
+        let guard = ImmutableRequestSnapshotFillGuard {
+            cache: Arc::clone(&cache),
+            key: "key".to_string(),
+            pending: Arc::clone(&pending),
+            completed: false,
+        };
+        guard.finish(Arc::clone(&request));
+        assert!(cache.lock().unwrap().pending.is_empty());
+        let published = pending
+            .result
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|result| result.as_ref().ok().cloned())
+            .unwrap();
+        assert!(Arc::ptr_eq(&request, &published));
+    }
+
+    #[test]
+    fn immutable_request_single_flight_wakes_a_concurrent_waiter_with_the_exact_result() {
+        let cache = Arc::new(Mutex::new(ImmutableRequestSnapshotCache::default()));
+        let pending = Arc::new(ImmutableRequestSnapshotPending::default());
+        cache
+            .lock()
+            .unwrap()
+            .pending
+            .insert("concurrent-key".to_string(), Arc::clone(&pending));
+        let waiter_pending = Arc::clone(&pending);
+        let waiter = std::thread::spawn(move || {
+            let mut completed = waiter_pending.result.lock().unwrap();
+            while completed.is_none() {
+                completed = waiter_pending.ready.wait(completed).unwrap();
+            }
+            completed.as_ref().unwrap().as_ref().unwrap().clone()
+        });
+        let request = immutable_request_fixture();
+        ImmutableRequestSnapshotFillGuard {
+            cache: Arc::clone(&cache),
+            key: "concurrent-key".to_string(),
+            pending,
+            completed: false,
+        }
+        .finish(Arc::clone(&request));
+        let waited = waiter.join().unwrap();
+        assert!(Arc::ptr_eq(&request, &waited));
+        assert!(cache.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn static_verification_single_flight_wakes_a_concurrent_waiter_with_exact_evidence() {
+        let key = format!(
+            "static-concurrent-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let pending = Arc::new(StaticVerificationPending::default());
+        static_verification_cache()
+            .lock()
+            .unwrap()
+            .pending
+            .insert(key.clone(), Arc::clone(&pending));
+        let waiter_pending = Arc::clone(&pending);
+        let waiter = std::thread::spawn(move || {
+            let mut completed = waiter_pending.result.lock().unwrap();
+            while completed.is_none() {
+                completed = waiter_pending.ready.wait(completed).unwrap();
+            }
+            completed.as_ref().unwrap().as_ref().unwrap().clone()
+        });
+        let evidence = Arc::new(StaticVerificationEvidence {
+            signer: None,
+            trust_class: TrustClass::Unsigned,
+            pinned_version: None,
+        });
+        StaticVerificationFillGuard {
+            key,
+            pending,
+            completed: false,
+        }
+        .finish(Arc::clone(&evidence));
+        let waited = waiter.join().unwrap();
+        assert!(Arc::ptr_eq(&evidence, &waited));
+    }
+
+    #[test]
+    fn immutable_request_failed_fill_publishes_one_shared_error() {
+        let cache = Arc::new(Mutex::new(ImmutableRequestSnapshotCache::default()));
+        let pending = Arc::new(ImmutableRequestSnapshotPending::default());
+        cache
+            .lock()
+            .unwrap()
+            .pending
+            .insert("key".to_string(), Arc::clone(&pending));
+        drop(ImmutableRequestSnapshotFillGuard {
+            cache: Arc::clone(&cache),
+            key: "key".to_string(),
+            pending: Arc::clone(&pending),
+            completed: false,
+        });
+        assert!(cache.lock().unwrap().pending.is_empty());
+        let result = pending.result.lock().unwrap();
+        let Some(Err(first)) = result.as_ref() else {
+            panic!("failed fill must publish an error");
+        };
+        let second = first.clone();
+        assert!(Arc::ptr_eq(first, &second));
     }
 
     fn tempdir() -> PathBuf {
@@ -1280,22 +3757,23 @@ formats:
     }
 
     #[test]
-    fn operator_root_is_added_only_to_launch_config_precedence() {
-        let engine = test_engine().with_operator_ai_root(PathBuf::from("/operator/.ai"));
+    fn node_config_root_is_added_only_to_launch_config_precedence() {
+        let engine = test_engine().with_node_config_ai_root(PathBuf::from("/node-config/.ai"));
         let ordinary = engine.resolution_roots(Some(PathBuf::from("/project")));
         assert_eq!(ordinary.ordered.len(), engine.bundle_roots.len() + 1);
         assert!(!ordinary
             .ordered
             .iter()
-            .any(|root| root.ai_root == Path::new("/operator/.ai")));
+            .any(|root| root.ai_root == Path::new("/node-config/.ai")));
+        assert!(!ordinary
+            .ordered
+            .iter()
+            .any(|root| root.space == crate::contracts::ItemSpace::Node));
 
         let launch = engine.launch_config_roots(&ordinary);
         assert_eq!(launch.ordered[0].label, "project");
-        assert_eq!(launch.ordered[1].label, "operator");
-        assert_eq!(
-            launch.ordered[1].space,
-            crate::contracts::ItemSpace::Project
-        );
+        assert_eq!(launch.ordered[1].label, "node-config");
+        assert_eq!(launch.ordered[1].space, crate::contracts::ItemSpace::Node);
     }
 
     #[test]
@@ -1440,6 +3918,7 @@ formats:
             project_context: ProjectContext::LocalPath {
                 path: project_dir.clone(),
             },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1532,6 +4011,7 @@ formats:
                 scopes: vec!["execute".into()],
             }),
             project_context: ProjectContext::LocalPath { path: project_dir },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1575,6 +4055,7 @@ formats:
                 scopes: vec!["execute".into()],
             }),
             project_context: ProjectContext::LocalPath { path: project_dir },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1587,6 +4068,153 @@ formats:
 
         assert_eq!(verified.trust_class, TrustClass::Unsigned);
         assert!(verified.signer.is_none());
+    }
+
+    #[test]
+    fn static_verification_cache_rehashes_live_source_before_hit() {
+        let project_dir = tempdir();
+        let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
+        let tool_dir = project_dir.join(AI_DIR).join("tools");
+        fs::create_dir_all(&tool_dir).unwrap();
+        let tool_path = tool_dir.join("hello.py");
+        fs::write(
+            &tool_path,
+            "# ryeos-tool:\n#   note: hello\nprint('hello')\n",
+        )
+        .unwrap();
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        );
+        let ctx = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp:test".into(),
+                scopes: vec!["execute".into()],
+            }),
+            project_context: ProjectContext::LocalPath { path: project_dir },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            execution_hints: ExecutionHints::default(),
+            validate_only: false,
+        };
+        let resolved = engine
+            .resolve(&ctx, &CanonicalRef::parse("tool:hello").unwrap())
+            .unwrap();
+        engine.verify(&ctx, resolved.clone()).unwrap();
+        fs::write(
+            &tool_path,
+            "# ryeos-tool:\n#   note: replaced\nprint('changed')\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            engine.verify(&ctx, resolved),
+            Err(EngineError::ContentHashMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn verified_attestation_refuses_different_subject_authority() {
+        let project_dir = tempdir();
+        let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
+        let tool_dir = project_dir.join(AI_DIR).join("tools");
+        fs::create_dir_all(&tool_dir).unwrap();
+        fs::write(
+            tool_dir.join("hello.py"),
+            "# ryeos-tool:\n#   note: hello\nprint('hello')\n",
+        )
+        .unwrap();
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        );
+        let ctx = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp:test".into(),
+                scopes: vec!["execute".into()],
+            }),
+            project_context: ProjectContext::LocalPath { path: project_dir },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            execution_hints: ExecutionHints::default(),
+            validate_only: false,
+        };
+        let resolved = engine
+            .resolve(&ctx, &CanonicalRef::parse("tool:hello").unwrap())
+            .unwrap();
+        let attestation = engine.verify_attested(&ctx, resolved).unwrap();
+        assert!(engine
+            .consume_verified_attestation(
+                &ctx,
+                &attestation,
+                &SubjectResolutionAuthority::PinnedGeneration {
+                    snapshot_hash: "a".repeat(64),
+                },
+            )
+            .is_err());
+
+        let mut substituted_context = ctx.clone();
+        substituted_context.subject_resolution_authority =
+            SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: "a".repeat(64),
+            };
+        assert!(engine
+            .consume_verified_attestation(
+                &substituted_context,
+                &attestation,
+                &SubjectResolutionAuthority::LiveFs,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn verified_attestation_refuses_caller_modified_resolution_metadata() {
+        let project_dir = tempdir();
+        let kinds_dir = tempdir();
+        let ts = test_trust_store();
+        write_signed_tool_schema(&kinds_dir);
+        let kinds = KindRegistry::load_base(&[kinds_dir], &ts).unwrap();
+        let tool_dir = project_dir.join(AI_DIR).join("tools");
+        fs::create_dir_all(&tool_dir).unwrap();
+        fs::write(
+            tool_dir.join("hello.py"),
+            "# ryeos-tool:\n#   note: hello\nprint('hello')\n",
+        )
+        .unwrap();
+        let engine = Engine::new(
+            kinds,
+            crate::parsers::test_helpers::dispatcher_with_canonical_bundle_descriptors(),
+            vec![],
+        );
+        let ctx = PlanContext {
+            requested_by: EffectivePrincipal::Local(Principal {
+                fingerprint: "fp:test".into(),
+                scopes: vec!["execute".into()],
+            }),
+            project_context: ProjectContext::LocalPath { path: project_dir },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
+            current_site_id: "site:test".into(),
+            origin_site_id: "site:test".into(),
+            execution_hints: ExecutionHints::default(),
+            validate_only: false,
+        };
+        let mut resolved = engine
+            .resolve(&ctx, &CanonicalRef::parse("tool:hello").unwrap())
+            .unwrap();
+        resolved
+            .metadata
+            .extra
+            .insert("fabricated".to_owned(), serde_json::json!(true));
+        assert!(engine.verify_attested(&ctx, resolved).is_err());
     }
 
     #[test]
@@ -1620,6 +4248,7 @@ formats:
                 scopes: vec!["execute".into()],
             }),
             project_context: ProjectContext::LocalPath { path: project_dir },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1688,6 +4317,7 @@ formats:
             project_context: ProjectContext::LocalPath {
                 path: project_dir.clone(),
             },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1743,6 +4373,7 @@ formats:
                 scopes: vec!["execute".into()],
             }),
             project_context: ProjectContext::LocalPath { path: project_dir },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -1768,14 +4399,18 @@ formats:
     #[test]
     fn effective_dispatcher_no_project_root_returns_boot_clone() {
         let engine = test_engine();
-        let effective = engine.effective_parser_dispatcher(None).unwrap();
+        let effective = engine
+            .effective_parser_dispatcher(None, &SubjectResolutionAuthority::Projectless)
+            .unwrap();
         assert_eq!(
             effective.parser_tools.fingerprint(),
             engine.parser_dispatcher.parser_tools.fingerprint(),
             "no-project effective dispatcher must mirror boot fingerprint"
         );
         assert_eq!(
-            engine.effective_registry_fingerprint(None).unwrap(),
+            engine
+                .effective_registry_fingerprint(None, &SubjectResolutionAuthority::Projectless,)
+                .unwrap(),
             engine.registry_fingerprint(),
             "no-project effective composite fingerprint must equal boot fingerprint"
         );
@@ -1886,7 +4521,9 @@ formats:
         .with_trust_store(ts);
 
         let boot_fp = engine.registry_fingerprint();
-        let no_project_fp = engine.effective_registry_fingerprint(None).unwrap();
+        let no_project_fp = engine
+            .effective_registry_fingerprint(None, &SubjectResolutionAuthority::Projectless)
+            .unwrap();
         assert_eq!(boot_fp, no_project_fp);
 
         // Project ships a parser descriptor that shadows
@@ -1904,7 +4541,7 @@ formats:
         );
 
         let with_project_fp = engine
-            .effective_registry_fingerprint(Some(&project_dir))
+            .effective_registry_fingerprint(Some(&project_dir), &SubjectResolutionAuthority::LiveFs)
             .expect("effective fingerprint with project root");
 
         assert_ne!(
@@ -1917,7 +4554,7 @@ formats:
         // And the dispatcher itself MUST carry the overlay's
         // descriptor — same canonical ref, project's version string.
         let effective = engine
-            .effective_parser_dispatcher(Some(&project_dir))
+            .effective_parser_dispatcher(Some(&project_dir), &SubjectResolutionAuthority::LiveFs)
             .unwrap();
         let descriptor = effective
             .parser_tools
@@ -1992,6 +4629,7 @@ formats:
             project_context: ProjectContext::LocalPath {
                 path: project_dir.clone(),
             },
+            subject_resolution_authority: SubjectResolutionAuthority::LiveFs,
             current_site_id: "site:test".into(),
             origin_site_id: "site:test".into(),
             execution_hints: ExecutionHints::default(),
@@ -2039,7 +4677,7 @@ formats:
         .with_trust_store(ts);
 
         let snapshot = engine
-            .effective_request_snapshot(Some(&project_dir))
+            .effective_request_snapshot(Some(&project_dir), &SubjectResolutionAuthority::LiveFs)
             .expect("effective request snapshot loads");
         let via_dispatcher =
             engine.fingerprint_for(snapshot.parser_dispatcher.parser_tools.fingerprint());
@@ -2057,5 +4695,21 @@ formats:
             engine.registry_fingerprint(),
             "test setup must produce a non-trivial overlay shift"
         );
+    }
+
+    #[test]
+    fn effective_snapshot_rejects_root_authority_substitution() {
+        let engine = test_engine();
+        let project_dir = tempdir();
+
+        assert!(engine
+            .effective_request_snapshot(
+                Some(&project_dir),
+                &SubjectResolutionAuthority::Projectless,
+            )
+            .is_err());
+        assert!(engine
+            .effective_request_snapshot(None, &SubjectResolutionAuthority::LiveFs)
+            .is_err());
     }
 }

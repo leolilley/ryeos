@@ -920,13 +920,16 @@ fn typed_object_edges(value: &Value) -> Result<Vec<ObjectEdge>, String> {
                     "admitted_launch_capsule missing project_authority object".to_string()
                 })?;
             if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
-                push_required_object_edge(
-                    &Value::Object(project_authority.clone()),
-                    "snapshot_hash",
-                    ExpectedObject::Kind("project_snapshot"),
-                    None,
-                    &mut edges,
-                )?;
+                let authority = Value::Object(project_authority.clone());
+                for field in ["base_snapshot_hash", "snapshot_hash"] {
+                    push_required_object_edge(
+                        &authority,
+                        field,
+                        ExpectedObject::Kind("project_snapshot"),
+                        None,
+                        &mut edges,
+                    )?;
+                }
             }
         }
         "thread_event" => {
@@ -1171,11 +1174,10 @@ pub fn object_links(value: &Value) -> Result<ObjectLinks, String> {
                     "admitted_launch_capsule missing project_authority object".to_string()
                 })?;
             if project_authority.get("kind").and_then(Value::as_str) == Some("pinned_generation") {
-                push_required_hash(
-                    &Value::Object(project_authority.clone()),
-                    "snapshot_hash",
-                    &mut links.object_hashes,
-                )?;
+                let authority = Value::Object(project_authority.clone());
+                for field in ["base_snapshot_hash", "snapshot_hash"] {
+                    push_required_hash(&authority, field, &mut links.object_hashes)?;
+                }
             }
             let execution_closure = value
                 .get("execution_closure")
@@ -1586,6 +1588,35 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(links.blob_hashes, vec![executable_blob_hash]);
+    }
+
+    #[test]
+    fn admitted_pinned_cow_capsule_reaches_base_and_operational_generations() {
+        let base_snapshot_hash = h("ba");
+        let operational_snapshot_hash = h("cd");
+        let links = object_links(&json!({
+            "kind": "admitted_launch_capsule",
+            "project_authority": {
+                "kind": "pinned_generation",
+                "base_snapshot_hash": base_snapshot_hash,
+                "snapshot_hash": operational_snapshot_hash
+            },
+            "execution_closure": {
+                "driver": "direct_item_executor",
+                "execution_plan": {},
+                "protocol_descriptor_document": "# signed",
+                "command": {
+                    "authority": {
+                        "executable_identity": {
+                            "blob_hash": h("de")
+                        }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert!(links.object_hashes.contains(&base_snapshot_hash));
+        assert!(links.object_hashes.contains(&operational_snapshot_hash));
     }
 
     #[test]

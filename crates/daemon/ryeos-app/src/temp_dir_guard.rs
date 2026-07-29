@@ -5,9 +5,13 @@
 //!
 //! | Owner | What it holds |
 //! |---|---|
-//! | Engine cache entry | `Arc<TempDirGuard>` for user overlay |
+//! | Engine user-overlay cache | `Arc<TempDirGuard>` for its shared overlay |
+//! | Admitted request binding | `Arc<TempDirGuard>` for its active checkout |
 //! | Request runner | `Arc<TempDirGuard>` for project checkout |
 //! | Callback token lifeline | `Arc<TempDirGuard>` (callback workstream) |
+//!
+//! The resolution cache is deliberately different: it retains no project
+//! materialization guard, and rebinds hits to the current admitted checkout.
 //!
 //! The directory is removed recursively when the **last** `Arc` holder
 //! drops. The internal `Mutex<Option<PathBuf>>` allows `disarm()` to
@@ -15,39 +19,58 @@
 //! the dir. Disarm is rare; the common path is just Drop.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+struct PinnedRemoval {
+    parent: lillux::PinnedDirectory,
+    name: std::ffi::OsString,
+    root: lillux::PinnedDirectory,
+}
 
 /// RAII guard for a materialised temp directory. Removes the directory
 /// recursively when the LAST `Arc<TempDirGuard>` drops.
 pub struct TempDirGuard {
     inner: Mutex<Option<PathBuf>>,
+    effective_path: PathBuf,
     leases: Mutex<Vec<std::fs::File>>,
     explicit_cleanup: bool,
     remove_on_drop: bool,
     owns_removal: bool,
+    pinned_removal: Option<PinnedRemoval>,
 }
 
 impl TempDirGuard {
     pub fn new(path: PathBuf) -> Self {
         Self {
-            inner: Mutex::new(Some(path)),
+            inner: Mutex::new(Some(path.clone())),
+            effective_path: path,
             leases: Mutex::new(Vec::new()),
             explicit_cleanup: false,
             remove_on_drop: true,
             owns_removal: true,
+            pinned_removal: None,
         }
     }
 
     /// A backend-owned workspace must be destroyed and descriptor-removed by
     /// its owner-fenced lifecycle before the journal can close.
-    pub fn new_workspace(path: PathBuf) -> Self {
-        Self {
+    pub fn new_workspace(path: PathBuf, effective_path: PathBuf) -> anyhow::Result<Self> {
+        if effective_path.parent() != Some(path.as_path()) {
+            anyhow::bail!(
+                "workspace effective path {} is not a direct child of its owned root {}",
+                effective_path.display(),
+                path.display()
+            );
+        }
+        Ok(Self {
             inner: Mutex::new(Some(path)),
+            effective_path,
             leases: Mutex::new(Vec::new()),
             explicit_cleanup: true,
             remove_on_drop: false,
             owns_removal: true,
-        }
+            pinned_removal: None,
+        })
     }
 
     /// Hold a lease and stable path to a shared derived cache generation.
@@ -55,11 +78,30 @@ impl TempDirGuard {
     /// generation; cache eviction owns deletion after all leases are gone.
     pub fn new_borrowed_cache(path: PathBuf) -> Self {
         Self {
-            inner: Mutex::new(Some(path)),
+            inner: Mutex::new(Some(path.clone())),
+            effective_path: path,
             leases: Mutex::new(Vec::new()),
             explicit_cleanup: false,
             remove_on_drop: false,
             owns_removal: false,
+            pinned_removal: None,
+        }
+    }
+
+    fn new_pinned(
+        parent: lillux::PinnedDirectory,
+        name: std::ffi::OsString,
+        root: lillux::PinnedDirectory,
+    ) -> Self {
+        let path = root.path().to_path_buf();
+        Self {
+            inner: Mutex::new(Some(path.clone())),
+            effective_path: path,
+            leases: Mutex::new(Vec::new()),
+            explicit_cleanup: false,
+            remove_on_drop: true,
+            owns_removal: true,
+            pinned_removal: Some(PinnedRemoval { parent, name, root }),
         }
     }
 
@@ -71,6 +113,14 @@ impl TempDirGuard {
     /// The guarded path, if not yet disarmed.
     pub fn path(&self) -> Option<PathBuf> {
         self.inner.lock().unwrap().clone()
+    }
+
+    /// Whether this still-armed lease owns the exact filesystem view supplied
+    /// to item resolution. Workspace layout names stay in the workspace
+    /// implementation; consumers compare the authority carried by the guard
+    /// instead of reconstructing ownership from path strings.
+    pub fn owns_effective_path(&self, candidate: &std::path::Path) -> bool {
+        self.inner.lock().unwrap().is_some() && self.effective_path == candidate
     }
 
     /// Transfer ownership without removing the directory. Returns the
@@ -90,20 +140,30 @@ impl TempDirGuard {
         let Some(path) = path_slot.as_ref() else {
             return Ok(());
         };
-        let name = path
-            .file_name()
-            .ok_or_else(|| anyhow::anyhow!("guarded directory has no final component"))?;
-        let parent_path = path
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("guarded directory has no parent"))?;
-        let parent = lillux::PinnedDirectory::open(parent_path)?
-            .ok_or_else(|| anyhow::anyhow!("guarded directory parent disappeared"))?;
-        let root = parent
-            .open_child_directory(name)?
-            .ok_or_else(|| anyhow::anyhow!("guarded directory disappeared"))?;
-        root.remove_contents_recursive()?;
-        if !parent.remove_empty_child_if_same(name, &root)? {
-            anyhow::bail!("guarded directory remained non-empty: {}", path.display());
+        if let Some(pinned) = &self.pinned_removal {
+            pinned.root.remove_contents_recursive()?;
+            if !pinned
+                .parent
+                .remove_empty_child_if_same(&pinned.name, &pinned.root)?
+            {
+                anyhow::bail!("guarded directory remained non-empty: {}", path.display());
+            }
+        } else {
+            let path_name = path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("guarded directory has no final component"))?;
+            let parent_path = path
+                .parent()
+                .ok_or_else(|| anyhow::anyhow!("guarded directory has no parent"))?;
+            let opened_parent = lillux::PinnedDirectory::open(parent_path)?
+                .ok_or_else(|| anyhow::anyhow!("guarded directory parent disappeared"))?;
+            let opened_root = opened_parent
+                .open_child_directory(path_name)?
+                .ok_or_else(|| anyhow::anyhow!("guarded directory disappeared"))?;
+            opened_root.remove_contents_recursive()?;
+            if !opened_parent.remove_empty_child_if_same(path_name, &opened_root)? {
+                anyhow::bail!("guarded directory remained non-empty: {}", path.display());
+            }
         }
         *path_slot = None;
         self.leases.lock().unwrap().clear();
@@ -120,7 +180,23 @@ impl Drop for TempDirGuard {
                     "backend workspace guard dropped while still armed; preserving for journal reconciliation"
                 );
             } else if self.remove_on_drop {
-                if let Err(error) = std::fs::remove_dir_all(&p) {
+                let removal = if let Some(pinned) = &self.pinned_removal {
+                    pinned.root.remove_contents_recursive().and_then(|()| {
+                        pinned
+                            .parent
+                            .remove_empty_child_if_same(&pinned.name, &pinned.root)
+                            .and_then(|removed| {
+                                if removed {
+                                    Ok(())
+                                } else {
+                                    anyhow::bail!("pinned temporary directory identity changed")
+                                }
+                            })
+                    })
+                } else {
+                    lillux::remove_dir_all_durable(&p)
+                };
+                if let Err(error) = removal {
                     tracing::warn!(path = %p.display(), %error, "temporary directory cleanup failed");
                 }
             }
@@ -128,10 +204,30 @@ impl Drop for TempDirGuard {
     }
 }
 
+/// Create one projectless execution workspace through descriptor-rooted Lillux
+/// authority. The returned guard retains the exact parent/root inodes and
+/// removes only that identity; pathname re-resolution is never cleanup
+/// authority.
+pub fn create_projectless_workspace(
+    runtime_cache_root: &std::path::Path,
+    workspace_name: &str,
+) -> anyhow::Result<(PathBuf, Arc<TempDirGuard>)> {
+    let execution_root =
+        lillux::PinnedDirectory::open_or_create(&runtime_cache_root.join("executions"))?;
+    execution_root.set_mode(0o700)?;
+    let name = std::ffi::OsString::from(workspace_name);
+    let workspace = execution_root.create_child(&name, 0o700)?;
+    workspace.create_child(std::ffi::OsStr::new(ryeos_engine::AI_DIR), 0o700)?;
+    let path = workspace.path().to_path_buf();
+    let guard = Arc::new(TempDirGuard::new_pinned(execution_root, name, workspace));
+    Ok((path, guard))
+}
+
 impl std::fmt::Debug for TempDirGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TempDirGuard")
             .field("path", &self.path())
+            .field("effective_path", &self.effective_path)
             .finish()
     }
 }
@@ -159,6 +255,28 @@ mod tests {
         // Drop second Arc — dir removed.
         drop(g2);
         assert!(!path.exists(), "dir removed on last Arc drop");
+    }
+
+    #[test]
+    fn workspace_guard_carries_exact_effective_path_authority() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        let effective = root.join("lower");
+        std::fs::create_dir_all(&effective).unwrap();
+        let guard = TempDirGuard::new_workspace(root.clone(), effective.clone()).unwrap();
+
+        assert!(guard.owns_effective_path(&effective));
+        assert!(!guard.owns_effective_path(&root));
+        assert!(!guard.owns_effective_path(&root.join("other")));
+        guard.disarm();
+    }
+
+    #[test]
+    fn workspace_guard_rejects_effective_path_outside_owned_root() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        let foreign = parent.path().join("foreign");
+        assert!(TempDirGuard::new_workspace(root, foreign).is_err());
     }
 
     #[test]

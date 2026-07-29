@@ -61,7 +61,8 @@ fn validate_canonical_capabilities(label: &str, capabilities: &[String]) -> anyh
 // Exact durable launch metadata contract. Changes to any embedded authority
 // shape require a new epoch so startup rejects the old store before nested
 // deserialization can reinterpret (or partially decode) that authority.
-pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 14;
+// v15 carries the pinned COW base/current project-authority pair.
+pub const LAUNCH_METADATA_SCHEMA_VERSION: u32 = 15;
 
 /// Per-thread daemon-owned state directory.
 ///
@@ -459,15 +460,19 @@ impl ResumeContext {
         })
     }
 
-    /// Verify the only authority transition a running continuation may make.
-    /// Ordinary successors inherit the complete admitted launch envelope. A
-    /// pinned COW source may additionally advance to the exact terminal
-    /// generation produced by that source; no other project, principal,
-    /// capability, runtime, or invocation field may drift.
+    /// Verify the exact typed authority transition for a continuation.
+    ///
+    /// Machine/follow successors inherit the complete admitted launch
+    /// envelope. An operator follow-up may replace only its stimulus and
+    /// authenticated caller principal. Either form may additionally advance a
+    /// pinned COW source to the exact terminal generation produced by that
+    /// source. No other project, capability, runtime, or invocation field may
+    /// drift.
     pub(crate) fn validate_continuation_transition_from(
         &self,
         source: &Self,
         source_result_snapshot_hash: Option<&str>,
+        transition_kind: ContinuationAuthorityTransitionKind,
     ) -> anyhow::Result<()> {
         let transition = match source_result_snapshot_hash {
             Some(result_snapshot_hash) => {
@@ -485,9 +490,13 @@ impl ResumeContext {
             expected.original_snapshot_hash = Some(result_hash.to_string());
             expected.original_pushed_head_ref = None;
         }
+        if transition_kind == ContinuationAuthorityTransitionKind::OperatorFollowUp {
+            expected.parameters = self.parameters.clone();
+            expected.requested_by = self.requested_by.clone();
+        }
         if self != &expected {
             anyhow::bail!(
-                "continuation launch authority differs from the admitted source outside its declared pinned-generation transition"
+                "continuation launch authority differs from the admitted source outside its declared typed transition"
             );
         }
         self.authoritative_project_identity()?;
@@ -617,6 +626,17 @@ impl ResumeContext {
             ),
         }
     }
+}
+
+/// The two continuation authority changes admitted by the lifecycle.
+///
+/// This tag is supplied by the already-separated machine/follow and
+/// operator-follow-up state boundaries; it is never inferred from changed
+/// fields in an untrusted successor envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContinuationAuthorityTransitionKind {
+    Inherit,
+    OperatorFollowUp,
 }
 
 impl RuntimeLaunchMetadata {
@@ -945,23 +965,13 @@ impl RuntimeLaunchMetadata {
             .resume_context
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("sealed launch has no persisted resume authority"))?;
-        if sealed.item_ref() != resume.item_ref
-            || sealed.runtime_ref() != resume.runtime_ref.as_deref().unwrap_or_default()
-            || sealed.executor_ref() != resume.executor_ref.as_deref().unwrap_or_default()
-        {
-            anyhow::bail!("sealed program and resume launch identity disagree");
-        }
-        if sealed.project_authority() != &resume.project_authority {
-            anyhow::bail!("sealed invocation and resume project authority disagree");
-        }
+        sealed.validate_invocation_against_resume(resume)?;
         let admitted_project_authority = self
             .admitted_project_authority
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("sealed launch has no admitted project authority"))?;
-        if self.continuation_source_thread_id.is_none()
-            && sealed.project_authority() != admitted_project_authority
-        {
-            anyhow::bail!("fresh sealed invocation and admitted project authority disagree");
+        if sealed.project_authority() != admitted_project_authority {
+            anyhow::bail!("sealed invocation and admitted project authority disagree");
         }
         let mut effective_caps = resume.effective_caps.clone();
         effective_caps.sort();
@@ -1071,6 +1081,11 @@ impl RuntimeLaunchMetadata {
         source_thread_id: &str,
         checkpoint_dir: PathBuf,
     ) -> Self {
+        let admitted_project_authority = self
+            .sealed_root_request
+            .as_ref()
+            .and_then(|_| self.resume_context.as_ref())
+            .map(|resume| resume.project_authority.clone());
         Self {
             schema_version: self.schema_version,
             launch_driver: self.launch_driver,
@@ -1081,7 +1096,7 @@ impl RuntimeLaunchMetadata {
             resume_context: self.resume_context.clone(),
             continuation_source_thread_id: Some(source_thread_id.to_string()),
             sealed_root_request: self.sealed_root_request.clone(),
-            admitted_project_authority: self.admitted_project_authority.clone(),
+            admitted_project_authority,
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
             admitted_execution_closure: self.admitted_execution_closure.clone(),
@@ -1108,6 +1123,10 @@ impl RuntimeLaunchMetadata {
     /// copied to a different thread identity. Launch preparation allocates the
     /// successor's own checkpoint directory before it attaches.
     pub fn continuation_successor_seed(&self, resume_context: ResumeContext) -> Self {
+        let admitted_project_authority = self
+            .sealed_root_request
+            .as_ref()
+            .map(|_| resume_context.project_authority.clone());
         Self {
             launch_driver: self.launch_driver,
             in_process_lifecycle_authority: self.in_process_lifecycle_authority,
@@ -1115,7 +1134,7 @@ impl RuntimeLaunchMetadata {
             native_resume: self.native_resume.clone(),
             resume_context: Some(resume_context),
             sealed_root_request: self.sealed_root_request.clone(),
-            admitted_project_authority: self.admitted_project_authority.clone(),
+            admitted_project_authority,
             admitted_artifact_identity: self.admitted_artifact_identity.clone(),
             admitted_launch_capsule_schema: self.admitted_launch_capsule_schema,
             admitted_execution_closure: self.admitted_execution_closure.clone(),
@@ -1136,12 +1155,10 @@ impl RuntimeLaunchMetadata {
 
     pub fn set_sealed_root_request(&mut self, request: SealedRootExecutionRequest) {
         let first_seal = self.sealed_root_request.is_none();
-        if self.admitted_project_authority.is_none() {
-            self.admitted_project_authority = self
-                .resume_context
-                .as_ref()
-                .map(|resume| resume.project_authority.clone());
-        }
+        // Every continuation segment gets its own capsule. Bind the outer
+        // admitted authority to the already-derived sealed invocation instead
+        // of retaining the source segment's operational generation.
+        self.admitted_project_authority = Some(request.project_authority().clone());
         if first_seal && self.admitted_launch_capsule_schema.is_none() {
             self.admitted_launch_capsule_schema =
                 Some(ryeos_state::objects::ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION);
@@ -1313,7 +1330,7 @@ mod tests {
             }
         };
         let original_snapshot_hash = project_authority
-            .base_snapshot_projection()
+            .operational_snapshot_projection()
             .map(str::to_owned);
         let lifecycle_authority =
             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_RESTARTABLE;
@@ -1340,6 +1357,53 @@ mod tests {
             executor_ref: Some("native:test".to_string()),
             runtime_ref: None,
         }
+    }
+
+    #[test]
+    fn continuation_transition_keeps_machine_authority_exact() {
+        let project = tempfile::tempdir().unwrap();
+        let source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        let mut changed = source.clone();
+        changed.parameters = serde_json::json!({"input": "new"});
+        assert!(changed
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::Inherit,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn operator_continuation_changes_only_stimulus_and_authenticated_principal() {
+        let project = tempfile::tempdir().unwrap();
+        let source = resume_context(ProjectContext::LocalPath {
+            path: project.path().to_path_buf(),
+        });
+        let mut operator = source.clone();
+        operator.parameters = serde_json::json!({"input": "continue"});
+        operator.requested_by = EffectivePrincipal::Local(Principal {
+            fingerprint: "fp:operator".to_string(),
+            scopes: vec!["execute".to_string()],
+        });
+        operator
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            )
+            .unwrap();
+
+        operator.item_ref = "tool:test/other".to_string();
+        assert!(operator
+            .validate_continuation_transition_from(
+                &source,
+                None,
+                ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            )
+            .is_err());
     }
 
     #[test]
@@ -1486,6 +1550,10 @@ mod tests {
         assert!(successor.checkpoint_dir.is_none());
         assert!(successor.continuation_source_thread_id.is_none());
         assert!(successor.sealed_root_request.is_none());
+        assert!(
+            successor.admitted_project_authority.is_none(),
+            "an unsealed continuation cannot acquire admitted project authority"
+        );
         assert!(successor.follow_parent_context.is_none());
         assert!(successor.follow_launch_window.is_none());
         assert_eq!(
@@ -1564,7 +1632,7 @@ mod tests {
             )
             .unwrap()
         };
-        let retained_root = ExecutionProvenance::root_pushed_head(
+        let retained_root = ExecutionProvenance::root_pushed_head_for_test(
             dir.path().to_path_buf(),
             PathBuf::from("/laptop/proj"),
             engine(),
@@ -1574,7 +1642,7 @@ mod tests {
         )
         .unwrap();
         assert!(OriginalPushedHeadRef::from_provenance(&retained_root).is_none());
-        let pushed_root = ExecutionProvenance::root_pushed_head(
+        let pushed_root = ExecutionProvenance::root_pushed_head_for_test(
             dir.path().to_path_buf(),
             PathBuf::from("/laptop/proj"),
             engine(),
@@ -1620,6 +1688,7 @@ mod tests {
             project_authority: ryeos_state::objects::ExecutionProjectAuthority::PinnedGeneration {
                 stable_project_identity: "site:a:/tmp/proj".to_string(),
                 display_path: Some(PathBuf::from("/tmp/proj")),
+                base_snapshot_hash: "abc123".to_string(),
                 snapshot_hash: "abc123".to_string(),
                 realization: ryeos_state::objects::PinnedProjectRealization::Cow {
                     terminal_publication: ryeos_state::objects::PinnedTerminalPublication::Discard,

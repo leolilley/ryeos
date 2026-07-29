@@ -33,6 +33,11 @@ pub enum OfflineDispatchOutcome {
     Silent,
 }
 
+enum ServiceDispatchOutcome {
+    Handled(Option<OfflineDispatchOutcome>),
+    Standalone { service_ref: String, params: Value },
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -62,9 +67,12 @@ pub async fn try_offline_dispatch(
             detail: format!("load node isolation policy: {error:#}"),
         })?;
     // One generation operation spans descriptor resolution, binary capture,
-    // and the final exec/dispatch handoff. A TUI/help launch must never resolve
-    // its surface under one installed generation and execute a client from a
-    // replacement generation.
+    // and any direct client/tool exec handoff. A TUI/help launch must never
+    // resolve its surface under one installed generation and execute a client
+    // from a replacement generation. Standalone services are different: the
+    // child daemon independently re-admits the canonical service under its own
+    // state and bundle-generation locks, so the parent releases this read
+    // generation before spawning it.
     let _generation_guard = isolation
         .begin_registered_generation_operation()
         .map_err(|error| local_err(anyhow::Error::new(error)))?;
@@ -145,7 +153,7 @@ pub async fn try_offline_dispatch(
     }
 
     if has_service_offline_dispatch(&item.composed_value) {
-        return dispatch_service(
+        let service = dispatch_service(
             &engine,
             item,
             &matched.command,
@@ -153,7 +161,25 @@ pub async fn try_offline_dispatch(
             app_root,
             project_path,
             &isolation,
-        );
+        )?;
+        return match service {
+            ServiceDispatchOutcome::Handled(outcome) => Ok(outcome),
+            ServiceDispatchOutcome::Standalone {
+                service_ref,
+                params,
+            } => {
+                // No pre-resolved program, artifact path, or mutable engine
+                // authority crosses this boundary. The child receives only the
+                // canonical service request and performs fresh verified
+                // admission. Retaining the parent's shared registry guard while
+                // waiting for that child would deadlock any standalone service
+                // that reconciles or mutates the registry.
+                drop(engine);
+                drop(_generation_guard);
+                drop(isolation);
+                run_standalone_service(&service_ref, params, app_root).map(Some)
+            }
+        };
     }
 
     if has_tool_command(&item.composed_value) {
@@ -217,6 +243,10 @@ fn effective_item_from_project_root(
     let request = ryeos_engine::engine::EffectiveItemRequest {
         item_ref: canonical,
         expected_kind: None,
+        subject_resolution_authority:
+            ryeos_engine::contracts::SubjectResolutionAuthority::for_live_project_root(
+                project_root.as_deref(),
+            ),
         project_root,
     };
 
@@ -736,7 +766,7 @@ fn dispatch_service(
     app_root: &Path,
     project_path: &str,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
-) -> Result<Option<OfflineDispatchOutcome>, CliError> {
+) -> Result<ServiceDispatchOutcome, CliError> {
     // Check availability
     let availability = item
         .composed_value
@@ -765,7 +795,7 @@ fn dispatch_service(
                 ),
             });
         }
-        return Ok(None);
+        return Ok(ServiceDispatchOutcome::Handled(None));
     }
 
     // Resolve offline tool ref
@@ -802,7 +832,10 @@ fn dispatch_service(
     }
 
     let Some(tool_ref) = offline_execute else {
-        return run_standalone_service(&item.canonical_ref, params, app_root).map(Some);
+        return Ok(ServiceDispatchOutcome::Standalone {
+            service_ref: item.canonical_ref,
+            params,
+        });
     };
 
     // Dispatch tool
@@ -819,7 +852,7 @@ fn dispatch_service(
         project_path,
         isolation,
     )
-    .map(|result| result.map(OfflineDispatchOutcome::Json))
+    .map(|result| ServiceDispatchOutcome::Handled(result.map(OfflineDispatchOutcome::Json)))
 }
 
 fn run_standalone_service(

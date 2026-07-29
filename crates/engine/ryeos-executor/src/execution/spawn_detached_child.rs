@@ -185,7 +185,7 @@ pub async fn spawn_detached_child(
                 }
                 ryeos_state::objects::ChildProjectAuthorityPolicy::PinAtSpawn { realization } => {
                     let snapshot_hash = if let Some(snapshot_hash) =
-                        parent_project_authority.base_snapshot_projection()
+                        parent_project_authority.operational_snapshot_projection()
                     {
                         snapshot_hash.to_string()
                     } else {
@@ -219,7 +219,7 @@ pub async fn spawn_detached_child(
     // guard. Inherit only the parent's immutable snapshot and reconstruct the
     // child into a fresh non-lineage checkout after a crash/queued launch.
     let launch_snapshot_hash = parent_project_authority
-        .base_snapshot_projection()
+        .operational_snapshot_projection()
         .map(str::to_owned);
     let mut inherited_generation = if !authority_already_bound
         && matches!(
@@ -261,7 +261,7 @@ pub async fn spawn_detached_child(
         })
         .or_else(|| {
             child_project_authority
-                .base_snapshot_projection()
+                .operational_snapshot_projection()
                 .map(str::to_owned)
         });
     if let Some(generation) = inherited_generation.as_ref() {
@@ -311,9 +311,10 @@ pub async fn spawn_detached_child(
             .ok_or_else(|| anyhow::anyhow!("detach: child workspace has no lifecycle guard"))?;
         child_provenance = cap.provenance.clone_for_pinned_child_workspace(
             child_context.request_engine,
-            child_context.effective_path,
+            child_context.pinned_materialization.ok_or_else(|| {
+                anyhow::anyhow!("detach: child context has no verified materialization authority")
+            })?,
             child_lifeline,
-            snapshot_hash.to_string(),
             child_project_authority.clone(),
         )?;
     }
@@ -376,6 +377,7 @@ pub async fn spawn_detached_child(
     let child_plan_context = ryeos_engine::contracts::PlanContext {
         requested_by: requested_by.clone(),
         project_context: child_project_context.clone(),
+        subject_resolution_authority: child_provenance.subject_resolution_authority(),
         current_site_id: parent.current_site_id.clone(),
         origin_site_id: parent.current_site_id.clone(),
         execution_hints: ryeos_engine::contracts::ExecutionHints::default(),
@@ -403,7 +405,9 @@ pub async fn spawn_detached_child(
     .context("detach: verified child history-policy preflight")?;
     let child_root_admission = child_preflight.root_admission;
     let child_execution = child_root_admission.execution_request(
-        child_executor_ref.clone(),
+        ryeos_app::thread_lifecycle::RootExecutionRoute::ManagedRuntimeForKind(
+            &child_runtime.canonical_ref,
+        ),
         "detached".to_string(),
         child_parameters.clone(),
     )?;

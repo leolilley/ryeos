@@ -21,6 +21,7 @@ pub mod object_closure;
 pub mod objects;
 pub mod operational;
 pub mod project_discovery;
+pub mod project_materialization;
 pub mod project_sync;
 pub mod projection;
 pub mod queries;
@@ -65,6 +66,7 @@ pub use operational::{
     OperationalDb, SyncJobAttemptRecord, SyncJobAttemptState, SyncJobRecord, SyncJobState,
     SyncJobUpdate,
 };
+pub use project_materialization::PinnedProjectMaterialization;
 pub use projection::{
     ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
 };
@@ -80,6 +82,7 @@ pub use state_db::{
     AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,
     AuthoritativeRootGenesisReadback, AuthoritativeRootThreadReadback,
     AuthoritativeRuntimePinAdmission, AuthoritativeTerminalChain,
+    AuthoritativeThreadAppendAnchorReadback, AuthoritativeThreadAppendHistoryReadback,
     AuthoritativeThreadEventChainReadback, AuthoritativeThreadHistoryDiscardProgress,
     AuthoritativeThreadHistoryDiscardReport, AuthoritativeThreadPairReadback,
     AuthoritativeThreadSnapshotReadback, AuthoritativeThreadSnapshotWithLastEventReadback,

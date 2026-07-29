@@ -98,6 +98,7 @@ fn timeout_secs_for_config(
         parsers: ctx.parsers,
         kinds: ctx.kinds,
         trust_store: ctx.trust_store,
+        project_authority: ctx.project_authority,
     })
     .resolve_for_item(&root_ref)?;
     if let Some(timeout) = policy.timeout {

@@ -6,7 +6,7 @@
 //! All directory names and extension lists come from `KindSchema`.
 //! This module never hardcodes kind strings, directories, or extensions.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::canonical_ref::CanonicalRef;
 use crate::contracts::{
@@ -14,6 +14,30 @@ use crate::contracts::{
 };
 use crate::error::EngineError;
 use crate::kind_registry::KindSchema;
+
+/// Maximum source bytes accepted for one resolvable RyeOS item.
+///
+/// This is shared by live-filesystem and admitted-CAS reads so changing the
+/// source authority cannot change the item language's resource contract.
+pub const MAX_ITEM_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Read one live item source under the same bound used by admitted content.
+pub fn read_item_source_no_follow(path: &std::path::Path) -> Result<String, EngineError> {
+    let bytes = lillux::read_regular_file_bounded_no_follow(path, MAX_ITEM_SOURCE_BYTES).map_err(
+        |error| {
+            EngineError::Internal(format!(
+                "securely read item source {}: {error:#}",
+                path.display()
+            ))
+        },
+    )?;
+    String::from_utf8(bytes).map_err(|error| {
+        EngineError::Internal(format!(
+            "item source {} is not UTF-8: {error}",
+            path.display()
+        ))
+    })
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredBundleRoot {
@@ -123,6 +147,36 @@ pub fn resolve_item_full(
     kind_schema: &KindSchema,
     ref_: &CanonicalRef,
 ) -> Result<ResolutionResult, EngineError> {
+    resolve_item_full_inner(roots, kind_schema, ref_, None)
+}
+
+/// Resolve one canonical ref while treating the supplied admitted project
+/// content as the sole existence authority for project-space candidates.
+/// Bundle candidates still come from the retained registered generation.
+pub fn resolve_item_full_under_project_authority(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    ref_: &CanonicalRef,
+    project_root: &std::path::Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+) -> Result<ResolutionResult, EngineError> {
+    resolve_item_full_inner(
+        roots,
+        kind_schema,
+        ref_,
+        Some((project_root, project_content)),
+    )
+}
+
+fn resolve_item_full_inner(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    ref_: &CanonicalRef,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<ResolutionResult, EngineError> {
     if kind_schema.excludes_relative_path(std::path::Path::new(&ref_.bare_id)) {
         let mut searched_spaces = Vec::new();
         for root in &roots.ordered {
@@ -151,16 +205,36 @@ pub fn resolve_item_full(
         for ext_spec in &kind_schema.extensions {
             let path = kind_dir.join(format!("{}{}", ref_.bare_id, ext_spec.ext));
             tracing::trace!(candidate = %path.display(), label = %root.label, "checking candidate path");
-            let is_file = match std::fs::metadata(&path) {
-                Ok(metadata) => metadata.is_file(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(source) => {
-                    return Err(EngineError::ItemResolutionUnavailable {
-                        canonical_ref: ref_.to_string(),
-                        path,
-                        source,
-                    });
+            let is_file = match (root.space, project_authority) {
+                (ItemSpace::Project, Some((project_root, content))) => {
+                    if root.ai_root != project_root.join(crate::AI_DIR) {
+                        return Err(EngineError::Internal(format!(
+                            "project resolution root {} differs from admitted root {}",
+                            root.ai_root.display(),
+                            project_root.display()
+                        )));
+                    }
+                    let relative = path.strip_prefix(project_root).map_err(|_| {
+                        EngineError::Internal(format!(
+                            "project candidate {} is outside admitted root {}",
+                            path.display(),
+                            project_root.display()
+                        ))
+                    })?;
+                    !content.validates_absence(relative)?
                 }
+                _ => match lillux::inspect_optional_entry_no_follow(&path) {
+                    Ok(Some(lillux::secure_fs::PinnedEntryType::Regular)) => true,
+                    Ok(None) => false,
+                    Ok(Some(_)) => false,
+                    Err(error) => {
+                        return Err(EngineError::ItemResolutionUnavailable {
+                            canonical_ref: ref_.to_string(),
+                            path,
+                            source: std::io::Error::other(error.to_string()),
+                        });
+                    }
+                },
             };
             if is_file {
                 if winner.is_none() {
@@ -219,6 +293,41 @@ pub fn resolve_item_full(
     }
 }
 
+/// Read the exact source selected by a resolution result. Project winners are
+/// read from admitted CAS content; bundle winners are read through Lillux's
+/// no-follow path boundary.
+pub fn read_resolved_source_under_project_authority(
+    result: &ResolutionResult,
+    project_root: &std::path::Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+) -> Result<String, EngineError> {
+    let bytes = if result.winner_space == ItemSpace::Project {
+        let relative = result.winner_path.strip_prefix(project_root).map_err(|_| {
+            EngineError::Internal(format!(
+                "project winner {} is outside admitted root {}",
+                result.winner_path.display(),
+                project_root.display()
+            ))
+        })?;
+        project_content
+            .read_file(relative, MAX_ITEM_SOURCE_BYTES)?
+            .ok_or_else(|| {
+                EngineError::Internal(format!(
+                    "admitted project winner disappeared from content authority: {}",
+                    relative.display()
+                ))
+            })?
+    } else {
+        return read_item_source_no_follow(&result.winner_path);
+    };
+    String::from_utf8(bytes).map_err(|error| {
+        EngineError::Internal(format!(
+            "resolved source {} is not UTF-8: {error}",
+            result.winner_path.display()
+        ))
+    })
+}
+
 /// Winner-only resolve: returns just the winner without clash info.
 pub fn resolve_item(
     roots: &ResolutionRoots,
@@ -261,112 +370,136 @@ pub fn enumerate_kind_refs(
     kind_schema: &KindSchema,
     kind: &str,
 ) -> Vec<CanonicalRef> {
-    use std::collections::HashSet;
-
-    let extensions: HashSet<&str> = kind_schema
-        .extensions
-        .iter()
-        .map(|e| e.ext.trim_start_matches('.'))
-        .collect();
-    let excluded_directories: HashSet<&str> = kind_schema
-        .excluded_directories
-        .iter()
-        .map(String::as_str)
-        .collect();
-
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut refs: Vec<CanonicalRef> = Vec::new();
-
-    for root in &roots.ordered {
-        let kind_dir = root.ai_root.join(&kind_schema.directory);
-        if !kind_dir.is_dir() {
-            continue;
-        }
-        walk_kind_dir(
-            &kind_dir,
-            &kind_dir,
-            &extensions,
-            &excluded_directories,
-            &mut |bare_id| {
-                if seen.insert(bare_id.clone()) {
-                    refs.push(CanonicalRef {
-                        kind: kind.to_owned(),
-                        bare_id,
-                        suffix: None,
-                    });
-                }
-            },
-        );
-    }
-
-    refs.sort_by(|a, b| a.bare_id.cmp(&b.bare_id));
-    refs
+    enumerate_kind_refs_inner(roots, kind_schema, kind, None).unwrap_or_default()
 }
 
-/// Recursively walk `dir`, invoking `emit(bare_id)` for each file whose
-/// extension is in `extensions`. `bare_id` is computed relative to
-/// `kind_root` with the matched extension stripped and platform path
-/// separators normalised to `/`.
-///
-/// Hidden entries (basename starting with `.`) are skipped — they're
-/// not legitimate item paths and tend to be VCS / editor noise.
-fn walk_kind_dir(
-    kind_root: &std::path::Path,
-    dir: &std::path::Path,
-    extensions: &std::collections::HashSet<&str>,
-    excluded_directories: &std::collections::HashSet<&str>,
-    emit: &mut dyn FnMut(String),
-) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let basename = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        if basename.starts_with('.') {
-            continue;
+pub fn enumerate_kind_refs_under_project_authority(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+    project_root: &std::path::Path,
+    project_content: &dyn crate::project_content::AuthoritativeProjectContent,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    enumerate_kind_refs_inner(
+        roots,
+        kind_schema,
+        kind,
+        Some((project_root, project_content)),
+    )
+}
+
+const MAX_CORPUS_ENUMERATION_FILES: usize = 100_000;
+const MAX_CORPUS_TRAVERSAL_ENTRIES: usize = MAX_CORPUS_ENUMERATION_FILES * 2;
+const MAX_CORPUS_TRAVERSAL_DEPTH: usize = 64;
+
+fn enumerate_kind_refs_inner(
+    roots: &ResolutionRoots,
+    kind_schema: &KindSchema,
+    kind: &str,
+    project_authority: Option<(
+        &std::path::Path,
+        &dyn crate::project_content::AuthoritativeProjectContent,
+    )>,
+) -> Result<Vec<CanonicalRef>, EngineError> {
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+    let mut refs = Vec::new();
+    for root in &roots.ordered {
+        let kind_dir = root.ai_root.join(&kind_schema.directory);
+        let mut relative_files = Vec::new();
+        match (root.space, project_authority) {
+            (ItemSpace::Project, Some((project_root, content))) => {
+                if root.ai_root != project_root.join(crate::AI_DIR) {
+                    return Err(EngineError::Internal(format!(
+                        "project corpus root {} differs from admitted root {}",
+                        root.ai_root.display(),
+                        project_root.display()
+                    )));
+                }
+                let prefix = Path::new(crate::AI_DIR).join(&kind_schema.directory);
+                relative_files.extend(
+                    content
+                        .list_files(&prefix, true, MAX_CORPUS_ENUMERATION_FILES)?
+                        .into_iter()
+                        .map(|entry| entry.relative_path),
+                );
+            }
+            _ => {
+                let mut count = 0_usize;
+                lillux::visit_regular_files_no_follow_bounded(
+                    &kind_dir,
+                    lillux::DirectoryTraversalBudget::new(
+                        MAX_CORPUS_TRAVERSAL_ENTRIES,
+                        MAX_CORPUS_TRAVERSAL_DEPTH,
+                    ),
+                    |relative, is_directory| {
+                        let hidden = relative.components().any(|component| {
+                            component
+                                .as_os_str()
+                                .to_str()
+                                .is_some_and(|name| name.starts_with('.'))
+                        });
+                        let excluded = is_directory
+                            && relative.file_name().and_then(|name| name.to_str()).is_some_and(
+                                |name| kind_schema.excluded_directories.iter().any(|value| value == name),
+                            );
+                        Ok(hidden || excluded)
+                    },
+                    |relative, _file| {
+                        count = count.saturating_add(1);
+                        if count > MAX_CORPUS_ENUMERATION_FILES {
+                            anyhow::bail!(
+                                "corpus enumeration exceeds {MAX_CORPUS_ENUMERATION_FILES} regular files"
+                            );
+                        }
+                        relative_files.push(relative.to_path_buf());
+                        Ok(())
+                    },
+                )
+                .map_err(|error| EngineError::Internal(format!(
+                    "securely enumerate corpus root {}: {error:#}",
+                    kind_dir.display()
+                )))?;
+            }
         }
-        let ftype = match entry.file_type() {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        if ftype.is_dir() {
-            if excluded_directories.contains(basename) {
+        for relative in relative_files {
+            if kind_schema.excludes_relative_path(&relative)
+                || relative.components().any(|component| {
+                    component
+                        .as_os_str()
+                        .to_str()
+                        .is_none_or(|name| name.starts_with('.'))
+                })
+            {
                 continue;
             }
-            walk_kind_dir(kind_root, &path, extensions, excluded_directories, emit);
-            continue;
-        }
-        if !ftype.is_file() {
-            continue;
-        }
-        let ext = match path.extension().and_then(|e| e.to_str()) {
-            Some(e) => e,
-            None => continue,
-        };
-        if !extensions.contains(ext) {
-            continue;
-        }
-        let rel = match path.strip_prefix(kind_root) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        let mut bare = String::with_capacity(rel.as_os_str().len());
-        for (i, comp) in rel.with_extension("").components().enumerate() {
-            if i > 0 {
-                bare.push('/');
+            let Some(extension) = kind_schema.extensions.iter().find(|extension| {
+                relative
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(&extension.ext))
+            }) else {
+                continue;
+            };
+            let Some(relative_text) = relative.to_str() else {
+                continue;
+            };
+            let Some(bare_id) = relative_text.strip_suffix(&extension.ext) else {
+                continue;
+            };
+            let bare_id = bare_id.replace('\\', "/");
+            if !bare_id.is_empty() && seen.insert(bare_id.clone()) {
+                refs.push(CanonicalRef {
+                    kind: kind.to_owned(),
+                    bare_id,
+                    suffix: None,
+                });
             }
-            bare.push_str(&comp.as_os_str().to_string_lossy());
         }
-        if bare.is_empty() {
-            continue;
-        }
-        emit(bare);
     }
+    refs.sort_by(|left, right| left.bare_id.cmp(&right.bare_id));
+    Ok(refs)
 }
 
 /// Parse a `ryeos:signed:<timestamp>:<content_hash>:<sig_b64>:<signer_fp>` header
@@ -449,6 +582,7 @@ mod tests {
                 history_policy: None,
                 method_dispatch: None,
                 methods: std::collections::BTreeMap::new(),
+                augmentation_methods: std::collections::BTreeMap::new(),
                 launch_augmentations: Vec::new(),
             }),
             extensions: extensions

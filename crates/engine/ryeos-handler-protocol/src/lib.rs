@@ -134,6 +134,7 @@ pub struct ComposeItemContext {
 pub enum TrustClassWire {
     TrustedBundle,
     TrustedProject,
+    TrustedNode,
     UntrustedProject,
     Unsigned,
 }
@@ -269,6 +270,7 @@ pub struct LaunchConfigContributorWire {
 pub enum ItemSpaceWire {
     Bundle,
     Project,
+    Node,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

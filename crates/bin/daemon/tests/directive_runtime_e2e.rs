@@ -1071,7 +1071,6 @@ async fn e2e_hard_budget_reserves_settles_and_denies_via_daemon_ledger() {
     drop(mock);
 }
 
-
 // -- Concurrent intra-turn tool dispatch (execution.tool_concurrency) --
 //
 // One assistant message carries THREE tool calls to three sleepy tools.
@@ -1271,7 +1270,6 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
         Some(true),
         "body={body:#}"
     );
-
     // Overlap: the latest start precedes the earliest end, so all three tool
     // executions coexisted. Serial dispatch cannot produce this shape (each
     // start would follow the previous end by construction).
@@ -1393,7 +1391,6 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
 
     drop(mock);
 }
-
 
 // -- Admission resolution cache: transparent hits + recompute on edit --
 //

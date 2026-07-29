@@ -197,6 +197,44 @@ pub fn load_limits_config_from_loader(
     Ok(config)
 }
 
+#[derive(Debug, Clone)]
+pub struct LimitsConfigSnapshot {
+    pub config: LimitsConfig,
+    pub dependency_proof: ryeos_runtime::verified_loader::ConfigDependencyProof,
+}
+
+pub fn load_limits_config_snapshot(
+    loader: &ryeos_runtime::verified_loader::VerifiedLoader,
+) -> anyhow::Result<LimitsConfigSnapshot> {
+    let snapshot = loader
+        .load_optional_config_strict_signed_with_proof::<LimitsConfig>("directive-runtime/limits")
+        .map_err(|error| anyhow::anyhow!("limits config: {error}"))?;
+    let config = snapshot.value.unwrap_or_default();
+    config.validate()?;
+    Ok(LimitsConfigSnapshot {
+        config,
+        dependency_proof: snapshot.dependency_proof,
+    })
+}
+
+pub fn load_limits_config_snapshot_under_project_authority(
+    loader: &ryeos_runtime::verified_loader::VerifiedLoader,
+    project_content: &dyn ryeos_engine::project_content::AuthoritativeProjectContent,
+) -> anyhow::Result<LimitsConfigSnapshot> {
+    let snapshot = loader
+        .load_optional_config_strict_signed_with_proof_under_project_authority::<LimitsConfig>(
+            "directive-runtime/limits",
+            project_content,
+        )
+        .map_err(|error| anyhow::anyhow!("limits config: {error}"))?;
+    let config = snapshot.value.unwrap_or_default();
+    config.validate()?;
+    Ok(LimitsConfigSnapshot {
+        config,
+        dependency_proof: snapshot.dependency_proof,
+    })
+}
+
 fn apply_execution_policy_source(
     base: &LimitValues,
     policy: &ResolvedExecutionPolicy,
@@ -479,7 +517,8 @@ mod tests {
             tmp.path().join("project"),
             vec![],
             &tmp.path().join("operator/.ai/config/keys/trusted"),
-        );
+        )
+        .unwrap();
         let config = load_limits_config_from_loader(&loader).unwrap();
         assert!(config.is_none(), "missing file should return Ok(None)");
     }
@@ -502,7 +541,8 @@ mod tests {
             project,
             vec![],
             &tmp.path().join("operator/.ai/config/keys/trusted"),
-        );
+        )
+        .unwrap();
         let err = load_limits_config_from_loader(&loader).unwrap_err();
         assert!(
             err.to_string().contains("canonical decimal string"),

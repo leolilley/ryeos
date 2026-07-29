@@ -21,6 +21,7 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true }
 ryeos-handler-protocol = { workspace = true }
 ryeos-isolation-protocol = { workspace = true }
+ryeos-state = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }

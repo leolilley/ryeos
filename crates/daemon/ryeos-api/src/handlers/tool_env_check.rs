@@ -111,6 +111,7 @@ pub async fn handle(
         project_context: ProjectContext::LocalPath {
             path: project_path.clone(),
         },
+        subject_resolution_authority: ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs,
         current_site_id: site_id.clone(),
         origin_site_id: ctx.execution_origin(&site_id),
         execution_hints: Default::default(),
