@@ -1555,12 +1555,10 @@ impl VerifiedLoader {
             }
         }
 
-        if include_project {
-            if let Some(node_config_root) = &self.node_config_root {
-                let path = node_config_root.join(&item_path);
-                if path.exists() {
-                    candidate_paths.push((path, "node", ConfigCandidateRootClass::Node));
-                }
+        if include_project && let Some(node_config_root) = &self.node_config_root {
+            let path = node_config_root.join(&item_path);
+            if path.exists() {
+                candidate_paths.push((path, "node", ConfigCandidateRootClass::Node));
             }
         }
 
