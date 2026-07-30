@@ -29,16 +29,16 @@ pub mod thread_event;
 pub mod thread_snapshot;
 
 pub use admitted_launch_capsule::{
-    AdmittedAccountingScope, AdmittedDirectCommandClosure, AdmittedExecutionClosure,
-    AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule, DirectExecutableIdentity,
-    DirectRootSourceIdentity, DirectRuntimeIdentity, DirectRuntimeSourceSpace,
-    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION,
+    ADMITTED_LAUNCH_CAPSULE_SCHEMA_VERSION, AdmittedAccountingScope, AdmittedDirectCommandClosure,
+    AdmittedExecutionClosure, AdmittedLaunchArtifactIdentity, AdmittedLaunchCapsule,
+    DirectExecutableIdentity, DirectRootSourceIdentity, DirectRuntimeIdentity,
+    DirectRuntimeSourceSpace,
 };
 pub use attestation::Attestation;
 pub use bundle_event::{
-    hash_bundle_event, validate_bundle_identifier, BundleEventAttachment, BundleEventAttribution,
-    BundleEventObject, BUNDLE_EVENT_KIND, MAX_BUNDLE_EVENT_ATTACHMENTS,
-    MAX_BUNDLE_EVENT_ATTACHMENT_BYTES, MAX_BUNDLE_EVENT_SERIALIZED_BYTES,
+    BUNDLE_EVENT_KIND, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
+    MAX_BUNDLE_EVENT_ATTACHMENT_BYTES, MAX_BUNDLE_EVENT_ATTACHMENTS,
+    MAX_BUNDLE_EVENT_SERIALIZED_BYTES, hash_bundle_event, validate_bundle_identifier,
 };
 pub use chain_state::{ChainState, ChainStateBuilder, ChainThreadEntry};
 pub use execution_project_authority::{
@@ -56,13 +56,13 @@ pub use project_snapshot::ProjectSnapshot;
 pub use project_snapshot_policy::ProjectSnapshotPolicy;
 pub use project_tree::ProjectTree;
 pub use source_manifest::SourceManifest;
-pub use thread_event::{EventDurability, ThreadEvent, MAX_THREAD_EVENT_SERIALIZED_BYTES};
+pub use thread_event::{EventDurability, MAX_THREAD_EVENT_SERIALIZED_BYTES, ThreadEvent};
 pub use thread_snapshot::{
-    parse_canonical_timestamp, CapturedEffectiveTrustClass, CapturedItemSpace,
-    CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
-    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ThreadHistoryRetention,
-    ThreadSnapshot, ThreadSnapshotBuilder, ThreadStatus, ThreadUsage, UsageSubject,
-    MAX_TERMINAL_DURATION_SECONDS, THREAD_SNAPSHOT_SCHEMA_VERSION,
+    CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,
+    CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, MAX_TERMINAL_DURATION_SECONDS,
+    THREAD_SNAPSHOT_SCHEMA_VERSION, ThreadHistoryRetention, ThreadSnapshot, ThreadSnapshotBuilder,
+    ThreadStatus, ThreadUsage, UsageSubject, parse_canonical_timestamp,
 };
 
 /// Schema version shared across all CAS object types.

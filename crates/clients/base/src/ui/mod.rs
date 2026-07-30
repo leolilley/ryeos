@@ -22,11 +22,11 @@ pub use content::{ProjectedRecord, SourceBinding, ViewBinding};
 pub use effect::{RyeOsEffect, RyeOsEffectKind, RyeOsEffectResult, RyeOsEffectResultKind};
 pub use event::{RyeOsEvent, RyeOsFilterField, RyeOsUiEvent, RyeOsUiIntent};
 pub use keymap::{
-    ryeos_key_command, RyeOsKey, RyeOsKeyCommand, RyeOsKeyContext, RyeOsKeyEvent, RyeOsKeyModifiers,
+    RyeOsKey, RyeOsKeyCommand, RyeOsKeyContext, RyeOsKeyEvent, RyeOsKeyModifiers, ryeos_key_command,
 };
 pub use model::{BrowserSession, BrowserViewport, RyeOsCore, RyeOsEnvelope};
 pub use scene_model::RyeOsSceneModel;
 pub use seat::{InputRoute, InvokeTemplate, SeatEvent, SeatEventKind, SeatFold, SeatLog};
 pub use timeline::{RyeOsLiveDelta, RyeOsTimelineEntryVm};
-pub use tokenize::{classify_line, InputLine, TokenizeError};
+pub use tokenize::{InputLine, TokenizeError, classify_line};
 pub use view_model::RyeOsViewModel;

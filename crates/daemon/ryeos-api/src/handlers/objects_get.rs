@@ -99,51 +99,57 @@ pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let mut entries = Vec::with_capacity(req.object_hashes.len() + req.blob_hashes.len());
 
     for hash in &req.object_hashes {
-        if let Some((mut source, size)) = cas.open_object(hash)? {
-            if size > MAX_INLINE_OBJECT_BYTES {
-                anyhow::bail!("object {hash} exceeds the inline response limit");
+        match cas.open_object(hash)? {
+            Some((mut source, size)) => {
+                if size > MAX_INLINE_OBJECT_BYTES {
+                    anyhow::bail!("object {hash} exceeds the inline response limit");
+                }
+                let mut bytes = vec![0_u8; usize::try_from(size)?];
+                source.read_exact(&mut bytes)?;
+                if lillux::sha256_hex(&bytes) != *hash {
+                    anyhow::bail!("CAS object {hash} failed content-address verification");
+                }
+                let value: Value = serde_json::from_slice(&bytes)?;
+                if lillux::canonical_json(&value)?.as_bytes() != bytes {
+                    anyhow::bail!("CAS object {hash} is not canonical JSON");
+                }
+                entries.push(serde_json::json!({
+                    "hash": hash,
+                    "kind": "object",
+                    "value": value,
+                }));
             }
-            let mut bytes = vec![0_u8; usize::try_from(size)?];
-            source.read_exact(&mut bytes)?;
-            if lillux::sha256_hex(&bytes) != *hash {
-                anyhow::bail!("CAS object {hash} failed content-address verification");
+            None => {
+                entries.push(serde_json::json!({
+                    "hash": hash,
+                    "kind": "missing_object",
+                }));
             }
-            let value: Value = serde_json::from_slice(&bytes)?;
-            if lillux::canonical_json(&value)?.as_bytes() != bytes {
-                anyhow::bail!("CAS object {hash} is not canonical JSON");
-            }
-            entries.push(serde_json::json!({
-                "hash": hash,
-                "kind": "object",
-                "value": value,
-            }));
-        } else {
-            entries.push(serde_json::json!({
-                "hash": hash,
-                "kind": "missing_object",
-            }));
         }
     }
     for hash in &req.blob_hashes {
-        if let Some((mut source, size)) = cas.open_blob(hash)? {
-            if size > MAX_INLINE_BLOB_BYTES {
-                anyhow::bail!(
-                    "blob {hash} exceeds the inline response limit; use a bounded blob_chunk request"
-                );
+        match cas.open_blob(hash)? {
+            Some((mut source, size)) => {
+                if size > MAX_INLINE_BLOB_BYTES {
+                    anyhow::bail!(
+                        "blob {hash} exceeds the inline response limit; use a bounded blob_chunk request"
+                    );
+                }
+                let mut data = vec![0_u8; usize::try_from(size)?];
+                source.read_exact(&mut data)?;
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                entries.push(serde_json::json!({
+                    "hash": hash,
+                    "kind": "blob",
+                    "data": encoded,
+                }));
             }
-            let mut data = vec![0_u8; usize::try_from(size)?];
-            source.read_exact(&mut data)?;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-            entries.push(serde_json::json!({
-                "hash": hash,
-                "kind": "blob",
-                "data": encoded,
-            }));
-        } else {
-            entries.push(serde_json::json!({
-                "hash": hash,
-                "kind": "missing_blob",
-            }));
+            None => {
+                entries.push(serde_json::json!({
+                    "hash": hash,
+                    "kind": "missing_blob",
+                }));
+            }
         }
     }
 

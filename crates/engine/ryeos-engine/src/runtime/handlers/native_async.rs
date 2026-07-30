@@ -42,7 +42,7 @@ use crate::config_loading::ConfigLoadContext;
 use crate::contracts::{CancellationMode, NativeAsyncSpec};
 use crate::error::EngineError;
 use crate::execution_policy::{
-    value_has_execution_policy_shape, ExecutionPolicyResolver, PolicySourceKind,
+    ExecutionPolicyResolver, PolicySourceKind, value_has_execution_policy_shape,
 };
 use crate::runtime::{CompileContext, RuntimeHandler};
 
@@ -109,21 +109,19 @@ fn resolve_policy_from_config(
         // Runtime descriptor rich form is also an implementation default, so
         // callers may skip execution-policy defaults while still allowing exact
         // item overrides to win over that descriptor default.
-        if let Some(resolved_mode) = policy.cancellation_mode {
-            if apply_defaults
-                || resolved_mode.source.kind == PolicySourceKind::ExecutionYamlItemOverride
-            {
-                mode = resolved_mode.value.as_str().to_owned();
-                mode_source = resolved_mode.source.describe();
-            }
+        if let Some(resolved_mode) = policy.cancellation_mode
+            && (apply_defaults
+                || resolved_mode.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
+        {
+            mode = resolved_mode.value.as_str().to_owned();
+            mode_source = resolved_mode.source.describe();
         }
-        if let Some(resolved_grace) = policy.cancellation_grace_secs {
-            if apply_defaults
-                || resolved_grace.source.kind == PolicySourceKind::ExecutionYamlItemOverride
-            {
-                grace = resolved_grace.value;
-                grace_source = resolved_grace.source.describe();
-            }
+        if let Some(resolved_grace) = policy.cancellation_grace_secs
+            && (apply_defaults
+                || resolved_grace.source.kind == PolicySourceKind::ExecutionYamlItemOverride)
+        {
+            grace = resolved_grace.value;
+            grace_source = resolved_grace.source.describe();
         }
     }
 

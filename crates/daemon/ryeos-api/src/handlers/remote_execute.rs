@@ -132,7 +132,8 @@ pub async fn handle(
                 ryeos_state::project_sync::ProjectSyncScope::AiOnly => {
                     return Err(HandlerError::BadRequest(format!(
                         "remote execute is not supported for ai_only binding '{}' -> '{}' yet; use remote sync-project-ai for deployment or bind as full_project",
-                        binding.local_project_path.display(), binding.remote_project_path
+                        binding.local_project_path.display(),
+                        binding.remote_project_path
                     )));
                 }
                 ryeos_state::project_sync::ProjectSyncScope::FullProject => {

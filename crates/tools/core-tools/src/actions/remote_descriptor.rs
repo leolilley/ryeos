@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use serde::{Deserialize, Serialize};
@@ -166,15 +166,15 @@ pub fn run_export_remote_descriptor(
     capabilities.dedup();
 
     let admission = if let Some(policy) = &hosted_policy {
-        if let Some(mode) = &requested_admission_mode {
-            if mode != &policy.admission.mode {
-                bail!(
-                    "admission_mode '{}' conflicts with hosted-node policy mode '{}' from {}",
-                    mode,
-                    policy.admission.mode,
-                    policy.source_file.display()
-                );
-            }
+        if let Some(mode) = &requested_admission_mode
+            && mode != &policy.admission.mode
+        {
+            bail!(
+                "admission_mode '{}' conflicts with hosted-node policy mode '{}' from {}",
+                mode,
+                policy.admission.mode,
+                policy.source_file.display()
+            );
         }
         policy.admission.mode.clone()
     } else {
@@ -205,15 +205,15 @@ pub fn run_export_remote_descriptor(
     let yaml = serde_yaml::to_string(&descriptor).context("failed to serialize descriptor YAML")?;
 
     if let Some(path) = params.output {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!(
-                        "failed to create descriptor output dir {}",
-                        parent.display()
-                    )
-                })?;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create descriptor output dir {}",
+                    parent.display()
+                )
+            })?;
         }
         std::fs::write(&path, &yaml)
             .with_context(|| format!("failed to write descriptor {}", path.display()))?;
@@ -306,19 +306,13 @@ mod tests {
     use super::*;
     use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     struct HostedPolicyFixture {
-        _env_guard: MutexGuard<'static, ()>,
         _user: std::path::PathBuf,
         key: lillux::crypto::SigningKey,
     }
 
     impl HostedPolicyFixture {
         fn new(root: &std::path::Path) -> Self {
-            let env_guard = ENV_MUTEX.lock().unwrap();
             let user = root.join("user");
             let trust_dir = user
                 .join(ryeos_engine::AI_DIR)
@@ -328,19 +322,8 @@ mod tests {
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            std::env::set_var("RYEOS_APP_ROOT", &user);
             write_node_bootstrap(root, &trust_dir, &key);
-            Self {
-                _env_guard: env_guard,
-                _user: user,
-                key,
-            }
-        }
-    }
-
-    impl Drop for HostedPolicyFixture {
-        fn drop(&mut self) {
-            std::env::remove_var("RYEOS_APP_ROOT");
+            Self { _user: user, key }
         }
     }
 

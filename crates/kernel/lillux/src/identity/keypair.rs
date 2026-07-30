@@ -2,12 +2,12 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::Subcommand;
+use ed25519_dalek::SigningKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-use ed25519_dalek::SigningKey;
 use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 

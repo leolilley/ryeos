@@ -1646,11 +1646,11 @@ fn retire_previous_generation(inner: &mut Inner, key: &ResolutionCacheKey) {
     let Some(epoch) = key.generation_epoch else {
         return;
     };
-    if let Some((active_epoch, active_generation)) = inner.active_generation.as_ref() {
-        if *active_epoch > epoch || (*active_epoch == epoch && active_generation == &key.generation)
-        {
-            return;
-        }
+    if let Some((active_epoch, active_generation)) = inner.active_generation.as_ref()
+        && (*active_epoch > epoch
+            || (*active_epoch == epoch && active_generation == &key.generation))
+    {
+        return;
     }
     inner.active_generation = Some((epoch, key.generation.clone()));
     let stale = inner
@@ -1777,7 +1777,7 @@ fn revalidate(inputs: &RevalidationInputs) -> bool {
         // read it as "still absent".
         match lillux::inspect_optional_entry_no_follow(path) {
             Ok(Some(lillux::PinnedEntryType::Regular | lillux::PinnedEntryType::Symlink)) => {
-                return false
+                return false;
             }
             Ok(Some(_)) | Ok(None) => {}
             Err(_) => return false,
@@ -1995,9 +1995,11 @@ mod tests {
             Vec::new(),
         )
         .unwrap();
-        assert!(projectless
-            .validates_current_diagnostic_authority()
-            .unwrap());
+        assert!(
+            projectless
+                .validates_current_diagnostic_authority()
+                .unwrap()
+        );
 
         let root = tempdir();
         let item = root.join(".ai/tools/x.yaml");
@@ -2549,42 +2551,12 @@ mod tests {
             plan_context_identity: String::new(),
         };
         let lifeline = Arc::new(TempDirGuard::new(source_root.clone()));
-        cache_insert_pinned_fixture(
-            &source_root,
-            &source_item,
-            digest,
-            authority,
-            key.clone(),
-            lifeline,
-            source_probe,
-            &active_root,
-            active_probe,
-            active_digest,
-        );
-    }
-
-    fn cache_insert_pinned_fixture(
-        source_root: &Path,
-        source_item: &Path,
-        digest: String,
-        authority: SubjectResolutionAuthority,
-        key: ResolutionCacheKey,
-        lifeline: Arc<TempDirGuard>,
-        source_probe: PathBuf,
-        active_root: &Path,
-        active_probe: PathBuf,
-        active_digest: String,
-    ) {
         let cache = ResolutionCache::new(8);
         let closure = Arc::new(
             ResolvedClosure::new(
-                output_with_root(ancestor(
-                    ItemSpace::Project,
-                    source_item.to_path_buf(),
-                    digest,
-                )),
-                authority,
-                Some(source_root.to_path_buf()),
+                output_with_root(ancestor(ItemSpace::Project, source_item.clone(), digest)),
+                authority.clone(),
+                Some(source_root.clone()),
                 Some(lifeline),
             )
             .unwrap(),
@@ -2598,8 +2570,8 @@ mod tests {
             }],
         );
         let binding = pinned_binding(
-            key.subject_authority.clone(),
-            active_root,
+            authority,
+            &active_root,
             [(".ai/tools/x.yaml", active_digest, "name: x\n".len() as u64)],
         );
         let (hit, outcome) = cache.get_admitted(&key, &binding).unwrap();

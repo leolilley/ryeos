@@ -9,16 +9,16 @@ use serde_json::Value;
 
 use crate::route_error::RouteDispatchError;
 use crate::routes::invocation::{
-    authenticated_execution_origin, CompiledRouteInvocation, PrincipalPolicy, RouteEventStream,
-    RouteInvocationContext, RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
+    CompiledRouteInvocation, PrincipalPolicy, RouteEventStream, RouteInvocationContext,
+    RouteInvocationContract, RouteInvocationOutput, RouteInvocationResult,
+    authenticated_execution_origin,
 };
 use crate::routes::response_modes::execute_mode::{
-    create_isolated_no_project_workspace, map_project_source_error,
+    ResolveProjectContextRequest, create_isolated_no_project_workspace, map_project_source_error,
     pinned_realization_from_execution_policy, preauthorize_execution_policy,
     project_execution_dimension_classes, project_root_normalization_from_execution_policy,
     project_source_from_execution_policy, resolve_execution_contract,
     resolve_project_context_off_thread, validate_project_path_presence,
-    ResolveProjectContextRequest,
 };
 use ryeos_app::event_store_service::EventReplayParams;
 use ryeos_app::stream_envelope::RouteStreamEnvelope;
@@ -726,10 +726,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
 
                                 if let Some(err_msg) = lag_error {
                                     let thread = state_store_clone.get_thread(&thread_id_for_stream);
-                                    if let Ok(Some(detail)) = thread {
-                                        if is_terminal_status(&detail.status) {
-                                            return;
-                                        }
+                                    if let Ok(Some(detail)) = thread
+                                        && is_terminal_status(&detail.status)
+                                    {
+                                        return;
                                     }
                                     yield Ok(error_envelope("replay_failed", &err_msg));
                                     return;
@@ -814,10 +814,10 @@ impl CompiledRouteInvocation for CompiledGatewayStreamInvocation {
                                     }
                                 }
                                 let detail = state_store_clone.get_thread(&thread_id_for_stream);
-                                if let Ok(Some(d)) = detail {
-                                    if is_terminal_status(&d.status) {
-                                        return;
-                                    }
+                                if let Ok(Some(d)) = detail
+                                    && is_terminal_status(&d.status)
+                                {
+                                    return;
                                 }
                                 yield Ok(error_envelope("thread_not_terminal", "launch completed but thread is not terminal"));
                                 return;
@@ -1133,9 +1133,11 @@ mod tests {
         };
         assert_eq!(envelope.event_type, "stream_error");
         assert_eq!(envelope.payload["code"], "launch_task_failed");
-        assert!(envelope.payload["error"]
-            .as_str()
-            .is_some_and(|message| message.contains("synthetic launch panic")));
+        assert!(
+            envelope.payload["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("synthetic launch panic"))
+        );
     }
 
     #[tokio::test]
@@ -1260,10 +1262,12 @@ mod tests {
         // Dropping the returned stream must still drop its captured ownership
         // guard and abort request-scoped launch work before handoff.
         drop(stream);
-        assert!(request_task
-            .await
-            .expect_err("stream drop must abort request-scoped launch")
-            .is_cancelled());
+        assert!(
+            request_task
+                .await
+                .expect_err("stream drop must abort request-scoped launch")
+                .is_cancelled()
+        );
     }
 
     #[test]

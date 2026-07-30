@@ -16,12 +16,12 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use common::DaemonHarness;
 use common::fast_fixture::{
-    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
-    FastFixture,
+    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
-use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 
 fn plant_mock_provider(
@@ -545,13 +545,13 @@ async fn sse_thread_events_reconnect_resumes_from_last_event_id() {
 
     // The resumed stream should NOT include any event with id <= resume_from.
     for ev in &events_2 {
-        if let Some(ref id_str) = ev.id {
-            if let Ok(id) = id_str.parse::<i64>() {
-                assert!(
-                    id > resume_from,
-                    "resumed stream should not yield id={id} (resume_from={resume_from})"
-                );
-            }
+        if let Some(ref id_str) = ev.id
+            && let Ok(id) = id_str.parse::<i64>()
+        {
+            assert!(
+                id > resume_from,
+                "resumed stream should not yield id={id} (resume_from={resume_from})"
+            );
         }
     }
 

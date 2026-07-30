@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub use ryeos_vault::dotenv::read_dotenv_overlay;
 pub use ryeos_vault::paths::{
@@ -21,11 +21,11 @@ pub use ryeos_vault::paths::{
 };
 use ryeos_vault::policy::MAX_VAULT_ENVELOPE_BYTES;
 pub use ryeos_vault::policy::{
-    validate_decrypted_keys, validate_key_name, validate_secret_value, BLOCKED_NAMES,
+    BLOCKED_NAMES, validate_decrypted_keys, validate_key_name, validate_secret_value,
 };
 pub use ryeos_vault::sealed::{
-    cleanup_staged_rewrap_files, prepare_rewrap, read_bounded_file, read_sealed_secrets,
-    recover_rewrap, with_store_lock, write_sealed_secrets, MAX_VAULT_KEY_FILE_BYTES,
+    MAX_VAULT_KEY_FILE_BYTES, cleanup_staged_rewrap_files, prepare_rewrap, read_bounded_file,
+    read_sealed_secrets, recover_rewrap, with_store_lock, write_sealed_secrets,
 };
 
 // ── Command options + reports ────────────────────────────────────────

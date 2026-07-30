@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;
@@ -351,7 +351,7 @@ fn inspect_remote_fetch_heartbeat(transfer_root: &Path) -> Result<Option<std::fs
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("inspect remote transfer heartbeat {}", heartbeat.display())
-            })
+            });
         }
     };
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
@@ -422,7 +422,7 @@ fn scavenge_stale_remote_fetches(bundles_root: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect bundles root {}", bundles_root.display()))
+                .with_context(|| format!("inspect bundles root {}", bundles_root.display()));
         }
     };
     if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
@@ -543,7 +543,7 @@ fn remove_stale_transaction_staging(path: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect transaction staging {}", path.display()))
+                .with_context(|| format!("inspect transaction staging {}", path.display()));
         }
     };
     if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {

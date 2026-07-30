@@ -1,7 +1,7 @@
 [package]
 name = "ryeos-client-terminal"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license.workspace = true
 description = "Native terminal TUI for Rye OS"
 

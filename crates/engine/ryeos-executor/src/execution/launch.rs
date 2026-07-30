@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result};
 use rand::Rng;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::arch_check;
 use super::launch_claim::{ThreadLaunchClaim, ThreadLaunchClaimOutcome};
@@ -17,10 +17,9 @@ use super::launch_envelope::{
 };
 
 use super::limits::{
-    apply_caller_limit_overrides, apply_execution_policy_defaults,
+    LimitsConfigSnapshot, apply_caller_limit_overrides, apply_execution_policy_defaults,
     apply_execution_policy_item_overrides, compute_effective_limits, load_limits_config_snapshot,
     load_limits_config_snapshot_under_project_authority, merge_header_limits, policy_item_override,
-    LimitsConfigSnapshot,
 };
 use super::thread_meta::ThreadMeta;
 use crate::dispatch_error::DispatchError;
@@ -28,16 +27,16 @@ use ryeos_app::callback_token::{effective_bundle_id_for_request, launch_token_tt
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::{ResolvedExecutionRequest, ThreadFinalizeParams};
 use ryeos_app::vault::VaultReadError;
+use ryeos_runtime::RuntimeJsonArrayBudget;
 use ryeos_runtime::checkpoint::{
-    checkpoint_shape_limits, validate_checkpoint_shape, FanoutItemStatus,
+    FanoutItemStatus, checkpoint_shape_limits, validate_checkpoint_shape,
 };
 use ryeos_runtime::events::RuntimeEventType;
-use ryeos_runtime::RuntimeJsonArrayBudget;
 
 mod runtime_request;
 mod terminal;
 
-use runtime_request::{spawn_runtime, SpawnRuntimeParams};
+use runtime_request::{SpawnRuntimeParams, spawn_runtime};
 use terminal::{
     fallback_finalization, is_thread_terminal_status, reconcile_terminal_finalization,
     runtime_terminal_status,
@@ -523,10 +522,10 @@ fn remove_cached_probe(
     state: &mut ExecutorVerificationCacheState,
     probe: &ExecutorVerificationProbe,
 ) {
-    if let Some(key) = state.by_probe.remove(probe) {
-        if let Some(entry) = state.entries.remove(&key) {
-            state.metadata_bytes = state.metadata_bytes.saturating_sub(entry.metadata_bytes);
-        }
+    if let Some(key) = state.by_probe.remove(probe)
+        && let Some(entry) = state.entries.remove(&key)
+    {
+        state.metadata_bytes = state.metadata_bytes.saturating_sub(entry.metadata_bytes);
     }
 }
 
@@ -679,12 +678,11 @@ impl ExecutorVerificationFlight {
                 .and_then(|bytes| bytes.checked_add(1)),
             Some(reserved_bytes)
         );
-        let blob = Arc::new(ExecutorVerificationBlob {
+        Arc::new(ExecutorVerificationBlob {
             bytes,
             reserved_bytes,
             budget: Arc::clone(&self.blob_budget),
-        });
-        blob
+        })
     }
 
     fn publish(
@@ -1075,7 +1073,7 @@ fn verify_native_executor_chain(
 
         let verified_ref =
             match ryeos_engine::executor_resolution::verify_signed_executor_manifest_ref(
-                &signed_ref,
+                signed_ref,
                 |fingerprint| {
                     trust_store
                         .get(fingerprint)
@@ -1200,7 +1198,7 @@ fn verify_native_executor_chain(
                 return Err(MaterializationError::ResolutionFailed {
                     executor_ref: bare.to_string(),
                     detail: error.to_string(),
-                })
+                });
             }
         }
     }
@@ -1693,7 +1691,7 @@ fn inspect_materialized_executor(
                 Err(error) => MaterializedArtifactInspection::Invalid(format!(
                     "content-addressed executor entry is malformed: {error}"
                 )),
-            }
+            };
         }
         Err(error) => {
             return MaterializedArtifactInspection::Invalid(format!(
@@ -1709,7 +1707,7 @@ fn inspect_materialized_executor(
         Ok(None) => {
             return MaterializedArtifactInspection::Invalid(
                 "materialized executor file is missing".to_string(),
-            )
+            );
         }
         Err(error) => {
             return MaterializedArtifactInspection::Invalid(format!(
@@ -1726,7 +1724,7 @@ fn inspect_materialized_executor(
             Err(error) => {
                 return MaterializedArtifactInspection::Invalid(format!(
                     "failed to stat materialized executor descriptor: {error}"
-                ))
+                ));
             }
         };
         let daemon_uid = unsafe { libc::geteuid() };
@@ -1741,13 +1739,14 @@ fn inspect_materialized_executor(
             ));
         }
     }
-    match verify_opened_executor_file(
+    let verification = verify_opened_executor_file(
         file,
         &verified.key.blob_hash,
         verified.key.blob_len,
         verified.key.mode,
         bare,
-    ) {
+    );
+    match verification {
         Ok(opened) => MaterializedArtifactInspection::Valid(opened),
         Err(detail) => MaterializedArtifactInspection::Invalid(detail),
     }
@@ -2053,7 +2052,7 @@ fn quarantine_materialized_executor(
     let quarantine_name = format!(
         ".quarantine.{blob_hash}.{}.{}",
         std::process::id(),
-        rand::thread_rng().gen::<u64>()
+        rand::thread_rng().r#gen::<u64>()
     );
     let quarantined = match source {
         lillux::PinnedDirectoryEntry::Directory(directory) => {
@@ -2070,7 +2069,7 @@ fn quarantine_materialized_executor(
                         detail: format!(
                             "failed to quarantine corrupt executor cache entry: {error}"
                         ),
-                    })
+                    });
                 }
             }
             QuarantinedExecutorEntry::Directory {
@@ -2092,7 +2091,7 @@ fn quarantine_materialized_executor(
                         detail: format!(
                             "failed to quarantine corrupt executor cache entry: {error}"
                         ),
-                    })
+                    });
                 }
             }
             QuarantinedExecutorEntry::Regular {
@@ -2135,7 +2134,7 @@ fn publish_verified_executor_blob(
         ".staging.{}.{}.{}",
         verified.key.blob_hash,
         std::process::id(),
-        rand::thread_rng().gen::<u64>()
+        rand::thread_rng().r#gen::<u64>()
     );
     let staging = layout
         .executors
@@ -2194,11 +2193,12 @@ fn publish_verified_executor_blob(
             detail: format!("failed to sync staged executor tree: {error}"),
         })?;
 
-    match layout.executors.rename_child_directory_noreplace(
+    let publication = layout.executors.rename_child_directory_noreplace(
         OsStr::new(&staging_name),
         OsStr::new(&executor_cache_entry_key(&verified.key.blob_hash, bare)),
         &staging,
-    ) {
+    );
+    match publication {
         // The staged file was fully hashed through its open descriptor, and
         // this primitive proves the same pinned staging-directory inode was
         // moved without replacement. No second target-path read is needed on
@@ -2622,8 +2622,8 @@ impl ExecutionControlSnapshot {
     }
 }
 
-fn execution_control_cache(
-) -> &'static crate::resolved_config_cache::SnapshotCache<ExecutionControlSnapshot> {
+fn execution_control_cache()
+-> &'static crate::resolved_config_cache::SnapshotCache<ExecutionControlSnapshot> {
     static CACHE: OnceLock<crate::resolved_config_cache::SnapshotCache<ExecutionControlSnapshot>> =
         OnceLock::new();
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
@@ -4127,37 +4127,38 @@ async fn prepare_managed_launch_authority(
                         params.resolved.resolved_item.kind
                     ))
                 })?;
-            if let Some(exec) = launching_kind_schema.execution() {
-                if !exec.launch_augmentations.is_empty() {
-                    let augmentation_timer = params.launch_timings.as_ref().map(|timings| {
-                        timings.nested("background_dispatch", "launch_augmentation")
-                    });
-                    let audits = crate::augmentations::run_augmentations(
-                        exec,
-                        &mut resolution,
-                        thread_id,
-                        params.project_path,
-                        engine,
-                        params.provenance,
-                        &params.resolved.plan_context,
-                        params.acting_principal,
-                        params.state,
-                        params.launch_timings.as_ref(),
-                        params
-                            .resolved
-                            .root_admission
-                            .as_ref()
-                            .and_then(|admission| admission.admitted_request_snapshot()),
-                    )
-                    .await
-                    .map_err(|error| {
-                        BuildAndLaunchError::Internal(anyhow::anyhow!(
-                            "launch augmentation failed: {error}"
-                        ))
-                    })?;
-                    drop(augmentation_timer);
-                    return Ok(audits);
-                }
+            if let Some(exec) = launching_kind_schema.execution()
+                && !exec.launch_augmentations.is_empty()
+            {
+                let augmentation_timer = params
+                    .launch_timings
+                    .as_ref()
+                    .map(|timings| timings.nested("background_dispatch", "launch_augmentation"));
+                let audits = crate::augmentations::run_augmentations(
+                    exec,
+                    &mut resolution,
+                    thread_id,
+                    params.project_path,
+                    engine,
+                    params.provenance,
+                    &params.resolved.plan_context,
+                    params.acting_principal,
+                    params.state,
+                    params.launch_timings.as_ref(),
+                    params
+                        .resolved
+                        .root_admission
+                        .as_ref()
+                        .and_then(|admission| admission.admitted_request_snapshot()),
+                )
+                .await
+                .map_err(|error| {
+                    BuildAndLaunchError::Internal(anyhow::anyhow!(
+                        "launch augmentation failed: {error}"
+                    ))
+                })?;
+                drop(augmentation_timer);
+                return Ok(audits);
             }
         }
         Ok::<Vec<crate::augmentations::LaunchAugmentationAudit>, BuildAndLaunchError>(Vec::new())
@@ -4342,14 +4343,13 @@ async fn prepare_managed_launch_authority(
             .state_store
             .verify_admitted_artifact_identity(thread_id, &admitted_artifact_identity)
             .map_err(BuildAndLaunchError::Internal)?;
-    } else if let Some(persisted) = metadata_template {
-        if let Some(expected) = persisted.admitted_artifact_identity.as_ref() {
-            if expected != &admitted_artifact_identity {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "installed runtime/protocol/executor identity no longer matches the admitted launch capsule: admitted={expected:?}, installed={admitted_artifact_identity:?}"
-                )));
-            }
-        }
+    } else if let Some(persisted) = metadata_template
+        && let Some(expected) = persisted.admitted_artifact_identity.as_ref()
+        && expected != &admitted_artifact_identity
+    {
+        return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+            "installed runtime/protocol/executor identity no longer matches the admitted launch capsule: admitted={expected:?}, installed={admitted_artifact_identity:?}"
+        )));
     }
     let (executor_blob_hash, pending_executor_blob) =
         if let Some(capsule) = admitted_capsule.as_ref() {
@@ -4770,13 +4770,15 @@ pub async fn build_and_launch(
     }
     drop(authority.pending_project_snapshot.take());
     drop(authority.pending_executor_blob.take());
-    run_claimed_thread_row_with_authority(
+    let result = run_claimed_thread_row_with_authority(
         params,
         thread,
         authority,
         LaunchAuditDisposition::CommittedAtBirth,
     )
-    .await
+    .await;
+    drop(_launch_claim);
+    result
 }
 
 fn map_launch_planning_check_error(
@@ -5322,16 +5324,16 @@ async fn run_claimed_thread_row_inner(
         // non-paying runtime (graph/knowledge) may carry a finite limit that
         // its paid descendants enforce through the shared execution account —
         // each descendant's own admission re-checks eligibility.
-        if let Some(authority) = prepared_launch.financial_authority.as_ref() {
-            if !authority.spend_bound.hard_spend_eligible() {
-                return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
-                    "hard spend limit {} requires a mechanically proven spend bound; this \
-                     route's sealed financial authority is `{}` and is ineligible for hard \
-                     spend",
-                    hard_limits.spend_usd.to_canonical_string(),
-                    authority.spend_bound.as_str()
-                )));
-            }
+        if let Some(authority) = prepared_launch.financial_authority.as_ref()
+            && !authority.spend_bound.hard_spend_eligible()
+        {
+            return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
+                "hard spend limit {} requires a mechanically proven spend bound; this \
+                 route's sealed financial authority is `{}` and is ineligible for hard \
+                 spend",
+                hard_limits.spend_usd.to_canonical_string(),
+                authority.spend_bound.as_str()
+            )));
         }
         if accounting_scope.is_none() || state.accounting.is_none() {
             return Err(BuildAndLaunchError::Internal(anyhow::anyhow!(
@@ -6040,7 +6042,7 @@ pub fn settle_recovery_preparation_refusal(
     let claim = match ThreadLaunchClaim::acquire(state, thread_id)? {
         ThreadLaunchClaimOutcome::Claimed(claim) => *claim,
         ThreadLaunchClaimOutcome::AlreadyClaimed => {
-            return Ok(RecoveryRefusalOutcome::AlreadyClaimed)
+            return Ok(RecoveryRefusalOutcome::AlreadyClaimed);
         }
     };
     let launch_owner = claim.canonical_owner()?;
@@ -7127,7 +7129,7 @@ async fn launch_claimed_native_resume(
     )?;
     let project_path = params.provenance.effective_path().to_path_buf();
 
-    run_claimed_thread_row(
+    let result = run_claimed_thread_row(
         BuildAndLaunchParams {
             state,
             lifecycle_authority: resume.lifecycle_authority,
@@ -7152,7 +7154,9 @@ async fn launch_claimed_native_resume(
         },
         thread,
     )
-    .await
+    .await;
+    drop(params);
+    result
 }
 
 fn attached_identity_launch_blocker(
@@ -7268,7 +7272,8 @@ pub fn prepare_and_spawn_admitted_root_recovery(
             }
         };
         let launch_state = state.clone();
-        match launch_admitted_root_with_claim(state, &thread_id, claim).await {
+        let launch_result = launch_admitted_root_with_claim(state, &thread_id, claim).await;
+        match launch_result {
             Ok(SuccessorLaunchOutcome::Launched(_)) => {}
             Ok(SuccessorLaunchOutcome::Skipped(reason)) => tracing::debug!(
                 thread_id = %thread_id,
@@ -7987,21 +7992,25 @@ pub fn sweep_launch_windows(state: &AppState) {
     match state.state_store.launch_window_launched_members() {
         Ok(members) => {
             for chain in members {
-                match chain_tip_hard_terminal(state, &chain) {
-                    Ok(true) => match state.state_store.launch_window_release(
-                        &chain,
-                        global_live_fanout_limit(),
-                        now_ms,
-                    ) {
-                        Ok(admitted) => {
-                            for id in admitted {
-                                launch_admitted_window_member(state, &id);
+                let terminal = chain_tip_hard_terminal(state, &chain);
+                match terminal {
+                    Ok(true) => {
+                        let release = state.state_store.launch_window_release(
+                            &chain,
+                            global_live_fanout_limit(),
+                            now_ms,
+                        );
+                        match release {
+                            Ok(admitted) => {
+                                for id in admitted {
+                                    launch_admitted_window_member(state, &id);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep release failed")
                             }
                         }
-                        Err(e) => {
-                            tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep release failed")
-                        }
-                    },
+                    }
                     Ok(false) => {}
                     Err(e) => {
                         tracing::warn!(chain_root_id = %chain, error = %e, "launch-window sweep terminal check failed")
@@ -8014,11 +8023,11 @@ pub fn sweep_launch_windows(state: &AppState) {
     match state.state_store.launch_window_keys_with_queue() {
         Ok(keys) => {
             for key in keys {
-                match state.state_store.launch_window_admit(
-                    &key,
-                    global_live_fanout_limit(),
-                    now_ms,
-                ) {
+                let admission =
+                    state
+                        .state_store
+                        .launch_window_admit(&key, global_live_fanout_limit(), now_ms);
+                match admission {
                     Ok(admitted) => {
                         for id in admitted {
                             tracing::info!(
@@ -8227,13 +8236,12 @@ pub fn prepare_and_spawn_follow_resume_recovery(
             // provably the right successor and it already advanced, the owning
             // launcher has durably consumed the waiter even though we did not
             // win its claim.
-            if let Some(successor) = state.threads.get_thread(&successor_id)? {
-                if follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &successor)
+            if let Some(successor) = state.threads.get_thread(&successor_id)?
+                && follow_resume_successor_refusal(&state, &waiter.parent_thread_id, &successor)
                     .is_none()
-                    && successor.status != ryeos_state::objects::ThreadStatus::Created.as_str()
-                {
-                    let _ = state.state_store.clear_follow_waiter(follow_key);
-                }
+                && successor.status != ryeos_state::objects::ThreadStatus::Created.as_str()
+            {
+                let _ = state.state_store.clear_follow_waiter(follow_key);
             }
             return Ok(RecoveryLaunchOutcome::Skipped("already_claimed"));
         }
@@ -8877,13 +8885,15 @@ mod tests {
         assert_eq!(out, caps(&["a", "b"]));
         // Drift (narrower OR wider) → rejected.
         let narrower = caps(&["a"]);
-        assert!(apply_policy(
-            &["a", "b"],
-            &[],
-            CapabilityPolicy::ExactPinned(&narrower),
-            ""
-        )
-        .is_err());
+        assert!(
+            apply_policy(
+                &["a", "b"],
+                &[],
+                CapabilityPolicy::ExactPinned(&narrower),
+                ""
+            )
+            .is_err()
+        );
         let wider = caps(&["a", "b", "c"]);
         assert!(apply_policy(&["a", "b"], &[], CapabilityPolicy::ExactPinned(&wider), "").is_err());
     }
@@ -8915,12 +8925,14 @@ mod tests {
         );
 
         let mismatched = caps(&["ryeos.execute.tool.echo"]);
-        assert!(recover_admitted_effective_caps(
-            &admitted,
-            CapabilityPolicy::ExactPinned(&mismatched),
-            "tool:echo",
-        )
-        .is_err());
+        assert!(
+            recover_admitted_effective_caps(
+                &admitted,
+                CapabilityPolicy::ExactPinned(&mismatched),
+                "tool:echo",
+            )
+            .is_err()
+        );
     }
 
     // ── Follow-child hybrid: source-aware bounding ──────────────────────
@@ -9298,21 +9310,25 @@ mod tests {
         );
 
         let tampered = document.replace("directive", "graph");
-        assert!(verify_admitted_signed_descriptor_document(
-            &tampered,
-            &content_hash,
-            &fingerprint,
-            &trust,
-        )
-        .is_err());
+        assert!(
+            verify_admitted_signed_descriptor_document(
+                &tampered,
+                &content_hash,
+                &fingerprint,
+                &trust,
+            )
+            .is_err()
+        );
         let revoked = ryeos_engine::trust::TrustStore::from_signers(Vec::new());
-        assert!(verify_admitted_signed_descriptor_document(
-            &document,
-            &content_hash,
-            &fingerprint,
-            &revoked,
-        )
-        .is_err());
+        assert!(
+            verify_admitted_signed_descriptor_document(
+                &document,
+                &content_hash,
+                &fingerprint,
+                &revoked,
+            )
+            .is_err()
+        );
     }
 
     #[test]

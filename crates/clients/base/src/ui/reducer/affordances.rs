@@ -89,16 +89,14 @@ impl RyeOsCore {
                 args,
                 notice,
             }) => {
-                if item_ref == "service:projects/open"
+                if (item_ref == "service:projects/open"
                     || item_ref == "service:ui/projects/open"
-                    || item_ref == "service:ui/ryeos-ui/projects/open"
+                    || item_ref == "service:ui/ryeos-ui/projects/open")
+                    && let Some(local_id) = args.get("local_id").and_then(serde_json::Value::as_str)
                 {
-                    if let Some(local_id) = args.get("local_id").and_then(serde_json::Value::as_str)
-                    {
-                        return vec![self.emit(RyeOsEffectKind::OpenProject {
-                            local_id: local_id.to_string(),
-                        })];
-                    }
+                    return vec![self.emit(RyeOsEffectKind::OpenProject {
+                        local_id: local_id.to_string(),
+                    })];
                 }
                 vec![self.emit(RyeOsEffectKind::Invoke {
                     target: super::effect::InvokeRef::Ref { item_ref },
@@ -135,15 +133,14 @@ impl RyeOsCore {
         if drill
             && self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
             && !self.workspace.center_is_empty()
+            && let Some(view) = self.workspace.focused_view().cloned()
         {
-            if let Some(view) = self.workspace.focused_view().cloned() {
-                let facets = self.seat.fold().snapshot();
-                // The frame carries the label of the level being left (the
-                // current lens label), so the breadcrumb reads the ancestor
-                // cognitions, not repeated view titles.
-                let label = self.workspace.lens_label.clone();
-                self.workspace.push_lens_frame(view, facets, label);
-            }
+            let facets = self.seat.fold().snapshot();
+            // The frame carries the label of the level being left (the
+            // current lens label), so the breadcrumb reads the ancestor
+            // cognitions, not repeated view titles.
+            let label = self.workspace.lens_label.clone();
+            self.workspace.push_lens_frame(view, facets, label);
         }
         let next = if let Some(merge) = merge {
             let mut current = self
@@ -829,9 +826,11 @@ mod tests {
             },
         });
 
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology)));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchTopology))
+        );
     }
 
     #[test]
@@ -880,11 +879,13 @@ mod tests {
         let scene = crate::ui::scene_model::build_scene_model(&core, &core.ui.atlas, None, None);
         let atlas = scene.atlas.expect("atlas surface should build scene atlas");
         assert_eq!(atlas.root_label, ".ai");
-        assert!(atlas
-            .nodes
-            .iter()
-            .flat_map(|node| &node.stack)
-            .any(|item| item.canonical_ref == "tool:demo/run"));
+        assert!(
+            atlas
+                .nodes
+                .iter()
+                .flat_map(|node| &node.stack)
+                .any(|item| item.canonical_ref == "tool:demo/run")
+        );
     }
 
     #[test]

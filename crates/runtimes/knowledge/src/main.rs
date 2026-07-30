@@ -21,7 +21,7 @@ use std::io::Read;
 
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::method_wire::{
-    MethodCallEnvelope, MethodCallError, MethodCallResult, METHOD_CALL_SCHEMA_VERSION,
+    METHOD_CALL_SCHEMA_VERSION, MethodCallEnvelope, MethodCallError, MethodCallResult,
 };
 
 use types::KnowledgeError;

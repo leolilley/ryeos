@@ -222,13 +222,13 @@ impl TryFrom<FieldTypeRaw> for FieldType {
                 }
                 // Nested contract root must be Mapping (it describes
                 // sub-fields of a mapping value).
-                if let Some(ref c) = contract {
-                    if c.root_type != ShapeType::Mapping {
-                        return Err(format!(
-                            "field: nested `contract` root_type must be mapping (got {:?})",
-                            c.root_type
-                        ));
-                    }
+                if let Some(ref c) = contract
+                    && c.root_type != ShapeType::Mapping
+                {
+                    return Err(format!(
+                        "field: nested `contract` root_type must be mapping (got {:?})",
+                        c.root_type
+                    ));
                 }
                 if elements.is_some() && prim != PrimType::Sequence {
                     return Err(format!(
@@ -777,7 +777,7 @@ fn validate_field(
             element_type,
         } => {
             // Check enum constraint.
-            if let Some(ref allowed) = enum_values {
+            if let Some(allowed) = enum_values {
                 if let Some(s) = value.as_str() {
                     if !allowed.contains(&s.to_string()) {
                         report.errors.push(InstanceViolation {
@@ -820,21 +820,21 @@ fn validate_field(
             }
 
             // Recurse into nested contract.
-            if let Some(ref contract) = nested_contract {
+            if let Some(contract) = nested_contract {
                 validate_value(contract, value, &[field_path.as_str()], report);
             }
 
             // Validate sequence elements.
-            if let Some(ref elem_ft) = element_type {
-                if let Some(arr) = value.as_array() {
-                    for (i, elem) in arr.iter().enumerate() {
-                        let elem_name = format!("{}[{}]", field_name, i);
-                        validate_field(elem, elem_ft, parent_path, &elem_name, report);
-                    }
+            if let Some(elem_ft) = element_type
+                && let Some(arr) = value.as_array()
+            {
+                for (i, elem) in arr.iter().enumerate() {
+                    let elem_name = format!("{}[{}]", field_name, i);
+                    validate_field(elem, elem_ft, parent_path, &elem_name, report);
                 }
-                // If value is not an array but prim == Sequence, we
-                // already reported a TypeMismatch above.
             }
+            // If value is not an array but prim == Sequence, we
+            // already reported a TypeMismatch above.
         }
         FieldType::Union { prims } => {
             let matches = match value {
@@ -1081,13 +1081,17 @@ mod value_shape_tests {
             optional: Default::default(),
             strict_fields: None,
         };
-        assert!(consumer_root_any
-            .is_satisfied_by(&producer_mapping)
-            .is_empty());
+        assert!(
+            consumer_root_any
+                .is_satisfied_by(&producer_mapping)
+                .is_empty()
+        );
         assert!(consumer_root_any.is_satisfied_by(&producer_seq).is_empty());
-        assert!(consumer_root_any
-            .is_satisfied_by(&producer_root_any)
-            .is_empty());
+        assert!(
+            consumer_root_any
+                .is_satisfied_by(&producer_root_any)
+                .is_empty()
+        );
 
         // Consumer field-level Any: accepts any producer field type.
         let consumer = shape_mapping(&[("body", ft_any())], &[]);
@@ -1217,9 +1221,10 @@ mod value_shape_tests {
             strict_fields: None,
         };
         let v = consumer.is_satisfied_by(&producer);
-        assert!(v
-            .iter()
-            .any(|x| matches!(x, ContractViolation::RootTypeMismatch { .. })));
+        assert!(
+            v.iter()
+                .any(|x| matches!(x, ContractViolation::RootTypeMismatch { .. }))
+        );
     }
 
     #[test]
@@ -1382,7 +1387,7 @@ required:
         let shape: ValueShape = serde_yaml::from_str(yaml).expect("enum field parses");
         let mode = shape.required.get("mode").unwrap();
         if let FieldType::Single {
-            enum_values: Some(ref vals),
+            enum_values: Some(vals),
             ..
         } = mode
         {
@@ -1405,7 +1410,7 @@ optional:
         let shape: ValueShape = serde_yaml::from_str(yaml).expect("typed sequence parses");
         let items = shape.optional.get("items").unwrap();
         if let FieldType::Single {
-            element_type: Some(ref elem),
+            element_type: Some(elem),
             ..
         } = items
         {
@@ -1717,7 +1722,7 @@ required:
         // Spot-check: launch has a nested contract with mode enum.
         let launch = shape.required.get("launch").unwrap();
         if let FieldType::Single {
-            nested_contract: Some(ref contract),
+            nested_contract: Some(contract),
             ..
         } = launch
         {
@@ -1727,19 +1732,19 @@ required:
             // config is optional with its own nested contract.
             let config = contract.optional.get("config").unwrap();
             if let FieldType::Single {
-                nested_contract: Some(ref cfg_contract),
+                nested_contract: Some(cfg_contract),
                 ..
             } = config
             {
                 let env = cfg_contract.optional.get("env").unwrap();
                 if let FieldType::Single {
-                    element_type: Some(ref elem),
+                    element_type: Some(elem),
                     ..
                 } = env
                 {
                     // Element type is a mapping with key+value required.
                     if let FieldType::Single {
-                        nested_contract: Some(ref env_contract),
+                        nested_contract: Some(env_contract),
                         ..
                     } = elem.as_ref()
                     {
@@ -2260,14 +2265,18 @@ strict_fields: warn
         let report = validate(&shape, &value);
         assert_eq!(report.errors.len(), 2);
         // Missing required + type mismatch.
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.code == InstanceViolationCode::MissingRequiredField));
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.code == InstanceViolationCode::TypeMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == InstanceViolationCode::MissingRequiredField)
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.code == InstanceViolationCode::TypeMismatch)
+        );
     }
 
     #[test]
@@ -2422,10 +2431,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "launch.mode" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "launch.mode" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     #[test]
@@ -2448,11 +2459,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "serves.kind"
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(|e| e.path == "serves.kind"
+                && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     #[test]
@@ -2462,10 +2472,11 @@ mod kind_contract_regressions {
         });
         let report = validate(&client_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "launch" && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(
+                |e| e.path == "launch" && e.code == InstanceViolationCode::MissingRequiredField
+            )
+        );
     }
 
     // ── service kind ─────────────────────────────────────────────
@@ -2528,10 +2539,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&service_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "availability" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "availability" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     // ── handler kind ─────────────────────────────────────────────
@@ -2581,10 +2594,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&handler_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "serves" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "serves" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     // ── runtime kind ─────────────────────────────────────────────
@@ -2649,10 +2664,12 @@ mod kind_contract_regressions {
         });
         let report = validate(&runtime_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "kind" && e.code == InstanceViolationCode::EnumMismatch));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path == "kind" && e.code == InstanceViolationCode::EnumMismatch)
+        );
     }
 
     #[test]
@@ -2666,11 +2683,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&runtime_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "schema.result"
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(|e| e.path == "schema.result"
+                && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     // ── surface kind ─────────────────────────────────────────────
@@ -2729,11 +2745,10 @@ mod kind_contract_regressions {
         });
         let report = validate(&surface_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path == "layout.root"
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report.errors.iter().any(|e| e.path == "layout.root"
+                && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     #[test]
@@ -2746,11 +2761,13 @@ mod kind_contract_regressions {
         });
         let report = validate(&surface_shape(), &value);
         assert!(!report.is_ok());
-        assert!(report
-            .errors
-            .iter()
-            .any(|e| e.path.starts_with("affordances[")
-                && e.code == InstanceViolationCode::MissingRequiredField));
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.path.starts_with("affordances[")
+                    && e.code == InstanceViolationCode::MissingRequiredField)
+        );
     }
 
     #[test]

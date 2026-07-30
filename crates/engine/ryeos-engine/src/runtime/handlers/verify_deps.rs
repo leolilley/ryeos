@@ -125,18 +125,18 @@ impl RuntimeHandler for VerifyDepsHandler {
 
         // Resolve base directory from scope.
         let (base, recursive) = resolve_base(&cfg, ctx)?;
-        if let Some((project_root, project_content)) = ctx.project_authority {
-            if base.starts_with(project_root) {
-                return verify_admitted_project_dependencies(
-                    &base,
-                    project_root,
-                    project_content,
-                    recursive,
-                    &cfg.exclude_dirs,
-                    &cfg.extensions,
-                    ctx,
-                );
-            }
+        if let Some((project_root, project_content)) = ctx.project_authority
+            && base.starts_with(project_root)
+        {
+            return verify_admitted_project_dependencies(
+                &base,
+                project_root,
+                project_content,
+                recursive,
+                &cfg.exclude_dirs,
+                &cfg.extensions,
+                ctx,
+            );
         }
         let extensions: HashSet<String> = cfg.extensions.iter().cloned().collect();
         if extensions.is_empty() {
@@ -288,7 +288,7 @@ fn verify_file_content(
             })?;
     let envelope = &ext_spec.signature;
 
-    match parse_signature_header(&content, envelope) {
+    match parse_signature_header(content, envelope) {
         None => {
             tracing::warn!(
                 file = %path.display(),
@@ -296,7 +296,7 @@ fn verify_file_content(
             );
         }
         Some(header) => {
-            let recomputed = content_hash_after_signature(&content, envelope).ok_or_else(|| {
+            let recomputed = content_hash_after_signature(content, envelope).ok_or_else(|| {
                 EngineError::InvalidRuntimeConfig {
                     path: path.display().to_string(),
                     reason: "verify_deps: could not locate signature line".to_string(),
@@ -403,10 +403,10 @@ fn pick_kind_for_extension<'a>(
     let mut names: Vec<&str> = ctx.kinds.kinds().collect();
     names.sort();
     for name in names {
-        if let Some(schema) = ctx.kinds.get(name) {
-            if schema.spec_for(suffix).is_some() {
-                return Some(schema);
-            }
+        if let Some(schema) = ctx.kinds.get(name)
+            && schema.spec_for(suffix).is_some()
+        {
+            return Some(schema);
         }
     }
     None
@@ -420,7 +420,7 @@ mod tests {
     use crate::parsers::ParserDispatcher;
     use crate::runtime::{ChainIntermediate, HostEnvBindings, SpecOverrides, TemplateContext};
     use crate::trust::TrustStore;
-    use serde_json::{json, Map, Value};
+    use serde_json::{Map, Value, json};
     use std::collections::HashMap;
     use std::path::PathBuf;
 

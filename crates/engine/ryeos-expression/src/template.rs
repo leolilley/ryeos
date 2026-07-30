@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::error::{ErrorPhase, ExpressionError, SourceSpan};
 use super::limits::CompilationLimits;
-use super::{compile_expression_arc, CompiledTemplate, TemplatePart};
+use super::{CompiledTemplate, TemplatePart, compile_expression_arc};
 
 pub(crate) fn compile(
     source: Arc<str>,

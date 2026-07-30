@@ -8,8 +8,8 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use ryeos_client_base::ui::{
-    ryeos_key_command, BrowserSession as RyeOsBrowserSession, BrowserViewport, RyeOsCore,
-    RyeOsEffectResult, RyeOsEnvelope, RyeOsEvent, RyeOsKeyCommand, RyeOsKeyEvent,
+    BrowserSession as RyeOsBrowserSession, BrowserViewport, RyeOsCore, RyeOsEffectResult,
+    RyeOsEnvelope, RyeOsEvent, RyeOsKeyCommand, RyeOsKeyEvent, ryeos_key_command,
 };
 use ryeos_client_base::ui::{SeatEvent, SeatEventKind};
 

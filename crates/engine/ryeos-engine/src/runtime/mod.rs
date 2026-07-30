@@ -237,7 +237,7 @@ fn render_compiled_runtime_template(
 
     let context = Value::Object(roots);
     let evaluation_limits = ryeos_expression::EvaluationLimits::default();
-    let rendered = ryeos_expression::render_template(&compiled, &context, &evaluation_limits)
+    let rendered = ryeos_expression::render_template(compiled, &context, &evaluation_limits)
         .map_err(|error| EngineError::RuntimeTemplateExpression {
             reason: error.to_string(),
         })?;
@@ -560,18 +560,18 @@ pub fn compile_with_handlers(
     // of chain[0]'s source path; `tool_parent` is one level above
     // that. Both are guaranteed present so templates that reference
     // them never need a handler to have run first.
-    if let Some(first) = chain.first() {
-        if let Some(tool_dir) = first.source_path.parent() {
-            ctx.template_ctx.extra.insert(
-                "tool_dir".to_owned(),
-                tool_dir.to_string_lossy().into_owned(),
-            );
-            let tool_parent = tool_dir.parent().unwrap_or(tool_dir);
-            ctx.template_ctx.extra.insert(
-                "tool_parent".to_owned(),
-                tool_parent.to_string_lossy().into_owned(),
-            );
-        }
+    if let Some(first) = chain.first()
+        && let Some(tool_dir) = first.source_path.parent()
+    {
+        ctx.template_ctx.extra.insert(
+            "tool_dir".to_owned(),
+            tool_dir.to_string_lossy().into_owned(),
+        );
+        let tool_parent = tool_dir.parent().unwrap_or(tool_dir);
+        ctx.template_ctx.extra.insert(
+            "tool_parent".to_owned(),
+            tool_parent.to_string_lossy().into_owned(),
+        );
     }
 
     // 1. Validate every key up-front: must be ignored or claimed by a

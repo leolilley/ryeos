@@ -1,8 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
 use ed25519_dalek::{Signer, Verifier, VerifyingKey};
 
@@ -26,7 +26,7 @@ pub fn verify(hash: &str, signature: &str, public_key_path: &str) -> serde_json:
     let key = match VerifyingKey::from_public_key_pem(&pem) {
         Ok(k) => k,
         Err(e) => {
-            return serde_json::json!({ "valid": false, "error": format!("parse public key: {e}") })
+            return serde_json::json!({ "valid": false, "error": format!("parse public key: {e}") });
         }
     };
     // Accept both padded and unpadded base64url

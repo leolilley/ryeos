@@ -5,15 +5,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::AI_DIR;
 use crate::protocol_vocabulary::{
-    is_compatible_lifecycle_detached, is_compatible_shape_mode, validate_env_name, CallbackChannel,
-    EnvInjectionSource,
+    CallbackChannel, EnvInjectionSource, is_compatible_lifecycle_detached,
+    is_compatible_shape_mode, validate_env_name,
 };
-use crate::protocols::descriptor::ProtocolDescriptor;
 use crate::protocols::SUPPORTED_PROTOCOL_ABI_VERSION;
+use crate::protocols::descriptor::ProtocolDescriptor;
 use crate::resolution::TrustClass;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 /// A protocol descriptor that has been loaded, verified, and validated.
 #[derive(Debug, Clone)]

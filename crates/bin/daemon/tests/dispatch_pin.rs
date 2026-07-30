@@ -23,8 +23,8 @@ mod common;
 use std::path::Path;
 
 use base64::Engine;
-use common::fast_fixture::register_standard_bundle;
 use common::DaemonHarness;
+use common::fast_fixture::register_standard_bundle;
 use lillux::crypto::Signer as _;
 
 // ── Helpers ────────────────────────────────────────────────────────────

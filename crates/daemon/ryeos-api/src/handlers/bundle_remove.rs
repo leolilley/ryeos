@@ -8,10 +8,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use ryeos_bundle::plan::{build_plan, BundleAction, BundlePlan, BundlePlanMode};
+use ryeos_bundle::plan::{BundleAction, BundlePlan, BundlePlanMode, build_plan};
 use ryeos_engine::trust::TrustStore;
 
 use crate::registry::ServiceDescriptor;

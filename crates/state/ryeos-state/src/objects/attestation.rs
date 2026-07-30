@@ -5,11 +5,11 @@
 //! about `subject_hash` under `policy`. Local policy decides whether a
 //! verified attestation is authoritative.
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use base64::Engine as _;
 use lillux::crypto::Verifier;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::refs::TrustStore;
 use crate::signer::Signer;
@@ -508,27 +508,35 @@ mod tests {
 
         let mut policy_tampered = unsigned().sign(&signer).unwrap();
         policy_tampered.policy = "other.policy".to_string();
-        assert!(policy_tampered
-            .verify_with_key(&signer.verifying_key())
-            .is_err());
+        assert!(
+            policy_tampered
+                .verify_with_key(&signer.verifying_key())
+                .is_err()
+        );
 
         let mut issued_tampered = unsigned().sign(&signer).unwrap();
         issued_tampered.issued_at = "2026-05-29T12:00:01Z".to_string();
-        assert!(issued_tampered
-            .verify_with_key(&signer.verifying_key())
-            .is_err());
+        assert!(
+            issued_tampered
+                .verify_with_key(&signer.verifying_key())
+                .is_err()
+        );
 
         let mut expiry_tampered = unsigned().sign(&signer).unwrap();
         expiry_tampered.expires_at = Some("2026-05-31T12:00:00Z".to_string());
-        assert!(expiry_tampered
-            .verify_with_key(&signer.verifying_key())
-            .is_err());
+        assert!(
+            expiry_tampered
+                .verify_with_key(&signer.verifying_key())
+                .is_err()
+        );
 
         let mut evidence_tampered = unsigned().sign(&signer).unwrap();
         evidence_tampered.evidence = json!({ "checks": ["different"], "refs": [] });
-        assert!(evidence_tampered
-            .verify_with_key(&signer.verifying_key())
-            .is_err());
+        assert!(
+            evidence_tampered
+                .verify_with_key(&signer.verifying_key())
+                .is_err()
+        );
     }
 
     #[test]

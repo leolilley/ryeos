@@ -23,8 +23,8 @@ use crate::trust::TrustStore;
 use super::alias::AliasResolver;
 use super::decl::ResolutionStepDecl;
 use super::types::{
-    effective_trust, ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput,
-    ResolutionStepName, ResolvedAncestor, TrustClass,
+    ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput, ResolutionStepName,
+    ResolvedAncestor, TrustClass, effective_trust,
 };
 
 /// Result of loading an item: identity / trust / raw bytes (as a
@@ -77,6 +77,31 @@ impl LoadedItem {
             raw_content: self.raw_content,
             source_content_digest: self.source_content_digest,
             raw_content_digest: self.raw_content_digest,
+        }
+    }
+}
+
+/// Shared registries used throughout one resolution pipeline.
+#[derive(Clone, Copy)]
+pub(crate) struct ResolutionServices<'a> {
+    kinds: &'a KindRegistry,
+    parsers: &'a ParserDispatcher,
+    roots: &'a ResolutionRoots,
+    trust_store: &'a TrustStore,
+}
+
+impl<'a> ResolutionServices<'a> {
+    pub(crate) fn new(
+        kinds: &'a KindRegistry,
+        parsers: &'a ParserDispatcher,
+        roots: &'a ResolutionRoots,
+        trust_store: &'a TrustStore,
+    ) -> Self {
+        Self {
+            kinds,
+            parsers,
+            roots,
+            trust_store,
         }
     }
 }
@@ -150,10 +175,7 @@ impl<'a> ResolutionContext<'a> {
     /// not per-step.
     pub(crate) fn new(
         current_ref: CanonicalRef,
-        kinds: &'a KindRegistry,
-        parsers: &'a ParserDispatcher,
-        roots: &'a ResolutionRoots,
-        trust_store: &'a TrustStore,
+        services: ResolutionServices<'a>,
         aliases: AliasResolver,
         root_loaded: LoadedItem,
         project_authority: Option<(
@@ -179,6 +201,12 @@ impl<'a> ResolutionContext<'a> {
             source_content_digest: root_loaded.source_content_digest.clone(),
             raw_content_digest: root_loaded.raw_content_digest.clone(),
         };
+        let ResolutionServices {
+            kinds,
+            parsers,
+            roots,
+            trust_store,
+        } = services;
         Self {
             current_ref,
             kinds,
@@ -309,10 +337,7 @@ impl<'a> ResolutionContext<'a> {
         step: ResolutionStepName,
     ) -> Result<LoadedItem, ResolutionError> {
         let loaded = load_item_at(
-            self.kinds,
-            self.parsers,
-            self.roots,
-            self.trust_store,
+            ResolutionServices::new(self.kinds, self.parsers, self.roots, self.trust_store),
             ref_,
             referenced_by,
             step,
@@ -336,10 +361,7 @@ impl<'a> ResolutionContext<'a> {
 /// is identical to what the dispatcher uses. Free function so the
 /// pipeline can load the root before any `ResolutionContext` exists.
 pub(crate) fn load_item_at(
-    kinds: &KindRegistry,
-    parsers: &ParserDispatcher,
-    roots: &ResolutionRoots,
-    trust_store: &TrustStore,
+    services: ResolutionServices<'_>,
     ref_: &CanonicalRef,
     referenced_by: &str,
     step: ResolutionStepName,
@@ -348,6 +370,12 @@ pub(crate) fn load_item_at(
         &dyn crate::project_content::AuthoritativeProjectContent,
     )>,
 ) -> Result<LoadedItem, ResolutionError> {
+    let ResolutionServices {
+        kinds,
+        parsers,
+        roots,
+        trust_store,
+    } = services;
     let raw = load_item_raw(
         kinds,
         roots,

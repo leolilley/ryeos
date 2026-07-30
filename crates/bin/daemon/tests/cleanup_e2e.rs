@@ -21,7 +21,7 @@
 
 mod common;
 
-use common::{run_service_standalone_fresh, ryeos_binary, ryeosd_binary, DaemonHarness};
+use common::{DaemonHarness, run_service_standalone_fresh, ryeos_binary, ryeosd_binary};
 
 // ── Test 1: live /execute over TCP ─────────────────────────────────────
 

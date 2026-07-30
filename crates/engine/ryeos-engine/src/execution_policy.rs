@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
-use crate::config_loading::{load_and_verify_config_file_with_hash, ConfigLoadContext};
+use crate::config_loading::{ConfigLoadContext, load_and_verify_config_file_with_hash};
 use crate::contracts::ItemSpace;
 use crate::error::EngineError;
 

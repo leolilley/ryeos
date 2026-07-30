@@ -47,7 +47,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_app::execution_provenance::ProjectSourceKind;
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -71,7 +71,7 @@ fn resolution_project_root<'a>(
     ))
     .then_some(execution_workspace)
 }
-use crate::dispatch_role::{enforce_runtime_target_caps, SubprocessRole};
+use crate::dispatch_role::{SubprocessRole, enforce_runtime_target_caps};
 use crate::execution::launch;
 use crate::executor::{
     self as service_executor, ExecutionContext, ExecutionMode, ServiceExecutionResult,
@@ -82,8 +82,8 @@ use ryeos_app::thread_lifecycle::ResolvedExecutionRequest;
 mod subprocess_execution;
 mod subprocess_policy;
 pub(crate) use subprocess_execution::{dispatch_subprocess, validate_ordinary_protocol_contract};
-pub(crate) use subprocess_policy::strip_binary_ref_prefix;
 pub use subprocess_policy::PreparedManagedLaunch;
+pub(crate) use subprocess_policy::strip_binary_ref_prefix;
 use subprocess_policy::{
     enforce_runtime_caps, prepare_managed_launch, require_terminal_executor_id,
 };
@@ -164,7 +164,7 @@ pub(crate) fn require_callback_runtime_protocol<'a>(
                     "verified runtime '{}' declares non-subprocess terminator {other:?}",
                     verified_runtime.canonical_ref
                 ),
-            })
+            });
         }
         None => {
             return Err(DispatchError::SchemaMisconfigured {
@@ -173,7 +173,7 @@ pub(crate) fn require_callback_runtime_protocol<'a>(
                     "verified runtime '{}' has no subprocess terminator",
                     verified_runtime.canonical_ref
                 ),
-            })
+            });
         }
     };
     let protocol = engine
@@ -508,13 +508,13 @@ fn resolve_dispatch_hop_with_verified(
     // would surface as a 400 "resolution failed" instead of the
     // contractual 501. The schema is the source of truth for
     // executability — resolve only matters once we know we'd dispatch.
-    if let Some(schema) = ctx.engine.kinds.get(&current_ref.kind) {
-        if schema.execution().is_none() {
-            return Err(DispatchError::NotRootExecutable {
-                kind: current_ref.kind.clone(),
-                detail: "schema has no `execution:` block".into(),
-            });
-        }
+    if let Some(schema) = ctx.engine.kinds.get(&current_ref.kind)
+        && schema.execution().is_none()
+    {
+        return Err(DispatchError::NotRootExecutable {
+            kind: current_ref.kind.clone(),
+            detail: "schema has no `execution:` block".into(),
+        });
     }
 
     // **P1.3 + P1.4**: per-hop resolve AND verify. No special-case
@@ -870,31 +870,29 @@ fn validate_arg_value(
     }
 
     // 2. enum (applies to string values).
-    if let Some(allowed) = &decl.enum_values {
-        if let Some(s) = val.as_str() {
-            if !allowed.iter().any(|a| a == s) {
-                return Err(err(format!(
-                    "arg '{name}' must be one of {allowed:?}, got {s:?}"
-                )));
-            }
-        }
+    if let Some(allowed) = &decl.enum_values
+        && let Some(s) = val.as_str()
+        && !allowed.iter().any(|a| a == s)
+    {
+        return Err(err(format!(
+            "arg '{name}' must be one of {allowed:?}, got {s:?}"
+        )));
     }
 
     // 3. min (applies to integer values).
-    if let Some(min) = decl.min {
-        if let Some(n) = val.as_i64() {
-            if n < min {
-                return Err(err(format!("arg '{name}' must be >= {min}, got {n}")));
-            }
-        }
+    if let Some(min) = decl.min
+        && let Some(n) = val.as_i64()
+        && n < min
+    {
+        return Err(err(format!("arg '{name}' must be >= {min}, got {n}")));
     }
 
     // 4. Array element type, when declared via `items`.
-    if matches!(decl.ty, ArgType::Array) {
-        if let (Some(items_decl), Some(arr)) = (&decl.items, val.as_array()) {
-            for (i, el) in arr.iter().enumerate() {
-                validate_arg_value(el, items_decl, &format!("{name}[{i}]"), method_name)?;
-            }
+    if matches!(decl.ty, ArgType::Array)
+        && let (Some(items_decl), Some(arr)) = (&decl.items, val.as_array())
+    {
+        for (i, el) in arr.iter().enumerate() {
+            validate_arg_value(el, items_decl, &format!("{name}[{i}]"), method_name)?;
         }
     }
 
@@ -1584,6 +1582,8 @@ fn method_runtime_config_snapshot_with_proof_from_authority(
     })
 }
 
+// The blocking loader receives the complete authority tuple explicitly.
+#[allow(clippy::too_many_arguments)]
 async fn method_runtime_config_snapshot_off_thread(
     kind: &str,
     requirements: &BTreeMap<String, MethodRuntimeConfigRequirement>,
@@ -2499,13 +2499,13 @@ pub(crate) async fn dispatch_method(
             // Trust a structured error only if the runtime echoed the
             // dispatched kind/method; otherwise fall through to a generic
             // failure so a confused result cannot masquerade as a typed one.
-            if let Ok(batch_result) = decode_method_runtime_result(runtime_protocol, &result.stdout)
+            if let Ok(batch_result) =
+                decode_method_runtime_result(runtime_protocol, &result.stdout)
+                && batch_result.kind == kind
+                && batch_result.method == method_name
+                && let Some(error) = batch_result.error
             {
-                if batch_result.kind == kind && batch_result.method == method_name {
-                    if let Some(error) = batch_result.error {
-                        return Err(map_method_error(kind, method_name, error));
-                    }
-                }
+                return Err(map_method_error(kind, method_name, error));
             }
             return Err(DispatchError::MethodFailed {
                 kind: kind.to_string(),
@@ -2931,7 +2931,10 @@ pub async fn dispatch_service(
             // through `anyhow`. Recover that typed error here so it keeps its
             // HTTP status — a blanket `?` would re-wrap it as `Internal` (500),
             // dropping the 404/409/etc. that the route path preserves.
-            .map_err(|e| e.downcast::<DispatchError>().unwrap_or_else(DispatchError::Internal))?;
+            .map_err(|e| {
+                e.downcast::<DispatchError>()
+                    .unwrap_or_else(DispatchError::Internal)
+            })?;
             let envelope = serde_json::json!({
                 "thread": {
                     "thread_id": result.invocation_id,
@@ -2984,15 +2987,15 @@ fn resolve_method_target_ref(
         // match — the wrapper is narrow by construction and must not be coaxed
         // into dispatching a different kind.
         Some((kind, _bare)) => {
-            if let Some(rk) = ref_kind {
-                if kind != rk {
-                    return Err(DispatchError::MethodInvalidArg {
-                        method: "method_dispatch".into(),
-                        reason: format!(
-                            "tool `{wrapper_ref}` only dispatches `{rk}:` refs, got `{kind}:`"
-                        ),
-                    });
-                }
+            if let Some(rk) = ref_kind
+                && kind != rk
+            {
+                return Err(DispatchError::MethodInvalidArg {
+                    method: "method_dispatch".into(),
+                    reason: format!(
+                        "tool `{wrapper_ref}` only dispatches `{rk}:` refs, got `{kind}:`"
+                    ),
+                });
             }
             Ok(raw.to_string())
         }
@@ -3179,7 +3182,7 @@ async fn dispatch_via_method_executor(
     // Re-enter the shared dispatch loop on the target ref. Boxed: this closes
     // the recursion cycle while preserving accepted-launch handoff authority
     // through an inert method wrapper to the actual method-runtime leaf.
-    Box::pin(dispatch_inner(
+    let result = Box::pin(dispatch_inner(
         &target_ref,
         None,
         None,
@@ -3188,7 +3191,10 @@ async fn dispatch_via_method_executor(
         state,
         launch_handoff,
     ))
-    .await
+    .await;
+    drop(dispatch_req);
+    drop(exec_ctx);
+    result
 }
 
 /// Mint the manifest-backed callback caps an item is entitled to.
@@ -3532,21 +3538,20 @@ fn reject_tool_declared_capabilities(
     requires: Option<&Value>,
     item_ref: &str,
 ) -> Result<(), DispatchError> {
-    if let Some(rv) = requires {
-        if rv
+    if let Some(rv) = requires
+        && rv
             .get("capabilities")
             .and_then(|c| c.get("declared"))
             .is_some()
-        {
-            return Err(DispatchError::InvalidRef(
-                item_ref.to_string(),
-                "tool items cannot self-declare action authority under \
-                 `requires.capabilities.declared`; only \
-                 `requires.capabilities.manifest.runtime_authority` \
-                 (manifest-backed runtime authority) is honored for tools"
-                    .into(),
-            ));
-        }
+    {
+        return Err(DispatchError::InvalidRef(
+            item_ref.to_string(),
+            "tool items cannot self-declare action authority under \
+             `requires.capabilities.declared`; only \
+             `requires.capabilities.manifest.runtime_authority` \
+             (manifest-backed runtime authority) is honored for tools"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -3720,10 +3725,14 @@ pub fn dispatch_daemon_owned(
             root_dispatch_evidence,
             parent_execution_context,
         };
-        Box::pin(dispatch_inner(
+        let result = Box::pin(dispatch_inner(
             &item_ref, None, None, &request, &ctx, &state, None,
         ))
-        .await
+        .await;
+        drop(request);
+        drop(ctx);
+        drop(state);
+        result
     })
 }
 
@@ -3838,17 +3847,15 @@ async fn dispatch_inner(
         }
         (None, _) => {}
     }
-    if verified_root.is_none() {
-        if let (Some(evidence), Some(admission)) = (
+    if verified_root.is_none()
+        && let (Some(evidence), Some(admission)) = (
             request.root_dispatch_evidence.as_ref(),
             request.root_admission.as_ref(),
-        ) {
-            if can_reuse_root_dispatch_evidence(admission)
-                && evidence.requested_subject.resolved.canonical_ref == current_ref
-            {
-                verified_root = Some(evidence.requested_subject.clone());
-            }
-        }
+        )
+        && can_reuse_root_dispatch_evidence(admission)
+        && evidence.requested_subject.resolved.canonical_ref == current_ref
+    {
+        verified_root = Some(evidence.requested_subject.clone());
     }
 
     // Secondary execution identities are independently authorized before any
@@ -4021,14 +4028,14 @@ async fn dispatch_inner(
         // entire dispatch chain. We clone here because the loop may
         // continue (alias/registry hop) and dispatch_by also needs
         // the same data on the terminating hop.
-        if root_subject.is_none() {
-            if let Some(tp) = thread_profile.as_ref() {
-                root_subject = Some(RootSubject {
-                    item_ref: hop_ref.to_string(),
-                    thread_profile: tp.clone(),
-                    verified: verified.clone(),
-                });
-            }
+        if root_subject.is_none()
+            && let Some(tp) = thread_profile.as_ref()
+        {
+            root_subject = Some(RootSubject {
+                item_ref: hop_ref.to_string(),
+                thread_profile: tp.clone(),
+                verified: verified.clone(),
+            });
         }
 
         match next {
@@ -4687,12 +4694,12 @@ fn finish_root_dispatch_preflight(
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<RootDispatchPreflight, DispatchError> {
-    if !ref_bindings.is_empty() {
-        if let LaunchContractApplicability::NonEnvelope { class } = &applicability {
-            return Err(DispatchError::RefBindingNotApplicable {
-                class: class.as_str().to_owned(),
-            });
-        }
+    if !ref_bindings.is_empty()
+        && let LaunchContractApplicability::NonEnvelope { class } = &applicability
+    {
+        return Err(DispatchError::RefBindingNotApplicable {
+            class: class.as_str().to_owned(),
+        });
     }
     let subject_authority = project_binding.subject_resolution_authority().clone();
     let admitted_root_ref = root_subject.resolved.canonical_ref.to_string();
@@ -4786,20 +4793,19 @@ fn admit_request_authority(
         .map_err(DispatchError::Internal)
 }
 
+type CachedRootDispatchSubject = (
+    VerifiedItem,
+    std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
+    std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
+);
+
 fn cached_root_dispatch_subject(
     canonical_ref: &CanonicalRef,
     project_binding: &ryeos_app::thread_lifecycle::AdmittedProjectBinding,
     ctx: &ExecutionContext,
     state: &AppState,
     admitted_request_snapshot: Option<&ryeos_engine::engine::AdmittedRequestAuthoritySnapshot>,
-) -> Result<
-    Option<(
-        VerifiedItem,
-        std::sync::Arc<ryeos_engine::engine::VerifiedArtifactAttestation>,
-        std::sync::Arc<ryeos_app::resolution_cache::ResolvedClosure>,
-    )>,
-    DispatchError,
-> {
+) -> Result<Option<CachedRootDispatchSubject>, DispatchError> {
     let project_root = match &ctx.plan_ctx.project_context {
         ryeos_engine::contracts::ProjectContext::LocalPath { path } => Some(path.as_path()),
         ryeos_engine::contracts::ProjectContext::SnapshotHash { .. }
@@ -4962,10 +4968,10 @@ fn map_root_resolution_validation_error(
     requested_root: &str,
 ) -> DispatchError {
     for cause in error.chain() {
-        if let Some(engine_error) = cause.downcast_ref::<ryeos_engine::error::EngineError>() {
-            if let Some(mapped) = map_engine_root_resolution_error(engine_error, requested_root) {
-                return mapped;
-            }
+        if let Some(engine_error) = cause.downcast_ref::<ryeos_engine::error::EngineError>()
+            && let Some(mapped) = map_engine_root_resolution_error(engine_error, requested_root)
+        {
+            return mapped;
         }
     }
     DispatchError::Internal(error)
@@ -5021,13 +5027,13 @@ fn validate_root_resolution_inner(
     state: &AppState,
     launch_timings: Option<&ryeos_app::launch_stage_timings::LaunchStageTimings>,
 ) -> Result<ValidatedDispatchRoot, DispatchError> {
-    if let Some(schema) = ctx.engine.kinds.get(&canonical_ref.kind) {
-        if schema.execution().is_none() {
-            return Err(DispatchError::NotRootExecutable {
-                kind: canonical_ref.kind.clone(),
-                detail: "schema has no `execution:` block".to_string(),
-            });
-        }
+    if let Some(schema) = ctx.engine.kinds.get(&canonical_ref.kind)
+        && schema.execution().is_none()
+    {
+        return Err(DispatchError::NotRootExecutable {
+            kind: canonical_ref.kind.clone(),
+            detail: "schema has no `execution:` block".to_string(),
+        });
     }
     let admitted_request_snapshot = admit_request_authority(project_binding, ctx)?;
     let cached = cached_root_dispatch_subject(
@@ -5296,10 +5302,10 @@ pub fn preflight_root_dispatch(
             })?;
             requested_subject = Some(subject);
         }
-        if root_subject.is_none() {
-            if let (Some(subject), Some(profile)) = (verified.clone(), thread_profile.clone()) {
-                root_subject = Some((subject, profile));
-            }
+        if root_subject.is_none()
+            && let (Some(subject), Some(profile)) = (verified.clone(), thread_profile.clone())
+        {
+            root_subject = Some((subject, profile));
         }
         let admitted_requested_subject = requested_subject.clone().ok_or_else(|| {
             DispatchError::InvalidRef(
@@ -5492,15 +5498,14 @@ pub fn preflight_root_dispatch(
                             };
                             if managed_route
                                 == subprocess_execution::ManagedProtocolRoute::CallbackRuntime
+                                && let SubprocessRole::RuntimeTarget { verified_runtime } = &role
                             {
-                                if let SubprocessRole::RuntimeTarget { verified_runtime } = &role {
-                                    enforce_runtime_caps(
-                                        &state.authorizer,
-                                        &hop_ref.to_string(),
-                                        &verified_runtime.yaml.required_caps,
-                                        &ctx.caller_scopes,
-                                    )?;
-                                }
+                                enforce_runtime_caps(
+                                    &state.authorizer,
+                                    &hop_ref.to_string(),
+                                    &verified_runtime.yaml.required_caps,
+                                    &ctx.caller_scopes,
+                                )?;
                             }
                             let (subject, profile) = root_subject.clone().ok_or_else(|| {
                                 DispatchError::InvalidRef(
@@ -5779,7 +5784,7 @@ mod tests {
     use ryeos_engine::engine::Engine;
     use ryeos_engine::kind_registry::KindRegistry;
     use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
-    use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+    use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
     #[test]
     fn cancelled_method_root_publication_preserves_launch_cancelled_contract() {

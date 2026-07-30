@@ -11,8 +11,8 @@ mod common;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by};
 use common::DaemonHarness;
+use common::fast_fixture::{register_standard_bundle, write_authorized_key_signed_by};
 use lillux::crypto::{Signer as _, SigningKey};
 
 /// Build ryeos-signed auth headers with a specific audience.

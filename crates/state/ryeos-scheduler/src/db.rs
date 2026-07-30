@@ -6,12 +6,12 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use anyhow::{Context, Result, anyhow};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::planning;
 use super::types::{
-    validate_schedule_spec_record, FireRecord, ScheduleCursorRecord, ScheduleSpecRecord,
+    FireRecord, ScheduleCursorRecord, ScheduleSpecRecord, validate_schedule_spec_record,
 };
 
 // ── Schema ──────────────────────────────────────────────────────────
@@ -2098,21 +2098,24 @@ mod tests {
         assert!(db.get_fire("sched@1000").unwrap().is_some());
         assert!(db.fire_projection_is_current().unwrap());
 
-        assert!(db
-            .verify_fire_retention_targets(&[ryeos_state::gc::retention::FireRetentionTarget {
+        assert!(
+            db.verify_fire_retention_targets(&[ryeos_state::gc::retention::FireRetentionTarget {
                 schedule_id: "sched".to_string(),
                 fire_id: "sched@2000".to_string(),
             }])
-            .is_err());
-        assert!(db
-            .verify_fire_retention_targets(&[ryeos_state::gc::retention::FireRetentionTarget {
+            .is_err()
+        );
+        assert!(
+            db.verify_fire_retention_targets(&[ryeos_state::gc::retention::FireRetentionTarget {
                 schedule_id: "sched".to_string(),
                 fire_id: "sched@missing".to_string(),
             }])
-            .is_err());
-        assert!(db
-            .verify_fire_retention_targets(&[old.clone(), old])
-            .is_err());
+            .is_err()
+        );
+        assert!(
+            db.verify_fire_retention_targets(&[old.clone(), old])
+                .is_err()
+        );
     }
 
     #[test]
@@ -2399,9 +2402,11 @@ mod tests {
         fire.signer_fingerprint = "  ".to_string();
 
         let error = db.upsert_fire(&fire).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("signer_fingerprint must be lowercase SHA-256 hex"));
+        assert!(
+            error
+                .to_string()
+                .contains("signer_fingerprint must be lowercase SHA-256 hex")
+        );
         assert!(db.get_fire("sched@1000").unwrap().is_none());
     }
 
@@ -2615,8 +2620,10 @@ mod tests {
         let mut fire = make_fire("sched", 1000, "dispatched");
         fire.thread_id = None;
         let error = db.upsert_fire(&fire).unwrap_err();
-        assert!(format!("{error:#}")
-            .contains("dispatched scheduler fire must have its deterministic thread_id"));
+        assert!(
+            format!("{error:#}")
+                .contains("dispatched scheduler fire must have its deterministic thread_id")
+        );
     }
 
     #[test]

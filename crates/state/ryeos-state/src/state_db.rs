@@ -19,9 +19,9 @@ use crate::bundle_events::{
 use crate::bundle_projection::BundleProjectionDb;
 use crate::chain::{self, AddThreadWithEventsResult, AppendResult, CreateResult, SnapshotUpdate};
 use crate::head_cache::HeadCache;
-use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::objects::ThreadEvent;
 use crate::objects::ThreadSnapshot;
+use crate::objects::bundle_event::validate_bundle_identifier;
 use crate::operational::{
     AdmissionAttestationRecord, CasEntriesByStateSummary, CasEntryAttribution, CasEntryKind,
     CasEntryState, FinishSyncJobAttempt, NewAdmissionAttestationRecord, NewCasEntryAttribution,
@@ -29,8 +29,8 @@ use crate::operational::{
     SyncJobState, SyncJobUpdate,
 };
 use crate::projection::{
-    self, project_committed_chain, project_initial_root_committed_chain, ChainRetentionProjection,
-    DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+    self, ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor, ProjectionDb,
+    project_committed_chain, project_initial_root_committed_chain,
 };
 use crate::queries;
 use crate::recovery::{
@@ -150,44 +150,43 @@ fn open_recovered_projection(
         }
     };
 
-    if let Some(generation) = generation {
-        if generation.projection_schema_epoch == expected_epoch {
-            let projection_path = runtime_state_dir.join(&generation.projection_file);
-            match ProjectionDb::open_selected_current_in_directory(
-                recovery.runtime_directory(),
-                std::ffi::OsStr::new(&generation.projection_file),
-                false,
-            ) {
-                Ok(db)
-                    if db.projection_instance_id()?.as_deref()
-                        == Some(generation.projection_instance_id.as_str()) =>
-                {
-                    replay_pending_into(
-                        &db,
-                        cas_root,
-                        refs_root,
-                        recovery,
-                        trust_store,
-                        runtime_liveness,
-                        true,
-                        observer,
-                    )?;
-                    let deleted =
-                        cleanup_superseded_projection_instances(recovery, &projection_path)?;
-                    if deleted != 0 {
-                        tracing::info!(deleted, "removed superseded projection instances");
-                    }
-                    return Ok(db);
+    if let Some(generation) = generation
+        && generation.projection_schema_epoch == expected_epoch
+    {
+        let projection_path = runtime_state_dir.join(&generation.projection_file);
+        match ProjectionDb::open_selected_current_in_directory(
+            recovery.runtime_directory(),
+            std::ffi::OsStr::new(&generation.projection_file),
+            false,
+        ) {
+            Ok(db)
+                if db.projection_instance_id()?.as_deref()
+                    == Some(generation.projection_instance_id.as_str()) =>
+            {
+                replay_pending_into(
+                    &db,
+                    cas_root,
+                    refs_root,
+                    recovery,
+                    trust_store,
+                    runtime_liveness,
+                    true,
+                    observer,
+                )?;
+                let deleted = cleanup_superseded_projection_instances(recovery, &projection_path)?;
+                if deleted != 0 {
+                    tracing::info!(deleted, "removed superseded projection instances");
                 }
-                Ok(_) => tracing::warn!(
-                    expected_instance = %generation.projection_instance_id,
-                    "projection instance does not match recovery generation; rebuilding baseline"
-                ),
-                Err(error) => tracing::warn!(
-                    error = %error,
-                    "selected projection is not current; rebuilding generation baseline"
-                ),
+                return Ok(db);
             }
+            Ok(_) => tracing::warn!(
+                expected_instance = %generation.projection_instance_id,
+                "projection instance does not match recovery generation; rebuilding baseline"
+            ),
+            Err(error) => tracing::warn!(
+                error = %error,
+                "selected projection is not current; rebuilding generation baseline"
+            ),
         }
     }
 
@@ -714,7 +713,8 @@ fn count_pinned_files_named(
 ) -> anyhow::Result<usize> {
     let mut count = 0usize;
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 count = count
                     .checked_add(count_pinned_files_named(&child, target)?)
@@ -743,7 +743,8 @@ fn remove_pinned_directory_contents_tracking_heads(
 ) -> anyhow::Result<usize> {
     let mut removed = 0usize;
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 removed = removed
                     .checked_add(remove_pinned_directory_contents_tracking_heads(
@@ -1535,10 +1536,10 @@ fn classify_pending_set_head<'a>(
         .target_hash
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("pending Set is missing target_hash"))?;
-    if let Some(head) = head {
-        if head.target_hash == target {
-            return Ok(PendingSetHead::Published(head));
-        }
+    if let Some(head) = head
+        && head.target_hash == target
+    {
+        return Ok(PendingSetHead::Published(head));
     }
     if transition.phase == TransitionPhase::Prepared {
         let still_previous = match (transition.expected_previous_hash.as_deref(), head) {
@@ -2526,7 +2527,7 @@ impl StateDb {
                     if pending.expected_previous_hash.as_deref()
                         == Some(cancelled.expected_previous_hash.as_str()) =>
                 {
-                    return Ok(())
+                    return Ok(());
                 }
                 HeadOperation::Set
                     if pending.phase == TransitionPhase::Prepared
@@ -3027,16 +3028,16 @@ impl StateDb {
             &head.target_hash,
             None,
         )?;
-        if let Some(pending) = pending {
-            if !acknowledge_if_projection_current(
+        if let Some(pending) = pending
+            && !acknowledge_if_projection_current(
                 &self.projection,
                 &self.recovery,
                 &chain_lock,
                 &pending,
                 Some(&head),
-            )? {
-                anyhow::bail!("repaired projection did not converge for {chain_root_id}");
-            }
+            )?
+        {
+            anyhow::bail!("repaired projection did not converge for {chain_root_id}");
         }
         Ok(report)
     }
@@ -3220,12 +3221,10 @@ impl StateDb {
         if let Some(deployed) = self
             ._refs_directory
             .open_child_directory(std::ffi::OsStr::new("deployed"))?
-        {
-            if let Some(projects) =
+            && let Some(projects) =
                 deployed.open_child_directory(std::ffi::OsStr::new("projects"))?
-            {
-                projects.remove_contents_recursive()?;
-            }
+        {
+            projects.remove_contents_recursive()?;
         }
         Ok(head_count)
     }
@@ -5182,21 +5181,21 @@ impl StateDb {
             );
             return Err(error);
         }
-        if pending.phase == TransitionPhase::Prepared {
-            if let Err(error) = self.recovery.advance_phase(
+        if pending.phase == TransitionPhase::Prepared
+            && let Err(error) = self.recovery.advance_phase(
                 &chain_lock,
                 chain_root_id,
                 &pending.transition_id,
                 TransitionPhase::Prepared,
                 TransitionPhase::HeadPublished,
-            ) {
-                self.note_pending_transition_error(
-                    chain_root_id,
-                    "publish_external_chain_head",
-                    &error,
-                );
-                return Err(error);
-            }
+            )
+        {
+            self.note_pending_transition_error(
+                chain_root_id,
+                "publish_external_chain_head",
+                &error,
+            );
+            return Err(error);
         }
         self.head_cache
             .lock()
@@ -5695,19 +5694,22 @@ mod tests {
         assert!(preview.chain_ref_artifacts >= 2);
         assert!(old_selected.is_file());
         assert!(obsolete_fixed.is_file());
-        assert!(db
-            .discard_authoritative_thread_history_admitted(&guard, false)
-            .unwrap_err()
-            .to_string()
-            .contains("intent was not durably published"));
+        assert!(
+            db.discard_authoritative_thread_history_admitted(&guard, false)
+                .unwrap_err()
+                .to_string()
+                .contains("intent was not durably published")
+        );
 
         db.begin_thread_history_discard_admitted(&guard).unwrap();
         let startup_error = StateDb::open(dir.path(), test_trust_store())
             .err()
             .expect("ordinary startup must refuse an incomplete discard");
-        assert!(startup_error
-            .to_string()
-            .contains("thread-history discard is incomplete"));
+        assert!(
+            startup_error
+                .to_string()
+                .contains("thread-history discard is incomplete")
+        );
 
         let report = db
             .discard_authoritative_thread_history_admitted(&guard, false)
@@ -5765,14 +5767,16 @@ mod tests {
                 .unwrap(),
             2
         );
-        assert!(db
-            .read_project_head(principal_key, &principal_project_hash)
-            .unwrap()
-            .is_none());
-        assert!(db
-            .read_deployed_project_ref(&deployed_project_hash)
-            .unwrap()
-            .is_none());
+        assert!(
+            db.read_project_head(principal_key, &principal_project_hash)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.read_deployed_project_ref(&deployed_project_hash)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -5800,9 +5804,11 @@ mod tests {
         let error = db
             .discard_authoritative_thread_history_admitted(&guard, true)
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("foreign and will not be removed"));
+        assert!(
+            error
+                .to_string()
+                .contains("foreign and will not be removed")
+        );
         assert!(foreign_path.is_file());
         assert!(dir.path().join("refs/generic/chains/T-root/head").is_file());
         assert!(!db.recovery.thread_history_discard_in_progress().unwrap());
@@ -6160,11 +6166,12 @@ mod tests {
             .unwrap();
         let error = db.delete_chain_projection("T-root", &lock).unwrap_err();
         assert!(error.to_string().contains("before durable head removal"));
-        assert!(db
-            .projection()
-            .get_projection_meta("T-root")
-            .unwrap()
-            .is_some());
+        assert!(
+            db.projection()
+                .get_projection_meta("T-root")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -6307,14 +6314,16 @@ mod tests {
             .unwrap()
             .expect("root snapshot should exist through authoritative head");
         assert_eq!(loaded.to_value(), snapshot.to_value());
-        assert!(db
-            .read_authoritative_thread_snapshot("T-root", "T-missing")
-            .unwrap()
-            .is_none());
-        assert!(db
-            .read_authoritative_thread_snapshot("T-missing", "T-missing")
-            .unwrap()
-            .is_none());
+        assert!(
+            db.read_authoritative_thread_snapshot("T-root", "T-missing")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            db.read_authoritative_thread_snapshot("T-missing", "T-missing")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -6851,12 +6860,14 @@ mod tests {
             .append_events(
                 "T-root",
                 "T-root",
-                vec![crate::objects::thread_event::NewEvent::new(
-                    "T-root",
-                    "T-root",
-                    "advanced_after_remove",
-                )
-                .build()],
+                vec![
+                    crate::objects::thread_event::NewEvent::new(
+                        "T-root",
+                        "T-root",
+                        "advanced_after_remove",
+                    )
+                    .build(),
+                ],
                 vec![],
                 &signer,
             )

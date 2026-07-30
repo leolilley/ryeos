@@ -3,7 +3,7 @@
 //! Uses the `cron` crate (v0.16.0) for cron expressions.
 //! Interval and at types are handled directly.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::str::FromStr;
 
 /// Compute the next fire time (millis since epoch) after `after_ms`.

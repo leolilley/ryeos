@@ -22,14 +22,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use lillux::crypto::SigningKey;
 use serde::Serialize;
 
 use crate::actions::build_bundle::{self, RebuildReport};
 use crate::actions::sign_bundle::{self, SignBundleReport};
-use ryeos_bundle::manifest::{materialize_manifest, BundleManifestSource};
+use ryeos_bundle::manifest::{BundleManifestSource, materialize_manifest};
 use ryeos_engine::trust::TrustStore;
 
 #[derive(Debug)]
@@ -569,7 +569,7 @@ fn clean_derived_cas(bundle_source: &Path) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("inspect {}", manifest_ref_path.display()))
+                    .with_context(|| format!("inspect {}", manifest_ref_path.display()));
             }
         }
     } else {
@@ -863,15 +863,15 @@ pub(super) fn generate_and_sign_manifest_in_place(
     let target = ai_dir.join("manifest.yaml");
 
     // Idempotent: skip write if existing signed manifest is already valid.
-    if let Ok(existing) = fs::read_to_string(&target) {
-        if already_signed_for_body(&existing, &body, signing_key, "#", None) {
-            tracing::info!(
-                path = %target.display(),
-                name = %manifest.name,
-                "manifest unchanged — skipping write"
-            );
-            return Ok((target, false));
-        }
+    if let Ok(existing) = fs::read_to_string(&target)
+        && already_signed_for_body(&existing, &body, signing_key, "#", None)
+    {
+        tracing::info!(
+            path = %target.display(),
+            name = %manifest.name,
+            "manifest unchanged — skipping write"
+        );
+        return Ok((target, false));
     }
 
     let signed = lillux::signature::sign_content(&body, signing_key, "#", None);
@@ -919,10 +919,10 @@ fn write_publisher_trust_doc(
     let target = bundle_source.join("PUBLISHER_TRUST.toml");
 
     // Idempotent: skip write when existing content matches.
-    if let Ok(existing) = fs::read_to_string(&target) {
-        if existing == body {
-            return Ok((target, false));
-        }
+    if let Ok(existing) = fs::read_to_string(&target)
+        && existing == body
+    {
+        return Ok((target, false));
     }
 
     let tmp = target.with_extension(format!("trust-doc.tmp.{}", std::process::id()));
@@ -1010,9 +1010,11 @@ mod tests {
             "got {:?}",
             lint.shadow_warnings
         );
-        assert!(lint.shadow_warnings[0]
-            .message
-            .contains("undeclared override"));
+        assert!(
+            lint.shadow_warnings[0]
+                .message
+                .contains("undeclared override")
+        );
         assert_eq!(lint.notes.len(), 1, "got {:?}", lint.notes);
         assert_eq!(lint.notes[0].item_ref, "knowledge:other/notes");
     }
@@ -1037,9 +1039,11 @@ mod tests {
             lint.shadow_warnings
         );
         assert_eq!(lint.notes.len(), 2, "got {:?}", lint.notes);
-        assert!(lint.notes[0]
-            .message
-            .contains("declared config shadow verified"));
+        assert!(
+            lint.notes[0]
+                .message
+                .contains("declared config shadow verified")
+        );
     }
 
     #[test]

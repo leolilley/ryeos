@@ -78,14 +78,16 @@ pub fn compact_projects(
     let refs_directory = runtime
         .open_child_directory(std::ffi::OsStr::new("refs"))?
         .ok_or_else(|| anyhow::anyhow!("refs root is absent"))?;
-    compact_projects_pinned(
-        &lillux::CasStore::from_pinned_root(cas_directory),
-        &refs_directory,
-        trust_store,
-        signer,
-        policy,
-        dry_run,
-    )
+    // These bindings preserve the required pinned-handle drop order under Edition 2024.
+    #[allow(clippy::let_and_return)]
+    let outcome = {
+        let cas = lillux::CasStore::from_pinned_root(cas_directory);
+        #[allow(clippy::let_and_return)]
+        let result =
+            compact_projects_pinned(&cas, &refs_directory, trust_store, signer, policy, dry_run);
+        result
+    };
+    outcome
 }
 
 /// Compact project history from one descriptor-bound refs/CAS authority.
@@ -505,7 +507,7 @@ fn topological_sort_kept(all_snapshots: &[SnapshotInfo], keep: &HashSet<String>)
     // Kahn's algorithm: start with nodes that have no kept parents (roots)
     let mut queue: Vec<String> = in_degree
         .iter()
-        .filter(|(_, &deg)| deg == 0)
+        .filter(|&(_, &deg)| deg == 0)
         .map(|(h, _)| h.clone())
         .collect();
     queue.sort(); // deterministic ordering for nodes at same level

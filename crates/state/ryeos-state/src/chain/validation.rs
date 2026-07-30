@@ -304,12 +304,12 @@ pub(crate) fn validate_authoritative_history_with_cas_and_check(
         newest_to_oldest.push(hash);
     }
 
-    if let Some(expected) = expected_ancestor {
-        if !newest_to_oldest.iter().any(|hash| hash == expected) {
-            anyhow::bail!(
-                "target ChainState {target_hash} does not advance from expected current head {expected}"
-            );
-        }
+    if let Some(expected) = expected_ancestor
+        && !newest_to_oldest.iter().any(|hash| hash == expected)
+    {
+        anyhow::bail!(
+            "target ChainState {target_hash} does not advance from expected current head {expected}"
+        );
     }
 
     newest_to_oldest.reverse();
@@ -534,13 +534,13 @@ fn validate_new_thread_project_snapshots(
         // Project-bearing roots are born against an exact immutable generation.
         // A continuation additionally has to prove that its upstream link is the
         // transition source; a fresh admitted root has no continuation source.
-        if let Some(source) = continuation_source {
-            if snapshot.upstream_thread_id.as_deref() != Some(source) {
-                anyhow::bail!(
-                    "continuation successor upstream {:?} does not match continuation source {source}",
-                    snapshot.upstream_thread_id
-                );
-            }
+        if let Some(source) = continuation_source
+            && snapshot.upstream_thread_id.as_deref() != Some(source)
+        {
+            anyhow::bail!(
+                "continuation successor upstream {:?} does not match continuation source {source}",
+                snapshot.upstream_thread_id
+            );
         }
     }
     Ok(())
@@ -1371,12 +1371,14 @@ mod tests {
     fn terminal_snapshot_cannot_transition_again() {
         let previous = child(ThreadStatus::Failed, "2026-01-01T00:00:01Z");
         let mut next = child(ThreadStatus::Completed, "2026-01-01T00:00:02Z");
-        assert!(normalize_and_validate_snapshot_transition(
-            &previous,
-            &mut next,
-            "2026-01-01T00:00:02Z"
-        )
-        .is_err());
+        assert!(
+            normalize_and_validate_snapshot_transition(
+                &previous,
+                &mut next,
+                "2026-01-01T00:00:02Z"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1456,9 +1458,11 @@ mod tests {
             Some("T-root"),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not match continuation source"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match continuation source")
+        );
 
         continuation.upstream_thread_id = Some("T-root".into());
         continuation.result_project_snapshot_hash = Some("22".repeat(32));

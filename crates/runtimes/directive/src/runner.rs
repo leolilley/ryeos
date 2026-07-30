@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::budget::BudgetTracker;
 use crate::continuation::ContinuationCheck;
@@ -21,8 +21,8 @@ use ryeos_accounting::{
 };
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{
-    normalize_hook_dispatch_result, EnvelopeAccountingScope, RuntimeCost, RuntimeResult,
-    RuntimeResultStatus,
+    EnvelopeAccountingScope, RuntimeCost, RuntimeResult, RuntimeResultStatus,
+    normalize_hook_dispatch_result,
 };
 use ryeos_runtime::events::RuntimeEventType;
 use ryeos_runtime::{TerminalCompletion, ThreadTerminalStatus};
@@ -510,65 +510,66 @@ fn build_ledger_settlement(
         );
     }
 
-    let spend =
-        match &authority.reconciliation {
-            ChargeReconciliationAuthority::ProviderReportedFinalCharge { .. } => match usage {
-                Some(usage) if !usage.spend_anomalies.is_empty() => SpendAccounting::Unavailable {
-                    diagnostic: bound_diagnostic(&usage.spend_anomalies.join("; ")),
-                },
-                Some(usage) if usage.reported_cost_usd_raw.is_some() => {
-                    SpendAccounting::ProviderReportedFinal {
-                        raw_decimal: usage
-                            .reported_cost_usd_raw
-                            .clone()
-                            .expect("guarded by is_some"),
-                    }
-                }
-                _ => SpendAccounting::Unavailable {
-                    diagnostic: bound_diagnostic(
-                        "provider did not report a usable final charge for the attempt",
-                    ),
-                },
+    let spend = match &authority.reconciliation {
+        ChargeReconciliationAuthority::ProviderReportedFinalCharge { .. } => match usage {
+            Some(usage) if !usage.spend_anomalies.is_empty() => SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(&usage.spend_anomalies.join("; ")),
             },
-            ChargeReconciliationAuthority::DeterministicTariff { tariff } => {
-                match usage.filter(|usage| usage.anomalies.is_empty()).and_then(|usage| {
-                tariff
-                    .covered_dimensions
-                    .as_slice()
-                    .iter()
-                    .map(|dimension| {
-                        let units = match dimension {
-                            BillableDimension::InputTokens => usage.input_tokens?,
-                            BillableDimension::OutputTokens => usage.output_tokens?,
-                            BillableDimension::ReasoningTokens => usage.reasoning_tokens?,
-                            BillableDimension::CacheReadTokens => usage.cache_read_tokens?,
-                            BillableDimension::CacheWriteTokens => usage.cache_write_tokens?,
-                            // The daemon adds the tariff's flat per-request
-                            // rate itself; no provider observation is needed.
-                            BillableDimension::PerRequest => return Some(None),
-                        };
-                        Some(Some(UnitCount {
-                            dimension: *dimension,
-                            units,
-                        }))
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .map(|counts| counts.into_iter().flatten().collect())
-            }) {
+            Some(usage) if usage.reported_cost_usd_raw.is_some() => {
+                SpendAccounting::ProviderReportedFinal {
+                    raw_decimal: usage
+                        .reported_cost_usd_raw
+                        .clone()
+                        .expect("guarded by is_some"),
+                }
+            }
+            _ => SpendAccounting::Unavailable {
+                diagnostic: bound_diagnostic(
+                    "provider did not report a usable final charge for the attempt",
+                ),
+            },
+        },
+        ChargeReconciliationAuthority::DeterministicTariff { tariff } => {
+            match usage
+                .filter(|usage| usage.anomalies.is_empty())
+                .and_then(|usage| {
+                    tariff
+                        .covered_dimensions
+                        .as_slice()
+                        .iter()
+                        .map(|dimension| {
+                            let units = match dimension {
+                                BillableDimension::InputTokens => usage.input_tokens?,
+                                BillableDimension::OutputTokens => usage.output_tokens?,
+                                BillableDimension::ReasoningTokens => usage.reasoning_tokens?,
+                                BillableDimension::CacheReadTokens => usage.cache_read_tokens?,
+                                BillableDimension::CacheWriteTokens => usage.cache_write_tokens?,
+                                // The daemon adds the tariff's flat per-request
+                                // rate itself; no provider observation is needed.
+                                BillableDimension::PerRequest => return Some(None),
+                            };
+                            Some(Some(UnitCount {
+                                dimension: *dimension,
+                                units,
+                            }))
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .map(|counts| counts.into_iter().flatten().collect())
+                }) {
                 Some(unit_counts) => SpendAccounting::TariffUnits { unit_counts },
                 None => SpendAccounting::Unavailable {
-                diagnostic: bound_diagnostic(
+                    diagnostic: bound_diagnostic(
                         "deterministic tariff settlement is missing a covered billable dimension",
-                ),
-            },
+                    ),
+                },
             }
-            }
-            ChargeReconciliationAuthority::Unavailable => SpendAccounting::Unavailable {
-                diagnostic: bound_diagnostic(
-                    "route declares no charge reconciliation authority for issued attempts",
-                ),
-            },
-        };
+        }
+        ChargeReconciliationAuthority::Unavailable => SpendAccounting::Unavailable {
+            diagnostic: bound_diagnostic(
+                "route declares no charge reconciliation authority for issued attempts",
+            ),
+        },
+    };
     (spend, tokens)
 }
 
@@ -999,7 +1000,7 @@ impl Runner {
                                 Err(error) => {
                                     break Err(anyhow::anyhow!(
                                         "provider_spend_bound_unverified: {error:#}"
-                                    ))
+                                    ));
                                 }
                             };
                             match self
@@ -1178,14 +1179,14 @@ impl Runner {
                                     if let Some((_, _, _, usage, _, _, _)) =
                                         mid_stream_attempt.as_ref()
                                     {
-                                        if let Err(settlement_error) = self
+                                        let settlement_result = self
                                             .settle_available_attempt_accounting(
                                                 turn,
                                                 usage.as_ref(),
                                                 turn_start.elapsed().as_millis() as u64,
                                             )
-                                            .await
-                                        {
+                                            .await;
+                                        if let Err(settlement_error) = settlement_result {
                                             break Err(anyhow::anyhow!(
                                                 "provider attempt accounting settlement failed before retry: {settlement_error:#}"
                                             ));
@@ -1498,7 +1499,8 @@ impl Runner {
                                     source: PricingSource::ProviderReported,
                                 }
                             } else {
-                                match self.compute_cost_for_usage(valid_usage) {
+                                let cost_result = self.compute_cost_for_usage(valid_usage);
+                                match cost_result {
                                     Ok(cost) => cost,
                                     Err(error) => {
                                         state = State::Errored {
@@ -1577,15 +1579,15 @@ impl Runner {
                             }
 
                             if let Some(usage) = valid_usage {
-                                if let Err(e) = self
+                                let settlement_result = self
                                     .settle_provider_usage(
                                         turn,
                                         usage,
                                         usd,
                                         turn_start.elapsed().as_millis() as u64,
                                     )
-                                    .await
-                                {
+                                    .await;
+                                if let Err(e) = settlement_result {
                                     state = State::Errored {
                                         error: format!("provider usage settlement failed: {e:#}"),
                                     };
@@ -1832,30 +1834,33 @@ impl Runner {
                                              settled as zero",
                                         );
                                         if let Some(reported_cost_usd) = usage.reported_cost_usd {
-                                            if let Err(settlement_error) = self
+                                            let settlement_result = self
                                                 .settle_provider_spend_only(
                                                     turn,
                                                     reported_cost_usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
-                                            {
+                                                .await;
+                                            if let Err(settlement_error) = settlement_result {
                                                 detail.push_str(&format!(
                                                     "; reported-spend settlement also failed: {settlement_error:#}"
                                                 ));
                                             }
                                         }
                                     } else {
+                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
-                                                self.settle_provider_usage(
+                                                let settlement_result = self
+                                                    .settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
+                                                .await;
+                                                settlement_result
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -1895,14 +1900,14 @@ impl Runner {
                                              settled as zero",
                                         );
                                         if let Some(reported_cost_usd) = usage.reported_cost_usd {
-                                            if let Err(settlement_error) = self
+                                            let settlement_result = self
                                                 .settle_provider_spend_only(
                                                     turn,
                                                     reported_cost_usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
-                                            {
+                                                .await;
+                                            if let Err(settlement_error) = settlement_result {
                                                 detail.push_str(&format!(
                                                     "; reported-spend settlement also failed: {settlement_error:#}"
                                                 ));
@@ -1912,6 +1917,7 @@ impl Runner {
                                         let (input_tokens, output_tokens) = usage
                                             .complete_token_counts()
                                             .expect("valid provider usage has complete token counts");
+                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
@@ -1928,13 +1934,15 @@ impl Runner {
                                                         self.model_name
                                                     ));
                                                 }
-                                                self.settle_provider_usage(
+                                                let settlement_result = self
+                                                    .settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
+                                                .await;
+                                                settlement_result
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -2021,16 +2029,19 @@ impl Runner {
                                 let mut detail = protocol_error.to_string();
                                 if let Some(usage) = protocol_error.usage.as_ref() {
                                     if usage.is_valid() {
+                                        #[allow(clippy::let_and_return)]
                                         let settled = match self.compute_cost_for_usage(Some(usage))
                                         {
                                             Ok(cost) => {
-                                                self.settle_provider_usage(
+                                                let settlement_result = self
+                                                    .settle_provider_usage(
                                                     turn,
                                                     usage,
                                                     cost.usd,
                                                     turn_start.elapsed().as_millis() as u64,
                                                 )
-                                                .await
+                                                .await;
+                                                settlement_result
                                             }
                                             Err(error) => Err(error),
                                         };
@@ -2042,14 +2053,14 @@ impl Runner {
                                     } else if let Some(reported_cost_usd) =
                                         usage.reported_cost_usd
                                     {
-                                        if let Err(settlement_error) = self
+                                        let settlement_result = self
                                             .settle_provider_spend_only(
                                                 turn,
                                                 reported_cost_usd,
                                                 turn_start.elapsed().as_millis() as u64,
                                             )
-                                            .await
-                                        {
+                                            .await;
+                                        if let Err(settlement_error) = settlement_result {
                                             detail.push_str(&format!(
                                                 "; reported-spend settlement also failed: {settlement_error:#}"
                                             ));
@@ -2416,7 +2427,8 @@ impl Runner {
                                     tracing::Span::current(),
                                 ));
                             }
-                            match join.join_next().await {
+                            let joined = join.join_next().await;
+                            match joined {
                                 Some(Ok((index, result))) => {
                                     outcomes.insert(index, result);
                                 }
@@ -2601,15 +2613,20 @@ impl Runner {
                                 };
                                 if let Err(e) = self.callback.finalize_thread(completion).await {
                                     guard.finalized = true;
-                                    return Self::attach_warnings(RuntimeResult {
-                                        success: false,
-                                        status: RuntimeResultStatus::Failed,
-                                        thread_id: self.thread_id.clone(),
-                                        result: Some(json!(format!("resume-critical callback finalize_thread failed: {e}"))),
-                                        outputs: json!({}),
-                                        cost: Some(self.budget.cost()),
-                                        warnings: std::mem::take(&mut warnings),
-                                    }, &mut warnings);
+                                    return Self::attach_warnings(
+                                        RuntimeResult {
+                                            success: false,
+                                            status: RuntimeResultStatus::Failed,
+                                            thread_id: self.thread_id.clone(),
+                                            result: Some(json!(format!(
+                                                "resume-critical callback finalize_thread failed: {e}"
+                                            ))),
+                                            outputs: json!({}),
+                                            cost: Some(self.budget.cost()),
+                                            warnings: std::mem::take(&mut warnings),
+                                        },
+                                        &mut warnings,
+                                    );
                                 }
                                 let mut result = self.finalize(json!("directive_return"));
                                 result.outputs = args;
@@ -2712,15 +2729,15 @@ impl Runner {
                         Ok(result) => result.cost.as_ref(),
                         Err(error) => error.cost.as_ref(),
                     };
-                    if let Some(cost) = hook_cost {
-                        if let Err(error) = self.budget.accumulate(cost) {
-                            state = State::Errored {
-                                error: format!(
-                                    "hook event `{event}` cost violates accounting bounds: {error}"
-                                ),
-                            };
-                            continue;
-                        }
+                    if let Some(cost) = hook_cost
+                        && let Err(error) = self.budget.accumulate(cost)
+                    {
+                        state = State::Errored {
+                            error: format!(
+                                "hook event `{event}` cost violates accounting bounds: {error}"
+                            ),
+                        };
+                        continue;
                     }
 
                     match hook_run {
@@ -3345,15 +3362,15 @@ impl Runner {
                 authority.authority_digest.as_str()
             );
         }
-        if let Some(scope) = &self.accounting_scope {
-            if response.execution_budget_id != scope.execution_budget_id {
-                anyhow::bail!(
-                    "daemon reservation execution budget `{}` contradicts the sealed launch \
-                     scope `{}`",
-                    response.execution_budget_id,
-                    scope.execution_budget_id
-                );
-            }
+        if let Some(scope) = &self.accounting_scope
+            && response.execution_budget_id != scope.execution_budget_id
+        {
+            anyhow::bail!(
+                "daemon reservation execution budget `{}` contradicts the sealed launch \
+                 scope `{}`",
+                response.execution_budget_id,
+                scope.execution_budget_id
+            );
         }
         let ledger = LedgerAttempt {
             attempt_id: response.attempt_id,
@@ -3433,7 +3450,8 @@ impl Runner {
     ) -> anyhow::Result<ProviderAttemptReserveResponse> {
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self.callback.provider_attempt_reserve(params).await {
+            let reserve_result = self.callback.provider_attempt_reserve(params).await;
+            match reserve_result {
                 Ok(response) => {
                     if response.replayed {
                         tracing::warn!(
@@ -3472,7 +3490,8 @@ impl Runner {
     ) -> anyhow::Result<AttemptBudgetState> {
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self.callback.provider_attempt_mark_issued(params).await {
+            let mark_result = self.callback.provider_attempt_mark_issued(params).await;
+            match mark_result {
                 Ok(response) => {
                     if response.replayed {
                         tracing::warn!(
@@ -3557,7 +3576,8 @@ impl Runner {
         };
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self.callback.provider_attempt_settle(&params).await {
+            let settlement_result = self.callback.provider_attempt_settle(&params).await;
+            match settlement_result {
                 Ok(response) => {
                     if !response.state.is_terminal() {
                         anyhow::bail!(
@@ -3639,11 +3659,11 @@ impl Runner {
         };
         let mut last_error: Option<String> = None;
         for retry in 0..=LEDGER_RPC_RETRIES {
-            match self
+            let release_result = self
                 .callback
                 .provider_attempt_release_unissued(&params)
-                .await
-            {
+                .await;
+            match release_result {
                 Ok(response) => {
                     if response.state != AttemptBudgetState::ReleasedUnissued {
                         anyhow::bail!(
@@ -3775,16 +3795,14 @@ impl Runner {
         match self.callback.emit_thread_usage(usage).await {
             Ok(()) => Ok(()),
             Err(append_error) => {
-                let replay =
-                    self.callback
-                        .replay_thread(&self.thread_id)
-                        .await
-                        .map_err(|replay_error| {
-                            anyhow::anyhow!(
+                let replay = self.callback.replay_thread(&self.thread_id).await.map_err(
+                    |replay_error| {
+                        anyhow::anyhow!(
                             "resume-critical callback emit_thread_usage failed: {append_error}; \
                              ACK recovery replay also failed: {replay_error}"
                         )
-                        })?;
+                    },
+                )?;
                 if replay.events.iter().rev().any(|event| {
                     event.event_type == RuntimeEventType::ThreadUsage.as_str()
                         && event.payload == expected
@@ -3827,7 +3845,7 @@ impl Runner {
                     return Ok(CostBreakdown {
                         usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    })
+                    });
                 }
                 (Some(i), Some(o)) => (
                     ryeos_directive_core::ModelPricing {
@@ -3840,7 +3858,7 @@ impl Runner {
                     return Ok(CostBreakdown {
                         usd: ryeos_runtime::envelope::UsdNanos::ZERO,
                         source: PricingSource::Unpriced,
-                    })
+                    });
                 }
             }
         };
@@ -4531,9 +4549,11 @@ mod tests {
             }),
         ] {
             match normalize_hook_dispatch_result(envelope) {
-                Ok(output) => assert!(output
-                    .failure
-                    .is_some_and(|failure| failure.contains("hook_child_failed"))),
+                Ok(output) => assert!(
+                    output
+                        .failure
+                        .is_some_and(|failure| failure.contains("hook_child_failed"))
+                ),
                 Err(error) => assert!(error.contains("hook_child_failed")),
             }
         }

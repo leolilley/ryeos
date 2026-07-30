@@ -1,4 +1,4 @@
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::directive::{OutputSpec, ProviderMessage, ToolSchema};
 
@@ -44,10 +44,12 @@ fn build_directive_return_tool(outputs: &[OutputSpec]) -> ToolSchema {
         let mut property = Map::new();
         property.insert(
             "type".to_string(),
-            json!(output
-                .r#type
-                .clone()
-                .unwrap_or_else(|| "string".to_string())),
+            json!(
+                output
+                    .r#type
+                    .clone()
+                    .unwrap_or_else(|| "string".to_string())
+            ),
         );
         if let Some(description) = &output.description {
             property.insert("description".to_string(), json!(description));

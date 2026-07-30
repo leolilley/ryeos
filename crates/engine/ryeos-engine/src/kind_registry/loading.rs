@@ -4,7 +4,7 @@ use std::path::Path;
 use crate::error::EngineError;
 use crate::trust::TrustStore;
 
-use super::{load_and_verify_kind_schema, KindSchema};
+use super::{KindSchema, load_and_verify_kind_schema};
 
 const KIND_SCHEMA_SUFFIX: &str = ".kind-schema.yaml";
 

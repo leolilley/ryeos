@@ -8,8 +8,8 @@ use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsRowVm};
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, truncate};
 use super::super::theme::{
-    active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
-    tone_style, ACCENT,
+    ACCENT, active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
+    tone_style,
 };
 
 pub fn draw_rows(
@@ -67,11 +67,7 @@ pub fn draw_rows(
             tone_style(row.tone)
         };
         let glyph = if row.expandable {
-            if row.expanded {
-                "▾"
-            } else {
-                "▸"
-            }
+            if row.expanded { "▾" } else { "▸" }
         } else {
             tone_glyph(row.tone)
         };

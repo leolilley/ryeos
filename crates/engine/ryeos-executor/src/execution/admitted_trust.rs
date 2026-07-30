@@ -4,7 +4,7 @@
 //! source-space, and trust posture sealed with the exact program/plan, then
 //! lets current node/project trust stores narrow that authority.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use ryeos_engine::contracts::{ItemSpace, PlanTrustAuthority};
 use ryeos_engine::resolution::{
     AsLaunchedResolutionDigest, ResolutionDigestNode, ResolutionOutput, ResolvedAncestor,

@@ -2,8 +2,8 @@ mod test_state;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
@@ -27,10 +27,10 @@ use ryeos_engine::contracts::{
     EffectivePrincipal, ExecutionHints, PlanContext, Principal, ProjectContext,
 };
 use ryeos_executor::executor::{
-    execute_service, ExecutionContext, ExecutionMode, ServiceRecordingAuthoritySource,
-    ServiceRecordingContext,
+    ExecutionContext, ExecutionMode, ServiceRecordingAuthoritySource, ServiceRecordingContext,
+    execute_service,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 static HANDLER_CALLS: AtomicUsize = AtomicUsize::new(0);
 

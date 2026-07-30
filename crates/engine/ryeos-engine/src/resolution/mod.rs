@@ -15,15 +15,15 @@ pub mod types;
 pub use alias::AliasResolver;
 pub use context::ResolutionContext;
 pub use corpus::{
-    resolve_item_for_corpus, resolve_item_for_corpus_under_project_authority, CorpusItemProjection,
-    CorpusReferenceEdge,
+    CorpusItemProjection, CorpusReferenceEdge, resolve_item_for_corpus,
+    resolve_item_for_corpus_under_project_authority,
 };
 pub use decl::ResolutionStepDecl;
 pub use types::{
-    effective_trust, AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode,
-    ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionOutput,
-    ResolutionProvenance, ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName,
-    ResolvedAncestor, TrustClass,
+    AliasHop, AsLaunchedResolutionDigest, KindComposedView, ResolutionDigestNode, ResolutionEdge,
+    ResolutionError, ResolutionFailureClass, ResolutionOutput, ResolutionProvenance,
+    ResolutionProvenanceEdge, ResolutionProvenanceNode, ResolutionStepName, ResolvedAncestor,
+    TrustClass, effective_trust,
 };
 
 use crate::canonical_ref::CanonicalRef;
@@ -246,11 +246,9 @@ fn run_item_pipeline_inner(
 
     // Load the root once. Steps reuse this rather than re-loading on
     // every entry, and `into_output` ships it as `ResolutionOutput.root`.
+    let services = context::ResolutionServices::new(kinds, parsers, roots, trust_store);
     let root_loaded = context::load_item_at(
-        kinds,
-        parsers,
-        roots,
-        trust_store,
+        services,
         item,
         "<root>",
         ResolutionStepName::PipelineInit,
@@ -259,10 +257,7 @@ fn run_item_pipeline_inner(
 
     let mut ctx = ResolutionContext::new(
         item.clone(),
-        kinds,
-        parsers,
-        roots,
-        trust_store,
+        services,
         alias_resolver,
         root_loaded,
         project_authority,

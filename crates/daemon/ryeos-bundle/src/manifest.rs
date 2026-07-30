@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::TrustStore;
 use serde::{Deserialize, Serialize};
@@ -345,7 +345,7 @@ pub fn load_verified_manifest(
         }
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("failed to stat {}", manifest_path.display()))
+                .with_context(|| format!("failed to stat {}", manifest_path.display()));
         }
     };
     if file_type.is_symlink() || !file_type.is_file() {
@@ -430,7 +430,7 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
         }
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect manifest {}", manifest_path.display()))
+                .with_context(|| format!("inspect manifest {}", manifest_path.display()));
         }
     };
     if file_type.is_symlink() || !file_type.is_file() {
@@ -488,7 +488,7 @@ pub(crate) fn materialize_manifest_source(
         }
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect manifest source {}", source_path.display()))
+                .with_context(|| format!("inspect manifest source {}", source_path.display()));
         }
     };
     if file_type.is_symlink() || !file_type.is_file() {
@@ -953,9 +953,11 @@ typo_field: oops
         let error =
             parse_current_manifest_body("name: demo\nversion: 1.0.0\nprovides_kinds: []\n", origin)
                 .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("missing required field 'requires_kinds'"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing required field 'requires_kinds'")
+        );
     }
 
     #[test]

@@ -35,15 +35,15 @@ pub mod state_db;
 pub mod sync;
 pub mod verify;
 
-pub use admission::{admit_root, AdmissionRequest, AdmissionResult};
+pub use admission::{AdmissionRequest, AdmissionResult, admit_root};
 pub use bundle_events::{
     BundleEventAppendRequest, BundleEventAppendResult, BundleEventChainPage, BundleEventCursor,
     BundleEventRecord, BundleEventScanPage,
 };
 pub use bundle_outbox::{
-    claim_bundle_outbox_messages, enqueue_bundle_outbox_message, ensure_bundle_outbox_schema,
-    get_bundle_outbox_message, mark_bundle_outbox_delivered, mark_bundle_outbox_failed,
-    BundleOutboxMessage,
+    BundleOutboxMessage, claim_bundle_outbox_messages, enqueue_bundle_outbox_message,
+    ensure_bundle_outbox_schema, get_bundle_outbox_message, mark_bundle_outbox_delivered,
+    mark_bundle_outbox_failed,
 };
 pub use bundle_projection::{
     BundleProjectionCursor, BundleProjectionDb, BundleProjectionSyncReport,
@@ -52,13 +52,13 @@ pub use chain::{AppendResult, CreateResult, ReadSnapshotResult, SnapshotUpdate};
 pub use head_cache::{CachedHead, HeadCache};
 pub use locators::ThreadLocator;
 pub use objects::{
+    Attestation, BundleEventAttachment, BundleEventAttribution, BundleEventObject,
+    CapturedEffectiveTrustClass, CapturedItemSpace, CapturedItemTrustClass,
+    CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
+    CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy, ChainState,
+    IncompatibleCurrentObjectSchema, MAX_TERMINAL_DURATION_SECONDS, ThreadHistoryRetention,
     parse_canonical_timestamp, thread_event::ThreadEvent, thread_snapshot::ThreadSnapshot,
-    thread_snapshot::ThreadUsage, thread_snapshot::UsageSubject, Attestation,
-    BundleEventAttachment, BundleEventAttribution, BundleEventObject, CapturedEffectiveTrustClass,
-    CapturedItemSpace, CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance,
-    CapturedPolicyProvenance, CapturedThreadHistoryMinimumClamp, CapturedThreadHistoryPolicy,
-    ChainState, IncompatibleCurrentObjectSchema, ThreadHistoryRetention,
-    MAX_TERMINAL_DURATION_SECONDS,
+    thread_snapshot::ThreadUsage, thread_snapshot::UsageSubject,
 };
 pub use operational::{
     AdmissionAttestationRecord, AdmissionAttestationState, CasEntriesByStateSummary,
@@ -74,10 +74,10 @@ pub use projection::{
 pub use recovery::{
     CasMutationGuard, DurableCasPublicationKey, DurableCasUploadStage, HeadOperation,
     PendingChainHeadTransition, PendingTransitionCursor, ProjectionRecoveryGeneration,
-    RecoveryStore, StagedCasRootHashes, StagedCasRootLease, TransitionPhase,
-    RECOVERY_PROTOCOL_GENERATION,
+    RECOVERY_PROTOCOL_GENERATION, RecoveryStore, StagedCasRootHashes, StagedCasRootLease,
+    TransitionPhase,
 };
-pub use refs::{verify_signed_ref, GenericHeadRef, SignedRef, TrustStore};
+pub use refs::{GenericHeadRef, SignedRef, TrustStore, verify_signed_ref};
 pub use signer::Signer;
 pub use state_db::{
     AuthoritativeContinuationPredecessorReadback, AuthoritativeRootBirthReadback,

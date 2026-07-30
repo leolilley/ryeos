@@ -8,13 +8,13 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use ryeos_isolation_protocol::{
-    from_json_slice_strict, AdapterInspectionRequest, AdapterInspectionResponse,
-    AdapterLaunchLifecycle, AdapterLaunchRequest, AdapterWorkspaceRequest,
-    AdapterWorkspaceResponse, InspectedArtifact, IsolationAdapterProtocolVersion,
-    IsolationArtifactRole, IsolationAuthorityPurpose, IsolationCapability, IsolationDiagnostic,
-    IsolationDiagnosticCode, IsolationMountAccess, IsolationNetwork, IsolationTargetTriple,
-    LauncherRefusalDocument, WorkspaceLifecycleOperation, WorkspaceMutation, WorkspaceMutationKind,
-    MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_WORKSPACE_MUTATIONS, MAX_WORKSPACE_RESPONSE_BYTES,
+    AdapterInspectionRequest, AdapterInspectionResponse, AdapterLaunchLifecycle,
+    AdapterLaunchRequest, AdapterWorkspaceRequest, AdapterWorkspaceResponse, InspectedArtifact,
+    IsolationAdapterProtocolVersion, IsolationArtifactRole, IsolationAuthorityPurpose,
+    IsolationCapability, IsolationDiagnostic, IsolationDiagnosticCode, IsolationMountAccess,
+    IsolationNetwork, IsolationTargetTriple, LauncherRefusalDocument, MAX_REQUEST_BYTES,
+    MAX_RESPONSE_BYTES, MAX_WORKSPACE_MUTATIONS, MAX_WORKSPACE_RESPONSE_BYTES,
+    WorkspaceLifecycleOperation, WorkspaceMutation, WorkspaceMutationKind, from_json_slice_strict,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -250,7 +250,7 @@ fn scan_workspace_directory(
             _ => {
                 return Err(format!(
                     "workspace delta contains unsupported entry type at {relative}"
-                ))
+                ));
             }
         }
     }
@@ -1322,9 +1322,11 @@ mod tests {
 
         let mut wrong_backend = request.clone();
         wrong_backend.backend_id = "another-backend".to_string();
-        assert!(validate_inspection_identity(&wrong_backend)
-            .unwrap_err()
-            .contains("implements backend"));
+        assert!(
+            validate_inspection_identity(&wrong_backend)
+                .unwrap_err()
+                .contains("implements backend")
+        );
 
         let mut wrong_target = request;
         wrong_target.target = match wrong_target.target {
@@ -1335,9 +1337,11 @@ mod tests {
                 IsolationTargetTriple::X86_64UnknownLinuxGnu
             }
         };
-        assert!(validate_inspection_identity(&wrong_target)
-            .unwrap_err()
-            .contains("does not match"));
+        assert!(
+            validate_inspection_identity(&wrong_target)
+                .unwrap_err()
+                .contains("does not match")
+        );
     }
 
     #[test]
@@ -1403,42 +1407,58 @@ mod tests {
             prepared.launcher_fd,
             request.artifacts[&IsolationArtifactRole::Launcher] as RawFd
         );
-        assert!(prepared
-            .arguments
-            .windows(2)
-            .any(|pair| pair == ["--tmpfs", "/"]));
-        assert!(prepared
-            .arguments
-            .windows(2)
-            .any(|pair| pair == ["--tmpfs", "/tmp"]));
+        assert!(
+            prepared
+                .arguments
+                .windows(2)
+                .any(|pair| pair == ["--tmpfs", "/"])
+        );
+        assert!(
+            prepared
+                .arguments
+                .windows(2)
+                .any(|pair| pair == ["--tmpfs", "/tmp"])
+        );
         let release_fd = match request.lifecycle {
             AdapterLaunchLifecycle::AwaitAttachment { release_fd, .. } => release_fd,
             AdapterLaunchLifecycle::Run => panic!("fixture must await attachment"),
         };
-        assert!(prepared
-            .arguments
-            .windows(2)
-            .any(|pair| { pair[0] == "--block-fd" && pair[1] == release_fd.to_string() }));
-        assert!(prepared
-            .arguments
-            .iter()
-            .any(|argument| argument == "--die-with-parent"));
-        assert!(prepared
-            .arguments
-            .iter()
-            .any(|value| value == "--unshare-net"));
-        assert!(prepared
-            .arguments
-            .windows(3)
-            .any(|values| { values == ["--setenv", "API_TOKEN", "secret-token"] }));
-        assert!(prepared
-            .arguments
-            .windows(3)
-            .any(|values| { values[0] == "--ro-bind-fd" && values[2] == "/opt/bin/tool" }));
-        assert!(prepared
-            .arguments
-            .windows(3)
-            .any(|values| { values[0] == "--bind-fd" && values[2] == "/workspace" }));
+        assert!(
+            prepared
+                .arguments
+                .windows(2)
+                .any(|pair| { pair[0] == "--block-fd" && pair[1] == release_fd.to_string() })
+        );
+        assert!(
+            prepared
+                .arguments
+                .iter()
+                .any(|argument| argument == "--die-with-parent")
+        );
+        assert!(
+            prepared
+                .arguments
+                .iter()
+                .any(|value| value == "--unshare-net")
+        );
+        assert!(
+            prepared
+                .arguments
+                .windows(3)
+                .any(|values| { values == ["--setenv", "API_TOKEN", "secret-token"] })
+        );
+        assert!(
+            prepared
+                .arguments
+                .windows(3)
+                .any(|values| { values[0] == "--ro-bind-fd" && values[2] == "/opt/bin/tool" })
+        );
+        assert!(
+            prepared
+                .arguments
+                .windows(3)
+                .any(|values| { values[0] == "--bind-fd" && values[2] == "/workspace" })
+        );
         assert_eq!(
             &prepared.arguments[prepared.arguments.len() - 3..],
             ["/opt/bin/tool", "--flag", "secret-value"]
@@ -1460,9 +1480,11 @@ mod tests {
         let prepared = prepare_launch(&request).unwrap();
         assert_eq!(prepared.lifecycle, PreparedLaunchLifecycle::Run);
         assert!(!prepared.arguments.iter().any(|value| value == "--block-fd"));
-        assert!(attachment_descriptors
-            .into_iter()
-            .all(|descriptor| !prepared.inherited_fds.contains(&descriptor)));
+        assert!(
+            attachment_descriptors
+                .into_iter()
+                .all(|descriptor| !prepared.inherited_fds.contains(&descriptor))
+        );
     }
 
     #[test]
@@ -1526,9 +1548,11 @@ mod tests {
     fn launch_refuses_descriptor_reuse_unknown_artifacts_and_invalid_strings() {
         let (mut duplicate, _duplicate_handles) = valid_launch_request();
         duplicate.status_fd = duplicate.artifacts[&IsolationArtifactRole::Launcher];
-        assert!(prepare_launch(&duplicate)
-            .unwrap_err()
-            .contains("reused across"));
+        assert!(
+            prepare_launch(&duplicate)
+                .unwrap_err()
+                .contains("reused across")
+        );
 
         let (mut extra_artifact, mut handles) = valid_launch_request();
         let loader = File::open("/dev/null").unwrap();
@@ -1536,15 +1560,19 @@ mod tests {
             .artifacts
             .insert(IsolationArtifactRole::Loader, loader.as_raw_fd() as u32);
         handles.push(loader);
-        assert!(prepare_launch(&extra_artifact)
-            .unwrap_err()
-            .contains("does not support dynamic-loader"));
+        assert!(
+            prepare_launch(&extra_artifact)
+                .unwrap_err()
+                .contains("does not support dynamic-loader")
+        );
 
         let (mut invalid_argument, _invalid_handles) = valid_launch_request();
         invalid_argument.plan.target.arguments[0] = "bad\0argument".to_string();
-        assert!(prepare_launch(&invalid_argument)
-            .unwrap_err()
-            .contains("interior NUL"));
+        assert!(
+            prepare_launch(&invalid_argument)
+                .unwrap_err()
+                .contains("interior NUL")
+        );
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use ryeos_api::{handlers as service_handlers, ServiceDescriptor};
+use ryeos_api::{ServiceDescriptor, handlers as service_handlers};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal};
 use ryeos_engine::kind_registry::KindRegistry;

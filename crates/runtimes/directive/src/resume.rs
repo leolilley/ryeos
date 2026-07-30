@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::ReplayedEventRecord;
+use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_state::ThreadUsage;
 
 use crate::directive::ProviderMessage;
@@ -327,11 +327,11 @@ fn estimate_tokens_from_value(v: &Option<Value>) -> u64 {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use ryeos_runtime::ReplayedEventRecord;
     use ryeos_runtime::callback::{
         CallbackError, DispatchActionRequest, ReplayResponse, RuntimeCallbackAPI,
         TerminalCompletion,
     };
-    use ryeos_runtime::ReplayedEventRecord;
     use serde_json::json;
     use std::sync::Arc;
 

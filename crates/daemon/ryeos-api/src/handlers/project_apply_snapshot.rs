@@ -19,7 +19,7 @@ use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use lillux::cas::CasStore;
 use serde_json::Value;
 
@@ -131,14 +131,14 @@ pub async fn handle(req: Request, ctx: HandlerContext, state: Arc<AppState>) -> 
     // the traversal while making the ancestry predicate trivially true.
     let ancestry_target = expected_deployed_hash.unwrap_or(&req.snapshot_hash);
     let contains_expected = snapshot_history_contains(&cas, &req.snapshot_hash, ancestry_target)?;
-    if let Some(expected) = expected_deployed_hash {
-        if !contains_expected {
-            anyhow::bail!(
-                "project.apply-snapshot ancestry conflict: target {} does not descend from expected deployed snapshot {}",
-                req.snapshot_hash,
-                expected
-            );
-        }
+    if let Some(expected) = expected_deployed_hash
+        && !contains_expected
+    {
+        anyhow::bail!(
+            "project.apply-snapshot ancestry conflict: target {} does not descend from expected deployed snapshot {}",
+            req.snapshot_hash,
+            expected
+        );
     }
     if previous_deployed_hash.as_deref() == Some(req.snapshot_hash.as_str()) {
         return Ok(serde_json::json!({
@@ -460,7 +460,7 @@ impl StagingDirectory {
             for _ in 0..128 {
                 let name = OsString::from(format!(
                     "{STAGING_PREFIX}{:016x}",
-                    rand::Rng::gen::<u64>(&mut rand::thread_rng())
+                    rand::Rng::r#gen::<u64>(&mut rand::thread_rng())
                 ));
                 let name_c = os_c_string(&name)?;
                 let created =
@@ -579,7 +579,8 @@ fn open_relative_directory(
                 relative.display()
             );
         };
-        match open_child_directory(&directory, name)? {
+        let opened = open_child_directory(&directory, name)?;
+        match opened {
             Some(child) => directory = child,
             None if !create => return Ok(None),
             None => {
@@ -706,7 +707,8 @@ fn sweep_stale_staging_dirs(project: &PinnedDirectory) -> Result<()> {
                 .to_str()
                 .is_some_and(|name| name.starts_with(STAGING_PREFIX))
             {
-                if let Err(error) = remove_entry_at(&project.file, &name) {
+                let removal = remove_entry_at(&project.file, &name);
+                if let Err(error) = removal {
                     tracing::warn!(
                         path = %project.display_path.join(&name).display(),
                         %error,
@@ -880,7 +882,8 @@ impl PreparedRootSwap {
         for swap in &self.swaps {
             #[cfg(unix)]
             if let Some(backup) = &swap.backup_name {
-                if let Err(error) = remove_entry_at(&swap.parent, backup) {
+                let removal = remove_entry_at(&swap.parent, backup);
+                if let Err(error) = removal {
                     tracing::warn!(
                         path = %swap.display_dest.display(),
                         %error,
@@ -999,7 +1002,8 @@ fn rollback_swaps(swaps: &[RootSwap]) {
         #[cfg(unix)]
         {
             if swap.installed {
-                if let Err(error) = remove_entry_at(&swap.parent, &swap.dest_name) {
+                let removal = remove_entry_at(&swap.parent, &swap.dest_name);
+                if let Err(error) = removal {
                     tracing::error!(
                         path = %swap.display_dest.display(),
                         %error,
@@ -1008,9 +1012,9 @@ fn rollback_swaps(swaps: &[RootSwap]) {
                 }
             }
             if let Some(backup) = &swap.backup_name {
-                if let Err(error) =
-                    rename_noreplace(&swap.parent, backup, &swap.parent, &swap.dest_name)
-                {
+                let restoration =
+                    rename_noreplace(&swap.parent, backup, &swap.parent, &swap.dest_name);
+                if let Err(error) = restoration {
                     tracing::error!(
                         path = %swap.display_dest.display(),
                         %error,
@@ -1030,7 +1034,7 @@ fn backup_entry(parent: &File, name: &OsStr) -> Result<OsString> {
     for _ in 0..128 {
         let backup = OsString::from(format!(
             ".{stem}.ryeos-backup-{:016x}",
-            rand::Rng::gen::<u64>(&mut rand::thread_rng())
+            rand::Rng::r#gen::<u64>(&mut rand::thread_rng())
         ));
         match rename_noreplace(parent, name, parent, &backup) {
             Ok(()) => return Ok(backup),
@@ -1168,14 +1172,18 @@ mod tests {
         assert!(project.path().join(".ai/directives/new.md").exists());
         assert!(!project.path().join(".ai/directives/old.md").exists());
         assert!(!project.path().join(".ai/tools").exists());
-        assert!(project
-            .path()
-            .join(".ai/config/schedules/new.yaml")
-            .exists());
-        assert!(!project
-            .path()
-            .join(".ai/config/schedules/old.yaml")
-            .exists());
+        assert!(
+            project
+                .path()
+                .join(".ai/config/schedules/new.yaml")
+                .exists()
+        );
+        assert!(
+            !project
+                .path()
+                .join(".ai/config/schedules/old.yaml")
+                .exists()
+        );
         assert_eq!(
             std::fs::read_to_string(project.path().join(".ai/node/schedules/runtime.yaml"))
                 .unwrap(),

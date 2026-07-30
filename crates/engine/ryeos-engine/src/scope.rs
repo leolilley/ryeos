@@ -95,12 +95,14 @@ mod tests {
 
     #[test]
     fn local_with_execute_among_others() {
-        assert!(check_execution_scope(&local_principal(vec![
-            "threads.read",
-            "execute",
-            "registry.read"
-        ]))
-        .is_ok());
+        assert!(
+            check_execution_scope(&local_principal(vec![
+                "threads.read",
+                "execute",
+                "registry.read"
+            ]))
+            .is_ok()
+        );
     }
 
     #[test]
@@ -158,10 +160,10 @@ mod tests {
 
     #[test]
     fn local_with_ryeos_execute_specific() {
-        assert!(check_execution_scope(&local_principal(vec![
-            "ryeos.execute.tool.ryeos/bash/bash"
-        ]))
-        .is_ok());
+        assert!(
+            check_execution_scope(&local_principal(vec!["ryeos.execute.tool.ryeos/bash/bash"]))
+                .is_ok()
+        );
     }
 
     #[test]

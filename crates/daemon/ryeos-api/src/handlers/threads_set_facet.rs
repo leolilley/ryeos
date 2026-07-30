@@ -12,7 +12,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
@@ -97,10 +97,12 @@ mod tests {
             serde_json::from_value::<Request>(json!({"thread_id": "T-1", "key": "fleet"})).is_err()
         );
         // deny_unknown_fields
-        assert!(serde_json::from_value::<Request>(
-            json!({"thread_id": "T-1", "key": "f", "value": "v", "x": 1})
-        )
-        .is_err());
+        assert!(
+            serde_json::from_value::<Request>(
+                json!({"thread_id": "T-1", "key": "f", "value": "v", "x": 1})
+            )
+            .is_err()
+        );
     }
 
     #[test]

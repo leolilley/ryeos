@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use ryeos_runtime::{
     CognitionInAssembler, MAX_RUNTIME_EVENT_BATCH_BYTES, MAX_RUNTIME_EVENT_BATCH_ITEMS,
     MAX_RUNTIME_EVENT_PAYLOAD_BYTES,
@@ -380,8 +380,10 @@ mod tests {
 
         validate_runtime_event_batch(&events).unwrap();
         let error = validate_runtime_event_batch(&events[..events.len() - 1]).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("chunked cognition_in ended after"));
+        assert!(
+            error
+                .to_string()
+                .contains("chunked cognition_in ended after")
+        );
     }
 }

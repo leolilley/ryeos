@@ -1401,21 +1401,25 @@ mod authority_tests {
                 current_operational_generation: current,
             }
         );
-        assert!(continued_binding_subject_authority(
-            &SubjectResolutionAuthority::PinnedGeneration {
-                snapshot_hash: base.clone(),
-            },
-            &authority,
-        )
-        .is_err());
-        assert!(continued_binding_subject_authority(
-            &SubjectResolutionAuthority::CowWorkspace {
-                base_snapshot_hash: "c".repeat(64),
-                current_operational_generation: base,
-            },
-            &authority,
-        )
-        .is_err());
+        assert!(
+            continued_binding_subject_authority(
+                &SubjectResolutionAuthority::PinnedGeneration {
+                    snapshot_hash: base.clone(),
+                },
+                &authority,
+            )
+            .is_err()
+        );
+        assert!(
+            continued_binding_subject_authority(
+                &SubjectResolutionAuthority::CowWorkspace {
+                    base_snapshot_hash: "c".repeat(64),
+                    current_operational_generation: base,
+                },
+                &authority,
+            )
+            .is_err()
+        );
     }
 
     #[test]

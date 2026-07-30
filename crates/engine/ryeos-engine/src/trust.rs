@@ -621,7 +621,7 @@ fn load_trusted_key_doc_content(
     path: &Path,
     existing_signers: &HashMap<String, TrustedSigner>,
 ) -> Result<TrustedKeyDoc, EngineError> {
-    let toml_body = lillux::signature::strip_signature_lines(&content);
+    let toml_body = lillux::signature::strip_signature_lines(content);
 
     let parsed: TrustedKeyToml = toml::from_str(&toml_body).map_err(|e| {
         EngineError::Internal(format!(
@@ -645,7 +645,7 @@ fn load_trusted_key_doc_content(
     }
 
     // Verify integrity if signature line is present
-    verify_key_doc_integrity(&content, &verifying_key, &actual_fp, existing_signers, path)?;
+    verify_key_doc_integrity(content, &verifying_key, &actual_fp, existing_signers, path)?;
 
     let attestation = parsed.attestation.filter(|a| !a.is_empty());
 

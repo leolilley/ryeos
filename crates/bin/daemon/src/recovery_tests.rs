@@ -11,7 +11,6 @@ use ryeos_engine::contracts::{
 };
 
 fn build_test_state() -> (tempfile::TempDir, AppState) {
-    std::env::set_var("HOSTNAME", "recovery-testhost");
     let tmpdir = tempfile::TempDir::new().unwrap();
     let runtime_state_dir = tmpdir.path().join(".ai/state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -63,12 +62,13 @@ fn build_test_state() -> (tempfile::TempDir, AppState) {
     ));
     let event_streams = Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16));
     let threads = Arc::new(
-        ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
+        ryeos_app::thread_lifecycle::ThreadLifecycleService::new_for_test_with_site_id(
             state_store.clone(),
             engine.clone(),
             kind_profiles.clone(),
             events.clone(),
             event_streams.clone(),
+            "site:recovery-testhost",
         )
         .unwrap(),
     );
@@ -632,15 +632,19 @@ fn exact_terminal_postcommit_repair_republishes_the_persisted_terminal_event() {
             .unwrap()
             > 0
     );
-    assert!(state
-        .state_store
-        .latest_thread_events(thread_id, 1)
-        .unwrap()
-        .is_empty());
-    assert!(state
-        .state_store
-        .delete_thread_projection_row_for_test(thread_id)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .latest_thread_events(thread_id, 1)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        state
+            .state_store
+            .delete_thread_projection_row_for_test(thread_id)
+            .unwrap()
+    );
     assert!(state.state_store.get_thread(thread_id).unwrap().is_none());
     assert!(matches!(
         subscriber.try_recv(),
@@ -669,19 +673,25 @@ fn exact_terminal_postcommit_repair_republishes_the_persisted_terminal_event() {
         published.event_type,
         ryeos_state::event_types::THREAD_COMPLETED
     );
-    assert!(state
-        .state_store
-        .settle_in_process_handler_reservation_owned(thread_id, &owner)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .settle_in_process_handler_reservation_owned(thread_id, &owner)
+            .unwrap()
+    );
     owner.mark_terminal_confirmed();
-    assert!(state
-        .state_store
-        .delete_terminal_in_process_handler_reservation_owned(thread_id, &owner)
-        .unwrap());
-    assert!(state
-        .state_store
-        .unregister_in_process_handler(thread_id, &owner)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .delete_terminal_in_process_handler_reservation_owned(thread_id, &owner)
+            .unwrap()
+    );
+    assert!(
+        state
+            .state_store
+            .unregister_in_process_handler(thread_id, &owner)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -692,9 +702,11 @@ fn shutdown_authoritative_audit_refuses_to_run_while_an_owner_is_active() {
 
     let error = super::audit_ownerless_in_process_reservations(&state)
         .expect_err("shutdown audit must not race a registered handler owner");
-    assert!(error
-        .to_string()
-        .contains("requires an empty in-process owner registry"));
+    assert!(
+        error
+            .to_string()
+            .contains("requires an empty in-process owner registry")
+    );
     assert_eq!(
         state
             .state_store
@@ -713,10 +725,12 @@ fn shutdown_authoritative_audit_refuses_to_run_while_an_owner_is_active() {
             .phase,
         ryeos_app::runtime_db::InProcessHandlerReservationPhase::Running
     );
-    assert!(state
-        .state_store
-        .unregister_in_process_handler(thread_id, &owner)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .unregister_in_process_handler(thread_id, &owner)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -741,17 +755,21 @@ fn shutdown_authoritative_audit_repairs_and_retires_an_ownerless_terminal() {
             },
         )
         .unwrap();
-    assert!(state
-        .state_store
-        .unregister_in_process_handler(thread_id, &owner)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .unregister_in_process_handler(thread_id, &owner)
+            .unwrap()
+    );
 
     assert!(super::audit_ownerless_in_process_reservations(&state).unwrap());
-    assert!(state
-        .state_store
-        .in_process_handler_reservation(thread_id)
-        .unwrap()
-        .is_none());
+    assert!(
+        state
+            .state_store
+            .in_process_handler_reservation(thread_id)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         state
             .state_store
@@ -768,20 +786,24 @@ async fn reservation_reconciliation_accepts_a_preconverged_discarded_pending_bir
     let (_tmpdir, state) = build_test_state();
     let thread_id = "T-service-race-discarded-birth";
     seed_pending_in_process_reservation_without_root(&state, thread_id);
-    assert!(state
-        .state_store
-        .discard_uncommitted_in_process_handler_birth(thread_id)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .discard_uncommitted_in_process_handler_birth(thread_id)
+            .unwrap()
+    );
 
     let report = super::reconcile::reconcile_active_threads(&state)
         .await
         .unwrap();
     assert!(report.resume_intents.is_empty());
-    assert!(state
-        .state_store
-        .in_process_handler_reservation(thread_id)
-        .unwrap()
-        .is_none());
+    assert!(
+        state
+            .state_store
+            .in_process_handler_reservation(thread_id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -806,19 +828,25 @@ async fn reservation_reconciliation_accepts_a_preconverged_retired_terminal() {
             },
         )
         .unwrap();
-    assert!(state
-        .state_store
-        .settle_in_process_handler_reservation_owned(thread_id, &owner)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .settle_in_process_handler_reservation_owned(thread_id, &owner)
+            .unwrap()
+    );
     owner.mark_terminal_confirmed();
-    assert!(state
-        .state_store
-        .delete_terminal_in_process_handler_reservation_owned(thread_id, &owner)
-        .unwrap());
-    assert!(state
-        .state_store
-        .unregister_in_process_handler(thread_id, &owner)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .delete_terminal_in_process_handler_reservation_owned(thread_id, &owner)
+            .unwrap()
+    );
+    assert!(
+        state
+            .state_store
+            .unregister_in_process_handler(thread_id, &owner)
+            .unwrap()
+    );
 
     let report = super::reconcile::reconcile_active_threads(&state)
         .await
@@ -846,19 +874,23 @@ async fn startup_reconciliation_discards_pending_in_process_birth_without_root()
         .unwrap();
 
     assert!(report.resume_intents.is_empty());
-    assert!(state
-        .state_store
-        .get_launch_metadata(thread_id)
-        .unwrap()
-        .is_none());
-    assert!(state
-        .state_store
-        .in_process_handler_reservations_after(
-            None,
-            ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        state
+            .state_store
+            .get_launch_metadata(thread_id)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        state
+            .state_store
+            .in_process_handler_reservations_after(
+                None,
+                ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -967,14 +999,16 @@ async fn startup_reconciliation_advances_pending_committed_root_before_owner_los
 
     assert!(report.resume_intents.is_empty());
     assert_service_interrupted(&state, thread_id, "startup");
-    assert!(state
-        .state_store
-        .in_process_handler_reservations_after(
-            None,
-            ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        state
+            .state_store
+            .in_process_handler_reservations_after(
+                None,
+                ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -993,14 +1027,16 @@ async fn startup_reconciliation_fails_running_in_process_handler_without_resume(
     assert!(report.resume_intents.is_empty());
     assert!(!report.active_thread_ids.contains("T-service-running"));
     assert_service_interrupted(&state, "T-service-running", "startup");
-    assert!(state
-        .state_store
-        .in_process_handler_reservations_after(
-            None,
-            ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        state
+            .state_store
+            .in_process_handler_reservations_after(
+                None,
+                ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1023,14 +1059,16 @@ async fn reservation_reconciliation_terminalizes_ownerless_root_without_projecti
 
     assert!(!report.active_thread_ids.contains(thread_id));
     assert_service_interrupted(&state, thread_id, "startup");
-    assert!(state
-        .state_store
-        .in_process_handler_reservations_after(
-            None,
-            ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        state
+            .state_store
+            .in_process_handler_reservations_after(
+                None,
+                ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+            )
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1054,14 +1092,18 @@ async fn live_reconciliation_preserves_a_registered_in_process_handler() {
             .status,
         "running"
     );
-    assert!(state
-        .state_store
-        .is_in_process_handler_active(thread_id)
-        .unwrap());
-    assert!(state
-        .state_store
-        .unregister_in_process_handler(thread_id, &owner)
-        .unwrap());
+    assert!(
+        state
+            .state_store
+            .is_in_process_handler_active(thread_id)
+            .unwrap()
+    );
+    assert!(
+        state
+            .state_store
+            .unregister_in_process_handler(thread_id, &owner)
+            .unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1094,14 +1136,16 @@ async fn live_reconciliation_fails_an_unregistered_in_process_handler_idempotent
     assert!(first.resume_intents.is_empty());
     assert!(second.resume_intents.is_empty());
     assert_service_interrupted(&state, thread_id, "live");
-    assert!(state
-        .state_store
-        .in_process_handler_reservations_after(
-            None,
-            ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-        )
-        .unwrap()
-        .is_empty());
+    assert!(
+        state
+            .state_store
+            .in_process_handler_reservations_after(
+                None,
+                ryeos_app::runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+            )
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         state
             .state_store

@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use serde_json::Value;
 
 use crate::handlers::objects_closure_describe::{
-    closure_summary_json, collect_limited_closure_with_cas, Request,
+    Request, closure_summary_json, collect_limited_closure_with_cas,
 };
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;

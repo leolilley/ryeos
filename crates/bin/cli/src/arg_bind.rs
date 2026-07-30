@@ -41,22 +41,22 @@ pub fn bind_declared_shortcuts(
     command: &ryeos_runtime::CommandDef,
 ) -> Result<Option<Value>, CliDispatchError> {
     let binding = command.parameter_binding.as_ref();
-    if binding.is_some_and(|binding| binding.input_flag.is_some()) {
-        if let Some(input) = parse_input_arg(tail)? {
-            let input = if command.project.is_some() {
-                merge_project_control_flags(input, tail)?
-            } else {
-                input
-            };
-            return Ok(Some(input));
-        }
+    if binding.is_some_and(|binding| binding.input_flag.is_some())
+        && let Some(input) = parse_input_arg(tail)?
+    {
+        let input = if command.project.is_some() {
+            merge_project_control_flags(input, tail)?
+        } else {
+            input
+        };
+        return Ok(Some(input));
     }
-    if binding.is_some_and(|binding| binding.single_json_object_arg) && tail.len() == 1 {
-        if let Ok(value) = serde_json::from_str::<Value>(&tail[0]) {
-            if value.is_object() {
-                return Ok(Some(value));
-            }
-        }
+    if binding.is_some_and(|binding| binding.single_json_object_arg)
+        && tail.len() == 1
+        && let Ok(value) = serde_json::from_str::<Value>(&tail[0])
+        && value.is_object()
+    {
+        return Ok(Some(value));
     }
     Ok(None)
 }

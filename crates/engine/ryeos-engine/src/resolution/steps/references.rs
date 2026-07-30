@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use crate::canonical_ref::CanonicalRef;
 
-use crate::resolution::context::{ensure_canonical, field_as_list, ResolutionContext};
+use crate::resolution::context::{ResolutionContext, ensure_canonical, field_as_list};
 use crate::resolution::types::{
     ResolutionEdge, ResolutionError, ResolutionFailureClass, ResolutionStepName,
 };

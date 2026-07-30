@@ -94,10 +94,10 @@ fn atomic_write_batch_unix(
         if first_directory.is_none() {
             first_directory = Some(directory.try_clone()?);
         }
-        match directory
+        let prepared_entry = directory
             .prepare_atomic_create(name, data, 0o644)
-            .with_context(|| format!("prepare immutable CAS batch entry {}", target.display()))?
-        {
+            .with_context(|| format!("prepare immutable CAS batch entry {}", target.display()))?;
+        match prepared_entry {
             Some(temp) => prepared.push((directory, name.to_os_string(), index, temp)),
             None => verify_batch_entry(&directory, name, target, data)?,
         }
@@ -125,11 +125,13 @@ fn atomic_write_batch_unix(
             drop(temp);
             continue;
         }
-        match temp.publish() {
+        let publication = temp.publish();
+        match publication {
             Ok(true) => {}
             Ok(false) => {
                 let (target, data) = &writes[index];
-                if let Err(error) = verify_batch_entry(&directory, &name, target, data) {
+                let verification = verify_batch_entry(&directory, &name, target, data);
+                if let Err(error) = verification {
                     publication_error = Some(error);
                 }
             }
@@ -137,14 +139,16 @@ fn atomic_write_batch_unix(
         }
     }
     let durability = sync_write_batch(first_directory);
-    match (publication_error, durability) {
+    #[allow(clippy::let_and_return)]
+    let outcome = match (publication_error, durability) {
         (None, Ok(())) => Ok(()),
         (Some(error), Ok(())) => Err(error).context("publish immutable CAS batch entries"),
         (None, Err(error)) => Err(error).context("make CAS batch publication durable"),
         (Some(error), Err(durability_error)) => Err(error).context(format!(
             "publish immutable CAS batch entries; publication durability also failed: {durability_error:#}"
         )),
-    }
+    };
+    outcome
 }
 
 #[cfg(unix)]
@@ -684,29 +688,29 @@ impl CasStore {
                     &hash,
                     "",
                 )?;
-                let created =
-                    if let Some(existing) = target_parent.open_regular(&target_name, false)? {
-                        verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
-                        false
-                    } else if target_parent.publish_regular_link_from(
-                        &target_name,
-                        &staging,
-                        &staging_name,
-                        &staged,
-                    )? {
-                        true
-                    } else {
-                        let existing = target_parent
-                            .open_regular(&target_name, false)?
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "CAS publication winner disappeared: {}",
-                                    target_path.display()
-                                )
-                            })?;
-                        verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
-                        false
-                    };
+                let existing = target_parent.open_regular(&target_name, false)?;
+                let created = if let Some(existing) = existing {
+                    verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
+                    false
+                } else if target_parent.publish_regular_link_from(
+                    &target_name,
+                    &staging,
+                    &staging_name,
+                    &staged,
+                )? {
+                    true
+                } else {
+                    let existing = target_parent
+                        .open_regular(&target_name, false)?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "CAS publication winner disappeared: {}",
+                                target_path.display()
+                            )
+                        })?;
+                    verify_existing_streamed_entry(existing, &hash, size, &target_path)?;
+                    false
+                };
                 if !created {
                     let _ = staging.remove_if_same(&staging_name, &staged);
                 }
@@ -977,7 +981,9 @@ fn store_exact_entry(
         return Ok(false);
     }
 
-    match parent.atomic_write_if_same(&name, None, bytes, 0o644) {
+    let publication = parent.atomic_write_if_same(&name, None, bytes, 0o644);
+    #[allow(clippy::let_and_return)]
+    let outcome = match publication {
         Ok(()) => Ok(true),
         Err(publication_error) => match parent.open_regular(&name, false) {
             Ok(Some(existing)) => {
@@ -998,7 +1004,8 @@ fn store_exact_entry(
                 )
             }),
         },
-    }
+    };
+    outcome
 }
 
 // ── CLI interface ──────────────────────────────────────────────────
@@ -1082,7 +1089,8 @@ pub fn run(action: CasAction) -> serde_json::Value {
         }
         CasAction::Has { root, hash } => {
             let store = CasStore::new(PathBuf::from(&root));
-            match store.has(&hash) {
+            let membership = store.has(&hash);
+            match membership {
                 Ok(exists) => serde_json::json!({ "exists": exists, "hash": hash }),
                 Err(error) => serde_json::json!({ "error": error.to_string(), "hash": hash }),
             }

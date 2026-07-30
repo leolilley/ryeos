@@ -439,25 +439,25 @@ fn add_kind_schema_node_and_edges(
         "structural",
     );
 
-    if let Some(exec) = schema.execution() {
-        if let Some(delegate) = &exec.delegate {
-            let DelegationVia::RuntimeRegistry { serves_kind } = &delegate.via;
-            let served_kind = serves_kind.as_deref().unwrap_or(kind);
-            if let Ok(runtime) = state.engine.runtimes.lookup_for(served_kind) {
-                let runtime_ref = runtime.canonical_ref.to_string();
-                builder.add_ref_node(&runtime_ref, "runtime");
-                builder.add_edge(
-                    kind_node_id,
-                    runtime_ref,
-                    "uses_runtime",
-                    "runtime",
-                    Some(EdgeSource {
-                        field: Some("execution.delegate".into()),
-                        path: None,
-                    }),
-                    "structural",
-                );
-            }
+    if let Some(exec) = schema.execution()
+        && let Some(delegate) = &exec.delegate
+    {
+        let DelegationVia::RuntimeRegistry { serves_kind } = &delegate.via;
+        let served_kind = serves_kind.as_deref().unwrap_or(kind);
+        if let Ok(runtime) = state.engine.runtimes.lookup_for(served_kind) {
+            let runtime_ref = runtime.canonical_ref.to_string();
+            builder.add_ref_node(&runtime_ref, "runtime");
+            builder.add_edge(
+                kind_node_id,
+                runtime_ref,
+                "uses_runtime",
+                "runtime",
+                Some(EdgeSource {
+                    field: Some("execution.delegate".into()),
+                    path: None,
+                }),
+                "structural",
+            );
         }
     }
 }
@@ -858,7 +858,7 @@ pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {
 mod tests {
     use super::*;
     use lillux::crypto::SigningKey;
-    use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+    use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
     #[test]
     fn label_and_namespace_split_bare_ids() {
@@ -892,12 +892,16 @@ mod tests {
         add_item_edges(&mut builder, "surface:ryeos/ui/graph", &surface_path);
         add_item_edges(&mut builder, "client:ryeos/web", &client_path);
 
-        assert!(builder
-            .edges
-            .contains_key("surface:ryeos/ui/graph--extends--surface:ryeos/ui/base"));
-        assert!(builder
-            .edges
-            .contains_key("client:ryeos/web--serves_kind--kind:surface"));
+        assert!(
+            builder
+                .edges
+                .contains_key("surface:ryeos/ui/graph--extends--surface:ryeos/ui/base")
+        );
+        assert!(
+            builder
+                .edges
+                .contains_key("client:ryeos/web--serves_kind--kind:surface")
+        );
     }
 
     #[test]
@@ -935,9 +939,11 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
         assert!(builder.edges.contains_key(
             "directive:rye/code/quality/build--suppresses_context--knowledge:agent/core/Behavior"
         ));
-        assert!(builder
-            .edges
-            .contains_key("directive:rye/code/quality/build--calls_tool--tool:rye/code/git/git"));
+        assert!(
+            builder.edges.contains_key(
+                "directive:rye/code/quality/build--calls_tool--tool:rye/code/git/git"
+            )
+        );
         assert!(builder.edges.contains_key(
             "directive:rye/code/quality/build--spawns--directive:rye/code/quality/review"
         ));
@@ -977,9 +983,11 @@ Then `rye_execute(item_type="directive", item_id="rye/code/quality/review", para
 
         add_item_edges(&mut builder, "graph:rye/code/build", &graph_path);
 
-        assert!(builder
-            .edges
-            .contains_key("graph:rye/code/build--contains_node--graph:rye/code/build#node:review"));
+        assert!(
+            builder.edges.contains_key(
+                "graph:rye/code/build--contains_node--graph:rye/code/build#node:review"
+            )
+        );
         assert!(builder.edges.contains_key(
             "graph:rye/code/build#node:review--spawns--directive:rye/code/quality/review"
         ));

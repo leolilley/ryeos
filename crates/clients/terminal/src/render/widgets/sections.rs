@@ -11,8 +11,8 @@ use ryeos_client_base::ui::view_model::{RyeOsRowVm, RyeOsSectionVm};
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, truncate};
 use super::super::theme::{
-    active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
-    tone_style, ACCENT,
+    ACCENT, active_pulse_style, shimmer_style, style_fg, style_muted, style_selected, tone_glyph,
+    tone_style,
 };
 
 /// Rows sit two cells in from the section header so the fold glyph column

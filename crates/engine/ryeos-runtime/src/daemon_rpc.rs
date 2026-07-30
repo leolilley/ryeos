@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -264,13 +264,13 @@ impl DaemonRpcClient {
     fn parse_response(response_bytes: &[u8], request_id: u64) -> Result<Value, RpcError> {
         let response: RpcResponseFrame = rmp_serde::from_slice(response_bytes)?;
 
-        if let Some(actual_id) = response.request_id {
-            if actual_id != request_id {
-                return Err(RpcError::InvalidResponseRequestId {
-                    expected: request_id,
-                    actual: Some(actual_id),
-                });
-            }
+        if let Some(actual_id) = response.request_id
+            && actual_id != request_id
+        {
+            return Err(RpcError::InvalidResponseRequestId {
+                expected: request_id,
+                actual: Some(actual_id),
+            });
         }
 
         if let Some(err) = response.error {

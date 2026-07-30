@@ -159,29 +159,37 @@ mod params_tests {
         assert_eq!(params.seat_lease_grace_seconds, Some(600));
         assert_eq!(params.durable_cas_upload_max_age_seconds, Some(1_234));
 
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "schedule_fire_max_count": -1
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "sync_job_retention_days": "14"
-        }))
-        .is_err());
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "runtime_retention_days": 14
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "schedule_fire_max_count": -1
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "sync_job_retention_days": "14"
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "runtime_retention_days": 14
+            }))
+            .is_err()
+        );
     }
 
     #[test]
     fn compaction_requires_a_complete_nested_policy() {
         let missing: GcParams = serde_json::from_value(json!({ "compact": true })).unwrap();
         assert!(missing.validate().is_err());
-        assert!(serde_json::from_value::<GcParams>(json!({
-            "compact": true,
-            "policy": { "manual_pushes": 10 }
-        }))
-        .is_err());
+        assert!(
+            serde_json::from_value::<GcParams>(json!({
+                "compact": true,
+                "policy": { "manual_pushes": 10 }
+            }))
+            .is_err()
+        );
 
         let complete: GcParams = serde_json::from_value(json!({
             "compact": true,
@@ -293,7 +301,8 @@ pub fn purge_runtime_state_in_directory(
 
     if params.deep || params.purge_cache {
         let cache_name = std::ffi::OsStr::new("cache");
-        if let Some(cache_directory) = runtime_directory.open_child_directory(cache_name)? {
+        let cache_directory = runtime_directory.open_child_directory(cache_name)?;
+        if let Some(cache_directory) = cache_directory {
             remove_rebuildable_cache_directory(&cache_directory, params.dry_run, result)?;
         } else if !params.dry_run {
             runtime_directory
@@ -417,14 +426,14 @@ pub fn run_gc_with_pinned_authority(
     let recovery = authority.recovery();
     let cas = authority.cas_store()?;
 
-    if !params.dry_run {
-        if let Some(max_age_seconds) = params.durable_cas_upload_max_age_seconds {
-            let cutoff = iso8601_seconds_ago(max_age_seconds);
-            result.retired_durable_cas_uploads = authority
-                .require_recovery()?
-                .retire_durable_cas_uploads_created_before(&cutoff, cas_mutation_guard)
-                .context("retire abandoned durable CAS upload stages")?;
-        }
+    if !params.dry_run
+        && let Some(max_age_seconds) = params.durable_cas_upload_max_age_seconds
+    {
+        let cutoff = iso8601_seconds_ago(max_age_seconds);
+        result.retired_durable_cas_uploads = authority
+            .require_recovery()?
+            .retire_durable_cas_uploads_created_before(&cutoff, cas_mutation_guard)
+            .context("retire abandoned durable CAS upload stages")?;
     }
     let capture_cleanup = cas
         .prune_abandoned_blob_captures(params.dry_run)
@@ -619,20 +628,21 @@ fn sweep_sharded_directory(
                     anyhow::anyhow!("non-UTF8 CAS filename under {}", shard2.path().display())
                 })?;
                 let atomic_staging_hash = incomplete_atomic_write_temp_hash(filename, ext);
-                if let Some(hash) = atomic_staging_hash {
-                    if !canonical_cas_hash_at_shard(hash, shard1_text, shard2_text) {
-                        anyhow::bail!(
-                            "CAS atomic staging entry is not stored at its canonical shard path: {}",
-                            shard2.path().join(&file_name).display()
-                        );
-                    }
+                if let Some(hash) = atomic_staging_hash
+                    && !canonical_cas_hash_at_shard(hash, shard1_text, shard2_text)
+                {
+                    anyhow::bail!(
+                        "CAS atomic staging entry is not stored at its canonical shard path: {}",
+                        shard2.path().join(&file_name).display()
+                    );
                 }
                 if is_incomplete_batch_temp(filename) || atomic_staging_hash.is_some() {
                     let file_size = file.metadata()?.len();
                     if dry_run {
+                        let staging_path = shard2.path().join(&file_name);
                         tracing::info!(
                             namespace,
-                            path = %shard2.path().join(&file_name).display(),
+                            path = %staging_path.display(),
                             size = file_size,
                             "would delete incomplete CAS batch temp"
                         );
@@ -760,7 +770,8 @@ fn remove_directory_contents(
     result: &mut GcResult,
 ) -> Result<()> {
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
                 if !dry_run {
@@ -816,7 +827,8 @@ fn remove_rebuildable_cache_directory(
         ) {
             continue;
         }
-        match cache_directory.open_entry(&name, false)? {
+        let entry = cache_directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 remove_directory_contents(&child, dry_run, result)?;
                 if !dry_run && !cache_directory.remove_empty_child_if_same(&name, &child)? {
@@ -912,9 +924,9 @@ mod tests {
     /// then runs a full GC. The removed snapshots should be swept as unreachable.
     #[test]
     fn compact_then_sweep_cleans_victims() {
+        use crate::Signer as _;
         use crate::refs;
         use crate::signer::TestSigner;
-        use crate::Signer as _;
         use std::fs;
 
         let tmp = tempfile::tempdir().unwrap();

@@ -43,6 +43,19 @@ lto = "thin"
 # process can be stack-dumped with named frames; costs a few MB per binary.
 strip = "debuginfo"
 
+# Real-process integration tests repeatedly verify the signed node and bundle
+# inventory while booting debug daemons. Keep RyeOS itself in the ordinary test
+# profile, but optimize the cryptographic hot path so concurrent CI fixtures do
+# not spend their 60-second readiness budget in dependency debug code.
+[profile.test.package.curve25519-dalek]
+opt-level = 3
+
+[profile.test.package.ed25519-dalek]
+opt-level = 3
+
+[profile.test.package.sha2]
+opt-level = 3
+
 [workspace.dependencies]
 # Internal crates
 lillux = { path = "crates/kernel/lillux" }

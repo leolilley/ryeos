@@ -157,17 +157,16 @@ impl RyeOsCore {
             success_notice,
             ..
         } = expected
+            && outcome.delivery.is_none()
         {
-            if outcome.delivery.is_none() {
-                let notice = match success_notice {
-                    Some(template) => render_result_notice(template, data),
-                    None => effect_success_notice(expected, data),
-                };
-                self.notice(notice, RyeOsTone::Good);
-                let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
-                effects.extend(self.effects_for_hint("thread"));
-                return effects;
-            }
+            let notice = match success_notice {
+                Some(template) => render_result_notice(template, data),
+                None => effect_success_notice(expected, data),
+            };
+            self.notice(notice, RyeOsTone::Good);
+            let mut effects = vec![self.emit(RyeOsEffectKind::FetchThreads { limit: 200 })];
+            effects.extend(self.effects_for_hint("thread"));
+            return effects;
         }
         if outcome.delivery == Some(super::dto::ThreadDelivery::Refused) {
             // A refused delivery (non-continuation target, settled
@@ -1277,12 +1276,16 @@ mod tests {
                 .and_then(|s| s.project_path.as_deref()),
             Some("/tmp/next")
         );
-        assert!(reloads
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension)));
-        assert!(reloads
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchProjects)));
+        assert!(
+            reloads
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
+        );
+        assert!(
+            reloads
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchProjects))
+        );
     }
 
     #[test]
@@ -1474,11 +1477,12 @@ mod tests {
 
         assert!(followups.is_empty());
         assert_eq!(focused_input_text(&core), "hold on");
-        assert!(core
-            .ui
-            .notices
-            .last()
-            .is_some_and(|notice| notice.message.contains("refused")));
+        assert!(
+            core.ui
+                .notices
+                .last()
+                .is_some_and(|notice| notice.message.contains("refused"))
+        );
     }
 
     #[test]
@@ -1512,17 +1516,22 @@ mod tests {
             },
         });
 
-        assert!(core
-            .ui
-            .notices
-            .iter()
-            .any(|notice| notice.message == "Ran tool:demo/run."));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension)));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 100 })));
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message == "Ran tool:demo/run.")
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 100 }))
+        );
     }
 
     #[test]
@@ -1589,17 +1598,22 @@ mod tests {
             },
         });
 
-        assert!(core
-            .ui
-            .notices
-            .iter()
-            .any(|notice| notice.message == "Ran tool:demo/run."));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension)));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 100 })));
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message == "Ran tool:demo/run.")
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchDimension))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 100 }))
+        );
     }
 
     #[test]
@@ -1636,14 +1650,17 @@ mod tests {
             },
         });
 
-        assert!(core
-            .ui
-            .notices
-            .iter()
-            .any(|notice| notice.message == "Sent cancel to T-run."));
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 200 })));
+        assert!(
+            core.ui
+                .notices
+                .iter()
+                .any(|notice| notice.message == "Sent cancel to T-run.")
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchThreads { limit: 200 }))
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 
 use crate::bundle_events::BundleEventRecord;
 use crate::objects::validate_bundle_identifier;
@@ -586,7 +586,7 @@ fn validate_projection_name(value: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bundle_events::{append_bundle_event, BundleEventAppendRequest};
+    use crate::bundle_events::{BundleEventAppendRequest, append_bundle_event};
     use crate::signer::{Signer, TestSigner};
 
     fn append_request(chain_id: &str, event_type: &str) -> BundleEventAppendRequest {

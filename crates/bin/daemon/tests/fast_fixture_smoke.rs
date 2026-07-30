@@ -39,16 +39,18 @@ async fn fast_fixture_boots_daemon_without_real_init() {
     );
 
     // State files written by the fast fixture must be in place.
-    assert!(h
-        .state_path
-        .join(".ai/node/identity/private_key.pem")
-        .exists());
+    assert!(
+        h.state_path
+            .join(".ai/node/identity/private_key.pem")
+            .exists()
+    );
     assert!(h.state_path.join(".ai/node/vault/private_key.pem").exists());
     assert!(h.state_path.join(".ai/node/vault/public_key.pem").exists());
-    assert!(h
-        .state_path
-        .join(".ai/config/keys/signing/private_key.pem")
-        .exists());
+    assert!(
+        h.state_path
+            .join(".ai/config/keys/signing/private_key.pem")
+            .exists()
+    );
 }
 
 /// Re-running the fast fixture against the same paths must be

@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 

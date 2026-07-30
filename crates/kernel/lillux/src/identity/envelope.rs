@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use hkdf::Hkdf;
@@ -346,13 +346,13 @@ pub fn open_envelope(
         ));
     }
 
-    if let Some(ref top_recipient) = envelope.recipient {
-        if *top_recipient != envelope.aad_fields.recipient {
-            return Err(format!(
-                "recipient field mismatch: top-level is {}, but aad_fields says {}",
-                top_recipient, envelope.aad_fields.recipient
-            ));
-        }
+    if let Some(top_recipient) = envelope.recipient.as_ref()
+        && *top_recipient != envelope.aad_fields.recipient
+    {
+        return Err(format!(
+            "recipient field mismatch: top-level is {}, but aad_fields says {}",
+            top_recipient, envelope.aad_fields.recipient
+        ));
     }
 
     // Decode ephemeral public key
@@ -553,23 +553,22 @@ pub fn inspect_envelope(raw: &serde_json::Value) -> InspectResult {
         well_formed = false;
     }
 
-    if let Some(bytes) = enc_bytes {
-        if bytes != 32 {
-            warnings.push(format!("enc decoded to {} bytes, expected 32", bytes));
-            well_formed = false;
-        }
+    if let Some(bytes) = enc_bytes
+        && bytes != 32
+    {
+        warnings.push(format!("enc decoded to {} bytes, expected 32", bytes));
+        well_formed = false;
     }
 
     // Check top-level vs AAD recipient mismatch
-    if let Some(ref top_recipient) = raw.get("recipient").and_then(|r| r.as_str()) {
-        if let Some(ref aad_recipient) = declared_recipient {
-            if *top_recipient != aad_recipient.as_str() {
-                warnings.push(format!(
-                    "recipient mismatch: top-level is {}, but aad_fields says {}",
-                    top_recipient, aad_recipient
-                ));
-            }
-        }
+    if let Some(top_recipient) = raw.get("recipient").and_then(|r| r.as_str())
+        && let Some(aad_recipient) = declared_recipient.as_deref()
+        && top_recipient != aad_recipient
+    {
+        warnings.push(format!(
+            "recipient mismatch: top-level is {}, but aad_fields says {}",
+            top_recipient, aad_recipient
+        ));
     }
 
     InspectResult {
@@ -597,7 +596,7 @@ pub fn cli_open(key_dir: &str) -> serde_json::Value {
     match input.get("version").and_then(|v| v.as_u64()) {
         Some(1) => {}
         other => {
-            return serde_json::json!({ "error": format!("unsupported envelope version: {other:?}") })
+            return serde_json::json!({ "error": format!("unsupported envelope version: {other:?}") });
         }
     }
     for field in &["enc", "ciphertext", "aad_fields"] {
@@ -608,7 +607,7 @@ pub fn cli_open(key_dir: &str) -> serde_json::Value {
     match input.pointer("/aad_fields/kind").and_then(|k| k.as_str()) {
         Some(ENVELOPE_KIND) => {}
         other => {
-            return serde_json::json!({ "error": format!("unexpected envelope kind: {other:?}") })
+            return serde_json::json!({ "error": format!("unexpected envelope kind: {other:?}") });
         }
     }
 
@@ -899,9 +898,11 @@ mod tests {
         });
         let report = inspect_envelope(&raw);
         assert!(!report.well_formed);
-        assert!(report
-            .warnings
-            .iter()
-            .any(|w| w.contains("enc is not valid base64url")));
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("enc is not valid base64url"))
+        );
     }
 }

@@ -11,11 +11,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use ryeos_bundle::plan::{
-    build_plan, BundlePlan, BundlePlanMode, BundleSource, PlanInput, VerificationSubjectKind,
+    BundlePlan, BundlePlanMode, BundleSource, PlanInput, VerificationSubjectKind, build_plan,
 };
 use ryeos_bundle::preflight::{
     preflight_verify_bundle_staging_in_context, preflight_verify_named_bundle_in_context,
@@ -439,7 +439,7 @@ where
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect bundle install staging {}", staging.display()))
+                .with_context(|| format!("inspect bundle install staging {}", staging.display()));
         }
     };
     (|| {
@@ -453,7 +453,7 @@ where
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("inspect bundle target {}", target.display()))
+                    .with_context(|| format!("inspect bundle target {}", target.display()));
             }
         }
         if stale_staging {
@@ -559,7 +559,7 @@ where
         Err(error) => {
             return Err(error).with_context(|| {
                 format!("inspect bundle replacement staging {}", staging.display())
-            })
+            });
         }
     };
 

@@ -9,7 +9,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use super::thread_snapshot::{parse_canonical_timestamp, validate_canonical_hash};
-use super::{validate_object_kind, SCHEMA_VERSION};
+use super::{SCHEMA_VERSION, validate_object_kind};
 
 /// Maximum canonical JSON size of one thread event stored or emitted by the
 /// daemon. This limit is enforced on the complete event object, not only its

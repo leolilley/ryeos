@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
@@ -335,14 +335,16 @@ mod tests {
     fn route_source_mismatch_is_rejected() {
         // A thread-events route validated against the chain contract (wrong
         // source + placeholder) must fail — guards against route-id reuse.
-        assert!(resolve_stream_path(
-            &[valid_route()],
-            THREAD_EVENTS_ROUTE_ID,
-            "chain_tail",
-            "chain_root_id",
-            "abc"
-        )
-        .is_err());
+        assert!(
+            resolve_stream_path(
+                &[valid_route()],
+                THREAD_EVENTS_ROUTE_ID,
+                "chain_tail",
+                "chain_root_id",
+                "abc"
+            )
+            .is_err()
+        );
     }
 
     #[test]

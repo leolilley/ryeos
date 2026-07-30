@@ -5,10 +5,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::init_check::{init_state, InitDiagnostics, InitState};
+use crate::LocalLifecycleEnv;
+use crate::init_check::{InitDiagnostics, InitState, init_state};
 use crate::lifecycle_wire::{LifecycleResponse, LifecycleWireState, StartupSnapshot};
 use crate::metadata::DaemonMetadata;
-use crate::LocalLifecycleEnv;
 
 /// The daemon records its running marker immediately before publishing the
 /// startup control listener. Beyond this grace period, a live marker without a
@@ -108,16 +108,15 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
                     unusable_control_paths.push((control_path.clone(), live_error.to_string()));
                 } else if let Some(connect_error) =
                     err.downcast_ref::<crate::control::ControlConnectError>()
-                {
-                    if !matches!(
+                    && !matches!(
                         connect_error.kind,
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                    ) {
-                        unusable_control_paths.push((
-                            control_path.clone(),
-                            format!("lifecycle ownership is uncertain because {connect_error}"),
-                        ));
-                    }
+                    )
+                {
+                    unusable_control_paths.push((
+                        control_path.clone(),
+                        format!("lifecycle ownership is uncertain because {connect_error}"),
+                    ));
                 }
                 continue;
             }
@@ -207,39 +206,38 @@ pub async fn status(env: &LocalLifecycleEnv) -> Result<LifecycleStatus> {
         let state_dir = config.app_root.join(ryeos_engine::AI_DIR).join("state");
         if let Some(crate::lifecycle_marker::LifecycleMarker::Running { pid, started_at }) =
             crate::lifecycle_marker::read(&state_dir)
+            && crate::lifecycle_marker::process_alive_as_ryeosd(pid)
         {
-            if crate::lifecycle_marker::process_alive_as_ryeosd(pid) {
-                let marker_age = crate::lifecycle_marker::age(&state_dir).unwrap_or_default();
-                let mut startup = StartupSnapshot::bootstrapping(started_at.clone());
-                startup.elapsed_ms = marker_age.as_millis().try_into().unwrap_or(u64::MAX);
-                startup.updated_at = lillux::time::iso8601_now();
-                let metadata = DaemonMetadata {
-                    pid: Some(pid),
-                    bind: Some(config.bind.to_string()),
-                    uds_path: Some(config.uds_path.clone()),
-                    started_at: Some(started_at),
-                    version: None,
-                    revision: None,
-                    build_date: None,
-                    app_root: config.app_root.clone(),
-                };
-                if marker_age > MARKER_ONLY_BOOTSTRAP_GRACE {
-                    return Ok(LifecycleStatus::Unresponsive {
-                        metadata,
-                        diagnostics: StaleDiagnostics {
-                            message: format!(
-                                "live ryeosd pid {pid} has not published usable lifecycle control after {}ms",
-                                startup.elapsed_ms
-                            ),
-                        },
-                    });
-                }
-                return Ok(LifecycleStatus::Starting {
+            let marker_age = crate::lifecycle_marker::age(&state_dir).unwrap_or_default();
+            let mut startup = StartupSnapshot::bootstrapping(started_at.clone());
+            startup.elapsed_ms = marker_age.as_millis().try_into().unwrap_or(u64::MAX);
+            startup.updated_at = lillux::time::iso8601_now();
+            let metadata = DaemonMetadata {
+                pid: Some(pid),
+                bind: Some(config.bind.to_string()),
+                uds_path: Some(config.uds_path.clone()),
+                started_at: Some(started_at),
+                version: None,
+                revision: None,
+                build_date: None,
+                app_root: config.app_root.clone(),
+            };
+            if marker_age > MARKER_ONLY_BOOTSTRAP_GRACE {
+                return Ok(LifecycleStatus::Unresponsive {
                     metadata,
-                    startup,
-                    control_available: false,
+                    diagnostics: StaleDiagnostics {
+                        message: format!(
+                            "live ryeosd pid {pid} has not published usable lifecycle control after {}ms",
+                            startup.elapsed_ms
+                        ),
+                    },
                 });
             }
+            return Ok(LifecycleStatus::Starting {
+                metadata,
+                startup,
+                control_available: false,
+            });
         }
     }
 
@@ -307,8 +305,8 @@ pub fn is_running(status: &LifecycleStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle_wire::StartupPhase;
     use crate::NodeConfig;
+    use crate::lifecycle_wire::StartupPhase;
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -883,9 +881,11 @@ mod tests {
             panic!("a mismatched live UDS identity must block replacement: {status:?}")
         };
         assert_eq!(metadata.uds_path, Some(config.uds_path.clone()));
-        assert!(diagnostics
-            .message
-            .contains("mismatched lifecycle UDS identity"));
+        assert!(
+            diagnostics
+                .message
+                .contains("mismatched lifecycle UDS identity")
+        );
     }
 
     #[tokio::test]

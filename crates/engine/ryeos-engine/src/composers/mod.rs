@@ -621,14 +621,16 @@ composer: {composer}
             &json!({"policy": {"nearest": true}}),
         )
         .unwrap();
-        assert!(validate_composed_field_requirements(
-            "synthetic",
-            &requirements,
-            &root,
-            &ancestors,
-            &json!({"policy": {"base": true, "nearest": true}}),
-        )
-        .is_err());
+        assert!(
+            validate_composed_field_requirements(
+                "synthetic",
+                &requirements,
+                &root,
+                &ancestors,
+                &json!({"policy": {"base": true, "nearest": true}}),
+            )
+            .is_err()
+        );
 
         let root_null = json!({"policy": null});
         validate_composed_field_requirements(

@@ -193,14 +193,14 @@ impl DispatchLaunchOptions {
                 execution_workspace.display()
             )
         })?;
-        if let Some(admitted_workspace) = root_admission.execution_workspace() {
-            if admitted_workspace != project_path {
-                anyhow::bail!(
-                    "dispatch launch workspace {} differs from sealed execution materialization {}",
-                    project_path.display(),
-                    admitted_workspace.display()
-                );
-            }
+        if let Some(admitted_workspace) = root_admission.execution_workspace()
+            && admitted_workspace != project_path
+        {
+            anyhow::bail!(
+                "dispatch launch workspace {} differs from sealed execution materialization {}",
+                project_path.display(),
+                admitted_workspace.display()
+            );
         }
         Ok(Self {
             ref_bindings,
@@ -588,14 +588,14 @@ fn spawn_dispatch_launch_inner(
                 .await
             }
         };
-        if dispatched.is_err() {
-            if let Some(timings) = launch_timings.as_ref() {
-                timings.record_top_level_from_milestone(
-                    "background_dispatch",
-                    "background_dispatch_entered",
-                );
-                timings.emit("background_dispatch_failed");
-            }
+        if dispatched.is_err()
+            && let Some(timings) = launch_timings.as_ref()
+        {
+            timings.record_top_level_from_milestone(
+                "background_dispatch",
+                "background_dispatch_entered",
+            );
+            timings.emit("background_dispatch_failed");
         }
         match dispatched {
             Ok(_value) => Ok(()),
@@ -712,10 +712,10 @@ fn spawn_dispatch_launch_inner(
             }
         }
     });
-    match registration_state
+    let registration = registration_state
         .state_store
-        .register_launch_task_abort(&registration_thread_id, task.abort_handle())
-    {
+        .register_launch_task_abort(&registration_thread_id, task.abort_handle());
+    match registration {
         Ok(()) => task,
         Err(ryeos_app::state_store::LaunchTaskAbortRegistrationError::CapacityExceeded) => {
             tracing::warn!(
@@ -745,8 +745,8 @@ fn spawn_dispatch_launch_inner(
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
 
     #[test]
@@ -828,10 +828,11 @@ mod tests {
         // test yields, so this exercises the same unpolled-abort boundary as
         // abort-registry refusal in `spawn_dispatch_launch_inner`.
         task.abort();
-        assert!(task
-            .await
-            .expect_err("task must be aborted before first poll")
-            .is_cancelled());
+        assert!(
+            task.await
+                .expect_err("task must be aborted before first poll")
+                .is_cancelled()
+        );
         assert!(dropped.load(Ordering::SeqCst));
     }
 

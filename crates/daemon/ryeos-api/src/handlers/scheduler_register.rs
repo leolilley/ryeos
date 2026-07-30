@@ -5,7 +5,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -210,12 +210,12 @@ pub async fn handle(
     state.scheduler_db.upsert_spec(&rec)?;
 
     // Ping timer loop
-    if let Some(ref tx) = state.scheduler_reload_tx {
-        if let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
+    if let Some(ref tx) = state.scheduler_reload_tx
+        && let Err(e) = tx.try_send(ryeos_scheduler::ReloadSignal {
             schedule_id: Some(req.schedule_id.clone()),
-        }) {
-            tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
-        }
+        })
+    {
+        tracing::warn!(schedule_id = %req.schedule_id, error = %e, "scheduler reload channel full or closed — timer will pick up changes on next tick");
     }
 
     Ok(serde_json::json!({
@@ -262,15 +262,15 @@ pub(super) fn load_existing_schedule_source(
         }
     }
     let verified = projection::load_verified_schedule_source(&source, &state.engine.trust_store)?;
-    if let Some(expected) = expected_spec_hash {
-        if verified.spec_hash != expected {
-            bail!(
-                "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
-                schedule_id,
-                expected,
-                verified.spec_hash,
-            );
-        }
+    if let Some(expected) = expected_spec_hash
+        && verified.spec_hash != expected
+    {
+        bail!(
+            "schedule_id '{}' node source changed outside its scheduler projection; rebuild before updating (expected {}, got {})",
+            schedule_id,
+            expected,
+            verified.spec_hash,
+        );
     }
     Ok(Some(verified))
 }

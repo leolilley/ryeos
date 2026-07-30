@@ -5,8 +5,8 @@ use serde_json::{Map, Value};
 
 use crate::callback::action_keys;
 use crate::expression::{
-    compile_template_for, CompilationLimits, CompiledTemplate, EvaluationSession, ExpressionError,
-    ReferenceSet,
+    CompilationLimits, CompiledTemplate, EvaluationSession, ExpressionError, ReferenceSet,
+    compile_template_for,
 };
 
 /// Compilation failure for a JSON template tree.

@@ -39,7 +39,7 @@ fn tail(path: PathBuf, n: usize) -> LogStream {
                 path,
                 present: false,
                 lines: Vec::new(),
-            }
+            };
         }
     };
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);

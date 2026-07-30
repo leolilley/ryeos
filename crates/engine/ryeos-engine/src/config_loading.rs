@@ -5,10 +5,10 @@ use serde_json::{Map, Value};
 
 use crate::contracts::ItemSpace;
 use crate::error::EngineError;
-use crate::item_resolution::{parse_signature_header, ResolutionRoots};
+use crate::item_resolution::{ResolutionRoots, parse_signature_header};
 use crate::kind_registry::KindRegistry;
 use crate::parsers::dispatcher::ParserDispatcher;
-use crate::trust::{content_hash_after_signature, verify_item_signature_with_hash, TrustStore};
+use crate::trust::{TrustStore, content_hash_after_signature, verify_item_signature_with_hash};
 
 /// Maximum bytes accepted for one config source, independent of whether it is
 /// observed live or read from an admitted content authority.

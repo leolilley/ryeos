@@ -17,7 +17,7 @@
 mod common;
 
 use common::DaemonHarness;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 
 /// Convenience: POST /execute and unwrap.
@@ -1034,12 +1034,12 @@ async fn poll_for_fires_count(
         )
         .await;
 
-        if status.is_success() {
-            if let Some(result) = body.get("result") {
-                let total = result["total"].as_u64().unwrap_or(0) as usize;
-                if total >= min_count {
-                    return result["fires"].as_array().cloned();
-                }
+        if status.is_success()
+            && let Some(result) = body.get("result")
+        {
+            let total = result["total"].as_u64().unwrap_or(0) as usize;
+            if total >= min_count {
+                return result["fires"].as_array().cloned();
             }
         }
 

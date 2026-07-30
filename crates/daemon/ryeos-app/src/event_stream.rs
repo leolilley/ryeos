@@ -157,10 +157,10 @@ impl ThreadEventHub {
         // no live subscribers. Records can repeat a thread, so dedupe via the
         // map state rather than the slice.
         for ev in records {
-            if let Some(sender) = guard.get(&ev.thread_id) {
-                if sender.receiver_count() == 0 {
-                    guard.remove(&ev.thread_id);
-                }
+            if let Some(sender) = guard.get(&ev.thread_id)
+                && sender.receiver_count() == 0
+            {
+                guard.remove(&ev.thread_id);
             }
         }
     }
@@ -171,10 +171,10 @@ impl ThreadEventHub {
     /// threads.
     pub fn remove_if_idle(&self, thread_id: &str) {
         let mut guard = self.lock_inner();
-        if let Some(sender) = guard.get(thread_id) {
-            if sender.receiver_count() == 0 {
-                guard.remove(thread_id);
-            }
+        if let Some(sender) = guard.get(thread_id)
+            && sender.receiver_count() == 0
+        {
+            guard.remove(thread_id);
         }
     }
 }

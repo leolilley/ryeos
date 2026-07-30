@@ -243,19 +243,19 @@ fn validate_field_shape(
     }
 
     let value = value.unwrap();
-    if let Some(expected) = rule.expect_value_type {
-        if !expected.matches(value) {
-            return Err((
-                ResolutionStepNameWire::PipelineInit,
-                format!(
-                    "{ref_label}: `{}` of type {actual} but composer_config expects {expected_str} — \
-                     parser handler/declared-schema disagreement",
-                    rule.name,
-                    actual = json_value_type(value),
-                    expected_str = expected.as_str(),
-                ),
-            ));
-        }
+    if let Some(expected) = rule.expect_value_type
+        && !expected.matches(value)
+    {
+        return Err((
+            ResolutionStepNameWire::PipelineInit,
+            format!(
+                "{ref_label}: `{}` of type {actual} but composer_config expects {expected_str} — \
+                 parser handler/declared-schema disagreement",
+                rule.name,
+                actual = json_value_type(value),
+                expected_str = expected.as_str(),
+            ),
+        ));
     }
 
     if rule.strategy == ComposerStrategy::DictMergeRootLast && !value.is_object() {
@@ -345,22 +345,21 @@ fn apply_strategy(
                 .unwrap_or(false);
             if !child_has {
                 for parent in ancestor_parsed {
-                    if let Some(v) = parent.get(&rule.name) {
-                        if !v.is_null() {
-                            if let Value::Object(obj) = composed {
-                                obj.insert(rule.name.clone(), v.clone());
-                            }
-                            break;
-                        }
+                    if let Some(v) = parent.get(&rule.name)
+                        && !v.is_null()
+                        && let Value::Object(obj) = composed
+                    {
+                        obj.insert(rule.name.clone(), v.clone());
+                        break;
                     }
                 }
             }
         }
         ComposerStrategy::ReplaceRootLast => {
-            if let Some(value) = last_declared_field(ancestor_parsed, root_parsed, &rule.name) {
-                if let Value::Object(obj) = composed {
-                    obj.insert(rule.name.clone(), value.clone());
-                }
+            if let Some(value) = last_declared_field(ancestor_parsed, root_parsed, &rule.name)
+                && let Value::Object(obj) = composed
+            {
+                obj.insert(rule.name.clone(), value.clone());
             }
         }
         ComposerStrategy::DictMergeRootLast => {
@@ -403,13 +402,12 @@ fn apply_strategy(
             if !child_has {
                 // Child omitted the field — inherit from first ancestor that has it.
                 for parent in ancestor_parsed {
-                    if let Some(v) = parent.get(&rule.name) {
-                        if !v.is_null() {
-                            if let Value::Object(obj) = composed {
-                                obj.insert(rule.name.clone(), v.clone());
-                            }
-                            break;
-                        }
+                    if let Some(v) = parent.get(&rule.name)
+                        && !v.is_null()
+                        && let Value::Object(obj) = composed
+                    {
+                        obj.insert(rule.name.clone(), v.clone());
+                        break;
                     }
                 }
             } else {

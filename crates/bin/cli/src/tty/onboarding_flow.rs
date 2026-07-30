@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use ryeos_directive_core::{ProviderSetupModelProjection, ProviderSetupProjection};
 use ryeos_node::{
     InitOperatorCeremony, InitOperatorProfile, InitOptions, InitPhase, InitProgress, InitReport,
@@ -697,7 +697,7 @@ impl FlowUi {
             match self.events.next().await? {
                 Event::Key(key) if key.key == Key::Enter => return Ok(true),
                 Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
-                    return Ok(false)
+                    return Ok(false);
                 }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
@@ -761,7 +761,7 @@ impl FlowUi {
             match self.events.next().await? {
                 Event::Key(key) => match input.handle_key(key) {
                     InputAction::Submit if allow_empty || !input.is_empty() => {
-                        return Ok(Some(input))
+                        return Ok(Some(input));
                     }
                     InputAction::Cancel => return Ok(None),
                     _ if key.is_control('c') => return Ok(None),
@@ -790,12 +790,12 @@ impl FlowUi {
             self.frame.render(&lines)?;
             match self.events.next().await? {
                 Event::Key(key) if key.key == Key::Char('y') || key.key == Key::Enter => {
-                    return Ok(true)
+                    return Ok(true);
                 }
                 Event::Key(key)
                     if matches!(key.key, Key::Char('n') | Key::Escape) || key.is_control('c') =>
                 {
-                    return Ok(false)
+                    return Ok(false);
                 }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
@@ -833,7 +833,7 @@ impl FlowUi {
             match self.events.next().await? {
                 Event::Key(key) if key.key == Key::Enter => return Ok(true),
                 Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
-                    return Ok(false)
+                    return Ok(false);
                 }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
@@ -935,7 +935,7 @@ impl FlowUi {
                         .and_then(|item| (item.value.0 != usize::MAX).then_some(item.value.0)));
                 }
                 Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
-                    return Ok(None)
+                    return Ok(None);
                 }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => {
@@ -1034,7 +1034,7 @@ impl FlowUi {
                     }));
                 }
                 Event::Key(key) if key.key == Key::Escape || key.is_control('c') => {
-                    return Ok(None)
+                    return Ok(None);
                 }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
@@ -1067,13 +1067,13 @@ impl FlowUi {
                 Event::Key(key) if key.is_control('c') => return Ok(ValidationChoice::Skip),
                 Event::Key(key) if key.key == Key::Char('r') => return Ok(ValidationChoice::Retry),
                 Event::Key(key) if key.key == Key::Char('c') => {
-                    return Ok(ValidationChoice::Credential)
+                    return Ok(ValidationChoice::Credential);
                 }
                 Event::Key(key) if key.key == Key::Char('p') => {
-                    return Ok(ValidationChoice::Provider)
+                    return Ok(ValidationChoice::Provider);
                 }
                 Event::Key(key) if key.key == Key::Char('s') || key.key == Key::Escape => {
-                    return Ok(ValidationChoice::Skip)
+                    return Ok(ValidationChoice::Skip);
                 }
                 Event::Key(key) if matches!(key.key, Key::Down | Key::Char('j')) => pager.down(),
                 Event::Key(key) if matches!(key.key, Key::Up | Key::Char('k')) => pager.up(),
@@ -1143,7 +1143,7 @@ impl FlowUi {
                 Event::Key(key)
                     if key.key == Key::Enter || key.key == Key::Escape || key.is_control('c') =>
                 {
-                    return Ok(false)
+                    return Ok(false);
                 }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),
@@ -1166,7 +1166,7 @@ impl FlowUi {
                 Event::Key(key)
                     if key.key == Key::Enter || key.key == Key::Escape || key.is_control('c') =>
                 {
-                    return Ok(())
+                    return Ok(());
                 }
                 Event::Terminate => return Err(terminal_terminated()),
                 Event::Resize { width, height } => self.resize(width, height),

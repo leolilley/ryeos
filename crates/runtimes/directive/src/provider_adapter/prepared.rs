@@ -8,11 +8,11 @@
 //! send time. The credential VALUE stays outside every digest — only its
 //! declared header name participates.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use super::streaming::{
-    self, apply_declared_output_limit, build_request_body, declared_output_limit_from_body,
-    inject_sampling, StreamingCallInput,
+    self, StreamingCallInput, apply_declared_output_limit, build_request_body,
+    declared_output_limit_from_body, inject_sampling,
 };
 
 /// Credential frozen at prepare time. The env read happens during prepare —

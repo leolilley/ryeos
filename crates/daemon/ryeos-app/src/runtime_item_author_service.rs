@@ -12,7 +12,7 @@ use std::io::{Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use ryeos_bundle::runtime_authority::{item_author_cap, validate_bare_id_pattern};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::kind_registry::validate_metadata_anchoring;
@@ -232,16 +232,16 @@ impl RuntimeItemAuthorService {
                 target.display()
             );
         }
-        if params.mode == AuthorMode::Upsert {
-            if let Some(expected) = params.expected_digest.as_deref() {
-                enforce_expected_digest_from_file(
-                    incumbent.as_mut(),
-                    &target,
-                    expected,
-                    &source_format.signature.prefix,
-                    source_format.signature.suffix.as_deref(),
-                )?;
-            }
+        if params.mode == AuthorMode::Upsert
+            && let Some(expected) = params.expected_digest.as_deref()
+        {
+            enforce_expected_digest_from_file(
+                incumbent.as_mut(),
+                &target,
+                expected,
+                &source_format.signature.prefix,
+                source_format.signature.suffix.as_deref(),
+            )?;
         }
 
         write_atomic(
@@ -649,7 +649,7 @@ fn read_incumbent_state(
         Ok(file) => Some(file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            return Err(error).with_context(|| format!("open incumbent item {}", target.display()))
+            return Err(error).with_context(|| format!("open incumbent item {}", target.display()));
         }
     };
     read_incumbent_state_from_file(incumbent.as_mut(), target, prefix, suffix)
@@ -666,7 +666,7 @@ fn enforce_expected_digest(
         Ok(file) => Some(file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => {
-            return Err(error).with_context(|| format!("open incumbent item {}", target.display()))
+            return Err(error).with_context(|| format!("open incumbent item {}", target.display()));
         }
     };
     enforce_expected_digest_from_file(incumbent.as_mut(), target, expected, prefix, suffix)
@@ -715,10 +715,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "first");
-        assert!(!disposable
-            .path()
-            .join(".ai/knowledge/arc/games/test/model.md")
-            .exists());
+        assert!(
+            !disposable
+                .path()
+                .join(".ai/knowledge/arc/games/test/model.md")
+                .exists()
+        );
 
         let incumbent = parent.directory.open_regular(name, false).unwrap().unwrap();
         write_atomic(

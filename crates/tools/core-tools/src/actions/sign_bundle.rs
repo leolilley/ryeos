@@ -19,16 +19,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindRegistry};
+use ryeos_engine::kind_registry::{KindRegistry, validate_metadata_anchoring};
 use std::sync::Arc;
 
+use ryeos_engine::AI_DIR;
 use ryeos_engine::handlers::HandlerRegistry;
 use ryeos_engine::parsers::{ParserDispatcher, ParserRegistry};
 use ryeos_engine::trust::{TrustStore, TrustedSigner};
-use ryeos_engine::AI_DIR;
 
 /// Report returned by [`sign_bundle_items`].
 #[derive(Debug, Serialize, Deserialize)]
@@ -362,12 +362,11 @@ fn check_all_item_dirs_covered(ai_dir: &Path, kinds: &KindRegistry) -> Result<()
     // Top-level `.ai/` directory each registered kind owns.
     let mut covered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for kind_name in kinds.kinds() {
-        if let Some(schema) = kinds.get(kind_name) {
-            if let Some(top) = schema.directory.split('/').next() {
-                if !top.is_empty() {
-                    covered.insert(top.to_string());
-                }
-            }
+        if let Some(schema) = kinds.get(kind_name)
+            && let Some(top) = schema.directory.split('/').next()
+            && !top.is_empty()
+        {
+            covered.insert(top.to_string());
         }
     }
 

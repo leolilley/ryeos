@@ -681,7 +681,8 @@ impl MaterializationCache {
                     }
                     let lock_path = second.path().join(".build.lock");
                     let _lock = if dry_run {
-                        match try_existing_exclusive_lock(&lock_path)? {
+                        let existing_lock = try_existing_exclusive_lock(&lock_path)?;
+                        match existing_lock {
                             ExistingLock::Busy => continue,
                             ExistingLock::Absent => None,
                             ExistingLock::Acquired(file) => Some(file),
@@ -748,12 +749,10 @@ impl MaterializationCache {
                     entry.file_name().to_str(),
                     Some(".complete" | ".files" | ".leases" | ".locks")
                 )
+                && let Some(name) = entry.file_name().to_str()
+                && !name.contains(".staging.")
             {
-                if let Some(name) = entry.file_name().to_str() {
-                    if !name.contains(".staging.") {
-                        entries.push(name.to_string());
-                    }
-                }
+                entries.push(name.to_string());
             }
         }
         Ok(entries)

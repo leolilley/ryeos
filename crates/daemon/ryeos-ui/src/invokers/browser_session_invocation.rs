@@ -109,8 +109,8 @@ fn extract_session_cookie_impl(headers: &axum::http::HeaderMap) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header::COOKIE;
     use axum::http::HeaderMap;
+    use axum::http::header::COOKIE;
 
     #[test]
     fn extract_session_cookie_found() {

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use url::Url;
@@ -849,7 +849,9 @@ impl ProviderConfig {
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
             {
-                bail!("provider '{provider_id}' setup credential fields are empty, unsafe, or too long");
+                bail!(
+                    "provider '{provider_id}' setup credential fields are empty, unsafe, or too long"
+                );
             }
             if self.auth.env_var.as_deref() != Some(credential.secret_name.as_str()) {
                 bail!(
@@ -1220,32 +1222,29 @@ impl ProviderConfig {
             .schemas
             .as_ref()
             .and_then(|schemas| schemas.output_limit.as_ref())
-        {
-            if output_limit
+            && output_limit
                 .path
                 .split('.')
                 .any(|segment| segment.is_empty())
-            {
-                bail!(
-                    "provider config{context}: output_limit.path must contain non-empty dot-separated segments"
-                );
-            }
+        {
+            bail!(
+                "provider config{context}: output_limit.path must contain non-empty dot-separated segments"
+            );
         }
 
-        if let Some(pricing) = self.pricing.as_ref() {
-            if pricing.explicitly_free
-                && (pricing
-                    .input_per_million
+        if let Some(pricing) = self.pricing.as_ref()
+            && pricing.explicitly_free
+            && (pricing
+                .input_per_million
+                .is_some_and(|rate| !rate.is_zero())
+                || pricing
+                    .output_per_million
                     .is_some_and(|rate| !rate.is_zero())
-                    || pricing
-                        .output_per_million
-                        .is_some_and(|rate| !rate.is_zero())
-                    || !pricing.models.is_empty())
-            {
-                bail!(
-                    "provider config{context}: pricing.explicitly_free cannot be combined with non-zero/default or per-model prices"
-                );
-            }
+                || !pricing.models.is_empty())
+        {
+            bail!(
+                "provider config{context}: pricing.explicitly_free cannot be combined with non-zero/default or per-model prices"
+            );
         }
 
         if let Some(spend_authority) = self.spend_authority.as_ref() {
@@ -1256,23 +1255,22 @@ impl ProviderConfig {
 
         match self.family {
             ProtocolFamily::AnthropicMessages => {
-                if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref()) {
-                    if messages.assistant_tool_calls_placement
+                if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref())
+                    && messages.assistant_tool_calls_placement
                         != Some(AssistantToolCallsPlacement::InlineBlocks)
-                    {
-                        bail!(
-                            "provider config{context}: anthropic_messages requires inline_blocks tool calls"
-                        );
-                    }
+                {
+                    bail!(
+                        "provider config{context}: anthropic_messages requires inline_blocks tool calls"
+                    );
                 }
             }
             ProtocolFamily::GoogleGenerateContent => {
-                if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref()) {
-                    if messages.content_key.as_deref() != Some("parts") {
-                        bail!(
-                            "provider config{context}: google_generate_content requires messages.content_key=parts"
-                        );
-                    }
+                if let Some(messages) = self.schemas.as_ref().and_then(|s| s.messages.as_ref())
+                    && messages.content_key.as_deref() != Some("parts")
+                {
+                    bail!(
+                        "provider config{context}: google_generate_content requires messages.content_key=parts"
+                    );
                 }
             }
             ProtocolFamily::ChatCompletions => {}
@@ -1383,12 +1381,11 @@ fn validate_body_template_placeholders(template: &Value, context: &str) -> Resul
             if let Some(placeholder) = trimmed
                 .strip_prefix('{')
                 .and_then(|rest| rest.strip_suffix('}'))
+                && !matches!(placeholder, "model" | "messages" | "tools" | "stream")
             {
-                if !matches!(placeholder, "model" | "messages" | "tools" | "stream") {
-                    bail!(
-                        "provider config{context}: body_template placeholder `{{{placeholder}}}` is not supported"
-                    );
-                }
+                bail!(
+                    "provider config{context}: body_template placeholder `{{{placeholder}}}` is not supported"
+                );
             }
         }
         Value::Array(values) => {
@@ -1647,14 +1644,15 @@ pub fn prepare_directive_launch(
     let matched_profile = provider
         .matched_profile(&target.model_name)
         .map(|profile| profile.name.clone());
-    if let Some(profile) = &matched_profile {
-        if profile.trim().is_empty() || profile.len() > 128 || profile.chars().any(char::is_control)
-        {
-            return Err(DirectivePreparationError::configuration(
-                "provider_config_invalid",
-                "the matched provider profile name must be 1-128 bytes without control characters",
-            ));
-        }
+    if let Some(profile) = &matched_profile
+        && (profile.trim().is_empty()
+            || profile.len() > 128
+            || profile.chars().any(char::is_control))
+    {
+        return Err(DirectivePreparationError::configuration(
+            "provider_config_invalid",
+            "the matched provider profile name must be 1-128 bytes without control characters",
+        ));
     }
     let resolved_provider = provider.resolve_for_model(&target.model_name);
     resolved_provider

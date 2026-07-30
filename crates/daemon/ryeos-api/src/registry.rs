@@ -10,8 +10,8 @@
 use crate::handlers;
 
 pub use ryeos_app::service_registry::{
-    extract_endpoint, extract_required_caps, RawHandlerFn, ServiceAvailability, ServiceDescriptor,
-    ServiceRegistry,
+    RawHandlerFn, ServiceAvailability, ServiceDescriptor, ServiceRegistry, extract_endpoint,
+    extract_required_caps,
 };
 
 /// Build the service registry with all service handlers declared in
@@ -117,7 +117,7 @@ mod tests {
     // descriptor slice; these tests anchor it against the daemon's
     // canonical `handlers::ALL`. Lives in daemon because that table is
     // daemon-owned.
-    use ryeos_executor::executor::{availability_for_endpoint, ExecutionMode};
+    use ryeos_executor::executor::{ExecutionMode, availability_for_endpoint};
 
     #[test]
     fn availability_matches_descriptor_table() {

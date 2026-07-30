@@ -1893,12 +1893,12 @@ fn parse_execution_schema(
     }
 
     let mut aliases = HashMap::new();
-    if let Some(aliases_value) = execution_value.get("aliases") {
-        if let Some(aliases_mapping) = aliases_value.as_mapping() {
-            for (k, v) in aliases_mapping {
-                if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
-                    aliases.insert(key.to_owned(), val.to_owned());
-                }
+    if let Some(aliases_value) = execution_value.get("aliases")
+        && let Some(aliases_mapping) = aliases_value.as_mapping()
+    {
+        for (k, v) in aliases_mapping {
+            if let (Some(key), Some(val)) = (k.as_str(), v.as_str()) {
+                aliases.insert(key.to_owned(), val.to_owned());
             }
         }
     }
@@ -2043,31 +2043,30 @@ fn parse_execution_schema(
     }
 
     // Validate: the default method, when declared, must name a method.
-    if let Some(md) = &method_dispatch {
-        if let Some(default) = &md.default {
-            if !methods.contains_key(default) {
-                return Err(EngineError::SchemaLoaderError {
-                    reason: format!(
-                        "{display}: method_dispatch.default `{default}` does not match any declared method"
-                    ),
-                });
-            }
-        }
+    if let Some(md) = &method_dispatch
+        && let Some(default) = &md.default
+        && !methods.contains_key(default)
+    {
+        return Err(EngineError::SchemaLoaderError {
+            reason: format!(
+                "{display}: method_dispatch.default `{default}` does not match any declared method"
+            ),
+        });
     }
 
     // Parse launch_augmentations
     let mut launch_augmentations = Vec::new();
-    if let Some(la_value) = execution_value.get("launch_augmentations") {
-        if let Some(la_seq) = la_value.as_sequence() {
-            for item in la_seq {
-                let aug: LaunchAugmentationDecl =
-                    serde_yaml::from_value(item.clone()).map_err(|e| {
-                        EngineError::SchemaLoaderError {
-                            reason: format!("{display}: invalid launch_augmentations entry: {e}"),
-                        }
-                    })?;
-                launch_augmentations.push(aug);
-            }
+    if let Some(la_value) = execution_value.get("launch_augmentations")
+        && let Some(la_seq) = la_value.as_sequence()
+    {
+        for item in la_seq {
+            let aug: LaunchAugmentationDecl =
+                serde_yaml::from_value(item.clone()).map_err(|e| {
+                    EngineError::SchemaLoaderError {
+                        reason: format!("{display}: invalid launch_augmentations entry: {e}"),
+                    }
+                })?;
+            launch_augmentations.push(aug);
         }
     }
 
@@ -2996,9 +2995,11 @@ composed_value_contract:
             .and_then(|execution| execution.history_policy.as_ref())
             .expect("history policy declaration");
         assert_eq!(declaration.composed_path, "history");
-        assert!(registry
-            .schema_content_hash("service")
-            .is_some_and(|hash| hash.len() == 64));
+        assert!(
+            registry
+                .schema_content_hash("service")
+                .is_some_and(|hash| hash.len() == 64)
+        );
     }
 
     #[test]
@@ -3791,9 +3792,11 @@ execution:
       execution_cache: content_addressed
 ";
         let error = parse_exec(yaml).expect_err("public/private overlap must fail");
-        assert!(error
-            .to_string()
-            .contains("cannot be generically dispatched"));
+        assert!(
+            error
+                .to_string()
+                .contains("cannot be generically dispatched")
+        );
     }
 
     #[test]

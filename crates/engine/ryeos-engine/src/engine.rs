@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::AI_DIR;
 use crate::canonical_ref::CanonicalRef;
 use crate::composers::ComposerRegistry;
 use crate::contracts::{
@@ -21,7 +22,6 @@ use crate::parsers::ParserDispatcher;
 use crate::protocols::ProtocolRegistry;
 use crate::runtime_registry::RuntimeRegistry;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 /// Request for an effective, composed item value.
 #[derive(Debug, Clone)]
@@ -479,10 +479,10 @@ fn sweep_immutable_request_cache(state: &mut ImmutableRequestSnapshotCache) {
     let stale = state
         .slots
         .iter()
-        .filter_map(|(key, entry)| {
-            (now.saturating_duration_since(entry.last_touched) >= IMMUTABLE_REQUEST_CACHE_IDLE_TTL)
-                .then(|| key.clone())
+        .filter(|(_, entry)| {
+            now.saturating_duration_since(entry.last_touched) >= IMMUTABLE_REQUEST_CACHE_IDLE_TTL
         })
+        .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     for key in stale {
         remove_immutable_request_entry(state, &key);
@@ -1347,7 +1347,7 @@ impl Engine {
         }
         self.checked_bundle_generation(|| {
             let key = self.immutable_request_cache_key(subject_resolution_authority)?;
-            let pending_owner = loop {
+            let pending_owner = 'pending_owner: {
                 let lookup = {
                     let mut cache = self
                         .immutable_request_snapshot_cache
@@ -1367,7 +1367,7 @@ impl Engine {
                     } else {
                         let pending = Arc::new(ImmutableRequestSnapshotPending::default());
                         cache.pending.insert(key.clone(), pending.clone());
-                        break Some(pending);
+                        break 'pending_owner Some(pending);
                     }
                 };
                 match lookup {
@@ -1416,7 +1416,7 @@ impl Engine {
                             Err(error) => return Err(EngineError::Shared(error.clone())),
                         }
                     }
-                    None => break None,
+                    None => None,
                 }
             };
             if pending_owner.is_none() {
@@ -2467,7 +2467,7 @@ impl Engine {
         let key = lillux::canonical_json(&key_material)
             .map(|canonical| lillux::sha256_hex(canonical.as_bytes()))
             .map_err(|error| EngineError::Internal(error.to_string()))?;
-        let pending_owner = loop {
+        let pending_owner = 'pending_owner: {
             let lookup = {
                 let mut cache = static_verification_cache()
                     .lock()
@@ -2486,7 +2486,7 @@ impl Engine {
                 } else {
                     let pending = Arc::new(StaticVerificationPending::default());
                     cache.pending.insert(key.clone(), pending.clone());
-                    break Some(pending);
+                    break 'pending_owner Some(pending);
                 }
             };
             match lookup {
@@ -2538,7 +2538,7 @@ impl Engine {
                         Err(error) => return Err(EngineError::Shared(error.clone())),
                     }
                 }
-                None => break None,
+                None => None,
             }
         };
         if pending_owner.is_none() {
@@ -2963,14 +2963,14 @@ impl Engine {
     ) -> Result<EffectiveItem, EngineError> {
         let ref_str = request.item_ref.to_string();
 
-        if let Some(expected) = &request.expected_kind {
-            if expected != &request.item_ref.kind {
-                return Err(EngineError::EffectiveItemWrongKind {
-                    canonical_ref: ref_str,
-                    expected: expected.clone(),
-                    found: request.item_ref.kind.clone(),
-                });
-            }
+        if let Some(expected) = &request.expected_kind
+            && expected != &request.item_ref.kind
+        {
+            return Err(EngineError::EffectiveItemWrongKind {
+                canonical_ref: ref_str,
+                expected: expected.clone(),
+                found: request.item_ref.kind.clone(),
+            });
         }
 
         let roots = self.resolution_roots(request.project_root.clone());
@@ -3761,14 +3761,18 @@ formats:
         let engine = test_engine().with_node_config_ai_root(PathBuf::from("/node-config/.ai"));
         let ordinary = engine.resolution_roots(Some(PathBuf::from("/project")));
         assert_eq!(ordinary.ordered.len(), engine.bundle_roots.len() + 1);
-        assert!(!ordinary
-            .ordered
-            .iter()
-            .any(|root| root.ai_root == Path::new("/node-config/.ai")));
-        assert!(!ordinary
-            .ordered
-            .iter()
-            .any(|root| root.space == crate::contracts::ItemSpace::Node));
+        assert!(
+            !ordinary
+                .ordered
+                .iter()
+                .any(|root| root.ai_root == Path::new("/node-config/.ai"))
+        );
+        assert!(
+            !ordinary
+                .ordered
+                .iter()
+                .any(|root| root.space == crate::contracts::ItemSpace::Node)
+        );
 
         let launch = engine.launch_config_roots(&ordinary);
         assert_eq!(launch.ordered[0].label, "project");
@@ -4152,28 +4156,32 @@ formats:
             .resolve(&ctx, &CanonicalRef::parse("tool:hello").unwrap())
             .unwrap();
         let attestation = engine.verify_attested(&ctx, resolved).unwrap();
-        assert!(engine
-            .consume_verified_attestation(
-                &ctx,
-                &attestation,
-                &SubjectResolutionAuthority::PinnedGeneration {
-                    snapshot_hash: "a".repeat(64),
-                },
-            )
-            .is_err());
+        assert!(
+            engine
+                .consume_verified_attestation(
+                    &ctx,
+                    &attestation,
+                    &SubjectResolutionAuthority::PinnedGeneration {
+                        snapshot_hash: "a".repeat(64),
+                    },
+                )
+                .is_err()
+        );
 
         let mut substituted_context = ctx.clone();
         substituted_context.subject_resolution_authority =
             SubjectResolutionAuthority::PinnedGeneration {
                 snapshot_hash: "a".repeat(64),
             };
-        assert!(engine
-            .consume_verified_attestation(
-                &substituted_context,
-                &attestation,
-                &SubjectResolutionAuthority::LiveFs,
-            )
-            .is_err());
+        assert!(
+            engine
+                .consume_verified_attestation(
+                    &substituted_context,
+                    &attestation,
+                    &SubjectResolutionAuthority::LiveFs,
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -4702,14 +4710,18 @@ formats:
         let engine = test_engine();
         let project_dir = tempdir();
 
-        assert!(engine
-            .effective_request_snapshot(
-                Some(&project_dir),
-                &SubjectResolutionAuthority::Projectless,
-            )
-            .is_err());
-        assert!(engine
-            .effective_request_snapshot(None, &SubjectResolutionAuthority::LiveFs)
-            .is_err());
+        assert!(
+            engine
+                .effective_request_snapshot(
+                    Some(&project_dir),
+                    &SubjectResolutionAuthority::Projectless,
+                )
+                .is_err()
+        );
+        assert!(
+            engine
+                .effective_request_snapshot(None, &SubjectResolutionAuthority::LiveFs)
+                .is_err()
+        );
     }
 }

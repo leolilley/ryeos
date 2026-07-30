@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Validate that a bundle control tree contains only real directories and
 /// regular files. Authorization material under `.ai/` must never be reached

@@ -29,9 +29,9 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
-use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
-use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
 // ── Helpers (mirror directive_provider_secret_injection_e2e.rs) ──
@@ -639,16 +639,15 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
         // Check if the thread was already finalized (spawn failure).
         if let Some((status, outcome, full_error)) =
             read_thread_outcome_full(&h.state_path, &thread_id)
+            && (status == "failed" || status == "completed" || status == "killed")
         {
-            if status == "failed" || status == "completed" || status == "killed" {
-                let stderr = h.drain_stderr_nonblocking().await;
-                panic!(
-                    "thread {thread_id} reached terminal status before PID appeared: \
-                     status={status} outcome_code={outcome:?} error={full_error:?}\n\
-                     Daemon stderr (tail):\n{}",
-                    &stderr[stderr.len().saturating_sub(3000)..]
-                );
-            }
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
+                "thread {thread_id} reached terminal status before PID appeared: \
+                 status={status} outcome_code={outcome:?} error={full_error:?}\n\
+                 Daemon stderr (tail):\n{}",
+                &stderr[stderr.len().saturating_sub(3000)..]
+            );
         }
         if std::time::Instant::now() > pid_deadline {
             let stderr = h.drain_stderr_nonblocking().await;
@@ -695,10 +694,10 @@ async fn generic_tool_resume_does_not_require_provider_secret() {
     // leave the thread running, not fail with required_secret_missing.
     let outcome_deadline = std::time::Instant::now() + Duration::from_secs(15);
     let resumed_pid = loop {
-        if let Some((new_pid, _)) = read_process_attachment(&h.state_path, &thread_id) {
-            if new_pid != pid {
-                break new_pid;
-            }
+        if let Some((new_pid, _)) = read_process_attachment(&h.state_path, &thread_id)
+            && new_pid != pid
+        {
+            break new_pid;
         }
         if let Some((status, outcome, full_error)) =
             read_thread_outcome_full(&h.state_path, &thread_id)

@@ -9,4 +9,4 @@ pub mod subscriber;
 #[cfg(any(test, feature = "test-harness"))]
 pub mod test;
 
-pub use subscriber::{init_subscriber, SubscriberConfig};
+pub use subscriber::{SubscriberConfig, init_subscriber};

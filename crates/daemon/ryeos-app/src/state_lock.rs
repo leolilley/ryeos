@@ -12,7 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// RAII guard for the operator state lock.
 ///

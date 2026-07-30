@@ -12,12 +12,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::SignatureEnvelope;
-use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindSchema};
+use ryeos_engine::kind_registry::{KindSchema, validate_metadata_anchoring};
 use ryeos_engine::parsers::ParserDispatcher;
 
 use crate::registry::ServiceDescriptor;
@@ -346,8 +346,8 @@ fn glob_match_items(
     kind_schema: &KindSchema,
     pattern: &str,
 ) -> Result<Vec<PathBuf>> {
-    use glob::glob_with;
     use glob::MatchOptions;
+    use glob::glob_with;
 
     if !kind_dir.is_dir() {
         return Ok(Vec::new());

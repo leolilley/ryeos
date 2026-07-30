@@ -162,10 +162,8 @@ impl Walker {
         // durable authority. Do not publish terminal-node cache entries until
         // that boundary returns an explicit settlement acknowledgement.
         let authoritative = matches!(&committed, CommitResult::Advance { .. });
-        if authoritative {
-            if let Some(cache_key) = cache_write_key {
-                cache.store(cache_key, result);
-            }
+        if authoritative && let Some(cache_key) = cache_write_key {
+            cache.store(cache_key, result);
         }
         committed
     }

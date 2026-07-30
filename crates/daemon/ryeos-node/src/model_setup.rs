@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use lillux::crypto::DecodePrivateKey;
 use zeroize::Zeroizing;
 
@@ -225,9 +225,11 @@ mod tests {
             context_window: 128_000,
         })
         .expect_err("operator route must be preserved");
-        assert!(error
-            .to_string()
-            .contains("refusing to replace unverified or operator-authored"));
+        assert!(
+            error
+                .to_string()
+                .contains("refusing to replace unverified or operator-authored")
+        );
         assert_eq!(
             fs::read_to_string(path).expect("preserved route"),
             "tiers: {}\n"
@@ -247,8 +249,10 @@ mod tests {
             context_window: 128_000,
         })
         .expect_err("unsigned marker must not be trusted");
-        assert!(error
-            .to_string()
-            .contains("unverified or operator-authored"));
+        assert!(
+            error
+                .to_string()
+                .contains("unverified or operator-authored")
+        );
     }
 }

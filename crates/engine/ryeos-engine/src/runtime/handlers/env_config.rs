@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::contracts::RuntimeEnvSource;
 use crate::error::EngineError;
 use crate::runtime::{
-    expand_env_value, is_reserved_env_name, CompileContext, HostEnvBindings, RuntimeHandler,
+    CompileContext, HostEnvBindings, RuntimeHandler, expand_env_value, is_reserved_env_name,
 };
 
 pub const KEY: &str = "env_config";
@@ -71,6 +71,14 @@ pub fn resolve_interpreter(
     config: &InterpreterConfig,
     project_root: Option<&Path>,
 ) -> Result<String, EngineError> {
+    resolve_interpreter_with_env(config, project_root, |name| std::env::var(name).ok())
+}
+
+fn resolve_interpreter_with_env(
+    config: &InterpreterConfig,
+    project_root: Option<&Path>,
+    mut read_env: impl FnMut(&str) -> Option<String>,
+) -> Result<String, EngineError> {
     match config {
         InterpreterConfig::LocalBinary {
             binary,
@@ -80,10 +88,10 @@ pub fn resolve_interpreter(
             path_candidates,
         } => {
             // 1. Env-var override
-            if let Some(v) = var {
-                if let Ok(val) = std::env::var(v) {
-                    return Ok(val);
-                }
+            if let Some(v) = var
+                && let Some(val) = read_env(v)
+            {
+                return Ok(val);
             }
             // 2. Project-local search paths × {binary, ...candidates}
             if let Some(root) = project_root {
@@ -321,14 +329,13 @@ mod interpreter_resolution_tests {
 
     #[test]
     fn env_var_override_wins_over_venv_and_path() {
-        // Uniquely-named var so the process-global env mutation can't
-        // collide with other (parallel) tests.
         let var = "RYE_PYTHON_OVERRIDE_INTERP_TEST";
         let root = tempfile::tempdir().unwrap();
         touch(&root.path().join(".venv/bin/python3"));
-        std::env::set_var(var, "/custom/python");
-        let got = resolve_interpreter(&python_like(Some(var)), Some(root.path()));
-        std::env::remove_var(var);
+        let got =
+            resolve_interpreter_with_env(&python_like(Some(var)), Some(root.path()), |name| {
+                (name == var).then(|| "/custom/python".to_string())
+            });
         assert_eq!(got.unwrap(), "/custom/python");
     }
 }

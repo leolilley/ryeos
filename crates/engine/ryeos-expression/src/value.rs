@@ -250,11 +250,7 @@ fn from_i128(value: i128, overflow: &'static str) -> Result<Numeric, &'static st
 }
 
 fn normalize_zero(value: f64) -> f64 {
-    if value == 0.0 {
-        0.0
-    } else {
-        value
-    }
+    if value == 0.0 { 0.0 } else { value }
 }
 
 fn compare_i64_f64(integer: i64, decimal: f64) -> Ordering {

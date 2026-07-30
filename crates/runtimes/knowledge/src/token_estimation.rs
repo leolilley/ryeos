@@ -65,12 +65,12 @@ impl ResolvedTokenEstimator {
             .map_err(|e| {
                 KnowledgeError::TokenEstimation(format!("invalid token_estimation config: {e}"))
             })?;
-        if let Some(category) = config.category.as_deref() {
-            if category != EXPECTED_CATEGORY {
-                return Err(KnowledgeError::TokenEstimation(format!(
-                    "token_estimation config category must be `{EXPECTED_CATEGORY}`, got `{category}`"
-                )));
-            }
+        if let Some(category) = config.category.as_deref()
+            && category != EXPECTED_CATEGORY
+        {
+            return Err(KnowledgeError::TokenEstimation(format!(
+                "token_estimation config category must be `{EXPECTED_CATEGORY}`, got `{category}`"
+            )));
         }
         Self::build(&config.policy)
     }

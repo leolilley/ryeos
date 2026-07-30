@@ -291,26 +291,25 @@ impl RyeOsCore {
         // single lens, never from arranging panes.
         if self.workspace.tiling.mode == crate::surface::TilingModeSpec::SingleLens
             && !self.workspace.center_is_empty()
+            && let Some(tile_id) = self.workspace.replace_focused_view(view.clone())
         {
-            if let Some(tile_id) = self.workspace.replace_focused_view(view.clone()) {
-                let key = tile_id.0.to_string();
-                self.data.sources.remove(&key);
-                self.data.source_errors.remove(&key);
-                self.data.source_epoch.remove(&key);
-                self.data.source_stored_epoch.remove(&key);
-                self.data.timeline_sources.remove(&key);
-                let section_prefix = format!("{key}#section");
-                self.deferred_source_fetches
-                    .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
-                self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
-                self.bump_generation();
-                let effects = self.effects_for_view(&view);
-                // The lens swapped subjects: eviction alone would let an
-                // in-flight response for the OLD lens land into the empty
-                // store — the floor refuses it outright.
-                self.floor_source_fetches(&effects, true);
-                return effects;
-            }
+            let key = tile_id.0.to_string();
+            self.data.sources.remove(&key);
+            self.data.source_errors.remove(&key);
+            self.data.source_epoch.remove(&key);
+            self.data.source_stored_epoch.remove(&key);
+            self.data.timeline_sources.remove(&key);
+            let section_prefix = format!("{key}#section");
+            self.deferred_source_fetches
+                .retain(|source, _| source != &key && !source.starts_with(&section_prefix));
+            self.push_motion(RyeOsMotionEventVm::FocusChanged { tile_id: key });
+            self.bump_generation();
+            let effects = self.effects_for_view(&view);
+            // The lens swapped subjects: eviction alone would let an
+            // in-flight response for the OLD lens land into the empty
+            // store — the floor refuses it outright.
+            self.floor_source_fetches(&effects, true);
+            return effects;
         }
 
         let effects = self.add_center_tile(view);
@@ -443,7 +442,7 @@ mod tests {
 
     #[test]
     fn sections_flat_cursor_selects_a_row_and_resolves_its_section_activation() {
-        use crate::ui::view_model::{intent_for_focused_row, RyeOsLayoutNodeVm, RyeOsViewVm};
+        use crate::ui::view_model::{RyeOsLayoutNodeVm, RyeOsViewVm, intent_for_focused_row};
         let session = BrowserSession {
             effective_surface: Some(serde_json::json!({
                 "name": "t",
@@ -667,11 +666,12 @@ mod tests {
             core.workspace.focused_view(),
             Some(ViewSpec { view_ref }) if view_ref == "view:test/services"
         ));
-        assert!(core
-            .ui
-            .motion
-            .iter()
-            .any(|event| matches!(event, RyeOsMotionEventVm::TileSplit { .. })));
+        assert!(
+            core.ui
+                .motion
+                .iter()
+                .any(|event| matches!(event, RyeOsMotionEventVm::TileSplit { .. }))
+        );
         assert!(core.ui.motion.iter().any(|event| matches!(
             event,
             RyeOsMotionEventVm::TileEnter { tile_id } if tile_id == &core.workspace.focused_tile.0.to_string()
@@ -867,11 +867,12 @@ mod tests {
             .count();
         assert_eq!(core.workspace.tile_ids().len(), before + 1);
         assert_eq!(item_tile_count, 2);
-        assert!(core
-            .ui
-            .motion
-            .iter()
-            .any(|event| matches!(event, RyeOsMotionEventVm::TileSplit { .. })));
+        assert!(
+            core.ui
+                .motion
+                .iter()
+                .any(|event| matches!(event, RyeOsMotionEventVm::TileSplit { .. }))
+        );
         assert!(matches!(
             effects.first().map(|effect| &effect.kind),
             Some(RyeOsEffectKind::FetchSource { .. })
@@ -938,11 +939,12 @@ mod tests {
 
         assert!(core.workspace.center_is_empty());
         // The last-tile close emits a tile-exit motion (no home mode).
-        assert!(core
-            .ui
-            .motion
-            .iter()
-            .any(|event| matches!(event, RyeOsMotionEventVm::TileExit { .. })));
+        assert!(
+            core.ui
+                .motion
+                .iter()
+                .any(|event| matches!(event, RyeOsMotionEventVm::TileExit { .. }))
+        );
     }
 
     #[test]
@@ -1066,9 +1068,11 @@ mod tests {
 
         assert_eq!(core.active_workspace, 1);
         assert_eq!(core.workspaces[0].tile_ids().len(), first_tab_tiles);
-        assert!(effects
-            .iter()
-            .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchSource { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect.kind, RyeOsEffectKind::FetchSource { .. }))
+        );
     }
 
     #[test]

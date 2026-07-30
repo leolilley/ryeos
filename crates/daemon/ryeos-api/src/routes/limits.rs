@@ -28,15 +28,14 @@ impl RouteLimiter {
             .get(axum::http::header::CONTENT_LENGTH)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok())
+            && content_length > self.body_bytes_max
         {
-            if content_length > self.body_bytes_max {
-                return Err(
-                    (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(serde_json::json!({
-                        "error": format!("body too large: {} bytes (max {})", content_length, self.body_bytes_max)
-                    })))
-                        .into_response(),
-                );
-            }
+            return Err(
+                (StatusCode::PAYLOAD_TOO_LARGE, axum::Json(serde_json::json!({
+                    "error": format!("body too large: {} bytes (max {})", content_length, self.body_bytes_max)
+                })))
+                    .into_response(),
+            );
         }
         Ok(())
     }

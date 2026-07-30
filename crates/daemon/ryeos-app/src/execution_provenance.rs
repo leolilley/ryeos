@@ -376,7 +376,9 @@ impl ExecutionProvenance {
         match &mut self {
             Self::Projectless { .. } => {
                 if override_root.is_some() {
-                    panic!("ExecutionProvenance::with_state_root: projectless execution cannot redirect project state");
+                    panic!(
+                        "ExecutionProvenance::with_state_root: projectless execution cannot redirect project state"
+                    );
                 }
             }
             Self::RootLiveProject { state_root, .. }
@@ -556,18 +558,15 @@ impl ExecutionProvenance {
             if !workspace_lifeline.owns_effective_path(effective_path) {
                 anyhow::bail!("pinned provenance lifeline does not own its effective project path");
             }
-            match pinned_materialization.verified() {
-                Some(materialization) => {
-                    if materialization.snapshot_hash() != snapshot_hash
-                        || !materialization.owns_path(effective_path)?
-                    {
-                        anyhow::bail!(
-                            "pinned provenance materialization proof contradicts its snapshot or path"
-                        );
-                    }
-                    materialization.ensure_root_binding()?;
+            if let Some(materialization) = pinned_materialization.verified() {
+                if materialization.snapshot_hash() != snapshot_hash
+                    || !materialization.owns_path(effective_path)?
+                {
+                    anyhow::bail!(
+                        "pinned provenance materialization proof contradicts its snapshot or path"
+                    );
                 }
-                None => {}
+                materialization.ensure_root_binding()?;
             }
         }
         match &mut self {
@@ -1210,9 +1209,11 @@ mod tests {
             pinned(Path::new("/laptop"), &"a".repeat(64)),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not match its effective path"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its effective path")
+        );
     }
 
     #[test]
@@ -1423,7 +1424,8 @@ mod tests {
         )
         .unwrap();
 
-        match root.clone_for_borrowed_child() {
+        let child = root.clone_for_borrowed_child();
+        match child {
             ExecutionProvenance::ChildPinnedGeneration { .. } => {}
             other => panic!("expected ChildPinnedGeneration, got {other:?}"),
         }

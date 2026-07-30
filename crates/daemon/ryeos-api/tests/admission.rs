@@ -223,10 +223,12 @@ async fn admission_claim_enforces_hosted_policy_token_ttl() {
     let result = admission_claim::handle(req, Arc::new(state)).await;
 
     assert!(matches!(result, Err(HandlerError::Forbidden(_))));
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("hosted-node policy maximum"),);
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("hosted-node policy maximum"),
+    );
 }
 
 #[tokio::test]
@@ -248,10 +250,12 @@ async fn admission_claim_rejects_aged_overlong_hosted_policy_token() {
     let result = admission_claim::handle(req, Arc::new(state)).await;
 
     assert!(matches!(result, Err(HandlerError::Forbidden(_))));
-    assert!(result
-        .unwrap_err()
-        .to_string()
-        .contains("hosted-node policy maximum"),);
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("hosted-node policy maximum"),
+    );
 }
 
 fn write_admission_token_file(

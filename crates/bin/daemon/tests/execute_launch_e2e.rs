@@ -18,14 +18,14 @@ mod common;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use common::DaemonHarness;
 use common::fast_fixture::{
-    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_with_scopes,
-    FastFixture,
+    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    write_authorized_key_with_scopes,
 };
 use common::mock_provider::{MockProvider, MockResponse};
-use common::DaemonHarness;
 use lillux::crypto::SigningKey;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 fn accepted_policy(has_project: bool) -> ryeos_app::execution_policy::ExecutionPolicy {
     use ryeos_app::execution_policy::{ExecutionPolicy, ExecutionResponse};
@@ -72,12 +72,10 @@ async fn wait_for_terminal_thread(h: &DaemonHarness, thread_id: &str) -> Value {
             .get("thread")
             .and_then(|t| t.get("status"))
             .and_then(Value::as_str)
-        {
-            if ryeos_state::objects::ThreadStatus::from_str_lossy(status)
+            && ryeos_state::objects::ThreadStatus::from_str_lossy(status)
                 .is_some_and(|s| s.is_terminal())
-            {
-                return result;
-            }
+        {
+            return result;
         }
         assert!(
             Instant::now() < deadline,

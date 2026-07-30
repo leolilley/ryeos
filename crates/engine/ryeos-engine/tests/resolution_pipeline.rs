@@ -20,10 +20,10 @@ use ryeos_engine::kind_registry::KindRegistry;
 use ryeos_engine::parsers::ParserRegistry;
 use ryeos_engine::parsers::{ParserDescriptor, ParserDispatcher};
 use ryeos_engine::resolution::{
-    run_effective_item_pipeline, run_resolution_pipeline, ResolutionError,
+    ResolutionError, run_effective_item_pipeline, run_resolution_pipeline,
 };
 use ryeos_engine::test_support::load_live_handler_registry;
-use ryeos_engine::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+use ryeos_engine::trust::{TrustStore, TrustedSigner, compute_fingerprint};
 
 fn dispatcher_for_yaml_and_markdown_directive() -> ParserDispatcher {
     use serde_json::json;

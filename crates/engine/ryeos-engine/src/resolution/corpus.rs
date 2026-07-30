@@ -19,7 +19,7 @@ use crate::parsers::ParserDispatcher;
 use crate::trust::TrustStore;
 
 use super::alias::AliasResolver;
-use super::context::{ensure_canonical, field_as_list, load_item_raw, RawLoadedItem};
+use super::context::{RawLoadedItem, ensure_canonical, field_as_list, load_item_raw};
 use super::decl::ResolutionStepDecl;
 use super::types::{ResolutionError, ResolutionStepName, ResolvedAncestor};
 

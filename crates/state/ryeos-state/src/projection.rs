@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use rusqlite::{Connection, OpenFlags};
 
 use crate::sqlite_schema;
@@ -25,8 +25,8 @@ mod retention;
 mod threads;
 pub(crate) use events::ProjectionEventConflict;
 pub use events::{project_event, project_thread_edge};
-pub(crate) use retention::{derive_terminal_retention, refresh_chain_retention, TerminalMember};
 pub use retention::{ChainRetentionProjection, DueTerminalChain, DueTerminalChainCursor};
+pub(crate) use retention::{TerminalMember, derive_terminal_retention, refresh_chain_retention};
 pub(crate) use threads::project_thread_snapshot_with_events_in_transaction;
 pub use threads::{
     project_chain_state, project_thread_snapshot, project_thread_snapshot_with_events,
@@ -37,7 +37,7 @@ pub(crate) use chain_commit::{project_committed_chain, project_initial_root_comm
 pub use cursor::ProjectionMeta;
 #[cfg(test)]
 use schema::schema_spec_fingerprint;
-use schema::{projection_schema_epoch, projection_schema_spec, PROJECTION_APP_ID, SCHEMA_SQL};
+use schema::{PROJECTION_APP_ID, SCHEMA_SQL, projection_schema_epoch, projection_schema_spec};
 
 /// Projection database connection wrapper.
 pub struct ProjectionDb {
@@ -1465,15 +1465,21 @@ mod tests {
 
         let backups = reset_backups(&path);
         assert_eq!(backups.len(), 4);
-        assert!(backups
-            .iter()
-            .any(|backup| backup_has_stem(backup, "projection.db-wal")));
-        assert!(backups
-            .iter()
-            .any(|backup| backup_has_stem(backup, "projection.db-shm")));
-        assert!(backups
-            .iter()
-            .any(|backup| backup_has_stem(backup, "projection.db-journal")));
+        assert!(
+            backups
+                .iter()
+                .any(|backup| backup_has_stem(backup, "projection.db-wal"))
+        );
+        assert!(
+            backups
+                .iter()
+                .any(|backup| backup_has_stem(backup, "projection.db-shm"))
+        );
+        assert!(
+            backups
+                .iter()
+                .any(|backup| backup_has_stem(backup, "projection.db-journal"))
+        );
     }
 
     #[test]

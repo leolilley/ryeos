@@ -28,7 +28,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::Value;
 

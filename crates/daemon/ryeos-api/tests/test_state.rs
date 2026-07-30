@@ -38,7 +38,6 @@ pub fn build_test_state_with_bundles() -> (tempfile::TempDir, AppState) {
 fn build_test_state_with_engine(
     engine: Arc<ryeos_engine::engine::Engine>,
 ) -> (tempfile::TempDir, AppState) {
-    std::env::set_var("HOSTNAME", "testhost");
     let tmpdir = tempfile::TempDir::new().unwrap();
     let runtime_state_dir = tmpdir.path().join(".ai").join("state");
     let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -82,14 +81,15 @@ fn build_test_state_with_engine(
     ));
     let event_streams = Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16));
     let threads = Arc::new(
-        ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
+        ryeos_app::thread_lifecycle::ThreadLifecycleService::new_for_test_with_site_id(
             state_store.clone(),
             engine.clone(),
             kind_profiles.clone(),
             events.clone(),
             event_streams.clone(),
+            "site:testhost",
         )
-        .expect("HOSTNAME not set in test environment"),
+        .expect("valid test site identity"),
     );
     let commands = Arc::new(ryeos_app::command_service::CommandService::new(
         state_store.clone(),

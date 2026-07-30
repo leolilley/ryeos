@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus};
@@ -559,17 +559,17 @@ fn classify_follow_envelope_with_projection(
     } else {
         let structured_failure = parse_runtime_failure(&result);
         let mut runtime_failure_contract_error = runtime_failure_contract_error(&result);
-        if let Some(failure) = structured_failure.as_ref() {
-            if failure.diagnostic_locator.thread_id != envelope_child_thread_id {
-                let mismatch = format!(
-                    "RuntimeFailure diagnostic thread `{}` does not match follow child `{}`",
-                    failure.diagnostic_locator.thread_id, envelope_child_thread_id
-                );
-                runtime_failure_contract_error = Some(match runtime_failure_contract_error {
-                    Some(error) => format!("{error}; {mismatch}"),
-                    None => mismatch,
-                });
-            }
+        if let Some(failure) = structured_failure.as_ref()
+            && failure.diagnostic_locator.thread_id != envelope_child_thread_id
+        {
+            let mismatch = format!(
+                "RuntimeFailure diagnostic thread `{}` does not match follow child `{}`",
+                failure.diagnostic_locator.thread_id, envelope_child_thread_id
+            );
+            runtime_failure_contract_error = Some(match runtime_failure_contract_error {
+                Some(error) => format!("{error}; {mismatch}"),
+                None => mismatch,
+            });
         }
         let child_thread_id = Some(envelope_child_thread_id);
         let mut diagnostic = format!("child runtime failed (status: {})", status.as_str());
@@ -715,7 +715,7 @@ fn classify_native_runtime_envelope(
                 retryable: false,
                 child_thread_id: None,
                 integrity: true,
-            })
+            });
         }
     };
     if success != status.is_success() {
@@ -1440,9 +1440,11 @@ mod tests {
         let failure = expect_action_failure(outcome);
         assert_eq!(failure.child_thread_id.as_deref(), Some("T-child-failed"));
         assert!(failure.diagnostic.contains("child failed"));
-        assert!(failure
-            .diagnostic
-            .contains("ryeos thread tail T-child-failed"));
+        assert!(
+            failure
+                .diagnostic
+                .contains("ryeos thread tail T-child-failed")
+        );
     }
 
     #[tokio::test]
@@ -1465,9 +1467,11 @@ mod tests {
         let failure = expect_action_failure(outcome);
         assert!(failure.integrity);
         assert!(failure.child_thread_id.is_none());
-        assert!(failure
-            .diagnostic
-            .contains("invalid dispatched child identity"));
+        assert!(
+            failure
+                .diagnostic
+                .contains("invalid dispatched child identity")
+        );
     }
 
     // ── classify_envelope ──────────────────────────────────────────────
@@ -1606,9 +1610,11 @@ mod tests {
         let failure = expect_action_failure(classified.outcome);
         assert_eq!(failure.child_thread_id.as_deref(), Some("T-follow-child"));
         assert!(failure.diagnostic.contains("precise child failure"));
-        assert!(failure
-            .diagnostic
-            .contains("ryeos thread tail T-follow-child"));
+        assert!(
+            failure
+                .diagnostic
+                .contains("ryeos thread tail T-follow-child")
+        );
     }
 
     #[test]
@@ -1623,9 +1629,11 @@ mod tests {
             .expect("canonical failed follow envelope");
         let failure = expect_action_failure(classified.outcome);
         assert_eq!(failure.child_thread_id.as_deref(), Some("T-follow-child"));
-        assert!(failure
-            .diagnostic
-            .contains("ryeos thread tail T-follow-child"));
+        assert!(
+            failure
+                .diagnostic
+                .contains("ryeos thread tail T-follow-child")
+        );
     }
 
     #[test]
@@ -1650,9 +1658,11 @@ mod tests {
         let failure = expect_action_failure(classified.outcome);
         assert!(failure.integrity);
         assert!(!failure.retryable);
-        assert!(failure
-            .diagnostic
-            .contains("unsupported runtime failure version 99"));
+        assert!(
+            failure
+                .diagnostic
+                .contains("unsupported runtime failure version 99")
+        );
     }
 
     #[test]
@@ -1894,9 +1904,11 @@ mod tests {
             }),
         ] {
             let failure = expect_action_failure(classify_envelope(malformed));
-            assert!(failure
-                .diagnostic
-                .contains("malformed native runtime envelope"));
+            assert!(
+                failure
+                    .diagnostic
+                    .contains("malformed native runtime envelope")
+            );
         }
     }
 
@@ -1910,9 +1922,11 @@ mod tests {
             "warnings": [],
             "cost": null,
         });
-        assert!(expect_action_success(classify_envelope(envelope))
-            .cost
-            .is_none());
+        assert!(
+            expect_action_success(classify_envelope(envelope))
+                .cost
+                .is_none()
+        );
     }
 
     #[test]
@@ -1957,9 +1971,11 @@ mod tests {
             "error": {"exit_code": 1, "stderr": "boom"},
             "artifacts": []
         });
-        assert!(expect_action_failure(classify_envelope(envelope))
-            .cost
-            .is_none());
+        assert!(
+            expect_action_failure(classify_envelope(envelope))
+                .cost
+                .is_none()
+        );
     }
 
     #[test]
@@ -2082,9 +2098,11 @@ mod tests {
         let failure = expect_action_failure(classify_envelope(envelope));
         assert!(failure.integrity);
         assert!(!failure.retryable);
-        assert!(failure
-            .diagnostic
-            .contains("unsupported runtime failure version 99"));
+        assert!(
+            failure
+                .diagnostic
+                .contains("unsupported runtime failure version 99")
+        );
     }
 
     #[test]
@@ -2186,16 +2204,20 @@ mod tests {
             "warnings": [],
             "cost": null,
         });
-        assert!(classify_follow_envelope(unknown_status)
-            .unwrap_err()
-            .contains("unknown variant"));
+        assert!(
+            classify_follow_envelope(unknown_status)
+                .unwrap_err()
+                .contains("unknown variant")
+        );
 
         let mut unknown_field =
             canonical_follow_envelope(true, RuntimeResultStatus::Completed, json!(42));
         unknown_field["legacy_outcome"] = json!("success");
-        assert!(classify_follow_envelope(unknown_field)
-            .unwrap_err()
-            .contains("unknown field"));
+        assert!(
+            classify_follow_envelope(unknown_field)
+                .unwrap_err()
+                .contains("unknown field")
+        );
     }
 
     #[test]

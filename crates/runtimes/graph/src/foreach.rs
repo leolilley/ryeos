@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::{Map, Value};
 
 use crate::compiled_graph::CompiledNode;
 use crate::context::ExecutionContext;
-use crate::evaluation::{validate_runtime_value, ExpressionScope};
+use crate::evaluation::{ExpressionScope, validate_runtime_value};
 use crate::model::{DispatchObservation, ErrorRecord, GraphNode, GraphToolCallStatus, RetryConfig};
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::envelope::{RuntimeCost, RuntimeCostError};
@@ -1287,7 +1287,7 @@ pub async fn run_foreach_parallel(
 }
 
 fn merge_into(target: &mut Value, source: &Value) {
-    if let (Value::Object(ref mut t_map), Value::Object(ref s_map)) = (target, source) {
+    if let (Value::Object(t_map), Value::Object(s_map)) = (target, source) {
         for (k, v) in s_map {
             t_map.insert(k.clone(), v.clone());
         }

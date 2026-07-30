@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use base64::Engine;
-use lillux::crypto::{fingerprint as compute_fp, load_signing_key, SigningKey};
+use lillux::crypto::{SigningKey, fingerprint as compute_fp, load_signing_key};
 use ryeos_engine::AI_DIR;
 
 use crate::error::CliTransportError;
@@ -74,7 +74,7 @@ impl Signer {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let nonce_bytes = rand::Rng::gen::<[u8; 16]>(&mut rand::thread_rng());
+        let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = hex::encode(nonce_bytes);
 
         let body_hash = lillux::cas::sha256_hex(body);

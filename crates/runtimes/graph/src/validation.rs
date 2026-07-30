@@ -5,8 +5,8 @@ use ryeos_runtime::ReferenceSegment;
 use serde_json::Value;
 
 use crate::model::{
-    EdgeSpec, GraphConfig, GraphDefinition, GraphNode, NodeType, MAX_GRAPH_SEGMENT_STEPS,
-    MAX_GRAPH_STEPS, MAX_RETRY_BACKOFF_MS,
+    EdgeSpec, GraphConfig, GraphDefinition, GraphNode, MAX_GRAPH_SEGMENT_STEPS, MAX_GRAPH_STEPS,
+    MAX_RETRY_BACKOFF_MS, NodeType,
 };
 
 const MAX_NODE_CONCURRENCY: usize = 256;
@@ -189,27 +189,27 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
             // collected results under `collect`, then removes the
             // iteration variable `as` from state — if they share a name
             // the collected results are removed too (silent data loss).
-            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as) {
-                if collect == as_var {
-                    result.errors.push(format!(
-                        "foreach node '{name}' uses '{collect}' for both 'collect' and 'as' — \
-                         the collected results would be removed with the iteration variable"
-                    ));
-                }
+            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as)
+                && collect == as_var
+            {
+                result.errors.push(format!(
+                    "foreach node '{name}' uses '{collect}' for both 'collect' and 'as' — \
+                     the collected results would be removed with the iteration variable"
+                ));
             }
-            if let Some(as_var) = &node.r#as {
-                if assign_keys.contains(as_var.as_str()) {
-                    result.errors.push(format!(
-                        "foreach node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
-                    ));
-                }
+            if let Some(as_var) = &node.r#as
+                && assign_keys.contains(as_var.as_str())
+            {
+                result.errors.push(format!(
+                    "foreach node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
+                ));
             }
-            if let Some(collect) = &node.collect {
-                if assign_keys.contains(collect.as_str()) {
-                    result.errors.push(format!(
-                        "foreach node '{name}' uses '{collect}' as both its collect key and an assign key"
-                    ));
-                }
+            if let Some(collect) = &node.collect
+                && assign_keys.contains(collect.as_str())
+            {
+                result.errors.push(format!(
+                    "foreach node '{name}' uses '{collect}' as both its collect key and an assign key"
+                ));
             }
         }
         NodeType::Gate => {
@@ -278,26 +278,26 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
                     "follow fanout node '{name}' must set 'parallel: true'"
                 ));
             }
-            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as) {
-                if collect == as_var {
-                    result.errors.push(format!(
-                        "follow fanout node '{name}' uses '{collect}' for both 'collect' and 'as'"
-                    ));
-                }
+            if let (Some(collect), Some(as_var)) = (&node.collect, &node.r#as)
+                && collect == as_var
+            {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' uses '{collect}' for both 'collect' and 'as'"
+                ));
             }
-            if let Some(as_var) = &node.r#as {
-                if assign_keys.contains(as_var.as_str()) {
-                    result.errors.push(format!(
-                        "follow fanout node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
-                    ));
-                }
+            if let Some(as_var) = &node.r#as
+                && assign_keys.contains(as_var.as_str())
+            {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' uses '{as_var}' as both its iteration variable and an assign key"
+                ));
             }
-            if let Some(collect) = &node.collect {
-                if assign_keys.contains(collect.as_str()) {
-                    result.errors.push(format!(
-                        "follow fanout node '{name}' uses '{collect}' as both its collect key and an assign key"
-                    ));
-                }
+            if let Some(collect) = &node.collect
+                && assign_keys.contains(collect.as_str())
+            {
+                result.errors.push(format!(
+                    "follow fanout node '{name}' uses '{collect}' as both its collect key and an assign key"
+                ));
             }
         }
         if node.is_cacheable() {
@@ -429,12 +429,12 @@ fn validate_node(name: &str, node: &GraphNode, cfg: &GraphConfig, result: &mut V
         validate_edges(name, next, cfg, result);
     }
 
-    if let Some(ref on_err) = node.on_error {
-        if !cfg.nodes.contains_key(on_err) {
-            result.errors.push(format!(
-                "on_error target '{on_err}' in node '{name}' does not exist"
-            ));
-        }
+    if let Some(ref on_err) = node.on_error
+        && !cfg.nodes.contains_key(on_err)
+    {
+        result.errors.push(format!(
+            "on_error target '{on_err}' in node '{name}' does not exist"
+        ));
     }
 }
 
@@ -644,10 +644,10 @@ fn bfs_reachable(start: &str, nodes: &HashMap<String, GraphNode>) -> HashSet<Str
                     }
                 }
             }
-            if let Some(ref on_err) = node.on_error {
-                if !visited.contains(on_err) {
-                    queue.push(on_err.clone());
-                }
+            if let Some(ref on_err) = node.on_error
+                && !visited.contains(on_err)
+            {
+                queue.push(on_err.clone());
             }
         }
     }
@@ -691,10 +691,12 @@ config:
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
         assert!(result.errors.is_empty());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.contains("orphan") && w.contains("unreachable")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("orphan") && w.contains("unreachable"))
+        );
     }
 
     #[test]
@@ -715,10 +717,12 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = analyze_graph(&graph);
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.contains("undef_key") && w.contains("never assigned")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("undef_key") && w.contains("never assigned"))
+        );
     }
 
     #[test]
@@ -762,10 +766,12 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.contains("config.nodes is empty")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("config.nodes is empty"))
+        );
     }
 
     #[test]
@@ -963,10 +969,12 @@ config:
 "#;
         let graph = make_graph(yaml);
         let result = validate_graph(&graph);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.contains("nonexistent") && e.contains("does not exist")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.contains("nonexistent") && e.contains("does not exist"))
+        );
     }
 
     // R-D: foreach nodes MUST declare `as`.
@@ -1844,10 +1852,11 @@ config:
         let zero = validate_graph(&retry_graph(
             "      action: {item_id: \"tool:x\", ref_bindings: {}}\n      retry: {attempts: 0, backoff_ms: 100}\n      next: {type: unconditional, to: done}",
         ));
-        assert!(zero
-            .errors
-            .iter()
-            .any(|e| e.contains("retry.attempts must be between 1 and 10")));
+        assert!(
+            zero.errors
+                .iter()
+                .any(|e| e.contains("retry.attempts must be between 1 and 10"))
+        );
     }
 
     #[test]
@@ -2062,10 +2071,11 @@ config:
 "#,
         );
         let result = validate_graph(&graph);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| { error.contains("parallel: true") && error.contains("with 'assign'") }));
+        assert!(
+            result.errors.iter().any(|error| {
+                error.contains("parallel: true") && error.contains("with 'assign'")
+            })
+        );
     }
 
     #[test]

@@ -4,16 +4,15 @@
 //! (`spawn` → `RunningProcess::wait`), detached spawn (`spawn_detached`),
 //! liveness (`is_alive`), and termination (`kill`). The most load-bearing
 //! contract exercised here is `env_clear`: `SubprocessRequest::envs` is
-//! authoritative, so a variable exported into the parent must NOT leak
-//! into the child — this is the secret-scoping guarantee documented on
-//! `SubprocessRequest`.
+//! authoritative, so parent variables must NOT leak into the child — this is
+//! the secret-scoping guarantee documented on `SubprocessRequest`.
 
 #![cfg(unix)]
 
 use lillux::{
-    configure_subprocess_limits, is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd,
-    sealed_memfd, spawn, spawn_detached, supervised_launcher_status_pipe,
-    validate_subprocess_limits, OutputLimitExceeded, SubprocessLimits, SubprocessRequest,
+    OutputLimitExceeded, SubprocessLimits, SubprocessRequest, configure_subprocess_limits,
+    is_alive, kill, run, run_inherited_stdio, sealed_executable_memfd, sealed_memfd, spawn,
+    spawn_detached, supervised_launcher_status_pipe, validate_subprocess_limits,
 };
 
 /// A `/bin/sh -c <args>` request with a generous default timeout and an
@@ -143,25 +142,33 @@ fn spawn_rejects_an_unbounded_open_file_limit_before_fork() {
 
 #[test]
 fn run_env_is_authoritative_no_parent_leak() {
-    // Export a probe into THIS process, then confirm the child cannot see
-    // it (env_clear) unless it is passed explicitly through `envs`.
-    std::env::set_var("LILLUX_LEAK_PROBE", "leaked");
-
-    let absent = run(sh(&["-c", "printf %s \"${LILLUX_LEAK_PROBE:-absent}\""]));
-    assert_eq!(
-        absent.stdout, "absent",
-        "parent env must not leak into the child"
+    // HOME is present in the test process, but the child must not see it
+    // (env_clear) unless it is passed explicitly through `envs`. Execute
+    // `env` directly because a shell is allowed to synthesize variables such
+    // as PATH after it starts with an otherwise empty environment.
+    assert!(
+        std::env::var_os("HOME").is_some(),
+        "test runner must set HOME"
     );
 
-    let mut with_env = sh(&["-c", "printf %s \"$LILLUX_LEAK_PROBE\""]);
-    with_env.envs = vec![("LILLUX_LEAK_PROBE".to_string(), "explicit".to_string())];
+    let mut request = sh(&[]);
+    request.cmd = "/usr/bin/env".to_string();
+    let absent = run(request);
+    assert!(
+        !absent.stdout.lines().any(|line| line.starts_with("HOME=")),
+        "parent env must not leak into the child: {}",
+        absent.stdout
+    );
+
+    let mut with_env = sh(&[]);
+    with_env.cmd = "/usr/bin/env".to_string();
+    with_env.envs = vec![("HOME".to_string(), "explicit".to_string())];
     let explicit = run(with_env);
-    assert_eq!(
-        explicit.stdout, "explicit",
-        "an explicitly-passed env var must reach the child"
+    assert!(
+        explicit.stdout.lines().any(|line| line == "HOME=explicit"),
+        "an explicitly-passed env var must reach the child: {}",
+        explicit.stdout
     );
-
-    std::env::remove_var("LILLUX_LEAK_PROBE");
 }
 
 // ── timeout kills the process group ────────────────────────────────────
@@ -568,11 +575,11 @@ fn spawn_detached_writes_to_log_file() {
     // Poll briefly for the detached child to run and flush into the log.
     let mut content = String::new();
     for _ in 0..50 {
-        if let Ok(s) = std::fs::read_to_string(&log) {
-            if !s.is_empty() {
-                content = s;
-                break;
-            }
+        if let Ok(s) = std::fs::read_to_string(&log)
+            && !s.is_empty()
+        {
+            content = s;
+            break;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }

@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use ryeos_runtime::method_wire::{EdgeKind, GraphEdge, SingleRootPayload, VerifiedItem};
 
 use crate::frontmatter::strip_frontmatter;
-use crate::ordering::{extends_first, OrderedItem};
+use crate::ordering::{OrderedItem, extends_first};
 use crate::render::render_item;
 use crate::token_estimation::ResolvedTokenEstimator;
 use crate::types::{
@@ -516,11 +516,13 @@ mod tests {
 
         let result = compose(&payload, &default_runtime_config()).unwrap();
         assert!(result.composition.resolved_items.is_empty());
-        assert!(result
-            .composition
-            .items_omitted
-            .iter()
-            .any(|o| o.item_id == "root" && o.reason == OmissionReason::OverBudget));
+        assert!(
+            result
+                .composition
+                .items_omitted
+                .iter()
+                .any(|o| o.item_id == "root" && o.reason == OmissionReason::OverBudget)
+        );
     }
 
     #[test]
@@ -611,11 +613,13 @@ mod tests {
         let before = result.rendered.get("before").unwrap();
         assert!(before.content.contains("Extra content"));
         // "shared" should be in omitted due to cross-position dedupe
-        assert!(before
-            .composition
-            .items_omitted
-            .iter()
-            .any(|o| o.item_id == "shared" && o.reason == OmissionReason::Excluded));
+        assert!(
+            before
+                .composition
+                .items_omitted
+                .iter()
+                .any(|o| o.item_id == "shared" && o.reason == OmissionReason::Excluded)
+        );
     }
 
     #[test]

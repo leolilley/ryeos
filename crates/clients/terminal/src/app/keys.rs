@@ -8,8 +8,8 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ryeos_client_base::ui::view_model::{RyeOsLayoutNodeVm, RyeOsViewVm};
 use ryeos_client_base::ui::{
-    ryeos_key_command, RyeOsCore, RyeOsEffect, RyeOsEvent, RyeOsKey, RyeOsKeyCommand,
-    RyeOsKeyContext, RyeOsKeyEvent, RyeOsKeyModifiers, RyeOsUiEvent,
+    RyeOsCore, RyeOsEffect, RyeOsEvent, RyeOsKey, RyeOsKeyCommand, RyeOsKeyContext, RyeOsKeyEvent,
+    RyeOsKeyModifiers, RyeOsUiEvent, ryeos_key_command,
 };
 
 pub fn handle_key(core: &mut RyeOsCore, key: KeyEvent) -> Vec<RyeOsEffect> {
@@ -37,17 +37,15 @@ pub fn handle_key(core: &mut RyeOsCore, key: KeyEvent) -> Vec<RyeOsEffect> {
             }
             _ => false,
         };
-        if !expansion_wins {
-            if let Some((tile_id, section)) = focused_fold_section(core) {
-                let collapsed = matches!(event.key, RyeOsKey::ArrowLeft);
-                return core.dispatch(RyeOsEvent::Ui {
-                    event: RyeOsUiEvent::SetFold {
-                        tile_id,
-                        section,
-                        collapsed,
-                    },
-                });
-            }
+        if !expansion_wins && let Some((tile_id, section)) = focused_fold_section(core) {
+            let collapsed = matches!(event.key, RyeOsKey::ArrowLeft);
+            return core.dispatch(RyeOsEvent::Ui {
+                event: RyeOsUiEvent::SetFold {
+                    tile_id,
+                    section,
+                    collapsed,
+                },
+            });
         }
     }
     let command = ryeos_key_command(event, context);

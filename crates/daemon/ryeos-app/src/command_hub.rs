@@ -54,7 +54,8 @@ impl CommandHub {
     /// allocated, and a later `commands.wait` reads the already-terminal row.
     pub fn publish(&self, record: &CommandRecord) {
         let mut lanes = self.lanes.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(tx) = lanes.remove(&record.command_id) {
+        let lane = lanes.remove(&record.command_id);
+        if let Some(tx) = lane {
             // Err means every receiver dropped between subscribe and now — the
             // waiter gave up (timeout/disconnect). Nothing to deliver.
             let _ = tx.send(record.clone());

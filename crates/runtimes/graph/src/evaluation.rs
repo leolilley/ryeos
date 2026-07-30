@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_runtime::checkpoint::{checkpoint_shape_limits, validate_checkpoint_shape};
 use ryeos_runtime::{

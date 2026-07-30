@@ -160,10 +160,12 @@ mod tests {
 
         let raw = fs::read_to_string(&paths.ignore_config).unwrap();
         let config: ryeos_app::ignore::IgnoreConfig = serde_yaml::from_str(&raw).unwrap();
-        assert!(config
-            .patterns
-            .iter()
-            .any(|entry| entry == "custom-build-output/"));
+        assert!(
+            config
+                .patterns
+                .iter()
+                .any(|entry| entry == "custom-build-output/")
+        );
         assert!(config.patterns.iter().any(|entry| entry == ".venv/"));
         assert!(config.patterns.iter().any(|entry| entry == "/.ai/state/"));
         assert!(config.patterns.iter().any(|entry| entry == "/.ai/cache/"));

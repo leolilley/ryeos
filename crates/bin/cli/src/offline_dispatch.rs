@@ -923,12 +923,12 @@ fn ensure_daemon_stopped_for_standalone(app_root: &Path) -> Result<(), CliError>
 }
 
 fn resolve_ryeosd_binary() -> PathBuf {
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(parent) = current_exe.parent() {
-            let sibling = parent.join("ryeosd");
-            if sibling.exists() {
-                return sibling;
-            }
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let sibling = parent.join("ryeosd");
+        if sibling.exists() {
+            return sibling;
         }
     }
     PathBuf::from("ryeosd")
@@ -1088,7 +1088,6 @@ mod tests {
 
     struct Fixture {
         _tmp: tempfile::TempDir,
-        _env_guard: std::sync::MutexGuard<'static, ()>,
         system: PathBuf,
         project: PathBuf,
         bundle: PathBuf,
@@ -1097,7 +1096,6 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let env_guard = crate::test_env::lock();
             let tmp = tempfile::tempdir().unwrap();
             let system = tmp.path().join("system");
             let project = tmp.path().join("project");
@@ -1145,8 +1143,6 @@ mod tests {
                 dev_key,
                 "fixture core signer must match the copied bundle's pinned publisher"
             );
-            std::env::set_var("RYEOS_APP_ROOT", &system);
-
             let bundle = system
                 .join(ryeos_engine::AI_DIR)
                 .join("bundles")
@@ -1160,7 +1156,6 @@ mod tests {
 
             let this = Self {
                 _tmp: tmp,
-                _env_guard: env_guard,
                 system,
                 project,
                 bundle,
@@ -1913,9 +1908,11 @@ else:
         let captured = std::fs::read_to_string(capture_file).unwrap();
         let lines: Vec<&str> = captured.lines().collect();
         assert_eq!(lines[0], fixture.project_str());
-        assert!(lines[1..]
-            .windows(2)
-            .any(|pair| pair == ["--surface", "main"]));
+        assert!(
+            lines[1..]
+                .windows(2)
+                .any(|pair| pair == ["--surface", "main"])
+        );
         assert!(lines[1..].contains(&"--mock"));
     }
 

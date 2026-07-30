@@ -26,7 +26,7 @@
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -127,15 +127,21 @@ impl CheckpointWriter {
     /// unset, which means the tool was not launched with `native_resume`
     /// (or is running outside the daemon entirely — e.g. unit tests).
     pub fn from_env() -> Option<Self> {
-        std::env::var("RYEOS_CHECKPOINT_DIR")
-            .ok()
-            .map(|s| Self::new(PathBuf::from(s)))
+        Self::from_checkpoint_dir(std::env::var_os("RYEOS_CHECKPOINT_DIR"))
+    }
+
+    fn from_checkpoint_dir(dir: Option<impl Into<PathBuf>>) -> Option<Self> {
+        dir.map(Self::new)
     }
 
     /// True iff the daemon launched this run as a resume (`RYEOS_RESUME=1`).
     /// Tools should check this on startup and `load_latest()` if true.
     pub fn is_resume() -> bool {
-        std::env::var("RYEOS_RESUME").ok().as_deref() == Some("1")
+        Self::is_resume_value(std::env::var("RYEOS_RESUME").ok().as_deref())
+    }
+
+    fn is_resume_value(value: Option<&str>) -> bool {
+        value == Some("1")
     }
 
     /// Copy the latest checkpoint from `from_dir` into `to_dir` — used by the
@@ -275,13 +281,15 @@ mod tests {
         let from = TempDir::new().unwrap();
         let to = TempDir::new().unwrap();
         // No source checkpoint → nothing spliced.
-        assert!(!CheckpointWriter::copy_latest_with_splice(
-            from.path(),
-            to.path(),
-            FOLLOW_RESULT_KEY,
-            json!({"ignored": true})
-        )
-        .unwrap());
+        assert!(
+            !CheckpointWriter::copy_latest_with_splice(
+                from.path(),
+                to.path(),
+                FOLLOW_RESULT_KEY,
+                json!({"ignored": true})
+            )
+            .unwrap()
+        );
 
         // The parent's checkpoint carries its own cursor; the splice adds the child
         // result under FOLLOW_RESULT_KEY without disturbing the rest.
@@ -289,13 +297,15 @@ mod tests {
             .write(&json!({"node": "await", "step": 7}))
             .unwrap();
         let child_env = json!({"success": true, "outputs": {"answer": 42}});
-        assert!(CheckpointWriter::copy_latest_with_splice(
-            from.path(),
-            to.path(),
-            FOLLOW_RESULT_KEY,
-            child_env.clone()
-        )
-        .unwrap());
+        assert!(
+            CheckpointWriter::copy_latest_with_splice(
+                from.path(),
+                to.path(),
+                FOLLOW_RESULT_KEY,
+                child_env.clone()
+            )
+            .unwrap()
+        );
 
         let resumed = CheckpointWriter::new(to.path())
             .load_latest()
@@ -305,12 +315,14 @@ mod tests {
         assert_eq!(resumed["step"], 7);
         assert_eq!(resumed[FOLLOW_RESULT_KEY], child_env);
         // The source is untouched — the splice only writes the destination.
-        assert!(CheckpointWriter::new(from.path())
-            .load_latest()
-            .unwrap()
-            .unwrap()
-            .get(FOLLOW_RESULT_KEY)
-            .is_none());
+        assert!(
+            CheckpointWriter::new(from.path())
+                .load_latest()
+                .unwrap()
+                .unwrap()
+                .get(FOLLOW_RESULT_KEY)
+                .is_none()
+        );
     }
 
     #[test]
@@ -322,13 +334,15 @@ mod tests {
             .unwrap();
         // A non-object payload has no top level to splice into — an error, not a
         // silent drop of the child result.
-        assert!(CheckpointWriter::copy_latest_with_splice(
-            from.path(),
-            to.path(),
-            FOLLOW_RESULT_KEY,
-            json!({})
-        )
-        .is_err());
+        assert!(
+            CheckpointWriter::copy_latest_with_splice(
+                from.path(),
+                to.path(),
+                FOLLOW_RESULT_KEY,
+                json!({})
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -340,9 +354,11 @@ mod tests {
 
         let error = CheckpointWriter::new(tmp.path()).load_latest().unwrap_err();
         assert!(error.to_string().contains("maximum"));
-        assert!(error
-            .to_string()
-            .contains(&MAX_CHECKPOINT_FILE_BYTES.to_string()));
+        assert!(
+            error
+                .to_string()
+                .contains(&MAX_CHECKPOINT_FILE_BYTES.to_string())
+        );
     }
 
     #[test]
@@ -412,27 +428,14 @@ mod tests {
 
     #[test]
     fn from_env_returns_none_without_var() {
-        // SAFELY isolate from any caller env.
-        let prev = std::env::var("RYEOS_CHECKPOINT_DIR").ok();
-        std::env::remove_var("RYEOS_CHECKPOINT_DIR");
-        let w = CheckpointWriter::from_env();
+        let w = CheckpointWriter::from_checkpoint_dir(None::<PathBuf>);
         assert!(w.is_none());
-        if let Some(v) = prev {
-            std::env::set_var("RYEOS_CHECKPOINT_DIR", v);
-        }
     }
 
     #[test]
     fn is_resume_reads_env_flag() {
-        let prev = std::env::var("RYEOS_RESUME").ok();
-        std::env::set_var("RYEOS_RESUME", "1");
-        assert!(CheckpointWriter::is_resume());
-        std::env::set_var("RYEOS_RESUME", "0");
-        assert!(!CheckpointWriter::is_resume());
-        std::env::remove_var("RYEOS_RESUME");
-        assert!(!CheckpointWriter::is_resume());
-        if let Some(v) = prev {
-            std::env::set_var("RYEOS_RESUME", v);
-        }
+        assert!(CheckpointWriter::is_resume_value(Some("1")));
+        assert!(!CheckpointWriter::is_resume_value(Some("0")));
+        assert!(!CheckpointWriter::is_resume_value(None));
     }
 }

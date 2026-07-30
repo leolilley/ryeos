@@ -1,6 +1,6 @@
 //! `ryeos-core-tools identity` — return the node's public identity document.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 use serde_json::Value;
 

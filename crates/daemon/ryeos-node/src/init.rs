@@ -49,19 +49,19 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use lillux::crypto::{
     DecodePrivateKey, EncodePrivateKey, Signature, Signer, SigningKey, Verifier, VerifyingKey,
 };
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
-use ryeos_engine::trust::{compute_fingerprint, pin_key, TrustStore};
+use ryeos_engine::trust::{TrustStore, compute_fingerprint, pin_key};
 
 mod bundle_install;
 mod default_policy;
@@ -661,13 +661,13 @@ fn run_init_internal(
         }
     })
     .with_context(|| format!("initialize vault key {}", vault_secret_path.display()))?;
-    if let Ok(metadata) = fs::symlink_metadata(&vault_public_path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!(
-                "refusing unsafe vault public key path {}",
-                vault_public_path.display()
-            );
-        }
+    if let Ok(metadata) = fs::symlink_metadata(&vault_public_path)
+        && (metadata.file_type().is_symlink() || !metadata.is_file())
+    {
+        bail!(
+            "refusing unsafe vault public key path {}",
+            vault_public_path.display()
+        );
     }
     lillux::vault::write_public_key(&vault_public_path, &vault_sk.public_key())
         .with_context(|| format!("write vault pubkey {}", vault_public_path.display()))?;
@@ -1200,10 +1200,10 @@ pub fn is_valid_bundle_name(name: &str) -> bool {
 
 // ── Bundle manifest (generated + signed) ───────────────────────────
 pub use ryeos_bundle::manifest::{
-    derive_provides_kinds, materialize_manifest, parse_manifest, sort_bundles_by_dependency,
-    validate_manifest_dependencies, BundleManifest, BundleManifestSource,
+    BundleManifest, BundleManifestSource, derive_provides_kinds, materialize_manifest,
+    parse_manifest, sort_bundles_by_dependency, validate_manifest_dependencies,
 };
-use ryeos_bundle::plan::{build_plan, BundlePlanMode, BundleSource, PlanInput};
+use ryeos_bundle::plan::{BundlePlanMode, BundleSource, PlanInput, build_plan};
 
 /// Decode the hardcoded official publisher public key into a `VerifyingKey`,
 /// guaranteeing the fingerprint matches [`OFFICIAL_PUBLISHER_FP`].
@@ -1374,7 +1374,7 @@ fn load_or_create_operator_key(
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| format!("inspect key {}", path.display()))
+                return Err(error).with_context(|| format!("inspect key {}", path.display()));
             }
         }
         let mut os_random = Zeroizing::new([0_u8; 32]);
@@ -1525,7 +1525,7 @@ fn ensure_operator_genesis_locked(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect operator genesis {}", path.display()))
+                .with_context(|| format!("inspect operator genesis {}", path.display()));
         }
     }
 
@@ -1548,10 +1548,8 @@ fn ensure_operator_genesis_locked(
     {
         document["identity_statement"] = serde_json::Value::String(statement);
     }
-    if key_created {
-        if let Some(digest) = contribution_digest {
-            document["contribution_digest"] = serde_json::Value::String(digest.to_string());
-        }
+    if key_created && let Some(digest) = contribution_digest {
+        document["contribution_digest"] = serde_json::Value::String(digest.to_string());
     }
     let canonical = lillux::canonical_json(&document)
         .map_err(|error| anyhow!("canonicalize operator genesis: {error}"))?;
@@ -1717,9 +1715,11 @@ mod tests {
         );
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
-        assert!(state
-            .join(".ai/config/keys/signing/private_key.pem")
-            .exists());
+        assert!(
+            state
+                .join(".ai/config/keys/signing/private_key.pem")
+                .exists()
+        );
     }
 
     #[test]
@@ -1768,13 +1768,17 @@ mod tests {
         assert_eq!(report.official_publisher_pinned, OFFICIAL_PUBLISHER_FP);
         assert!(state.join(".ai/node/identity/private_key.pem").exists());
         assert!(state.join(".ai/node/vault").is_dir());
-        assert!(state
-            .join(".ai/config/keys/signing/private_key.pem")
-            .exists());
-        assert!(state
-            .join(".ai/config/keys/trusted")
-            .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
-            .exists());
+        assert!(
+            state
+                .join(".ai/config/keys/signing/private_key.pem")
+                .exists()
+        );
+        assert!(
+            state
+                .join(".ai/config/keys/trusted")
+                .join(format!("{}.toml", OFFICIAL_PUBLISHER_FP))
+                .exists()
+        );
     }
 
     #[test]

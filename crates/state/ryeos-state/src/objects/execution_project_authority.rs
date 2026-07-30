@@ -334,12 +334,12 @@ impl ExecutionProjectAuthority {
     }
 
     pub fn for_child(mut self) -> anyhow::Result<Self> {
-        if let Self::PinnedGeneration { realization, .. } = &mut self {
-            if matches!(realization, PinnedProjectRealization::Cow { .. }) {
-                *realization = PinnedProjectRealization::Cow {
-                    terminal_publication: PinnedTerminalPublication::Discard,
-                };
-            }
+        if let Self::PinnedGeneration { realization, .. } = &mut self
+            && matches!(realization, PinnedProjectRealization::Cow { .. })
+        {
+            *realization = PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            };
         }
         self.validate()?;
         Ok(self)
@@ -614,12 +614,9 @@ impl ExecutionProjectAuthority {
                     project_authority_id,
                     ..
                 } = environment
+                    && project_authority_id != authority_id
                 {
-                    if project_authority_id != authority_id {
-                        anyhow::bail!(
-                            "live project environment authority is bound to another project"
-                        );
-                    }
+                    anyhow::bail!("live project environment authority is bound to another project");
                 }
                 environment.validate(true)?;
                 validate_capability_ceiling(capability_ceiling)
@@ -1210,9 +1207,11 @@ mod tests {
             vec!["ryeos.read.project".to_string()],
         )
         .unwrap();
-        assert!(!base
-            .same_continuation_lineage(&different_publication)
-            .unwrap());
+        assert!(
+            !base
+                .same_continuation_lineage(&different_publication)
+                .unwrap()
+        );
 
         let read_only = ExecutionProjectAuthority::pinned(
             "test-project".to_string(),

@@ -7,7 +7,7 @@
 //! the sealed authority maximum exactly. The verifier never recomputes a
 //! LOWER maximum: a runtime cannot discount its own reservation.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 use crate::directive::ProviderConfig;
 use crate::provider_adapter::PreparedProviderRequest;
@@ -284,8 +284,8 @@ mod tests {
     use super::*;
     use ryeos_accounting::{
         ChargeReconciliationAuthority, ClosedBillableDimensionSet, Currency, FinalityContract,
-        ProviderChargeCapContract, SpendTariffDocument, PROVIDER_CHARGE_CAP_SCHEMA_VERSION,
-        SPEND_TARIFF_SCHEMA_VERSION,
+        PROVIDER_CHARGE_CAP_SCHEMA_VERSION, ProviderChargeCapContract, SPEND_TARIFF_SCHEMA_VERSION,
+        SpendTariffDocument,
     };
     use ryeos_directive_core::SpendAuthorityConfig;
 
@@ -574,9 +574,11 @@ mod tests {
             OUTPUT_CEILING,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("tariff contract digest mismatch"));
+        assert!(
+            error
+                .to_string()
+                .contains("tariff contract digest mismatch")
+        );
     }
 
     #[test]
@@ -616,9 +618,11 @@ mod tests {
             OUTPUT_CEILING,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not equal the contract maximum"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not equal the contract maximum")
+        );
 
         // Missing cap field fails.
         let missing = prepared(serde_json::json!({"messages": []}), Some(OUTPUT_CEILING));

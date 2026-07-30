@@ -6,7 +6,7 @@
 //! the terminal event. Deliberately NOT the TUI timeline widget — this is a
 //! plain stdout log for the CLI.
 
-use ryeos_state::event_types::{thread_terminal_outcome, ThreadOutcomeKind};
+use ryeos_state::event_types::{ThreadOutcomeKind, thread_terminal_outcome};
 use serde_json::Value;
 
 use crate::transport::http::SseEvent;
@@ -112,20 +112,20 @@ fn failure_reason(payload: &Value) -> String {
     if let Some(s) = payload.get("error").and_then(|v| v.as_str()) {
         return s.to_string();
     }
-    if let Some(obj) = payload.get("error") {
-        if !obj.is_null() {
-            if let Some(summary) = obj.get("summary").and_then(Value::as_str) {
-                let locator = obj.get("diagnostic_locator");
-                let thread_id = locator
-                    .and_then(|locator| locator.get("thread_id"))
-                    .and_then(Value::as_str);
-                return thread_id.map_or_else(
-                    || summary.to_string(),
-                    |thread_id| crate::thread_diagnostics::child_diagnostic(summary, thread_id),
-                );
-            }
-            return obj.to_string();
+    if let Some(obj) = payload.get("error")
+        && !obj.is_null()
+    {
+        if let Some(summary) = obj.get("summary").and_then(Value::as_str) {
+            let locator = obj.get("diagnostic_locator");
+            let thread_id = locator
+                .and_then(|locator| locator.get("thread_id"))
+                .and_then(Value::as_str);
+            return thread_id.map_or_else(
+                || summary.to_string(),
+                |thread_id| crate::thread_diagnostics::child_diagnostic(summary, thread_id),
+            );
         }
+        return obj.to_string();
     }
     payload
         .get("outcome_code")
@@ -138,10 +138,10 @@ fn failure_reason(payload: &Value) -> String {
 /// across common shapes (token/message deltas, content, output).
 fn human_text(payload: &Value) -> Option<String> {
     for key in ["delta", "text", "content", "message", "output"] {
-        if let Some(s) = payload.get(key).and_then(|v| v.as_str()) {
-            if !s.is_empty() {
-                return Some(s.to_string());
-            }
+        if let Some(s) = payload.get(key).and_then(|v| v.as_str())
+            && !s.is_empty()
+        {
+            return Some(s.to_string());
         }
     }
     None
@@ -371,16 +371,20 @@ mod tests {
                 .and_then(Value::as_str)
                 .map(str::to_string)
         );
-        assert!(nonterminal_failure_detail("graph_step_completed", &payload)
-            .unwrap()
-            .ends_with("diagnostic-tail-marker"));
+        assert!(
+            nonterminal_failure_detail("graph_step_completed", &payload)
+                .unwrap()
+                .ends_with("diagnostic-tail-marker")
+        );
         payload
             .as_object_mut()
             .unwrap()
             .insert("status".to_string(), serde_json::json!("retry"));
-        assert!(nonterminal_failure_detail("graph_step_completed", &payload)
-            .unwrap()
-            .ends_with("diagnostic-tail-marker"));
+        assert!(
+            nonterminal_failure_detail("graph_step_completed", &payload)
+                .unwrap()
+                .ends_with("diagnostic-tail-marker")
+        );
         assert!(nonterminal_failure_detail("tool_call_result", &payload).is_none());
     }
 

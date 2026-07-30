@@ -112,10 +112,10 @@ impl Walker {
                 inputs,
             )
             .await;
-        if let CommitResult::Advance { .. } = &advance {
-            if delay_ms > 0 {
-                self.sleep_retry_backoff(delay_ms).await;
-            }
+        if let CommitResult::Advance { .. } = &advance
+            && delay_ms > 0
+        {
+            self.sleep_retry_backoff(delay_ms).await;
         }
         advance
     }

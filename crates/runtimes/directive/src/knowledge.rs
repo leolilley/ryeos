@@ -38,25 +38,25 @@ pub fn write_thread_transcript(
                 }
             }
             "assistant" => {
-                if let Some(ref tool_calls) = msg.tool_calls {
-                    if !tool_calls.is_empty() {
-                        md.push_str("### Assistant\n\n");
-                        for tc in tool_calls {
-                            md.push_str(&format!(
-                                "**Tool call**: `{}`\n```json\n{}\n```\n\n",
-                                tc.name,
-                                serde_json::to_string_pretty(&tc.arguments)
-                                    .unwrap_or_else(|_| tc.arguments.to_string()),
-                            ));
-                        }
+                if let Some(ref tool_calls) = msg.tool_calls
+                    && !tool_calls.is_empty()
+                {
+                    md.push_str("### Assistant\n\n");
+                    for tc in tool_calls {
+                        md.push_str(&format!(
+                            "**Tool call**: `{}`\n```json\n{}\n```\n\n",
+                            tc.name,
+                            serde_json::to_string_pretty(&tc.arguments)
+                                .unwrap_or_else(|_| tc.arguments.to_string()),
+                        ));
                     }
                 }
-                if let Some(ref content) = msg.content {
-                    if !content.is_null() {
-                        md.push_str("### Assistant\n\n");
-                        md.push_str(&format_content(content));
-                        md.push_str("\n\n");
-                    }
+                if let Some(ref content) = msg.content
+                    && !content.is_null()
+                {
+                    md.push_str("### Assistant\n\n");
+                    md.push_str(&format_content(content));
+                    md.push_str("\n\n");
                 }
             }
             "tool" => {

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::Context;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A manifest listing all items in a project source snapshot.
 ///
@@ -67,8 +67,10 @@ mod tests {
         let value = original.to_value();
         let restored = SourceManifest::from_value(&value).unwrap();
         assert_eq!(restored.item_source_hashes.len(), 1);
-        assert!(restored
-            .item_source_hashes
-            .contains_key(".ai/directives/test/simple.md"));
+        assert!(
+            restored
+                .item_source_hashes
+                .contains_key(".ai/directives/test/simple.md")
+        );
     }
 }

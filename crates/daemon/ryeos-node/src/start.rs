@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-use crate::status::{is_ready, LifecycleStatus};
+use crate::status::{LifecycleStatus, is_ready};
 use crate::{LifecycleProgressObserver, LocalLifecycleEnv};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ pub async fn start_with_progress(
             return Ok(StartReport {
                 status,
                 already_running: true,
-            })
+            });
         }
         LifecycleStatus::Stopped { .. } | LifecycleStatus::Stale { .. } => {}
         LifecycleStatus::Unresponsive { diagnostics, .. } => {
@@ -80,7 +80,8 @@ pub async fn start_with_progress(
     }
 
     let _start_lock = loop {
-        match env.try_acquire_start_lock() {
+        let lock_attempt = env.try_acquire_start_lock();
+        match lock_attempt {
             Ok(lock) => break lock,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 // Another `ryeos start` is in flight; let it converge.
@@ -343,12 +344,12 @@ fn flock_exclusive_nb(_file: &File) -> io::Result<()> {
 }
 
 fn resolve_ryeosd() -> PathBuf {
-    if let Ok(current) = std::env::current_exe() {
-        if let Some(dir) = current.parent() {
-            let sibling = dir.join("ryeosd");
-            if sibling.exists() {
-                return sibling;
-            }
+    if let Ok(current) = std::env::current_exe()
+        && let Some(dir) = current.parent()
+    {
+        let sibling = dir.join("ryeosd");
+        if sibling.exists() {
+            return sibling;
         }
     }
     PathBuf::from("ryeosd")

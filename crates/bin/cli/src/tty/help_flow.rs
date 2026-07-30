@@ -11,7 +11,7 @@ use super::interaction::{
     Event, EventReader, Frame, InputAction, Key, KeyEvent, ListItem, ListState, Pager,
     TerminalGuard, TextInput,
 };
-use super::{theme, Console, Tone};
+use super::{Console, Tone, theme};
 use crate::error::CliError;
 use crate::help::{CachedHelpRow, DescriptorHelpRow, ResolvedCommandHelp};
 
@@ -183,26 +183,25 @@ pub(crate) async fn run(
     }));
     let mut resolution_task = None;
 
-    if let Some(target) = initial_target.as_deref() {
-        if let Some(entry) = list
+    if let Some(target) = initial_target.as_deref()
+        && let Some(entry) = list
             .find(|item| item.value.matches_tokens(target))
             .map(|item| item.value.clone())
-        {
-            open_detail(
-                entry,
-                &DetailContext {
-                    snapshot: &snapshot,
-                    app_root,
-                    project_path,
-                    width,
-                    height,
-                    resolution_cache: &resolution_cache,
-                },
-                &mut detail,
-                &mut resolution_task,
-            );
-            view = View::Detail;
-        }
+    {
+        open_detail(
+            entry,
+            &DetailContext {
+                snapshot: &snapshot,
+                app_root,
+                project_path,
+                width,
+                height,
+                resolution_cache: &resolution_cache,
+            },
+            &mut detail,
+            &mut resolution_task,
+        );
+        view = View::Detail;
     }
 
     let interaction_result: Result<(), CliError> = async {
@@ -375,24 +374,25 @@ pub(crate) async fn run(
                         }
                     }
                 }
-                if view == View::Index && key.key == Key::Enter {
-                    if let Some(entry) = list.selected().map(|item| item.value.clone()) {
-                        open_detail(
-                            entry,
-                            &DetailContext {
-                                snapshot: &snapshot,
-                                app_root,
-                                project_path,
-                                width,
-                                height,
-                                resolution_cache: &resolution_cache,
-                            },
-                            &mut detail,
-                            &mut resolution_task,
-                        );
-                        view = View::Detail;
-                        filtering = false;
-                    }
+                if view == View::Index
+                    && key.key == Key::Enter
+                    && let Some(entry) = list.selected().map(|item| item.value.clone())
+                {
+                    open_detail(
+                        entry,
+                        &DetailContext {
+                            snapshot: &snapshot,
+                            app_root,
+                            project_path,
+                            width,
+                            height,
+                            resolution_cache: &resolution_cache,
+                        },
+                        &mut detail,
+                        &mut resolution_task,
+                    );
+                    view = View::Detail;
+                    filtering = false;
                 }
             }
             Event::Paste(value) => {
@@ -590,27 +590,26 @@ fn open_detail(
         usize::from(context.width).saturating_sub(4).max(1),
         pager_rows(context.height),
     );
-    if !context.resolution_cache.contains_key(entry.tokens()) {
-        if let (HelpEntry::Installed(row), Some(snapshot)) = (&entry, context.snapshot) {
-            if row.descriptor.execute_ref().is_some() {
-                let descriptor = row.descriptor.clone();
-                let snapshot = snapshot.clone();
-                let app_root = PathBuf::from(context.app_root);
-                let project_path = context.project_path.to_string();
-                let tokens = entry.tokens().to_string();
-                *resolution_task = Some(tokio::task::spawn_blocking(move || {
-                    (
-                        tokens,
-                        crate::help::resolve_selected_command_help(
-                            &descriptor,
-                            &snapshot,
-                            &app_root,
-                            &project_path,
-                        ),
-                    )
-                }));
-            }
-        }
+    if !context.resolution_cache.contains_key(entry.tokens())
+        && let (HelpEntry::Installed(row), Some(snapshot)) = (&entry, context.snapshot)
+        && row.descriptor.execute_ref().is_some()
+    {
+        let descriptor = row.descriptor.clone();
+        let snapshot = snapshot.clone();
+        let app_root = PathBuf::from(context.app_root);
+        let project_path = context.project_path.to_string();
+        let tokens = entry.tokens().to_string();
+        *resolution_task = Some(tokio::task::spawn_blocking(move || {
+            (
+                tokens,
+                crate::help::resolve_selected_command_help(
+                    &descriptor,
+                    &snapshot,
+                    &app_root,
+                    &project_path,
+                ),
+            )
+        }));
     }
     *detail = Some(DetailState {
         entry,
@@ -779,12 +778,12 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
             };
             output.push_str(&format!("--{}{}  {}\n", flag.flag, value, flag.help));
         }
-        if let Some(binding) = &command.parameter_binding {
-            if let Some(input_flag) = &binding.input_flag {
-                output.push_str(&format!(
-                    "--{input_flag} <file>  read JSON parameters from file or stdin\n"
-                ));
-            }
+        if let Some(binding) = &command.parameter_binding
+            && let Some(input_flag) = &binding.input_flag
+        {
+            output.push_str(&format!(
+                "--{input_flag} <file>  read JSON parameters from file or stdin\n"
+            ));
         }
     }
     if !row.aliases.is_empty() {
@@ -804,13 +803,13 @@ fn descriptor_detail(entry: &HelpEntry) -> String {
     if let Some(availability) = row.availability {
         output.push_str(&format!("node     {}\n", availability_label(availability)));
     }
-    if let Some(help) = &command.help {
-        if !help.examples.is_empty() {
-            output.push_str("\nEXAMPLES\n");
-            for example in &help.examples {
-                output.push_str(example);
-                output.push('\n');
-            }
+    if let Some(help) = &command.help
+        && !help.examples.is_empty()
+    {
+        output.push_str("\nEXAMPLES\n");
+        for example in &help.examples {
+            output.push_str(example);
+            output.push('\n');
         }
     }
     output.push_str("\nADVANCED\n");

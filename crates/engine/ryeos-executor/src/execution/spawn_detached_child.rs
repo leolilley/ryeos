@@ -29,7 +29,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_app::callback_token::{CallbackCapability, ThreadAuthState};
 use ryeos_app::execution_provenance::ExecutionProvenance;
@@ -37,7 +37,7 @@ use ryeos_app::launch_metadata::{
     FollowLaunchWindow, PersistedParentExecutionContext, ResumeContext, RuntimeLaunchMetadata,
 };
 use ryeos_app::state::AppState;
-use ryeos_app::thread_lifecycle::{new_thread_id, SealedRootExecutionRequest};
+use ryeos_app::thread_lifecycle::{SealedRootExecutionRequest, new_thread_id};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, ExecutionHints, Principal, ProjectContext};
 use ryeos_runtime::events::RuntimeEventType;

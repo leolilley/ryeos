@@ -533,9 +533,11 @@ pub async fn dispatch_recovery_fire<Ctx: SchedulerContext>(
     ctx: Arc<Ctx>,
     intent: super::reconcile::ResumeIntent,
 ) -> anyhow::Result<FireDispatchOutcome> {
-    let _runtime_guard = ctx.scheduler_runtime_gate().read_owned().await;
+    let runtime_guard = ctx.scheduler_runtime_gate().read_owned().await;
 
-    dispatch_recovery_fire_inner(ctx, intent).await
+    let outcome = dispatch_recovery_fire_inner(ctx, intent).await;
+    drop(runtime_guard);
+    outcome
 }
 
 /// Persist and enqueue one recovery fire while the daemon still owns the
@@ -763,9 +765,11 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("fire projection became incomplete"));
+        assert!(
+            error
+                .to_string()
+                .contains("fire projection became incomplete")
+        );
     }
 
     /// A long-running scheduled job must not hold the timer or the

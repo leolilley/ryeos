@@ -10,7 +10,7 @@ use ryeos_client_base::ui::view_model::{RyeOsRowDetailVm, RyeOsTimelineEntryVm, 
 
 use super::super::primitives::fill_line;
 use super::super::text::{display_width, join_with_right_meta, truncate, wrap_words};
-use super::super::theme::{shimmer_style, style_fg, style_muted, tone_glyph, tone_style, PANEL};
+use super::super::theme::{PANEL, shimmer_style, style_fg, style_muted, tone_glyph, tone_style};
 
 /// One rendered line plus the index of the entry it belongs to (None for
 /// structural blanks and the empty-state line — they never take the point).
@@ -102,23 +102,23 @@ pub fn draw_timeline(
     // Default bottom-anchored (the tail). Once the point is on an entry, use
     // the same midpoint scroll behavior as rows and tables.
     let mut start = lines.len().saturating_sub(visible);
-    if let Some(sel) = selected {
-        if let Some(first) = lines.iter().position(|line| line.entry == Some(sel)) {
-            let last = lines
-                .iter()
-                .rposition(|line| line.entry == Some(sel))
-                .unwrap_or(first);
-            let selected_height = last.saturating_sub(first).saturating_add(1);
-            let max_start = lines.len().saturating_sub(visible);
-            start = if selected_height > visible {
-                first
-            } else {
-                first
-                    .saturating_sub(visible / 2)
-                    .max(last.saturating_add(1).saturating_sub(visible))
-            }
-            .min(max_start);
+    if let Some(sel) = selected
+        && let Some(first) = lines.iter().position(|line| line.entry == Some(sel))
+    {
+        let last = lines
+            .iter()
+            .rposition(|line| line.entry == Some(sel))
+            .unwrap_or(first);
+        let selected_height = last.saturating_sub(first).saturating_add(1);
+        let max_start = lines.len().saturating_sub(visible);
+        start = if selected_height > visible {
+            first
+        } else {
+            first
+                .saturating_sub(visible / 2)
+                .max(last.saturating_add(1).saturating_sub(visible))
         }
+        .min(max_start);
     }
 
     for (row, line) in lines.iter().skip(start).take(visible).enumerate() {

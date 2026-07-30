@@ -3,12 +3,12 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
+use super::EvaluationContext;
 use super::ast::{BinaryOperator, Expr, ExprKind, Literal, UnaryOperator};
 use super::error::{ErrorPhase, ExpressionError, SourceSpan};
 use super::functions;
 use super::limits::EvaluationLimits;
 use super::value::Numeric;
-use super::EvaluationContext;
 
 #[derive(Clone, Copy)]
 pub(crate) enum ContextView<'a> {

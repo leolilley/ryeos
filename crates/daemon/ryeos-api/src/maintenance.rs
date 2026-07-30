@@ -159,44 +159,44 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
         deleted_thread_runtime_files = retirement.deleted_runtime_files;
         pending_retirements_recovered = retirement.pending_retirements_recovered;
     }
-    if !params.dry_run {
-        if let Some(grace_ms) = seat_lease_grace_ms {
-            let now_ms = lillux::time::timestamp_millis();
-            let cutoff = now_ms.saturating_sub(grace_ms);
-            for thread_id in state.state_store.expired_seat_leases(cutoff)? {
-                if !state
-                    .state_store
-                    .claim_expired_seat_lease(&thread_id, cutoff)?
-                {
-                    continue;
-                }
-                let Some(detail) = state.state_store.get_thread(&thread_id)? else {
-                    state.state_store.remove_seat_lease(&thread_id)?;
-                    continue;
-                };
-                // The claimed lease row is the structural authority that this
-                // thread participates in lease expiry. Maintenance must not
-                // rediscover that relationship from an authored kind string.
-                if detail.status != "running" {
-                    state.state_store.remove_seat_lease(&thread_id)?;
-                    continue;
-                }
-                state.threads.finalize_thread(
-                    &ryeos_app::thread_lifecycle::ThreadFinalizeParams {
-                        thread_id,
-                        status: "completed".to_string(),
-                        outcome_code: Some("seat_lease_expired".to_string()),
-                        result: None,
-                        error: None,
-                        metadata: None,
-                        artifacts: Vec::new(),
-                        final_cost: None,
-                        summary_json: None,
-                    },
-                )?;
-                state.state_store.remove_seat_lease(&detail.thread_id)?;
-                reaped_seats += 1;
+    if !params.dry_run
+        && let Some(grace_ms) = seat_lease_grace_ms
+    {
+        let now_ms = lillux::time::timestamp_millis();
+        let cutoff = now_ms.saturating_sub(grace_ms);
+        for thread_id in state.state_store.expired_seat_leases(cutoff)? {
+            if !state
+                .state_store
+                .claim_expired_seat_lease(&thread_id, cutoff)?
+            {
+                continue;
             }
+            let Some(detail) = state.state_store.get_thread(&thread_id)? else {
+                state.state_store.remove_seat_lease(&thread_id)?;
+                continue;
+            };
+            // The claimed lease row is the structural authority that this
+            // thread participates in lease expiry. Maintenance must not
+            // rediscover that relationship from an authored kind string.
+            if detail.status != "running" {
+                state.state_store.remove_seat_lease(&thread_id)?;
+                continue;
+            }
+            state
+                .threads
+                .finalize_thread(&ryeos_app::thread_lifecycle::ThreadFinalizeParams {
+                    thread_id,
+                    status: "completed".to_string(),
+                    outcome_code: Some("seat_lease_expired".to_string()),
+                    result: None,
+                    error: None,
+                    metadata: None,
+                    artifacts: Vec::new(),
+                    final_cost: None,
+                    summary_json: None,
+                })?;
+            state.state_store.remove_seat_lease(&detail.thread_id)?;
+            reaped_seats += 1;
         }
     }
 
@@ -231,7 +231,8 @@ pub async fn run_maintenance_gc(state: &AppState, params: &GcParams) -> Result<G
             return Err(error);
         }
         let _ = guard_ready_tx.send(Ok(()));
-        match command_rx.recv() {
+        let command = command_rx.recv();
+        match command {
             Ok(GcWorkerCommand::Run(_write_barrier_resume)) => run_gc_and_log(GcRunInput {
                 state_authority: &state_authority,
                 cas_guard: &cas_guard,
@@ -479,29 +480,29 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
     // Retention: retire old terminal sync-job rows only when the invocation
     // explicitly authors a window. Rust supplies no fallback age. The write
     // barrier is quiesced here, so no concurrent sync-job writes race delete.
-    if !params.dry_run {
-        if let Some(retention_days) = params.sync_job_retention_days {
-            let cutoff = gc::retention::iso8601_days_ago(retention_days);
-            let (jobs, attempts) = state_store
-                .with_state_db(|db| db.delete_terminal_sync_jobs_before(&cutoff))
-                .context("explicit sync-job retention sweep failed")?;
-            result.deleted_sync_jobs = jobs;
-            result.deleted_sync_job_attempts = attempts;
-            if jobs > 0 {
-                tracing::info!(
-                    deleted_sync_jobs = jobs,
-                    deleted_sync_job_attempts = attempts,
-                    cutoff = %cutoff,
-                    "retention: retired terminal sync jobs"
-                );
-            }
+    if !params.dry_run
+        && let Some(retention_days) = params.sync_job_retention_days
+    {
+        let cutoff = gc::retention::iso8601_days_ago(retention_days);
+        let (jobs, attempts) = state_store
+            .with_state_db(|db| db.delete_terminal_sync_jobs_before(&cutoff))
+            .context("explicit sync-job retention sweep failed")?;
+        result.deleted_sync_jobs = jobs;
+        result.deleted_sync_job_attempts = attempts;
+        if jobs > 0 {
+            tracing::info!(
+                deleted_sync_jobs = jobs,
+                deleted_sync_job_attempts = attempts,
+                cutoff = %cutoff,
+                "retention: retired terminal sync jobs"
+            );
         }
     }
 
     // Dry-run is mutation-free across authoritative and operational stores;
     // even the ordinary best-effort audit append is therefore suppressed.
-    if !params.dry_run {
-        if let Err(err) = gc::event_log::append_event_in_directory(
+    if !params.dry_run
+        && let Err(err) = gc::event_log::append_event_in_directory(
             runtime_directory,
             &gc::event_log::GcEvent {
                 timestamp: lillux::time::iso8601_now(),
@@ -538,9 +539,9 @@ fn run_gc_and_log(input: GcRunInput<'_>) -> Result<GcResult> {
                     .unwrap_or(0),
                 duration_ms: result.duration_ms,
             },
-        ) {
-            tracing::warn!(error = %err, "failed to append GC event log");
-        }
+        )
+    {
+        tracing::warn!(error = %err, "failed to append GC event log");
     }
 
     Ok(result)

@@ -4,7 +4,7 @@
 //! the daemon and CLI can use it without circular dependencies.
 
 pub use ryeos_state::ignore::{
-    builtin_patterns, matcher_from_builtins, IgnoreConfig, IgnoreMatcher,
+    IgnoreConfig, IgnoreMatcher, builtin_patterns, matcher_from_builtins,
 };
 
 /// Path to the ingest ignore config relative to app root.

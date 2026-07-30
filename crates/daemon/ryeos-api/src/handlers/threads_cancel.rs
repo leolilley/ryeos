@@ -9,15 +9,15 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
-use ryeos_app::cascade::{cancel_queued_descendants, cascade_descendants, CascadeMode};
-use ryeos_app::process::{kill_by_action, resolve_shutdown_action, ShutdownAction};
+use ryeos_app::cascade::{CascadeMode, cancel_queued_descendants, cascade_descendants};
+use ryeos_app::process::{ShutdownAction, kill_by_action, resolve_shutdown_action};
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::{is_terminal_status, StopIntent};
+use ryeos_app::state_store::{StopIntent, is_terminal_status};
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
 use ryeos_engine::contracts::ThreadTerminalStatus;
 use ryeos_executor::executor::ServiceAvailability;
@@ -177,7 +177,7 @@ pub async fn handle(
                     return Err(HandlerError::Conflict(format!(
                         "stop requested as {terminal_status}, but thread settled {}",
                         thread.status
-                    )))
+                    )));
                 }
                 _ => return Err(HandlerError::Internal(e.to_string())),
             }

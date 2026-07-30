@@ -26,11 +26,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use crate::AI_DIR;
 use crate::contracts::SignatureEnvelope;
 use crate::error::EngineError;
 use crate::kind_registry::KindRegistry;
 use crate::trust::TrustStore;
-use crate::AI_DIR;
 
 use super::descriptor::ParserDescriptor;
 
@@ -262,8 +262,7 @@ impl ParserRegistry {
             {
                 return Err(EngineError::SchemaLoaderError {
                     reason: format!("unsafe admitted parser overlay path {}", relative.display()),
-                }
-                .into());
+                });
             }
             let extension_matches = relative
                 .extension()
@@ -282,8 +281,7 @@ impl ParserRegistry {
                     reason: format!(
                         "project parser overlay exceeds {MAX_PROJECT_PARSER_BYTES} bytes"
                     ),
-                }
-                .into());
+                });
             }
             let project_relative = project_prefix.join(&relative);
             let bytes = project_content

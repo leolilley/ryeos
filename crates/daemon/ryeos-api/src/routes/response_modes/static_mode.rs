@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::route_error::{RouteConfigError, RouteDispatchError};
@@ -252,15 +252,14 @@ impl CompiledResponseMode for CompiledStaticMode {
                 let asset = provider.get(&path).ok_or(RouteDispatchError::NotFound)?;
 
                 // ETag / If-None-Match → 304.
-                if let Some(inm) = ctx.request_parts.headers.get(header::IF_NONE_MATCH) {
-                    if let Ok(inm_str) = inm.to_str() {
-                        if inm_str == asset.etag {
-                            let mut resp = StatusCode::NOT_MODIFIED.into_response();
-                            resp.headers_mut()
-                                .insert(header::ETAG, asset.etag.parse().unwrap());
-                            return Ok(resp);
-                        }
-                    }
+                if let Some(inm) = ctx.request_parts.headers.get(header::IF_NONE_MATCH)
+                    && let Ok(inm_str) = inm.to_str()
+                    && inm_str == asset.etag
+                {
+                    let mut resp = StatusCode::NOT_MODIFIED.into_response();
+                    resp.headers_mut()
+                        .insert(header::ETAG, asset.etag.parse().unwrap());
+                    return Ok(resp);
                 }
 
                 let ct = self

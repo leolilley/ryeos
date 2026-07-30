@@ -208,10 +208,10 @@ fn build_items_list(
 
     for kind_name in state.engine.kinds.kinds() {
         // Apply kind filter
-        if let Some(filter) = kind_filter {
-            if kind_name != filter {
-                continue;
-            }
+        if let Some(filter) = kind_filter
+            && kind_name != filter
+        {
+            continue;
         }
 
         let Some(schema) = state.engine.kinds.get(kind_name) else {
@@ -232,10 +232,10 @@ fn build_items_list(
             let space_str = resolution.winner_space.as_str().to_string();
 
             // Apply space filter
-            if let Some(filter_fn) = &space_filter {
-                if !filter_fn(&resolution.winner_space) {
-                    continue;
-                }
+            if let Some(filter_fn) = &space_filter
+                && !filter_fn(&resolution.winner_space)
+            {
+                continue;
             }
 
             // Apply query filter

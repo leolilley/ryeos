@@ -31,16 +31,16 @@ use std::time::Duration;
 const VALIDATION_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 use crate::canonical_ref::CanonicalRef;
-use crate::composers::{field_requirements_for_schema, ComposerRegistry};
-use crate::contracts::{field_type_covers, ContractViolation, ShapeType, ValueShape};
+use crate::composers::{ComposerRegistry, field_requirements_for_schema};
+use crate::contracts::{ContractViolation, ShapeType, ValueShape, field_type_covers};
 use crate::error::EngineError;
 use crate::handlers::subprocess::run_handler_subprocess;
 use crate::handlers::{HandlerRegistry, HandlerServes, VerifiedHandler};
 use crate::kind_registry::KindRegistry;
 use crate::launch_preparers::LaunchPreparerRunner;
 use crate::parsers::{DuplicateRef, ParserRegistry};
-use crate::protocols::builder::{build_subprocess_spec, BuildRequest, CallbackBindings};
 use crate::protocols::ProtocolRegistry;
+use crate::protocols::builder::{BuildRequest, CallbackBindings, build_subprocess_spec};
 use crate::resolution::TrustClass;
 use crate::runtime_registry::{
     ConfigMergeMode, LaunchConfigInputDecl, LaunchItemSpace, LaunchPreparationDecl,
@@ -249,75 +249,74 @@ pub fn validate_boot(
                 }
             };
 
-            if let Some(h) = handler {
-                if !config_checked.contains_key(parser_ref) {
-                    let request =
-                        HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
-                            parser_config: descriptor.parser_config.clone(),
+            if let Some(h) = handler
+                && !config_checked.contains_key(parser_ref)
+            {
+                let request = HandlerRequest::ValidateParserConfig(ValidateParserConfigRequest {
+                    parser_config: descriptor.parser_config.clone(),
+                });
+                match run_handler_subprocess(
+                    h,
+                    &request,
+                    VALIDATION_SUBPROCESS_TIMEOUT,
+                    handler_registry.launch_runtime(),
+                ) {
+                    Ok(HandlerResponse::ValidateOk) => {}
+                    Ok(HandlerResponse::ValidateErr { message }) => {
+                        issues.push(BootIssue::InvalidParserConfig {
+                            parser_ref: parser_ref.clone(),
+                            reason: message,
                         });
-                    match run_handler_subprocess(
-                        h,
-                        &request,
-                        VALIDATION_SUBPROCESS_TIMEOUT,
-                        handler_registry.launch_runtime(),
-                    ) {
-                        Ok(HandlerResponse::ValidateOk) => {}
-                        Ok(HandlerResponse::ValidateErr { message }) => {
-                            issues.push(BootIssue::InvalidParserConfig {
-                                parser_ref: parser_ref.clone(),
-                                reason: message,
-                            });
-                        }
-                        Ok(other) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: format!("unexpected response: {other:?}"),
-                            });
-                        }
-                        Err(EngineError::HandlerExitNonZero {
-                            exit_code, stderr, ..
-                        }) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: format!("exit {exit_code}: {}", stderr.trim()),
-                            });
-                        }
-                        Err(EngineError::HandlerSpawnFailed { detail, .. }) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail,
-                            });
-                        }
-                        Err(EngineError::HandlerProtocolViolation { detail, .. }) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: format!("malformed response: {detail}"),
-                            });
-                        }
-                        Err(EngineError::HandlerBinaryMissing {
-                            handler, reason, ..
-                        }) => {
-                            tracing::warn!(
-                                handler = %handler,
-                                reason = %reason,
-                                "skipping boot-time subprocess validation for unresolved handler; \
-                                 invocation will hard-error if the handler is ever called"
-                            );
-                        }
-                        Err(other) => {
-                            issues.push(BootIssue::HandlerUnusable {
-                                parser_ref: parser_ref.clone(),
-                                handler: descriptor.handler.clone(),
-                                detail: other.to_string(),
-                            });
-                        }
                     }
-                    config_checked.insert(parser_ref.clone(), ());
+                    Ok(other) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: format!("unexpected response: {other:?}"),
+                        });
+                    }
+                    Err(EngineError::HandlerExitNonZero {
+                        exit_code, stderr, ..
+                    }) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: format!("exit {exit_code}: {}", stderr.trim()),
+                        });
+                    }
+                    Err(EngineError::HandlerSpawnFailed { detail, .. }) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail,
+                        });
+                    }
+                    Err(EngineError::HandlerProtocolViolation { detail, .. }) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: format!("malformed response: {detail}"),
+                        });
+                    }
+                    Err(EngineError::HandlerBinaryMissing {
+                        handler, reason, ..
+                    }) => {
+                        tracing::warn!(
+                            handler = %handler,
+                            reason = %reason,
+                            "skipping boot-time subprocess validation for unresolved handler; \
+                             invocation will hard-error if the handler is ever called"
+                        );
+                    }
+                    Err(other) => {
+                        issues.push(BootIssue::HandlerUnusable {
+                            parser_ref: parser_ref.clone(),
+                            handler: descriptor.handler.clone(),
+                            detail: other.to_string(),
+                        });
+                    }
                 }
+                config_checked.insert(parser_ref.clone(), ());
             }
 
             // Contract check always runs regardless of handler availability.
@@ -846,13 +845,12 @@ pub fn validate_protocol_builder(
         };
         if let Some(crate::kind_registry::TerminatorDecl::Subprocess { protocol_ref }) =
             &exec.terminator
+            && protocols.get(protocol_ref).is_none()
         {
-            if protocols.get(protocol_ref).is_none() {
-                issues.push(BootIssue::DanglingProtocolRef {
-                    kind: kind_name.to_string(),
-                    protocol_ref: protocol_ref.clone(),
-                });
-            }
+            issues.push(BootIssue::DanglingProtocolRef {
+                kind: kind_name.to_string(),
+                protocol_ref: protocol_ref.clone(),
+            });
         }
         if let Some(method_dispatch) = &exec.method_dispatch {
             match protocols.get(&method_dispatch.protocol) {
@@ -944,14 +942,13 @@ fn parser_output_compatible_with_kind_contract(
                 .required
                 .get(name)
                 .or_else(|| kind_contract.optional.get(name))
+                && !field_type_covers(needed, produced)
             {
-                if !field_type_covers(needed, produced) {
-                    violations.push(ContractViolation::FieldTypeMismatch {
-                        name: name.clone(),
-                        needed: needed.clone(),
-                        produced: produced.clone(),
-                    });
-                }
+                violations.push(ContractViolation::FieldTypeMismatch {
+                    name: name.clone(),
+                    needed: needed.clone(),
+                    produced: produced.clone(),
+                });
             }
         }
     }
@@ -965,10 +962,10 @@ mod tests {
     use crate::canonical_ref::CanonicalRef;
     use crate::composers::ComposerRegistry;
     use crate::kind_registry::KindRegistry;
-    use crate::parsers::descriptor::ParserDescriptor;
     use crate::parsers::ParserRegistry;
+    use crate::parsers::descriptor::ParserDescriptor;
     use crate::test_support::load_live_handler_registry;
-    use crate::trust::{compute_fingerprint, TrustStore, TrustedSigner};
+    use crate::trust::{TrustStore, TrustedSigner, compute_fingerprint};
     use lillux::crypto::SigningKey;
     use ryeos_handler_protocol::{ComposerFieldRequirement, ComposerFieldSemantics};
     use serde_json::Value;
@@ -1208,12 +1205,16 @@ composed_value_contract:
         let composers = composers_from(&kinds);
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
-        assert!(issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::UnknownHandler { .. })));
-        assert!(!issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::DanglingParserRef { .. })));
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::UnknownHandler { .. }))
+        );
+        assert!(
+            !issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::DanglingParserRef { .. }))
+        );
     }
 
     #[test]
@@ -1454,12 +1455,16 @@ composed_value_contract:
         let composers = ComposerRegistry::new();
 
         let issues = validate_boot(&kinds, &parsers, &hr, &composers, &[]).unwrap_err();
-        assert!(!issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::DanglingParserRef { .. })));
-        assert!(issues
-            .iter()
-            .any(|i| matches!(i, BootIssue::UnknownHandler { .. })));
+        assert!(
+            !issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::DanglingParserRef { .. }))
+        );
+        assert!(
+            issues
+                .iter()
+                .any(|i| matches!(i, BootIssue::UnknownHandler { .. }))
+        );
     }
 
     // ── Parser → composer wiring contract tests ──────────────────────

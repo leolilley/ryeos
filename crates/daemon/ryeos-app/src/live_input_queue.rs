@@ -328,7 +328,7 @@ mod tests {
     fn restore_front_preserves_fifo_and_prepends() {
         let q = LiveInputQueue::new();
         q.enqueue("T", steer("c")); // already pending
-                                    // Simulate a failed persist of an earlier drain of [a, b].
+        // Simulate a failed persist of an earlier drain of [a, b].
         q.restore_front("T", vec![steer("a"), steer("b")]);
         let drained = q.drain("T");
         assert_eq!(

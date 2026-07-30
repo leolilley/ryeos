@@ -25,11 +25,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use lillux::crypto::{DecodePrivateKey, SigningKey};
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::SignatureEnvelope;
-use ryeos_engine::kind_registry::{validate_metadata_anchoring, KindRegistry, KindSchema};
+use ryeos_engine::kind_registry::{KindRegistry, KindSchema, validate_metadata_anchoring};
 use std::sync::Arc;
 
 use ryeos_engine::handlers::HandlerRegistry;
@@ -412,7 +412,9 @@ fn parse_sign_target(item_ref: &str) -> Result<SignTarget> {
         .chars()
         .all(|c| c.is_alphanumeric() || matches!(c, '/' | '-' | '_' | '.' | '*' | '?'))
     {
-        bail!("malformed canonical ref `{item_ref}`: glob bare_id contains invalid characters: {bare_id}");
+        bail!(
+            "malformed canonical ref `{item_ref}`: glob bare_id contains invalid characters: {bare_id}"
+        );
     }
 
     Ok(SignTarget {
@@ -482,8 +484,8 @@ fn glob_match_items(
     kind_schema: &KindSchema,
     pattern: &str,
 ) -> Result<Vec<PathBuf>> {
-    use glob::glob_with;
     use glob::MatchOptions;
+    use glob::glob_with;
 
     if !kind_dir.is_dir() {
         return Ok(Vec::new());
@@ -666,6 +668,15 @@ fn sign_in_place(
     envelope: &SignatureEnvelope,
 ) -> Result<SignOutcome> {
     let signing_key = load_user_signing_key()?;
+    sign_in_place_with_key(input, validated_content, envelope, &signing_key)
+}
+
+fn sign_in_place_with_key(
+    input: &Path,
+    validated_content: &str,
+    envelope: &SignatureEnvelope,
+    signing_key: &SigningKey,
+) -> Result<SignOutcome> {
     let verifying_key = signing_key.verifying_key();
     let fingerprint = lillux::signature::compute_fingerprint(&verifying_key);
 
@@ -691,7 +702,7 @@ fn sign_in_place(
 
     let signed = lillux::signature::sign_content_with_options(
         &stripped,
-        &signing_key,
+        signing_key,
         &envelope.prefix,
         envelope.suffix.as_deref(),
         envelope.after_shebang,
@@ -789,15 +800,8 @@ fn extract_signature_line(content: &str, prefix: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lillux::crypto::{EncodePrivateKey, SigningKey};
+    use lillux::crypto::SigningKey;
     use rand::rngs::OsRng;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
-    fn env_lock() -> MutexGuard<'static, ()> {
-        ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner())
-    }
 
     #[test]
     fn sign_source_parses_project() {
@@ -873,21 +877,8 @@ mod tests {
 
     #[test]
     fn sign_in_place_uses_validated_content_not_reread_bytes() {
-        let _guard = env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let key = SigningKey::generate(&mut OsRng);
-        let key_path = tmp
-            .path()
-            .join(ryeos_engine::AI_DIR)
-            .join("config")
-            .join("keys")
-            .join("signing")
-            .join("private_key.pem");
-        std::fs::create_dir_all(key_path.parent().unwrap()).unwrap();
-        let pem = key.to_pkcs8_pem(Default::default()).unwrap();
-        std::fs::write(&key_path, pem.as_bytes()).unwrap();
-        let old_app_root = std::env::var_os("RYEOS_APP_ROOT");
-        std::env::set_var("RYEOS_APP_ROOT", tmp.path());
 
         let item_path = tmp.path().join("item.yaml");
         std::fs::write(&item_path, "name: unvalidated\n").unwrap();
@@ -898,7 +889,7 @@ mod tests {
         };
 
         let validated = "name: validated\n";
-        let outcome = sign_in_place(&item_path, validated, &envelope).unwrap();
+        let outcome = sign_in_place_with_key(&item_path, validated, &envelope, &key).unwrap();
         assert!(matches!(outcome, SignOutcome::Signed(_)));
 
         let written = std::fs::read_to_string(&item_path).unwrap();
@@ -909,12 +900,6 @@ mod tests {
         );
         assert_eq!(stripped, validated);
         assert!(!written.contains("unvalidated"));
-
-        if let Some(old_app_root) = old_app_root {
-            std::env::set_var("RYEOS_APP_ROOT", old_app_root);
-        } else {
-            std::env::remove_var("RYEOS_APP_ROOT");
-        }
     }
 
     #[test]
