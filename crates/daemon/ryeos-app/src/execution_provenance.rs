@@ -614,6 +614,22 @@ impl ExecutionProvenance {
         }
     }
 
+    /// Select the canonical live project root for a daemon-mediated read.
+    ///
+    /// A pinned materialization is an execution view, never an ambient route
+    /// back to mutable live state.
+    pub fn durable_live_read_root(&self) -> anyhow::Result<&Path> {
+        let root = self.project_authority().authorized_live_read_root()?;
+        if root != self.original_project_path() {
+            anyhow::bail!(
+                "durable live read root {} does not match provenance project identity {}",
+                root.display(),
+                self.original_project_path().display()
+            );
+        }
+        Ok(root)
+    }
+
     /// Select the durable project root for a daemon-mediated live mutation.
     ///
     /// `effective_path()` is an execution view and may be an ephemeral
@@ -1050,6 +1066,25 @@ mod tests {
         assert!(matches!(p, ExecutionProvenance::RootLiveProject { .. }));
         assert_eq!(p.project_source(), ProjectSourceKind::LiveFs);
         assert!(!p.is_borrowed_child());
+    }
+
+    #[test]
+    fn state_root_override_does_not_replace_durable_live_project_authority() {
+        let provenance =
+            live("/live", engine()).with_state_root(Some(PathBuf::from("/separate-state")));
+
+        assert_eq!(
+            provenance.state_root_override(),
+            Some(Path::new("/separate-state"))
+        );
+        assert_eq!(
+            provenance.durable_live_read_root().unwrap(),
+            Path::new("/live")
+        );
+        assert_eq!(
+            provenance.durable_live_write_root("project").unwrap(),
+            Path::new("/live")
+        );
     }
 
     #[test]

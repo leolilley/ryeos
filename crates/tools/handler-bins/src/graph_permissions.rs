@@ -269,7 +269,8 @@ mod tests {
     #[test]
     fn valid_manifest_passes() {
         let view = run(manifest(json!({
-            "bundle_events": [{ "event_kind": "e", "operations": ["append", "scan"] }]
+            "bundle_events": [{ "event_kind": "e", "operations": ["append", "scan"] }],
+            "project_snapshots": ["status"]
         })));
         // manifest is not lifted into effective_caps (it's minted at launch).
         assert!(policy_fact_string_seq(&view, "effective_caps").is_empty());

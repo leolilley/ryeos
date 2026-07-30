@@ -30,6 +30,15 @@ pub enum RuntimeVaultOperation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectSnapshotOperation {
+    Status,
+    Log,
+    Show,
+    Create,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BundleEventDecl {
     pub event_kind: String,
@@ -66,6 +75,8 @@ pub struct RuntimeAuthorityDecls {
     pub runtime_vault: Vec<RuntimeVaultDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_authoring: Vec<ItemAuthorDecl>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_snapshots: Vec<ProjectSnapshotOperation>,
 }
 
 /// One declared smoke execution: an item the bundle's author nominates as a
@@ -965,7 +976,12 @@ typo_field: oops
         // Hard switch: the runtime-authority families live under
         // `runtime_authority:` only. Old top-level siblings fail loudly rather
         // than silently dropping authority — no back-compat.
-        for field in ["bundle_events", "runtime_vault", "item_authoring"] {
+        for field in [
+            "bundle_events",
+            "runtime_vault",
+            "item_authoring",
+            "project_snapshots",
+        ] {
             let yaml = format!(
                 "name: test\nversion: \"1.0\"\nprovides_kinds: []\nrequires_kinds: []\n{field}: []\n"
             );

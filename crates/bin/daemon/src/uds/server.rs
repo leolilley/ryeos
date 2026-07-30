@@ -302,9 +302,9 @@ pub(crate) async fn dispatch_runtime_method(
         // durable `cognition_in` for the running thread. Require BOTH proofs the
         // runtime holds: the per-request thread_auth_token (like dispatch_action)
         // AND the exact-thread callback token (write tier — it appends durable
-        // events). runtime.author_item is also a durable signed project write,
-        // so it uses the same two-proof boundary. Either proof alone is
-        // insufficient.
+        // events). runtime.author_item and runtime.project_snapshot may also
+        // perform durable project writes, so they use the same two-proof
+        // boundary. Either proof alone is insufficient.
         let tat = params
             .get("thread_auth_token")
             .and_then(|v| v.as_str())
@@ -550,6 +550,7 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.spawn_follow_child"
             | "runtime.request_continuation"
             | "runtime.author_item"
+            | "runtime.project_snapshot"
             | "runtime.vault_put"
             | "runtime.vault_delete"
             | "runtime.bundle_events_append"
@@ -2080,6 +2081,40 @@ mod tests {
                 .unwrap()
                 .successor_thread_id
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn project_snapshot_callback_requires_a_running_thread() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-snapshot-running-fence";
+        create_running_test_thread(&state, thread_id);
+        let params = json!({"thread_id": thread_id});
+
+        enforce_runtime_callback_admission("runtime.project_snapshot", &params, &state)
+            .expect("running thread admits snapshot callback");
+
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread_id.to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: Some(json!({"ok": true})),
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let error = enforce_runtime_callback_admission("runtime.project_snapshot", &params, &state)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires a running thread") && error.contains("is completed"),
+            "got: {error}"
         );
     }
 

@@ -17,7 +17,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 use ryeos_bundle::manifest::{
-    BundleEventOperation, BundleManifest, BundleManifestSource, RuntimeVaultOperation,
+    BundleEventOperation, BundleManifest, BundleManifestSource, ProjectSnapshotOperation,
+    RuntimeVaultOperation,
 };
 
 /// Relative risk of a single authority change. Ordered highest-to-lowest so a
@@ -30,7 +31,7 @@ pub enum Risk {
     /// An existing grant broadened (more operations/verbs).
     Widened,
     /// A grant added (non-wildcard authoring pattern, event kind, vault
-    /// namespace, or provides/requires/uses kind).
+    /// namespace, project-snapshot operation, or provides/requires/uses kind).
     Added,
     /// An existing grant narrowed (fewer operations/verbs).
     Narrowed,
@@ -106,6 +107,16 @@ fn vault_op_str(op: &RuntimeVaultOperation) -> &'static str {
         RuntimeVaultOperation::Get => "get",
         RuntimeVaultOperation::Delete => "delete",
         RuntimeVaultOperation::List => "list",
+    }
+}
+
+/// Snake-case wire form of a project-snapshot operation.
+fn project_snapshot_op_str(op: &ProjectSnapshotOperation) -> &'static str {
+    match op {
+        ProjectSnapshotOperation::Status => "status",
+        ProjectSnapshotOperation::Log => "log",
+        ProjectSnapshotOperation::Show => "show",
+        ProjectSnapshotOperation::Create => "create",
     }
 }
 
@@ -218,6 +229,26 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
         &mut findings,
     );
 
+    // ── project_snapshots ──
+    let old_snapshots: BTreeSet<&str> = old
+        .runtime_authority
+        .project_snapshots
+        .iter()
+        .map(project_snapshot_op_str)
+        .collect();
+    let new_snapshots: BTreeSet<&str> = new
+        .runtime_authority
+        .project_snapshots
+        .iter()
+        .map(project_snapshot_op_str)
+        .collect();
+    diff_operation_set(
+        &old_snapshots,
+        &new_snapshots,
+        "project_snapshots",
+        &mut findings,
+    );
+
     // ── provides / requires / uses kinds ──
     diff_kind_list(
         &old.provides_kinds,
@@ -239,6 +270,39 @@ pub fn diff_authority(old: &BundleManifest, new: &BundleManifest) -> Vec<AuditFi
     );
 
     findings
+}
+
+/// Diff one global operation set. The first grant is an addition, the final
+/// removal is a removal, and changes within an existing family are
+/// widenings/narrowings.
+fn diff_operation_set(
+    old: &BTreeSet<&str>,
+    new: &BTreeSet<&str>,
+    family: &str,
+    findings: &mut Vec<AuditFinding>,
+) {
+    let added: BTreeSet<&str> = new.difference(old).copied().collect();
+    let removed: BTreeSet<&str> = old.difference(new).copied().collect();
+    if !added.is_empty() {
+        findings.push(AuditFinding {
+            risk: if old.is_empty() {
+                Risk::Added
+            } else {
+                Risk::Widened
+            },
+            message: format!("{family}: +[{}]", join(&added)),
+        });
+    }
+    if !removed.is_empty() {
+        findings.push(AuditFinding {
+            risk: if new.is_empty() {
+                Risk::Removed
+            } else {
+                Risk::Narrowed
+            },
+            message: format!("{family}: -[{}]", join(&removed)),
+        });
+    }
 }
 
 /// Diff a `key -> operation-set` map (bundle_events by event kind, runtime_vault
@@ -355,7 +419,8 @@ pub fn run_manifest_audit(old_path: &Path, new_path: &Path) -> Result<AuthorityA
 mod tests {
     use super::*;
     use ryeos_bundle::manifest::{
-        BundleEventDecl, ItemAuthorDecl, RuntimeAuthorityDecls, RuntimeVaultDecl,
+        BundleEventDecl, ItemAuthorDecl, ProjectSnapshotOperation, RuntimeAuthorityDecls,
+        RuntimeVaultDecl,
     };
 
     fn manifest(name: &str, ra: RuntimeAuthorityDecls) -> BundleManifest {
@@ -506,6 +571,37 @@ mod tests {
         assert!(findings.iter().any(|f| f.risk == Risk::Narrowed
             && f.message.contains("arc/state")
             && f.message.contains("-[list]")));
+    }
+
+    #[test]
+    fn project_snapshot_operations_are_audited() {
+        let old = manifest(
+            "core",
+            RuntimeAuthorityDecls {
+                project_snapshots: vec![ProjectSnapshotOperation::Status],
+                ..Default::default()
+            },
+        );
+        let new = manifest(
+            "core",
+            RuntimeAuthorityDecls {
+                project_snapshots: vec![
+                    ProjectSnapshotOperation::Status,
+                    ProjectSnapshotOperation::Create,
+                ],
+                ..Default::default()
+            },
+        );
+        let widened = diff_authority(&old, &new);
+        assert!(widened.iter().any(|finding| {
+            finding.risk == Risk::Widened && finding.message == "project_snapshots: +[create]"
+        }));
+
+        let removed = diff_authority(&new, &manifest("core", RuntimeAuthorityDecls::default()));
+        assert!(removed.iter().any(|finding| {
+            finding.risk == Risk::Removed
+                && finding.message == "project_snapshots: -[create, status]"
+        }));
     }
 
     #[test]

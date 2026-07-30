@@ -226,6 +226,7 @@ fn resolve_project_authority(
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    capability_ceiling: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
@@ -325,7 +326,7 @@ fn resolve_project_authority(
                     isolation.mode(),
                 ),
                 environment,
-                Vec::new(),
+                capability_ceiling.to_vec(),
             )
         }
         ProjectExecutionPolicy::Pinned { realization, .. } => {
@@ -361,7 +362,7 @@ fn resolve_project_authority(
                 snapshot_hash.to_string(),
                 realization,
                 environment,
-                Vec::new(),
+                capability_ceiling.to_vec(),
             )
         }
     }?;
@@ -453,6 +454,7 @@ pub(crate) fn resolve_execution_contract(
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
         &state.isolation,
+        caller_scopes,
     )?;
     authorize_terminal_publication(
         policy,
@@ -2123,6 +2125,27 @@ mod tests {
             validate_project_path_presence(&live, None),
             Err("project-backed execution policy requires project_path")
         );
+    }
+
+    #[test]
+    fn live_project_authority_seals_admitted_caller_capability_ceiling() {
+        let project = tempfile::tempdir().unwrap();
+        let policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        let capability_ceiling = vec![
+            "ryeos.execute.tool.core/snapshot-create".to_string(),
+            ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+        ];
+
+        let authority = resolve_project_authority(
+            &policy,
+            Some(project.path()),
+            None,
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &capability_ceiling,
+        )
+        .unwrap();
+
+        assert_eq!(authority.capability_ceiling(), capability_ceiling);
     }
 
     #[test]

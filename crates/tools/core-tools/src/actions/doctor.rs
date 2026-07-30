@@ -144,9 +144,14 @@ fn check_manifest(source: &Path) -> CheckResult {
             // `deny_unknown_fields` rejects a manifest still carrying the flat,
             // pre-nesting runtime-authority fields. Name the exact fix instead
             // of swallowing the error behind a generic "malformed" string.
-            let old_shape_field = ["bundle_events", "runtime_vault", "item_authoring"]
-                .into_iter()
-                .find(|f| msg.contains(&format!("unknown field `{f}`")));
+            let old_shape_field = [
+                "bundle_events",
+                "runtime_vault",
+                "item_authoring",
+                "project_snapshots",
+            ]
+            .into_iter()
+            .find(|f| msg.contains(&format!("unknown field `{f}`")));
             if let Some(field) = old_shape_field {
                 return CheckResult::new(
                     "manifest",
@@ -155,7 +160,7 @@ fn check_manifest(source: &Path) -> CheckResult {
                         "error": format!(
                             "manifest.source.yaml declares `{field}` as a top-level field"
                         ),
-                        "remedy": "nest bundle_events / runtime_vault / item_authoring under a single `runtime_authority:` block",
+                        "remedy": "nest bundle_events / runtime_vault / item_authoring / project_snapshots under a single `runtime_authority:` block",
                         "serde_error": msg,
                     }),
                 );
@@ -563,32 +568,37 @@ mod tests {
 
     #[test]
     fn manifest_check_hints_old_shape_runtime_authority_fields() {
-        let tmp = tempfile::tempdir().unwrap();
-        // A manifest still carrying the flat pre-nesting field. `deny_unknown_fields`
-        // rejects it; doctor must name the field and the nesting fix, not a
-        // generic "malformed" string.
-        write(
-            &tmp.path().join(".ai/manifest.source.yaml"),
-            "name: arc\nversion: \"0.1.0\"\nbundle_events:\n  - event_kind: ev\n    operations: [append]\n",
-        );
-        let r = check_manifest(tmp.path());
-        assert_eq!(r.status, FAIL);
-        assert!(
-            r.detail["error"]
+        for (field, body) in [
+            (
+                "bundle_events",
+                "bundle_events:\n  - event_kind: ev\n    operations: [append]\n",
+            ),
+            ("runtime_vault", "runtime_vault: []\n"),
+            ("item_authoring", "item_authoring: []\n"),
+            ("project_snapshots", "project_snapshots: [status]\n"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            // A manifest still carrying a flat pre-nesting field.
+            // `deny_unknown_fields` rejects it; doctor must name the field and
+            // nesting fix, not a generic "malformed" string.
+            write(
+                &tmp.path().join(".ai/manifest.source.yaml"),
+                &format!("name: arc\nversion: \"0.1.0\"\n{body}"),
+            );
+            let r = check_manifest(tmp.path());
+            assert_eq!(r.status, FAIL);
+            assert!(
+                r.detail["error"].as_str().unwrap().contains(field),
+                "error should name the offending field: {:?}",
+                r.detail
+            );
+            assert!(r.detail["remedy"]
                 .as_str()
                 .unwrap()
-                .contains("bundle_events"),
-            "error should name the offending field: {:?}",
-            r.detail
-        );
-        assert!(
-            r.detail["remedy"]
-                .as_str()
-                .unwrap()
-                .contains("runtime_authority:")
-        );
-        // The raw serde error is preserved for context.
-        assert!(r.detail["serde_error"].is_string());
+                .contains("runtime_authority:"));
+            // The raw serde error is preserved for context.
+            assert!(r.detail["serde_error"].is_string());
+        }
     }
 
     #[test]

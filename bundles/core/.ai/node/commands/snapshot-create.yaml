@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-29T05:00:13Z:976941f7a683f9b449cf14b132afc205df1a38241f32b50ba33103817dedb621:7iZM/KMmM8wqIZQZZoi7N04ssB65+Dr/tM4NeclVNzKTl1+3EFVev6fAdqFjFmm9TLvVsguL1uPE7Ak80sOeCA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-30T01:37:14Z:83cfba2e860eb025e8071a2b70c1026b2d2102987a0a30095c77b69584f99563:GoyfAngMpDqBNC84LQ17LO2kcu5RIR6xYqJdltSiBNksDLnM19L6aSFtAapTYxYA/OTWx1lfC8xUmpjhGjNvBw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - commit
 description: Create a local project snapshot
@@ -12,8 +12,9 @@ forms:
   - field: message
 project:
   resolution: required
+  request_project_path: true
   bind_parameter: project_path
 dispatch:
   kind: execute_ref
-  execute: tool:ryeos/core/snapshot-create
+  execute: tool:core/snapshot-create
   availability: daemon

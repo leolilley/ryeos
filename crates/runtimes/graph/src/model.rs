@@ -806,6 +806,7 @@ requires:
         runtime_vault:
           - namespace: oauth
             operations: [get]
+        project_snapshots: [status]
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert_eq!(
@@ -821,6 +822,7 @@ requires:
             vec![
                 "ryeos.append.bundle-events.arc/arc_pattern_event".to_string(),
                 "ryeos.get.vault.arc/oauth".to_string(),
+                "ryeos.status.project-snapshots.live".to_string(),
             ]
         );
     }

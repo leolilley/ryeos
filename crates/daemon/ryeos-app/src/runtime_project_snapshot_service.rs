@@ -22,9 +22,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::callback_token::{CallbackCapability, ThreadAuthState};
+use crate::execution_policy::{
+    LIVE_PROJECT_READ_CAPABILITY, LIVE_PROJECT_WRITE_CAPABILITY,
+};
 use crate::state::AppState;
 use crate::state_store::NodeIdentitySigner;
-use ryeos_runtime::authorizer::AuthorizationPolicy;
+use ryeos_bundle::manifest::ProjectSnapshotOperation;
+use ryeos_bundle::runtime_authority::project_snapshot_cap;
+use ryeos_runtime::authorizer::{AuthorizationPolicy, Authorizer};
 use ryeos_state::objects::{ProjectFile, ProjectSnapshot, ProjectSnapshotPolicy, ProjectTree};
 use ryeos_state::project_sync::ProjectSyncScope;
 
@@ -32,12 +37,13 @@ use ryeos_state::project_sync::ProjectSyncScope;
 #[serde(deny_unknown_fields)]
 pub struct RuntimeProjectSnapshotRequest {
     pub thread_id: String,
-    pub operation: String,
+    pub operation: ProjectSnapshotOperation,
     #[serde(default)]
     pub params: Value,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ProjectParams {
     #[serde(default)]
     project_path: Option<PathBuf>,
@@ -72,6 +78,63 @@ enum SnapshotState<'a> {
 
 pub struct RuntimeProjectSnapshotService;
 
+fn authorize_snapshot_operation(
+    authorizer: &Authorizer,
+    project_capability_ceiling: &[String],
+    runtime_caps: &[String],
+    operation: &ProjectSnapshotOperation,
+) -> Result<()> {
+    let required_project_capability = match operation {
+        ProjectSnapshotOperation::Status
+        | ProjectSnapshotOperation::Log
+        | ProjectSnapshotOperation::Show => LIVE_PROJECT_READ_CAPABILITY,
+        ProjectSnapshotOperation::Create => LIVE_PROJECT_WRITE_CAPABILITY,
+    };
+    authorizer
+        .authorize(
+            project_capability_ceiling,
+            &AuthorizationPolicy::require(required_project_capability),
+        )
+        .with_context(|| {
+            format!(
+                "admitted caller is missing required capability: {required_project_capability} — \
+                 project snapshots require sealed live-project authority"
+            )
+        })?;
+
+    let required_runtime_capability = project_snapshot_cap(operation);
+    authorizer
+        .authorize(
+            runtime_caps,
+            &AuthorizationPolicy::require(&required_runtime_capability),
+        )
+        .with_context(|| {
+            format!(
+                "runtime is missing required capability: {required_runtime_capability} — \
+                 project snapshots are signed manifest-backed runtime authority"
+            )
+        })?;
+    Ok(())
+}
+
+fn authorized_snapshot_project_root<'a>(
+    cap: &'a CallbackCapability,
+    operation: &ProjectSnapshotOperation,
+) -> Result<&'a Path> {
+    match operation {
+        ProjectSnapshotOperation::Status
+        | ProjectSnapshotOperation::Log
+        | ProjectSnapshotOperation::Show => cap
+            .provenance
+            .durable_live_read_root()
+            .context("project snapshot read requires sealed live-project authority"),
+        ProjectSnapshotOperation::Create => cap
+            .provenance
+            .durable_live_write_root("project")
+            .context("project snapshot creation requires sealed live-project write authority"),
+    }
+}
+
 impl RuntimeProjectSnapshotService {
     pub fn execute(
         state: &AppState,
@@ -82,33 +145,24 @@ impl RuntimeProjectSnapshotService {
         if request.thread_id != cap.thread_id || request.thread_id != thread_auth.thread_id {
             bail!("snapshot callback authority does not match the running thread");
         }
-        let required_capability = match request.operation.as_str() {
-            "status" | "log" | "show" => crate::execution_policy::LIVE_PROJECT_READ_CAPABILITY,
-            "create" => crate::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY,
-            other => bail!("unsupported snapshot operation: {other}"),
-        };
-        state
-            .authorizer
-            .authorize(
-                &cap.effective_caps,
-                &AuthorizationPolicy::require(required_capability),
-            )
-            .with_context(|| {
-                format!(
-                    "missing required capability: {required_capability} — project snapshots are daemon-mediated runtime authority"
-                )
-            })?;
+        authorize_snapshot_operation(
+            &state.authorizer,
+            cap.provenance.project_authority().capability_ceiling(),
+            &cap.effective_caps,
+            &request.operation,
+        )?;
+        let authorized_project_path =
+            canonical_project_path(authorized_snapshot_project_root(cap, &request.operation)?)?;
         let params: ProjectParams =
             serde_json::from_value(request.params).context("invalid snapshot params")?;
         let project_path = canonical_project_path(
             params
                 .project_path
                 .as_deref()
-                .unwrap_or(cap.project_path.as_path()),
+                .unwrap_or(authorized_project_path.as_path()),
         )?;
-        let capability_path = canonical_project_path(&cap.project_path)?;
-        if project_path != capability_path {
-            bail!("snapshot project_path is outside the callback capability");
+        if project_path != authorized_project_path {
+            bail!("snapshot project_path is outside the callback's sealed live-project authority");
         }
         let canonical = project_path
             .to_str()
@@ -127,18 +181,17 @@ impl RuntimeProjectSnapshotService {
             cas,
             project_path,
         };
-        match request.operation.as_str() {
-            "status" => status(&ctx, &params),
-            "log" => log(&ctx, params.limit.unwrap_or(20).max(1)),
-            "create" => create(&ctx, params.message, params.allow_empty),
-            "show" => show(
+        match request.operation {
+            ProjectSnapshotOperation::Status => status(&ctx, &params),
+            ProjectSnapshotOperation::Log => log(&ctx, params.limit.unwrap_or(20).max(1)),
+            ProjectSnapshotOperation::Create => create(&ctx, params.message, params.allow_empty),
+            ProjectSnapshotOperation::Show => show(
                 &ctx,
                 params
                     .snapshot_hash
                     .as_deref()
                     .ok_or_else(|| anyhow!("snapshot_hash is required"))?,
             ),
-            _ => unreachable!("operation was validated before authorization"),
         }
     }
 }
@@ -856,6 +909,94 @@ fn capture_regular_file_no_follow(_root: &Path, path: &Path) -> Result<Option<Ca
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn snapshot_callback_requires_project_and_manifest_runtime_authority() {
+        let authorizer = Authorizer::new();
+        let project_ceiling = vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()];
+        let create_runtime = vec![project_snapshot_cap(&ProjectSnapshotOperation::Create)];
+        assert!(authorize_snapshot_operation(
+            &authorizer,
+            &project_ceiling,
+            &create_runtime,
+            &ProjectSnapshotOperation::Create,
+        )
+        .is_ok());
+
+        let missing_project = authorize_snapshot_operation(
+            &authorizer,
+            &[],
+            &create_runtime,
+            &ProjectSnapshotOperation::Create,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            missing_project.contains(LIVE_PROJECT_WRITE_CAPABILITY),
+            "got: {missing_project}"
+        );
+
+        let missing_runtime = authorize_snapshot_operation(
+            &authorizer,
+            &project_ceiling,
+            &[],
+            &ProjectSnapshotOperation::Create,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            missing_runtime.contains("ryeos.create.project-snapshots.live"),
+            "got: {missing_runtime}"
+        );
+    }
+
+    #[test]
+    fn snapshot_callback_runtime_authority_is_operation_specific() {
+        let authorizer = Authorizer::new();
+        let project_ceiling = vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()];
+        let status_runtime = vec![project_snapshot_cap(&ProjectSnapshotOperation::Status)];
+        let error = authorize_snapshot_operation(
+            &authorizer,
+            &project_ceiling,
+            &status_runtime,
+            &ProjectSnapshotOperation::Create,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("ryeos.create.project-snapshots.live"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn snapshot_callback_project_authority_is_operation_specific() {
+        let authorizer = Authorizer::new();
+        let write_only_ceiling = vec![LIVE_PROJECT_WRITE_CAPABILITY.to_string()];
+        let status_runtime = vec![project_snapshot_cap(&ProjectSnapshotOperation::Status)];
+        let error = authorize_snapshot_operation(
+            &authorizer,
+            &write_only_ceiling,
+            &status_runtime,
+            &ProjectSnapshotOperation::Status,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(LIVE_PROJECT_READ_CAPABILITY),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn snapshot_callback_params_reject_unknown_and_removed_fields() {
+        let error = serde_json::from_value::<ProjectParams>(serde_json::json!({
+            "project": "/project"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown field `project`"), "got: {error}");
+    }
 
     #[test]
     fn snapshot_walk_omits_symlinks_without_following_them() {

@@ -1,9 +1,14 @@
-# ryeos:signed:2026-07-27T09:00:07Z:779770187a7301a33927c47e18885c37d87aab31b76b1a23a5fc43c53799b423:mD5ds5uh8FoQJJO3897EahHHX5tqlJVPXiqHvsgkPPUnvjXroAcaNcOywuINQdS+UWKlL1R6D1oHJpYtdhvbBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-30T00:35:10Z:ee19b3e250503e2b6d04956c8855db53006d2576387e3e1648290c93a25f7f82:oFF0jmTMWw4xGEELCNQ8+pS13k9B5gnKNr9O89pFHd0jWdzPq4JwNIQxcsFb9/oNeHAwYaWy496uF/nbKJKtDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
-category: "ryeos/core"
+category: "core"
 name: "snapshot-log"
 required_caps: ["ryeos.read.project.live"]
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        project_snapshots: [log]
 description: "Show recent snapshots from the principal's local project head."
 
 config:

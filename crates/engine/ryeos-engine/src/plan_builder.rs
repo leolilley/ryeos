@@ -69,6 +69,8 @@ struct RuntimeSourceAuthorityDecls {
     runtime_vault: Vec<RuntimeSourceVaultDecl>,
     #[serde(default)]
     item_authoring: Vec<RuntimeSourceItemAuthorDecl>,
+    #[serde(default)]
+    project_snapshots: Vec<RuntimeSourceProjectSnapshotOperation>,
 }
 
 #[allow(dead_code)]
@@ -103,6 +105,16 @@ enum RuntimeSourceVaultOperation {
     Get,
     Delete,
     List,
+}
+
+#[allow(dead_code)]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum RuntimeSourceProjectSnapshotOperation {
+    Status,
+    Log,
+    Show,
+    Create,
 }
 
 #[allow(dead_code)]
@@ -1287,6 +1299,22 @@ mod tests {
             verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts())
                 .unwrap_err();
         assert!(error.to_string().contains("invalid runtime_authority"));
+    }
+
+    #[test]
+    fn runtime_bundle_generation_accepts_project_snapshot_authority() {
+        let parent = tempdir();
+        let bundle_root = parent.join("runtime-bundle");
+        fs::create_dir_all(bundle_root.join(crate::AI_DIR)).unwrap();
+        let body = "name: runtime-bundle\nversion: 1.0.0\nprovides_kinds: []\nrequires_kinds: []\nruntime_authority:\n  project_snapshots: [status, create]\n";
+        let signed = lillux::signature::sign_content(body, &test_signing_key(), "#", None);
+        fs::write(
+            bundle_root.join(crate::AI_DIR).join("manifest.yaml"),
+            signed,
+        )
+        .unwrap();
+
+        verify_bundle_source_manifest_identity(&bundle_root, "runtime-bundle", &test_ts()).unwrap();
     }
 
     #[test]

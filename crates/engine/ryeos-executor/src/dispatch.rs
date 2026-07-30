@@ -6398,6 +6398,7 @@ runtime_authority:
   item_authoring:
     - kind: knowledge
       namespace: runtime-authored/*
+  project_snapshots: [status, log, show, create]
 "#;
 
     #[test]
@@ -6570,6 +6571,28 @@ runtime_authority:
                 "ryeos.get.vault.example-bundle/oauth".to_string(),
                 "ryeos.put.vault.example-bundle/oauth".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn project_snapshot_requirement_mints_exact_operation() {
+        let bundle = tempdir().join("example-bundle");
+        write_signed_manifest(&bundle.join(ryeos_engine::AI_DIR), SELF_BUNDLE_MANIFEST);
+        let ctx = test_execution_context(bundle.clone());
+        let resolved = resolved_tool_with_extra(
+            &bundle,
+            "tool:example-bundle/snapshot-create",
+            requires_extra(json!({
+                "capabilities": { "manifest": { "runtime_authority": {
+                    "project_snapshots": ["create"]
+                } } }
+            })),
+        );
+        let caps = derive_manifest_runtime_caps(&resolved.resolved_item, &resolved.item_ref, &ctx)
+            .unwrap();
+        assert_eq!(
+            caps,
+            vec!["ryeos.create.project-snapshots.live".to_string()]
         );
     }
 

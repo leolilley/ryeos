@@ -1,7 +1,7 @@
-<!-- ryeos:signed:2026-07-23T15:25:30Z:2d6607cb750bb26edc60130f87f86a347ceac45bfb965e18e98789186cd5b4e5:ATdp212MbbEm31M5zu5HjbCjYXnfGFTtPfehbUrThNN0Mycj1gp/b9y488zw9Q59TEEdSIW4qkR0iKu8kSCkDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-30T00:35:21Z:25aad2336802ee7302b4f7d3b9912d6f0782dcb22ab4a9fda387831c0cde8720:1wnMfEpX3Pj5338dq0S/Z/7QlmZsfqgDJPpSKGDeZIX6GOjGyKbg+GsRaszbWjLtTYXtS/JUnLR9yVPeBb/PBg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 tags: [fundamentals, directives, workflows, prompts]
-version: "2.0.0"
+version: "2.0.1"
 description: >
   How directives work — YAML frontmatter, XML process body,
   inheritance (extends), capability requirements, limits, and context blocks.
@@ -103,8 +103,8 @@ Rules:
   - `["ryeos.execute.service.fetch"]` — just the fetch service
   - `[]` (or omitted) — no tool execution (read-only directive)
 - `requires.capabilities.manifest` — runtime callback authority (bundle events /
-  vault) the daemon mints only as the signed bundle manifest backs it; not
-  self-grantable.
+  vault / item authoring / project snapshots) the daemon mints only as the
+  signed bundle manifest backs it; not self-grantable.
 
 `declared` **narrows** through extends chains — a child can only reduce the
 parent's declared set, never expand it. `manifest` is stricter: a child that

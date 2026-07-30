@@ -12,7 +12,6 @@ use serde_json::Value;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotStatusParams {
-    #[serde(alias = "project")]
     pub project_path: PathBuf,
     #[serde(default)]
     pub include_unchanged: bool,
@@ -23,7 +22,6 @@ pub struct SnapshotStatusParams {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotLogParams {
-    #[serde(alias = "project")]
     pub project_path: PathBuf,
     #[serde(default = "default_limit", deserialize_with = "deserialize_limit")]
     pub limit: usize,
@@ -32,7 +30,6 @@ pub struct SnapshotLogParams {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SnapshotCreateParams {
-    #[serde(alias = "project")]
     pub project_path: PathBuf,
     #[serde(default)]
     pub message: Option<String>,
@@ -44,7 +41,7 @@ pub struct SnapshotCreateParams {
 #[serde(deny_unknown_fields)]
 pub struct SnapshotShowParams {
     pub snapshot_hash: String,
-    #[serde(default, alias = "project")]
+    #[serde(default)]
     pub project_path: Option<PathBuf>,
 }
 
@@ -115,5 +112,25 @@ where
         other => Err(serde::de::Error::custom(format!(
             "limit must be an integer or integer string, got {other}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_params_accept_only_project_path() {
+        let current: SnapshotCreateParams = serde_json::from_value(serde_json::json!({
+            "project_path": "/project"
+        }))
+        .unwrap();
+        assert_eq!(current.project_path, PathBuf::from("/project"));
+
+        let legacy = serde_json::from_value::<SnapshotCreateParams>(serde_json::json!({
+            "project": "/project"
+        }))
+        .unwrap_err();
+        assert!(legacy.to_string().contains("unknown field `project`"));
     }
 }
