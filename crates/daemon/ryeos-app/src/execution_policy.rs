@@ -655,24 +655,30 @@ mod policy_tests {
             authorize_live_project_access(&authorizer, &["*".to_string()], access).unwrap();
         }
 
-        assert!(authorize_live_project_access(
-            &authorizer,
-            &[LIVE_PROJECT_READ_CAPABILITY.to_string()],
-            LiveAccess::ReadWrite,
-        )
-        .is_err());
-        assert!(authorize_live_project_access(
-            &authorizer,
-            &[LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
-            LiveAccess::ReadOnly,
-        )
-        .is_err());
-        assert!(authorize_live_project_access(
-            &authorizer,
-            &["project.write".to_string()],
-            LiveAccess::ReadWrite,
-        )
-        .is_err());
+        assert!(
+            authorize_live_project_access(
+                &authorizer,
+                &[LIVE_PROJECT_READ_CAPABILITY.to_string()],
+                LiveAccess::ReadWrite,
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_live_project_access(
+                &authorizer,
+                &[LIVE_PROJECT_WRITE_CAPABILITY.to_string()],
+                LiveAccess::ReadOnly,
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_live_project_access(
+                &authorizer,
+                &["project.write".to_string()],
+                LiveAccess::ReadWrite,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -6,8 +6,8 @@
 //! auth means the ryeos-ui always sees all threads (admin context).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use anyhow::Result;
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(compact_limits(&serde_json::json!({})), "{}");
     }
 
-    use ryeos_app::thread_lifecycle::{follow_display_state, follow_role, FollowFact};
+    use ryeos_app::thread_lifecycle::{FollowFact, follow_display_state, follow_role};
 
     #[test]
     fn follow_rows_none_is_empty() {

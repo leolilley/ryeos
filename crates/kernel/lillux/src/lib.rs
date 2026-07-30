@@ -11,40 +11,40 @@ pub mod vault;
 
 pub use exec::retain_fork_sensitive_descriptors;
 pub use exec::{
-    configure_inherited_fds, configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
+    AbortedProcess, AttachmentAbortError, AttachmentReleaseError, ForkSensitiveDescriptorLease,
+    OutputLimitExceeded, ProcessAwaitingAttachment, RunningProcess, SpawnResult, SubprocessLimits,
+    SubprocessRequest, SubprocessResult, SupervisedLauncherAttachmentStatusPipe,
+    SupervisedLauncherStatusPipe, SupervisedProcessStatus, configure_inherited_fds,
+    configure_subprocess_limits, sealed_executable_memfd, sealed_memfd,
     supervised_launcher_attachment_status_pipe, supervised_launcher_status_pipe,
-    validate_subprocess_limits, AbortedProcess, AttachmentAbortError, AttachmentReleaseError,
-    ForkSensitiveDescriptorLease, OutputLimitExceeded, ProcessAwaitingAttachment, RunningProcess,
-    SpawnResult, SubprocessLimits, SubprocessRequest, SubprocessResult,
-    SupervisedLauncherAttachmentStatusPipe, SupervisedLauncherStatusPipe, SupervisedProcessStatus,
+    validate_subprocess_limits,
 };
 
 pub use atomic_fs::{
-    atomic_exchange_paths, atomic_write, atomic_write_private, atomic_write_with_mode,
-    remove_dir_all_durable, remove_file_durable, rename_path_durable,
-    rename_path_noreplace_durable, sync_tree_durable, AtomicMutationError, AtomicMutationResult,
+    AtomicMutationError, AtomicMutationResult, atomic_exchange_paths, atomic_write,
+    atomic_write_private, atomic_write_with_mode, remove_dir_all_durable, remove_file_durable,
+    rename_path_durable, rename_path_noreplace_durable, sync_tree_durable,
 };
 pub use cas::{
-    atomic_write_batch, atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path,
-    valid_hash, CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome,
+    CanonicalJsonError, CasPutOutcome, CasStore, StreamedBlobOutcome, atomic_write_batch,
+    atomic_write_batch_in_pinned_root, canonical_json, sha256_hex, shard_path, valid_hash,
 };
-pub use locks::{with_exclusive_file_lock, ExclusiveFileLock, SharedFileLock};
+pub use locks::{ExclusiveFileLock, SharedFileLock, with_exclusive_file_lock};
 pub use secure_fs::{
-    collect_directory_tree_no_follow, collect_regular_files_no_follow,
-    digest_open_regular_file_stable_exact, inspect_optional_entry_no_follow,
-    matches_regular_file_identity, normalized_portable_regular_mode,
-    read_open_regular_file_bounded, read_open_regular_file_exact_bounded,
-    read_optional_regular_file_bounded_no_follow, read_optional_regular_file_no_follow,
-    read_regular_file_bounded_no_follow, read_regular_file_no_follow,
-    read_regular_file_to_string_no_follow, set_open_regular_file_mode,
-    visit_regular_files_no_follow, visit_regular_files_no_follow_bounded, DirectoryTraversalBudget,
-    NoFollowDirectoryTree, PinnedDirectory, PinnedDirectoryEntry, PinnedDirectoryLock,
-    PinnedEntryType, PinnedRegularFile,
+    DirectoryTraversalBudget, NoFollowDirectoryTree, PinnedDirectory, PinnedDirectoryEntry,
+    PinnedDirectoryLock, PinnedEntryType, PinnedRegularFile, collect_directory_tree_no_follow,
+    collect_regular_files_no_follow, digest_open_regular_file_stable_exact,
+    inspect_optional_entry_no_follow, matches_regular_file_identity,
+    normalized_portable_regular_mode, read_open_regular_file_bounded,
+    read_open_regular_file_exact_bounded, read_optional_regular_file_bounded_no_follow,
+    read_optional_regular_file_no_follow, read_regular_file_bounded_no_follow,
+    read_regular_file_no_follow, read_regular_file_to_string_no_follow, set_open_regular_file_mode,
+    visit_regular_files_no_follow, visit_regular_files_no_follow_bounded,
 };
 
 pub use identity::envelope::{
-    inspect_envelope, open_envelope, seal_envelope, validate_envelope_env, AadFields, Envelope,
-    InspectResult, OpenResult, ValidateResult,
+    AadFields, Envelope, InspectResult, OpenResult, ValidateResult, inspect_envelope,
+    open_envelope, seal_envelope, validate_envelope_env,
 };
 
 pub fn run(request: SubprocessRequest) -> SubprocessResult {

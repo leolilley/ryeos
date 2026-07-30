@@ -4,8 +4,8 @@ use std::pin::Pin;
 
 use crate::callback::{CallbackError, HookDispatchIdentity, HookDispatchOccurrence};
 use crate::envelope::{
-    HookDispatchFailureKind, HookDispatchOutput, RuntimeCost, COST_BASIS_ROLLUP,
-    HOOK_INTEGRITY_FAILURE_CODE,
+    COST_BASIS_ROLLUP, HOOK_INTEGRITY_FAILURE_CODE, HookDispatchFailureKind, HookDispatchOutput,
+    RuntimeCost,
 };
 use crate::expression::{EvaluationLimits, EvaluationSession};
 use crate::hooks_loader::CompiledHook;
@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use crate::envelope::HookDispatchOutput;
     use crate::hooks_loader::{
-        compile_hooks, CompiledHook, HookContextSchema, HookDefinition, HookLayer, HookSources,
+        CompiledHook, HookContextSchema, HookDefinition, HookLayer, HookSources, compile_hooks,
     };
     use crate::{CompilationLimits, ExpressionCondition};
     use serde_json::json;

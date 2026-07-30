@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::content::ViewBinding;
 use super::event::RyeOsUiIntent;
 use super::model::{RyeOsCore, RyeOsDockContent, RyeOsDockEdge, RyeOsDockSlotState};
-use super::scene_model::{build_scene_model, RyeOsSceneModel};
+use super::scene_model::{RyeOsSceneModel, build_scene_model};
 use super::seat::InvokeTemplate;
 use crate::ids::TileId;
 use crate::layout::{LayoutTree, SplitAxis};
@@ -16,10 +16,10 @@ mod navigation;
 pub use dialogs::{
     RyeOsOverlayChoice, RyeOsOverlayItemVm, RyeOsOverlayVm, RyeOsShortcutEntryVm, RyeOsTileIntentVm,
 };
+pub use execution::RyeOsTimelineEntryVm;
 #[cfg(test)]
 use execution::status_tone;
 pub(crate) use execution::timeline_summary_entry;
-pub use execution::RyeOsTimelineEntryVm;
 use execution::{facet_backed_response, focused_timeline_entry, retry_intent_for_focused_row};
 pub use navigation::{
     RyeOsAmbientAtlasStyleVm, RyeOsAmbientAtlasVm, RyeOsAmbientModeVm, RyeOsAmbientVm,
@@ -1223,14 +1223,14 @@ fn bound_view_vm_keyed(
         .as_ref()
         .or_else(|| core.data.sources.get(source_key));
     let title = view_ref.rsplit('/').next().unwrap_or(view_ref).to_string();
-    if binding.widget == "text" {
-        if let Some(lines) = static_text_lines(binding) {
-            return RyeOsViewVm::Text {
-                title,
-                lines,
-                position: text_position(binding),
-            };
-        }
+    if binding.widget == "text"
+        && let Some(lines) = static_text_lines(binding)
+    {
+        return RyeOsViewVm::Text {
+            title,
+            lines,
+            position: text_position(binding),
+        };
     }
     match (binding.widget.as_str(), response) {
         // A feed with no chain root is empty, not loading — it would spin
@@ -1867,18 +1867,18 @@ fn input_completion(
 ) -> Vec<String> {
     // Inline @-mention: when the cursor is in an @-token, the hint lists
     // matching refs from the declared mentions source.
-    if let Some(mentions) = input.mentions.as_ref() {
-        if super::tokenize::active_mention(text, cursor).is_some() {
-            let records = core
-                .data
-                .sources
-                .get(&super::content::mention_source_key(view_ref, &input.id))
-                .map(|response| super::content::project_mentions(mentions, response))
-                .unwrap_or_default();
-            return super::tokenize::mention_hint(&records, text, cursor)
-                .into_iter()
-                .collect();
-        }
+    if let Some(mentions) = input.mentions.as_ref()
+        && super::tokenize::active_mention(text, cursor).is_some()
+    {
+        let records = core
+            .data
+            .sources
+            .get(&super::content::mention_source_key(view_ref, &input.id))
+            .map(|response| super::content::project_mentions(mentions, response))
+            .unwrap_or_default();
+        return super::tokenize::mention_hint(&records, text, cursor)
+            .into_iter()
+            .collect();
     }
     let Some(completion) = input.completion.as_ref() else {
         return Vec::new();
@@ -2174,10 +2174,10 @@ pub(crate) fn unsatisfied_facets(core: &RyeOsCore, binding: &ViewBinding) -> Vec
 fn collect_required_facet_refs(value: &serde_json::Value, out: &mut Vec<String>) {
     match value {
         serde_json::Value::String(s) => {
-            if let Some(rest) = s.strip_prefix("@facet:") {
-                if !rest.contains('|') {
-                    out.push(rest.to_string());
-                }
+            if let Some(rest) = s.strip_prefix("@facet:")
+                && !rest.contains('|')
+            {
+                out.push(rest.to_string());
             }
         }
         serde_json::Value::Object(map) => {
@@ -2988,10 +2988,12 @@ mod tests {
             .expect("backdrop scene on empty center");
         // The scene resolves from the view body — objects incl. text labels.
         assert!(!backdrop.objects.is_empty());
-        assert!(backdrop
-            .objects
-            .iter()
-            .any(|o| o.label.as_deref() == Some("RYE OS")));
+        assert!(
+            backdrop
+                .objects
+                .iter()
+                .any(|o| o.label.as_deref() == Some("RYE OS"))
+        );
     }
 
     #[test]
@@ -3125,10 +3127,12 @@ mod tests {
         );
         // Every leaf sits under its group header, indented one level.
         assert!(items.iter().any(|item| item.header));
-        assert!(items
-            .iter()
-            .filter(|item| !item.header)
-            .all(|item| item.depth == 1));
+        assert!(
+            items
+                .iter()
+                .filter(|item| !item.header)
+                .all(|item| item.depth == 1)
+        );
     }
 
     #[test]
@@ -3330,7 +3334,7 @@ mod tests {
 
     #[test]
     fn actual_threads_list_binding_projects_a_table() {
-        use crate::ui::content::{project_table, table_columns, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_table, table_columns};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/list.yaml"
         ))
@@ -3346,7 +3350,9 @@ mod tests {
         let columns = table_columns(&binding);
         assert_eq!(
             columns.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(),
-            ["thread", "kind", "item", "project", "status", "lineage", "created"]
+            [
+                "thread", "kind", "item", "project", "status", "lineage", "created"
+            ]
         );
         let rows = project_table(
             &binding,
@@ -3421,7 +3427,7 @@ mod tests {
 
     #[test]
     fn actual_thread_detail_binding_projects_inspect_sections() {
-        use crate::ui::content::{project_section, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_section};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos-ui/.ai/views/ryeos/threads/detail.yaml"
         ))
@@ -3493,7 +3499,7 @@ mod tests {
 
     #[test]
     fn actual_items_space_binding_projects_renamed_and_nested_fields() {
-        use crate::ui::content::{project_table, project_tone, table_columns, ViewBinding};
+        use crate::ui::content::{ViewBinding, project_table, project_tone, table_columns};
         let binding: ViewBinding = serde_yaml::from_str(include_str!(
             "../../../../../bundles/ryeos-ui/.ai/views/ryeos/items/space.yaml"
         ))

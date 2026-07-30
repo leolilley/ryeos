@@ -593,7 +593,13 @@ if [[ $run_populate -eq 1 ]]; then
     if [[ "$populate_user" != "$(id -un)" ]]; then
         populate_shell="$(getent passwd "$populate_user" | cut -d: -f7)"
         [[ -x "$populate_shell" ]] || populate_shell="/bin/sh"
-        printf -v populate_cmd 'cd %q && exec %q' "$repo_root" "$repo_root/scripts/populate-bundles.sh"
+        if [[ -n "${CARGO:-}" ]]; then
+            printf -v populate_cmd 'cd %q && exec env CARGO=%q %q' \
+                "$repo_root" "$CARGO" "$repo_root/scripts/populate-bundles.sh"
+        else
+            printf -v populate_cmd 'cd %q && exec %q' \
+                "$repo_root" "$repo_root/scripts/populate-bundles.sh"
+        fi
         for a in "${populate_args[@]}"; do printf -v populate_cmd '%s %q' "$populate_cmd" "$a"; done
         ryeos_term_note "running bundle population as $populate_user"
         ryeos_term_suspend

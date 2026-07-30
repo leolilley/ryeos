@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 pub const BLOCKED_NAMES: &[&str] = &[
     "PATH",

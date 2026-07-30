@@ -23,10 +23,10 @@ use std::time::Instant;
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::kind_registry::LaunchAugmentationDecl;
 use ryeos_engine::resolution::ResolutionOutput;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use super::compose_cache::{CacheLookup, CacheOutcome, CacheReason, CachedComposeProjection};
 use super::LaunchAugmentationError;
+use super::compose_cache::{CacheLookup, CacheOutcome, CacheReason, CachedComposeProjection};
 
 const AUGMENTATION_RUNTIME_TIMEOUT_SECS: u64 = 60;
 const MAX_COMPOSE_AUTHORITY_RETRIES: usize = 3;
@@ -234,7 +234,8 @@ pub async fn run(
                 &runtime_config_snapshot,
             )?;
             loop {
-                match super::compose_cache::cache().begin(&cache_key) {
+                let cache_lookup = super::compose_cache::cache().begin(&cache_key);
+                match cache_lookup {
                     CacheLookup::Hit {
                         projection,
                         entry_bytes,
@@ -1084,17 +1085,17 @@ pub async fn run(
         crate::dispatch::MethodFinalizeOutcome::AlreadyTerminal => {
             return Err(LaunchAugmentationError::Threads(format!(
                 "augmentation child {child_thread_id} became terminal before its validated projection was committed"
-            )))
+            )));
         }
         crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => {
             return Err(LaunchAugmentationError::Threads(format!(
                 "augmentation child {child_thread_id} completed after a durable stop won"
-            )))
+            )));
         }
         crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown => {
             return Err(LaunchAugmentationError::Threads(format!(
                 "augmentation child {child_thread_id} was preserved for daemon shutdown recovery"
-            )))
+            )));
         }
     }
         Ok(ColdComposeOutcome::Completed(projection))
@@ -1134,6 +1135,9 @@ pub async fn run(
     }
 }
 
+// This blocking boundary keeps every authority input explicit so none can be
+// silently recovered from ambient state inside the worker.
+#[allow(clippy::too_many_arguments)]
 async fn resolve_compose_authority_off_thread(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1182,6 +1186,7 @@ async fn resolve_compose_authority_off_thread(
     })?
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_compose_authority(
     engine: &ryeos_engine::engine::Engine,
     resolution_project_root: Option<&Path>,
@@ -1460,6 +1465,9 @@ fn runtime_config_snapshot_cache() -> &'static crate::resolved_config_cache::Sna
     CACHE.get_or_init(crate::resolved_config_cache::SnapshotCache::default)
 }
 
+// The cache key is deliberately parameterized by the complete admitted
+// authority tuple.
+#[allow(clippy::too_many_arguments)]
 async fn load_runtime_config_snapshot_cached(
     kind: &str,
     requirements: &BTreeMap<String, ryeos_engine::kind_registry::MethodRuntimeConfigRequirement>,
@@ -2342,7 +2350,7 @@ fn extract_rendered_meta(
 mod tests {
     use super::*;
     #[cfg(target_os = "linux")]
-    use std::sync::{mpsc, Arc};
+    use std::sync::{Arc, mpsc};
     #[cfg(target_os = "linux")]
     use std::time::{Duration, Instant};
 
@@ -2643,25 +2651,22 @@ mod tests {
                     .threads
                     .get_thread(thread_id)
                     .expect("read augmentation child")
+                    && let (Some(identity), Some(persisted_pgid)) =
+                        (thread.runtime.process_identity, thread.runtime.pgid)
                 {
-                    if let (Some(identity), Some(persisted_pgid)) = (
-                        thread.runtime.process_identity,
-                        thread.runtime.pgid,
-                    ) {
-                        let pid = u32::try_from(identity.target_pid).expect("positive child pid");
-                        if let Ok(encoded) = std::fs::read_to_string(&descendant_pid_path) {
-                            if let Ok(descendant_pid) = encoded.trim().parse::<u32>() {
-                                let actual_pgid = process_group(pid);
-                                if descendant_pid != pid
-                                    && lillux::is_alive(descendant_pid)
-                                    && actual_pgid == Some(persisted_pgid)
-                                    && process_group(descendant_pid) == actual_pgid
-                                    && std::fs::read_link(format!("/proc/{pid}/exe"))
-                                        .is_ok_and(|executable| executable == expected_executable)
-                                {
-                                    break (pid, descendant_pid);
-                                }
-                            }
+                    let pid = u32::try_from(identity.target_pid).expect("positive child pid");
+                    if let Ok(encoded) = std::fs::read_to_string(&descendant_pid_path)
+                        && let Ok(descendant_pid) = encoded.trim().parse::<u32>()
+                    {
+                        let actual_pgid = process_group(pid);
+                        if descendant_pid != pid
+                            && lillux::is_alive(descendant_pid)
+                            && actual_pgid == Some(persisted_pgid)
+                            && process_group(descendant_pid) == actual_pgid
+                            && std::fs::read_link(format!("/proc/{pid}/exe"))
+                                .is_ok_and(|executable| executable == expected_executable)
+                        {
+                            break (pid, descendant_pid);
                         }
                     }
                 }

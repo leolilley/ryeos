@@ -1409,9 +1409,11 @@ mod tests {
         );
 
         let error = ThreadSnapshot::from_current_value(value).unwrap_err();
-        assert!(error
-            .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<crate::objects::IncompatibleCurrentObjectSchema>()
+                .is_some()
+        );
         assert!(
             error.to_string().contains("not the exact current contract"),
             "unexpected error: {error:#}"

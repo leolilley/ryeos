@@ -317,8 +317,8 @@ impl LaunchStageTimings {
             thread_id: state.thread_id.clone(),
             item_ref_kind: state.item_ref_kind.clone(),
             launch_class: state.launch_class.clone(),
-            project_source_class: state.project_source_class.clone(),
-            project_realization_class: state.project_realization_class.clone(),
+            project_source_class: state.project_source_class,
+            project_realization_class: state.project_realization_class,
             augmentation_child_thread_ids: state.augmentation_child_thread_ids.clone(),
             total_us,
             accounted_union_us,
@@ -471,10 +471,8 @@ pub fn observe_child_callback(thread_id: &str) {
     }
     drop(registry);
 
-    if recorded {
-        if let Some(timing) = timing {
-            timing.emit("first_child_callback_received");
-        }
+    if recorded && let Some(timing) = timing {
+        timing.emit("first_child_callback_received");
     }
 }
 
@@ -734,10 +732,12 @@ mod tests {
 
         observe_child_callback(&observed_thread_id);
 
-        assert!(observed
-            .snapshot()
-            .milestones_us
-            .contains_key("first_child_callback_received"));
+        assert!(
+            observed
+                .snapshot()
+                .milestones_us
+                .contains_key("first_child_callback_received")
+        );
         let mut registry = REGISTERED_THREAD_TIMINGS
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());

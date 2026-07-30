@@ -1,24 +1,24 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::evaluation::{
-    validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value, ExpressionScope,
+    ExpressionScope, validate_runtime_array_shape, validate_runtime_shape, validate_runtime_value,
 };
 use crate::model::*;
 use crate::{dispatch, edges, env_preflight};
-use ryeos_runtime::envelope::RuntimeCost;
 use ryeos_runtime::RuntimeJsonArrayBudget;
+use ryeos_runtime::envelope::RuntimeCost;
 
 use super::outcome::{
-    add_runtime_cost, ActionOkOutcome, DispatchHardErrorOutcome, ExpressionFailedOutcome,
-    ExpressionFailureEffects, FollowFanoutDoneOutcome, FollowFanoutSuspendOutcome,
-    FollowSuspendOutcome, IntegrityFailedOutcome, LeafSoftErrorOutcome, RetryScheduledOutcome,
-    RunNodeBodyContext, StepOutcome, TerminalOrigin, TerminalOutcome,
+    ActionOkOutcome, DispatchHardErrorOutcome, ExpressionFailedOutcome, ExpressionFailureEffects,
+    FollowFanoutDoneOutcome, FollowFanoutSuspendOutcome, FollowSuspendOutcome,
+    IntegrityFailedOutcome, LeafSoftErrorOutcome, RetryScheduledOutcome, RunNodeBodyContext,
+    StepOutcome, TerminalOrigin, TerminalOutcome, add_runtime_cost,
 };
 use super::transitions::{resolve_next_on_error, retry_attempts_remaining};
-use super::{compute_cache_key, merge_into, Walker};
+use super::{Walker, compute_cache_key, merge_into};
 
 impl Walker {
     /// Action node body: permission check → env preflight → dispatch
@@ -203,20 +203,20 @@ impl Walker {
         // Env preflight — skipped when consuming a stored follow result (the child
         // already ran). Still enforced for first-run follow suspend, bare-marker
         // re-suspend, and normal dispatches.
-        if resumed_follow_envelope.is_none() {
-            if let Err(env_err) = env_preflight::check_env_requires(
+        if resumed_follow_envelope.is_none()
+            && let Err(env_err) = env_preflight::check_env_requires(
                 &self.graph.config.env_requires,
                 &node.env_requires,
-            ) {
-                let err_msg = format!("env preflight failed: {env_err}");
-                return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
-                    item_id: Some(dispatched_item_id),
-                    error: err_msg,
-                    next_on_error: resolve_next_on_error(node, cfg),
-                    elapsed_ms: elapsed,
-                    cost: None,
-                });
-            }
+            )
+        {
+            let err_msg = format!("env preflight failed: {env_err}");
+            return StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
+                item_id: Some(dispatched_item_id),
+                error: err_msg,
+                next_on_error: resolve_next_on_error(node, cfg),
+                elapsed_ms: elapsed,
+                cost: None,
+            });
         }
 
         // A follow node with no stored result does not dispatch inline: hand the
@@ -276,13 +276,13 @@ impl Walker {
                 Ok(classified) => Ok(classified.outcome),
                 Err(error) => {
                     return StepOutcome::Terminal(TerminalOutcome {
-                            status: GraphRunStatus::Error,
-                            error: Some(format!(
-                                "follow node `{current}` resumed with invalid terminal envelope: {error}"
-                            )),
-                            origin: TerminalOrigin::RunControl,
-                            output: None,
-                        });
+                        status: GraphRunStatus::Error,
+                        error: Some(format!(
+                            "follow node `{current}` resumed with invalid terminal envelope: {error}"
+                        )),
+                        origin: TerminalOrigin::RunControl,
+                        output: None,
+                    });
                 }
             }
         } else if node.is_cacheable() {
@@ -370,20 +370,20 @@ impl Walker {
             Err(dispatch_error) => {
                 // A transport/dispatch failure with retry attempts remaining
                 // reschedules a fresh-step re-dispatch; exhausted → on_error.
-                if dispatch_error.retryable {
-                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                        let rc = node.retry.as_ref().expect("retry present when scheduling");
-                        return StepOutcome::RetryScheduled(RetryScheduledOutcome {
-                            item_id: dispatched_item_id,
-                            error: dispatch_error.diagnostic,
-                            failed_attempt,
-                            total_attempts: rc.attempts,
-                            delay_ms: rc.delay_ms(failed_attempt),
-                            elapsed_ms: elapsed,
-                            // Transport failed before the child returned — no cost.
-                            cost: None,
-                        });
-                    }
+                if dispatch_error.retryable
+                    && let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt)
+                {
+                    let rc = node.retry.as_ref().expect("retry present when scheduling");
+                    return StepOutcome::RetryScheduled(RetryScheduledOutcome {
+                        item_id: dispatched_item_id,
+                        error: dispatch_error.diagnostic,
+                        failed_attempt,
+                        total_attempts: rc.attempts,
+                        delay_ms: rc.delay_ms(failed_attempt),
+                        elapsed_ms: elapsed,
+                        // Transport failed before the child returned — no cost.
+                        cost: None,
+                    });
                 }
                 StepOutcome::DispatchHardError(DispatchHardErrorOutcome {
                     item_id: Some(dispatched_item_id),
@@ -409,19 +409,19 @@ impl Walker {
                 }
                 // Authored retry is an attempt budget, not blanket permission.
                 // Only a failure explicitly classified retryable may consume it.
-                if failure.retryable {
-                    if let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt) {
-                        let rc = node.retry.as_ref().expect("retry present when scheduling");
-                        return StepOutcome::RetryScheduled(RetryScheduledOutcome {
-                            item_id: dispatched_item_id,
-                            error: failure.diagnostic,
-                            failed_attempt,
-                            total_attempts: rc.attempts,
-                            delay_ms: rc.delay_ms(failed_attempt),
-                            elapsed_ms: elapsed,
-                            cost: failure.cost,
-                        });
-                    }
+                if failure.retryable
+                    && let Some(failed_attempt) = retry_attempts_remaining(node, retry_attempt)
+                {
+                    let rc = node.retry.as_ref().expect("retry present when scheduling");
+                    return StepOutcome::RetryScheduled(RetryScheduledOutcome {
+                        item_id: dispatched_item_id,
+                        error: failure.diagnostic,
+                        failed_attempt,
+                        total_attempts: rc.attempts,
+                        delay_ms: rc.delay_ms(failed_attempt),
+                        elapsed_ms: elapsed,
+                        cost: failure.cost,
+                    });
                 }
                 let observation = DispatchObservation::child_only(
                     dispatched_item_id.clone(),
@@ -739,11 +739,7 @@ impl Walker {
                             next_on_error: route,
                             elapsed_ms: start.elapsed().as_millis() as u64,
                             cost: total_cost,
-                            effects: ExpressionFailureEffects::fanout(
-                                results,
-                                statuses,
-                                errors,
-                            ),
+                            effects: ExpressionFailureEffects::fanout(results, statuses, errors),
                         });
                     }
                     Err(FanoutNextError::Integrity(error)) => {
@@ -754,11 +750,7 @@ impl Walker {
                             ),
                             elapsed_ms: start.elapsed().as_millis() as u64,
                             cost: total_cost,
-                            effects: ExpressionFailureEffects::fanout(
-                                results,
-                                statuses,
-                                errors,
-                            ),
+                            effects: ExpressionFailureEffects::fanout(results, statuses, errors),
                         });
                     }
                 }
@@ -1018,7 +1010,7 @@ impl Walker {
                     next_on_error: resolve_next_on_error(node, cfg),
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     cost: None,
-                })
+                });
             }
         };
         StepOutcome::FollowFanoutSuspend(Box::new(FollowFanoutSuspendOutcome {

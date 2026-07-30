@@ -279,11 +279,13 @@ mod tests {
         let updated = store.set_project_root(&session_id, Some("/tmp/project".into()));
 
         assert!(updated.is_none());
-        assert!(store
-            .get_session(&session_id)
-            .unwrap()
-            .project_root
-            .is_none());
+        assert!(
+            store
+                .get_session(&session_id)
+                .unwrap()
+                .project_root
+                .is_none()
+        );
     }
 
     #[test]

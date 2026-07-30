@@ -16,9 +16,9 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
-use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use common::DaemonHarness;
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::mock_provider::{MockProvider, MockResponse, MockToolCallSpec};
 use lillux::crypto::SigningKey;
 
 /// Plant the `model-providers/mock` config under
@@ -578,18 +578,19 @@ async fn e2e_directive_with_unauthorized_tool_call_fails_cleanly() {
         project.path().to_str().unwrap(),
         serde_json::json!({"name": "X"}),
     );
-    let (status, body) =
-        match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut).await {
-            Ok(Ok(pair)) => pair,
-            Ok(Err(e)) => panic!("post /execute failed: {e}"),
-            Err(_) => {
-                let stderr = h.drain_stderr_nonblocking().await;
-                panic!(
+    let (status, body) = match tokio::time::timeout(std::time::Duration::from_secs(30), post_fut)
+        .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => panic!("post /execute failed: {e}"),
+        Err(_) => {
+            let stderr = h.drain_stderr_nonblocking().await;
+            panic!(
                 "POST /execute timed out after 30s — denial path hung instead of failing cleanly.\n\
                  --- daemon stderr ---\n{stderr}"
             );
-            }
-        };
+        }
+    };
 
     assert_eq!(
         status,
@@ -647,22 +648,17 @@ async fn poll_thread(
 ) -> Option<ryeos_state::queries::ThreadRow> {
     for _ in 0..120 {
         if projection_path.exists() {
-            if let Ok(db) = ryeos_state::projection::ProjectionDb::open(projection_path) {
-                if let Ok(threads) = ryeos_state::queries::list_threads(&db, 200) {
-                    if let Some(t) = threads.into_iter().find(|t| pred(t)) {
-                        let terminal = matches!(
-                            t.status.as_str(),
-                            "completed"
-                                | "failed"
-                                | "cancelled"
-                                | "killed"
-                                | "timed_out"
-                                | "continued"
-                        );
-                        if !require_terminal || terminal {
-                            return Some(t);
-                        }
-                    }
+            let database = ryeos_state::projection::ProjectionDb::open(projection_path);
+            if let Ok(db) = database
+                && let Ok(threads) = ryeos_state::queries::list_threads(&db, 200)
+                && let Some(t) = threads.into_iter().find(|t| pred(t))
+            {
+                let terminal = matches!(
+                    t.status.as_str(),
+                    "completed" | "failed" | "cancelled" | "killed" | "timed_out" | "continued"
+                );
+                if !require_terminal || terminal {
+                    return Some(t);
                 }
             }
         }
@@ -1088,12 +1084,12 @@ fn plant_sleepy_marker_tool(
     sleep_secs: f64,
     marker_dir: &Path,
 ) -> anyhow::Result<()> {
-    let dir = root.join(".ai/tools");
+    let dir = root.join(".ai/tools").join(name);
     std::fs::create_dir_all(&dir)?;
     let body = format!(
         r#"#!/usr/bin/env python3
 # ryeos-tool:
-#   category: ""
+#   category: "{name}"
 #   version: "1.0.0"
 #   executor_id: "tool:ryeos/core/runtimes/python/script"
 #   description: "concurrency e2e marker tool {index}"
@@ -1112,6 +1108,7 @@ with open(MARKER_DIR + "/" + str(INDEX) + ".end", "w") as f:
 print(json.dumps({{"idx": INDEX}}))
 "#,
         index = index,
+        name = name,
         sleep_secs = sleep_secs,
         marker_dir = marker_dir.to_str().expect("utf-8 marker dir"),
     );
@@ -1142,17 +1139,19 @@ fn sleepy_batch_response() -> MockResponse {
     MockResponse::ToolCalls(vec![
         MockToolCallSpec {
             id: "c1".into(),
-            name: "sleep1".into(),
+            // Canonical project ref `tool:sleep1/sleep1` is flattened for
+            // the provider-facing inventory name.
+            name: "sleep1_sleep1".into(),
             arguments: "{}".into(),
         },
         MockToolCallSpec {
             id: "c2".into(),
-            name: "sleep2".into(),
+            name: "sleep2_sleep2".into(),
             arguments: "{}".into(),
         },
         MockToolCallSpec {
             id: "c3".into(),
-            name: "sleep3".into(),
+            name: "sleep3_sleep3".into(),
             arguments: "{}".into(),
         },
     ])
@@ -1179,10 +1178,23 @@ async fn second_request_tool_messages(mock: &MockProvider) -> Vec<(String, Strin
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
-                m.get("content").map(|c| c.to_string()).unwrap_or_default(),
+                m.get("content")
+                    .and_then(|content| content.as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| {
+                        m.get("content")
+                            .map(ToString::to_string)
+                            .unwrap_or_default()
+                    }),
             )
         })
         .collect()
+}
+
+fn tool_message_failed(content: &str) -> bool {
+    let envelope: serde_json::Value = serde_json::from_str(content)
+        .unwrap_or_else(|e| panic!("tool message content must be a JSON envelope: {e}; {content}"));
+    envelope.get("error").is_some_and(|error| !error.is_null())
 }
 
 async fn run_sleepy_batch(
@@ -1260,9 +1272,9 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
     let markers = tempfile::tempdir().expect("marker tempdir");
 
     // Sleeps chosen so COMPLETION order (2, 3, 1) differs from CALL order,
-    // and so three-way overlap is provable: admission stagger is far below
-    // the shortest sleep.
-    let (status, body) = run_sleepy_batch(&mock_url, markers.path(), [1.6, 0.6, 1.1], None).await;
+    // while leaving enough headroom for process-admission jitter on loaded CI
+    // runners before the shortest-lived tool exits.
+    let (status, body) = run_sleepy_batch(&mock_url, markers.path(), [6.0, 3.5, 4.8], None).await;
     assert_eq!(status, reqwest::StatusCode::OK, "body={body:#}");
     let result = body.get("result").cloned().expect("result envelope");
     assert_eq!(
@@ -1270,6 +1282,14 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
         Some(true),
         "body={body:#}"
     );
+    let tool_messages = second_request_tool_messages(&mock).await;
+    assert!(
+        tool_messages
+            .iter()
+            .all(|(_, content)| !tool_message_failed(content)),
+        "batch tools must execute successfully; messages={tool_messages:?}"
+    );
+
     // Overlap: the latest start precedes the earliest end, so all three tool
     // executions coexisted. Serial dispatch cannot produce this shape (each
     // start would follow the previous end by construction).
@@ -1288,7 +1308,6 @@ async fn e2e_tool_batch_dispatches_concurrently_and_folds_in_call_order() {
 
     // Fold order: transcript tool messages are in CALL order despite the
     // completion order being (2, 3, 1).
-    let tool_messages = second_request_tool_messages(&mock).await;
     let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["c1", "c2", "c3"], "messages={tool_messages:?}");
 
@@ -1320,6 +1339,13 @@ async fn e2e_tool_batch_at_width_one_is_strictly_serial() {
         Some(true),
         "body={body:#}"
     );
+    let tool_messages = second_request_tool_messages(&mock).await;
+    assert!(
+        tool_messages
+            .iter()
+            .all(|(_, content)| !tool_message_failed(content)),
+        "serial tools must execute successfully; messages={tool_messages:?}"
+    );
 
     // Strict serial: every next call starts only after the previous ended.
     for i in 1..3u32 {
@@ -1331,7 +1357,6 @@ async fn e2e_tool_batch_at_width_one_is_strictly_serial() {
             i + 1
         );
     }
-    let tool_messages = second_request_tool_messages(&mock).await;
     let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["c1", "c2", "c3"]);
 
@@ -1347,7 +1372,7 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
         MockResponse::ToolCalls(vec![
             MockToolCallSpec {
                 id: "c1".into(),
-                name: "sleep1".into(),
+                name: "sleep1_sleep1".into(),
                 arguments: "{}".into(),
             },
             MockToolCallSpec {
@@ -1357,7 +1382,7 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
             },
             MockToolCallSpec {
                 id: "c3".into(),
-                name: "sleep3".into(),
+                name: "sleep3_sleep3".into(),
                 arguments: "{}".into(),
             },
         ]),
@@ -1376,12 +1401,23 @@ async fn e2e_tool_batch_refused_member_settles_error_envelope_in_place() {
         Some(true),
         "a refused batch member must not sink the run; body={body:#}"
     );
+    let tool_messages = second_request_tool_messages(&mock).await;
+    assert_eq!(
+        tool_messages.len(),
+        3,
+        "every batch member must settle once; messages={tool_messages:?}"
+    );
+    assert!(
+        !tool_message_failed(&tool_messages[0].1)
+            && tool_message_failed(&tool_messages[1].1)
+            && !tool_message_failed(&tool_messages[2].1),
+        "only the refused middle member may fail; messages={tool_messages:?}"
+    );
 
     // The real tools on both sides of the refusal executed.
     let _ = read_marker(markers.path(), 1, "end");
     let _ = read_marker(markers.path(), 3, "end");
 
-    let tool_messages = second_request_tool_messages(&mock).await;
     let ids: Vec<&str> = tool_messages.iter().map(|(id, _)| id.as_str()).collect();
     assert_eq!(ids, ["c1", "c2", "c3"], "messages={tool_messages:?}");
     assert!(

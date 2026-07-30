@@ -334,12 +334,12 @@ impl ExecutionProjectAuthority {
     }
 
     pub fn for_child(mut self) -> anyhow::Result<Self> {
-        if let Self::PinnedGeneration { realization, .. } = &mut self {
-            if matches!(realization, PinnedProjectRealization::Cow { .. }) {
-                *realization = PinnedProjectRealization::Cow {
-                    terminal_publication: PinnedTerminalPublication::Discard,
-                };
-            }
+        if let Self::PinnedGeneration { realization, .. } = &mut self
+            && matches!(realization, PinnedProjectRealization::Cow { .. })
+        {
+            *realization = PinnedProjectRealization::Cow {
+                terminal_publication: PinnedTerminalPublication::Discard,
+            };
         }
         self.validate()?;
         Ok(self)
@@ -614,12 +614,9 @@ impl ExecutionProjectAuthority {
                     project_authority_id,
                     ..
                 } = environment
+                    && project_authority_id != authority_id
                 {
-                    if project_authority_id != authority_id {
-                        anyhow::bail!(
-                            "live project environment authority is bound to another project"
-                        );
-                    }
+                    anyhow::bail!("live project environment authority is bound to another project");
                 }
                 environment.validate(true)?;
                 validate_capability_ceiling(capability_ceiling)
@@ -788,11 +785,42 @@ impl ExecutionProjectAuthority {
         }
     }
 
+    /// Capabilities the admitted caller was authorized to exercise against
+    /// this project authority.
+    ///
+    /// This ceiling is sealed with the execution authority and survives
+    /// continuation/recovery. Runtime callbacks must use it instead of
+    /// transient transport scopes when proving caller-derived project access.
+    pub fn capability_ceiling(&self) -> &[String] {
+        match self {
+            Self::Projectless { .. } => &[],
+            Self::LiveProject {
+                capability_ceiling,
+                ..
+            }
+            | Self::PinnedGeneration {
+                capability_ceiling,
+                ..
+            } => capability_ceiling,
+        }
+    }
+
     pub fn live_access(&self) -> Option<&LiveAccessAuthority> {
         match self {
             Self::LiveProject { live_access, .. } => Some(live_access),
             Self::Projectless { .. } | Self::PinnedGeneration { .. } => None,
         }
+    }
+
+    /// Resolve the canonical root authorized for live-project reads.
+    ///
+    /// Materialized pinned generations and projectless workspaces are
+    /// execution views, not live-project read authority. Both fail closed.
+    pub fn authorized_live_read_root(&self) -> anyhow::Result<&Path> {
+        let Self::LiveProject { canonical_root, .. } = self else {
+            anyhow::bail!("live-project read requires live project authority");
+        };
+        Ok(canonical_root)
     }
 
     /// Resolve a durable live-project write namespace to the canonical root
@@ -1072,6 +1100,29 @@ mod tests {
     }
 
     #[test]
+    fn live_read_root_excludes_pinned_and_projectless_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let read_only = live_authority(root.path(), LiveProjectAccess::ReadOnly);
+        assert_eq!(read_only.authorized_live_read_root().unwrap(), root.path());
+        let writable = live_authority(root.path(), LiveProjectAccess::ReadWrite);
+        assert_eq!(writable.authorized_live_read_root().unwrap(), root.path());
+
+        let pinned = ExecutionProjectAuthority::pinned(
+            "test-project".to_string(),
+            Some(root.path().to_path_buf()),
+            "a".repeat(64),
+            PinnedProjectRealization::ReadOnly,
+            EnvironmentAuthority::None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(pinned.authorized_live_read_root().is_err());
+        let projectless =
+            ExecutionProjectAuthority::projectless(EnvironmentAuthority::None).unwrap();
+        assert!(projectless.authorized_live_read_root().is_err());
+    }
+
+    #[test]
     fn cow_base_survives_multiple_advances_and_serialized_restart() {
         let root = tempfile::tempdir().unwrap();
         let base = "a".repeat(64);
@@ -1210,9 +1261,11 @@ mod tests {
             vec!["ryeos.read.project".to_string()],
         )
         .unwrap();
-        assert!(!base
-            .same_continuation_lineage(&different_publication)
-            .unwrap());
+        assert!(
+            !base
+                .same_continuation_lineage(&different_publication)
+                .unwrap()
+        );
 
         let read_only = ExecutionProjectAuthority::pinned(
             "test-project".to_string(),

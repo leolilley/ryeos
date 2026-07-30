@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 const SPEC_SOURCE: &str = include_str!("../../assets/onboarding/v1.yaml");

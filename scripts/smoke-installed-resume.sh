@@ -14,7 +14,9 @@ APP_ROOT="${RYEOS_SMOKE_APP_ROOT:-}"
 BUNDLE_SOURCE="${RYEOS_SMOKE_BUNDLE_SOURCE:-/usr/share/ryeos}"
 READY_TIMEOUT="${RYEOS_SMOKE_READY_TIMEOUT:-60}"
 STATE_TIMEOUT="${RYEOS_SMOKE_STATE_TIMEOUT:-30}"
+CHECKPOINT_TIMEOUT="${RYEOS_SMOKE_CHECKPOINT_TIMEOUT:-30}"
 COMMAND_TIMEOUT="${RYEOS_SMOKE_COMMAND_TIMEOUT:-45}"
+INIT_TIMEOUT="${RYEOS_SMOKE_INIT_TIMEOUT:-120}"
 KEEP="${RYEOS_SMOKE_KEEP:-0}"
 TRUST_FILE="${RYEOS_SMOKE_TRUST_FILE:-}"
 
@@ -48,8 +50,23 @@ smoke_exit() {
 }
 trap 'smoke_exit "$?"' EXIT
 
+bounded_for() {
+  local seconds="$1"
+  shift
+  local status
+  if timeout "$seconds" "$@"; then
+    return 0
+  else
+    status="$?"
+  fi
+  if [[ "$status" == "124" ]]; then
+    ryeos_term_fail "command timed out after ${seconds}s: $*"
+  fi
+  return "$status"
+}
+
 bounded() {
-  timeout "$COMMAND_TIMEOUT" "$@"
+  bounded_for "$COMMAND_TIMEOUT" "$@"
 }
 
 mkdir -p "$PROJECT_ROOT/.ai/tools/smoke" "$PROJECT_ROOT/.ai/graphs/smoke"
@@ -67,11 +84,21 @@ cat >"$PROJECT_ROOT/.ai/graphs/smoke/resume.yaml" <<'YAML'
 version: "1.0.0"
 category: smoke
 description: Native-resume graph wrapping the deterministic long-running fixture
+requires:
+  capabilities:
+    declared:
+      - ryeos.execute.tool.smoke/resume
 config:
-  start: wait
+  start: checkpoint
   nodes:
+    checkpoint:
+      node_type: gate
+      next:
+        type: conditional
+        branches:
+          - to: wait
     wait:
-      action: {item_id: "tool:smoke/resume"}
+      action: {item_id: "tool:smoke/resume", ref_bindings: {}}
       next: {type: unconditional, to: done}
     done:
       node_type: return
@@ -118,7 +145,7 @@ wait_ready() {
 }
 
 thread_json() {
-  bounded ryeos thread get --thread-id "$1" --json
+  bounded ryeos thread get --thread-id "$1"
 }
 
 wait_thread_active() {
@@ -140,6 +167,40 @@ wait_thread_active() {
   return 1
 }
 
+wait_checkpoint_ready() {
+  local thread_id="$1"
+  local checkpoint_file="$APP_ROOT/threads/$thread_id/checkpoints/latest.json"
+  local deadline=$((SECONDS + CHECKPOINT_TIMEOUT))
+  while (( SECONDS < deadline )); do
+    if [[ -s "$checkpoint_file" ]] && python3 - "$checkpoint_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as checkpoint:
+    value = json.load(checkpoint)
+
+expected = {
+    "definition_ref": "graph:smoke/resume",
+    "expression_language": "rye-expr/1",
+    "current_node": "wait",
+}
+if any(value.get(key) != expected_value for key, expected_value in expected.items()):
+    raise SystemExit(1)
+PY
+    then
+      return 0
+    fi
+    sleep 1
+  done
+  ryeos_term_fail "thread $thread_id did not produce a resumable checkpoint in ${CHECKPOINT_TIMEOUT}s"
+  if [[ -f "$checkpoint_file" ]]; then
+    printf '%s\n' "checkpoint: $checkpoint_file" >&2
+    sed -n '1,160p' "$checkpoint_file" >&2
+  fi
+  thread_json "$thread_id" >&2 || true
+  return 1
+}
+
 ryeos_term_info "initializing isolated node"
 init_args=(init --non-interactive --source "$BUNDLE_SOURCE")
 if [[ -n "$TRUST_FILE" ]]; then
@@ -149,7 +210,9 @@ if [[ -n "$TRUST_FILE" ]]; then
   }
   init_args+=(--trust-file "$TRUST_FILE")
 fi
-bounded ryeos "${init_args[@]}"
+bounded_for "$INIT_TIMEOUT" ryeos "${init_args[@]}"
+ryeos_term_info "signing resumable fixture"
+bounded ryeos --project "$PROJECT_ROOT" sign tool:smoke/resume graph:smoke/resume
 bounded ryeos start
 wait_ready
 
@@ -169,6 +232,7 @@ CHAIN_ROOT="$(printf '%s' "$BEFORE_JSON" | json_value chain_root_id:first)"
   exit 1
 }
 
+wait_checkpoint_ready "$THREAD_ID"
 ryeos_term_update "restarting active thread" "$THREAD_ID"
 ryeos_term_suspend
 bounded ryeos stop
@@ -189,7 +253,7 @@ AFTER_CHAIN="$(printf '%s' "$AFTER_JSON" | json_value chain_root_id:first)"
   exit 1
 }
 
-PROOF_JSON="$(bounded ryeos thread chain --thread-id "$THREAD_ID" --json)"
+PROOF_JSON="$(bounded ryeos thread chain --thread-id "$THREAD_ID")"
 if ! grep -Fq "$THREAD_ID" <<<"$PROOF_JSON" || ! grep -Fq "$CHAIN_ROOT" <<<"$PROOF_JSON"; then
   ryeos_term_fail "chain proof does not contain durable identities"
   printf '%s\n' "$PROOF_JSON" >&2

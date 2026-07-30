@@ -10,7 +10,7 @@ use tokio::net::{TcpListener, UnixListener};
 use ryeos_app::callback_token::CallbackCapabilityStore;
 use ryeos_app::command_service::CommandService;
 use ryeos_app::event_store_service::EventStoreService;
-use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
 use ryeos_app::identity::NodeIdentity;
 use ryeos_app::state::AppState;
 use ryeos_app::thread_lifecycle::ThreadLifecycleService;
@@ -300,9 +300,6 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             })?;
     }
 
-    std::env::set_var("RYEOSD_SOCKET_PATH", &config.uds_path);
-    std::env::set_var("RYEOSD_URL", format!("http://{}", actual_bind));
-
     // daemon.json is an early discovery hint.  Live lifecycle truth always
     // comes from the UDS, and started_at is process start (never ready time).
     let build = ryeos_app::build_info::get_for_version(env!("CARGO_PKG_VERSION"));
@@ -354,6 +351,7 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
     tokio::task::yield_now().await;
 
     let daemon_result: (Result<()>, bool, bool) = {
+        #[allow(clippy::let_and_return)]
         let daemon_work = async {
             startup.phase(
                 ryeos_node::StartupPhase::Bootstrapping,
@@ -1015,17 +1013,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
 
             prepare_follow_recovery_actions(&app_state, follow_actions)?;
 
-            if !projection_health.is_current() {
-                if let Some(generation) = projection_health.begin_repair() {
-                    let repair_store = app_state.state_store.clone();
-                    let repaired = tokio::task::spawn_blocking(move || {
-                        repair_store.repair_thread_projection()
-                    })
-                    .await
-                    .context("recovery projection repair task failed")?;
-                    projection_health.finish_repair(generation, &repaired);
-                    repaired.context("recovery projection repair failed")?;
-                }
+            if !projection_health.is_current()
+                && let Some(generation) = projection_health.begin_repair()
+            {
+                let repair_store = app_state.state_store.clone();
+                let repaired =
+                    tokio::task::spawn_blocking(move || repair_store.repair_thread_projection())
+                        .await
+                        .context("recovery projection repair task failed")?;
+                projection_health.finish_repair(generation, &repaired);
+                repaired.context("recovery projection repair failed")?;
             }
             let pre_scheduler_projection = projection_health.snapshot();
             if pre_scheduler_projection.status
@@ -1061,17 +1058,16 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             // Scheduler recovery can itself create/project thread state. Take the
             // readiness snapshot only after every recovered fire has crossed its durable
             // dispatch boundary, repairing any journal work produced along the way.
-            if !projection_health.is_current() {
-                if let Some(generation) = projection_health.begin_repair() {
-                    let repair_store = app_state.state_store.clone();
-                    let repaired = tokio::task::spawn_blocking(move || {
-                        repair_store.repair_thread_projection()
-                    })
-                    .await
-                    .context("final recovery projection repair task failed")?;
-                    projection_health.finish_repair(generation, &repaired);
-                    repaired.context("final recovery projection repair failed")?;
-                }
+            if !projection_health.is_current()
+                && let Some(generation) = projection_health.begin_repair()
+            {
+                let repair_store = app_state.state_store.clone();
+                let repaired =
+                    tokio::task::spawn_blocking(move || repair_store.repair_thread_projection())
+                        .await
+                        .context("final recovery projection repair task failed")?;
+                projection_health.finish_repair(generation, &repaired);
+                repaired.context("final recovery projection repair failed")?;
             }
             let projection_snapshot = projection_health.snapshot();
             if projection_snapshot.status
@@ -1100,7 +1096,9 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
             ));
             tracing::info!("scheduler: timer loop started after readiness publication");
 
-            supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await
+            let result =
+                supervise_background_tasks(app_state, ui_state_for_hints, scheduler_task).await;
+            result
         };
         tokio::pin!(daemon_work);
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1169,22 +1167,22 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
         progress_task.abort();
         let _ = progress_task.await;
 
-        if first_exit != FirstExit::HttpListener {
-            if let Err(error) = settle_http_listener(&mut http_task).await {
-                if result.is_ok() {
-                    result = Err(error);
-                } else {
-                    tracing::error!(%error, "HTTP listener also failed during daemon shutdown");
-                }
+        if first_exit != FirstExit::HttpListener
+            && let Err(error) = settle_http_listener(&mut http_task).await
+        {
+            if result.is_ok() {
+                result = Err(error);
+            } else {
+                tracing::error!(%error, "HTTP listener also failed during daemon shutdown");
             }
         }
-        if first_exit != FirstExit::UdsListener {
-            if let Err(error) = settle_uds_listener(&mut uds_task).await {
-                if result.is_ok() {
-                    result = Err(error);
-                } else {
-                    tracing::error!(%error, "UDS listener also failed during daemon shutdown");
-                }
+        if first_exit != FirstExit::UdsListener
+            && let Err(error) = settle_uds_listener(&mut uds_task).await
+        {
+            if result.is_ok() {
+                result = Err(error);
+            } else {
+                tracing::error!(%error, "UDS listener also failed during daemon shutdown");
             }
         }
 
@@ -1194,12 +1192,13 @@ async fn run(process_state_lock: &mut Option<state_lock::StateLock>) -> Result<(
                 .expect("shutdown drain state mutex poisoned");
             guard.take()
         };
-        if let Some(state) = shutdown_state {
-            if !drain_running_threads(&state).await && result.is_ok() {
-                result = Err(anyhow::anyhow!(
-                    "shutdown could not prove every attached process terminated"
-                ));
-            }
+        if let Some(state) = shutdown_state
+            && !drain_running_threads(&state).await
+            && result.is_ok()
+        {
+            result = Err(anyhow::anyhow!(
+                "shutdown could not prove every attached process terminated"
+            ));
         }
 
         (result, startup_cancelled, startup_failed)
@@ -1489,26 +1488,29 @@ async fn dispatch_resume_intents(
                 continue;
             }
         };
+        #[allow(clippy::let_and_return)]
         let outcome = match intent.kind {
             reconcile::ResumeKind::AdmittedRoot => {
-                ryeos_executor::execution::runner::run_existing_admitted_root(
+                let result = ryeos_executor::execution::runner::run_existing_admitted_root(
                     state.clone(),
                     thread_id.clone(),
                     intent.chain_root_id,
                     params,
                     intent.prior_status,
                 )
-                .await
+                .await;
+                result
             }
             reconcile::ResumeKind::NativeResume => {
-                ryeos_executor::execution::runner::run_existing_detached(
+                let result = ryeos_executor::execution::runner::run_existing_detached(
                     state.clone(),
                     thread_id.clone(),
                     intent.chain_root_id,
                     params,
                     intent.prior_status,
                 )
-                .await
+                .await;
+                result
             }
             reconcile::ResumeKind::Continuation | reconcile::ResumeKind::OperatorContinuation => {
                 unreachable!("continuation kinds handled above")
@@ -1676,7 +1678,7 @@ async fn dispatch_follow_actions(
     actions: Vec<reconcile::FollowReconcileAction>,
 ) -> Result<()> {
     for action in actions {
-        use ryeos_executor::execution::launch::{launch_follow_child, SuccessorLaunchOutcome};
+        use ryeos_executor::execution::launch::{SuccessorLaunchOutcome, launch_follow_child};
         let (label, target_thread_id, resume_follow_key, outcome) = match action {
             reconcile::FollowReconcileAction::Resume { follow_key } => {
                 let target_thread_id = state
@@ -1734,18 +1736,17 @@ async fn dispatch_follow_actions(
                     })
                     .is_some_and(|status| status.is_terminal());
                 if terminal {
-                    if let Some(follow_key) = resume_follow_key.as_deref() {
-                        if state
+                    if let Some(follow_key) = resume_follow_key.as_deref()
+                        && state
                             .state_store
                             .get_follow_waiter_by_key(follow_key)?
                             .is_some()
-                        {
-                            return Err(anyhow::anyhow!(error)).with_context(|| {
-                                format!(
-                                    "periodic follow recovery {label} terminalized its successor but did not retire waiter {follow_key}"
-                                )
-                            });
-                        }
+                    {
+                        return Err(anyhow::anyhow!(error)).with_context(|| {
+                            format!(
+                                "periodic follow recovery {label} terminalized its successor but did not retire waiter {follow_key}"
+                            )
+                        });
                     }
                     tracing::warn!(
                         action = %label,
@@ -1782,7 +1783,8 @@ async fn run_periodic_recovery(state: AppState) -> Result<()> {
             _ = tick.tick() => {}
         }
 
-        if let Err(error) = run_periodic_recovery_pass(&state).await {
+        let pass_result = run_periodic_recovery_pass(&state).await;
+        if let Err(error) = pass_result {
             tracing::error!(
                 error = %error,
                 "periodic recovery pass failed; durable recovery state preserved and daemon remains available"
@@ -1962,7 +1964,11 @@ async fn supervise_background_tasks(
     // for that bounded journal-replay unit to finish before state is drained.
     ryeosd::request_shutdown();
     let mut drain_error = None;
-    while let Some(joined) = tasks.join_next().await {
+    loop {
+        let joined = tasks.join_next().await;
+        let Some(joined) = joined else {
+            break;
+        };
         match joined {
             Ok((_, Ok(()))) => {}
             Ok((name, Err(error))) => {
@@ -2094,7 +2100,8 @@ async fn drain_running_threads(state: &AppState) -> bool {
             ),
         }
         if !ryeos_app::state_store::is_terminal_status(&status) {
-            if let Err(error) = state.state_store.reset_resume_attempts(&thread_id) {
+            let reset_result = state.state_store.reset_resume_attempts(&thread_id);
+            if let Err(error) = reset_result {
                 tracing::warn!(
                     thread_id,
                     error = %error,
@@ -2107,7 +2114,8 @@ async fn drain_running_threads(state: &AppState) -> bool {
     let mut in_process_completion_clean = true;
     for (thread_id, control) in in_process_handlers {
         let remaining = drain_deadline.saturating_duration_since(Instant::now());
-        match tokio::time::timeout(remaining, control.wait_completed()).await {
+        let completion = tokio::time::timeout(remaining, control.wait_completed()).await;
+        match completion {
             Ok(
                 ryeos_app::state_store::InProcessHandlerCompletion::TerminalConfirmed
                 | ryeos_app::state_store::InProcessHandlerCompletion::BirthAborted,
@@ -2276,10 +2284,10 @@ fn audit_ownerless_in_process_reservations(state: &AppState) -> anyhow::Result<b
                             }
                         };
                     if settled {
-                        match state
+                        let deletion = state
                             .state_store
-                            .delete_ownerless_terminal_in_process_handler_reservation(&thread_id)
-                        {
+                            .delete_ownerless_terminal_in_process_handler_reservation(&thread_id);
+                        match deletion {
                             Ok(true) => {}
                             Ok(false) => {
                                 clean = false;
@@ -2344,7 +2352,7 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         match signal(SignalKind::terminate()) {
             Ok(mut sigterm) => {
                 sigterm.recv().await;
@@ -2357,10 +2365,13 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     let lifecycle_shutdown = async {
-        if let Some(mut rx) = ryeosd::subscribe_shutdown() {
-            let _ = rx.recv().await;
-        } else {
-            std::future::pending::<()>().await;
+        match ryeosd::subscribe_shutdown() {
+            Some(mut rx) => {
+                let _ = rx.recv().await;
+            }
+            None => {
+                std::future::pending::<()>().await;
+            }
         }
     };
 
@@ -2674,7 +2685,7 @@ mod recovery_tests;
 
 #[cfg(test)]
 mod shutdown_mapping_tests {
-    use ryeos_app::process::{resolve_shutdown_action, ShutdownAction};
+    use ryeos_app::process::{ShutdownAction, resolve_shutdown_action};
     use ryeos_engine::contracts::CancellationMode;
     use std::time::Duration;
 

@@ -10,10 +10,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -241,12 +241,14 @@ async fn application_dispatch(State(state): State<DynamicHttpState>, request: Re
         // protects the invariant if a future caller violates that ordering.
         return unavailable_response(&lifecycle);
     };
-    ryeos_api::routes::dispatcher::route_dispatcher_from_ingress(
+    let response = ryeos_api::routes::dispatcher::route_dispatcher_from_ingress(
         State((*application).clone()),
         request,
         ingress_started_at,
     )
-    .await
+    .await;
+    drop(application);
+    response
 }
 
 fn unavailable_response(lifecycle: &LifecycleResponse) -> Response {
@@ -783,10 +785,10 @@ fn validate_progress_transition(previous: &StartupSnapshot, next: &StartupSnapsh
     if next.elapsed_ms < previous.elapsed_ms {
         anyhow::bail!("startup elapsed time cannot move backwards");
     }
-    if let (Some(done), Some(total)) = (next.chains_done, next.chains_total) {
-        if done > total {
-            anyhow::bail!("startup chains_done cannot exceed chains_total");
-        }
+    if let (Some(done), Some(total)) = (next.chains_done, next.chains_total)
+        && done > total
+    {
+        anyhow::bail!("startup chains_done cannot exceed chains_total");
     }
     if next.phase != previous.phase {
         return Ok(());
@@ -862,7 +864,8 @@ pub async fn progress_ticker(coordinator: StartupCoordinator) {
         if !coordinator.is_starting() {
             return;
         }
-        if let Err(error) = coordinator.refresh() {
+        let refresh_result = coordinator.refresh();
+        if let Err(error) = refresh_result {
             tracing::warn!(%error, "failed to refresh startup lifecycle progress");
             return;
         }
@@ -967,25 +970,33 @@ mod tests {
 
     #[test]
     fn startup_stage_rejects_phase_regression_and_reordering() {
-        assert!(advance_startup_stage(
-            StartupStage::InitialHeadReplay,
-            StartupPhase::OpeningProjection,
-        )
-        .is_err());
-        assert!(advance_startup_stage(
-            StartupStage::RecoveringSchedulerProjection,
-            StartupPhase::ReconcilingThreads,
-        )
-        .is_err());
-        assert!(advance_startup_stage(
-            StartupStage::ReconcilingFollow,
-            StartupPhase::ReconcilingThreads,
-        )
-        .is_err());
-        assert!(advance_startup_stage(
-            StartupStage::ReconcilingScheduler,
-            StartupPhase::ReplayingHeadChanges,
-        )
-        .is_err());
+        assert!(
+            advance_startup_stage(
+                StartupStage::InitialHeadReplay,
+                StartupPhase::OpeningProjection,
+            )
+            .is_err()
+        );
+        assert!(
+            advance_startup_stage(
+                StartupStage::RecoveringSchedulerProjection,
+                StartupPhase::ReconcilingThreads,
+            )
+            .is_err()
+        );
+        assert!(
+            advance_startup_stage(
+                StartupStage::ReconcilingFollow,
+                StartupPhase::ReconcilingThreads,
+            )
+            .is_err()
+        );
+        assert!(
+            advance_startup_stage(
+                StartupStage::ReconcilingScheduler,
+                StartupPhase::ReplayingHeadChanges,
+            )
+            .is_err()
+        );
     }
 }

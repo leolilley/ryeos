@@ -64,7 +64,9 @@ pub enum DispatchError {
     InvalidRef(String, String),
     #[error("kind '{kind}' is not root-executable: {detail}")]
     NotRootExecutable { kind: String, detail: String },
-    #[error("insufficient capabilities for runtime '{runtime}': required {required:?}, caller_scopes {caller_scopes:?}")]
+    #[error(
+        "insufficient capabilities for runtime '{runtime}': required {required:?}, caller_scopes {caller_scopes:?}"
+    )]
     InsufficientCaps {
         runtime: String,
         required: Vec<String>,
@@ -102,7 +104,9 @@ pub enum DispatchError {
     },
     /// Service capability denied — the caller lacks the scope required
     /// by the service handler's declared capabilities.
-    #[error("service '{service_ref}' denied: caller scopes {caller_scopes:?} do not include required '{required}'")]
+    #[error(
+        "service '{service_ref}' denied: caller scopes {caller_scopes:?} do not include required '{required}'"
+    )]
     ServiceCapDenied {
         service_ref: String,
         required: String,
@@ -171,7 +175,9 @@ pub enum DispatchError {
     /// coupling this generic error to any executable kind. The
     /// secret resolves from sealed vault, daemon host env, or `.env`
     /// overlay; `remediation` carries the actionable string.
-    #[error("required secret missing for '{item_ref}': `{env_var}` was not found in sealed vault, daemon host environment, or `.env` overlay (source: {source_kind}/{source_name})")]
+    #[error(
+        "required secret missing for '{item_ref}': `{env_var}` was not found in sealed vault, daemon host environment, or `.env` overlay (source: {source_kind}/{source_name})"
+    )]
     RequiredSecretMissing {
         item_ref: String,
         env_var: String,

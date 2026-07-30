@@ -12,7 +12,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use rand::RngCore;
@@ -222,15 +222,15 @@ pub fn run_mint_admission_token(
     if params.ttl_secs == 0 {
         bail!("ttl_secs must be greater than zero");
     }
-    if let Some(policy) = load_hosted_policy(&params.app_root)? {
-        if params.ttl_secs > policy.admission.token_ttl_secs {
-            bail!(
-                "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
-                params.ttl_secs,
-                policy.admission.token_ttl_secs,
-                policy.source_file.display()
-            );
-        }
+    if let Some(policy) = load_hosted_policy(&params.app_root)?
+        && params.ttl_secs > policy.admission.token_ttl_secs
+    {
+        bail!(
+            "ttl_secs {} exceeds hosted-node policy maximum {} from {}",
+            params.ttl_secs,
+            policy.admission.token_ttl_secs,
+            policy.source_file.display()
+        );
     }
 
     let mut scopes = params
@@ -320,19 +320,13 @@ mod tests {
     use super::*;
     use lillux::crypto::EncodePrivateKey;
     use rand::rngs::OsRng;
-    use std::sync::{Mutex, MutexGuard};
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
-
     struct HostedPolicyFixture {
-        _env_guard: MutexGuard<'static, ()>,
         _user: std::path::PathBuf,
         key: lillux::crypto::SigningKey,
     }
 
     impl HostedPolicyFixture {
         fn new(root: &std::path::Path) -> Self {
-            let env_guard = ENV_MUTEX.lock().unwrap();
             let user = root.join("user");
             let trust_dir = user
                 .join(ryeos_engine::AI_DIR)
@@ -342,19 +336,8 @@ mod tests {
             std::fs::create_dir_all(&trust_dir).unwrap();
             let key = lillux::crypto::SigningKey::generate(&mut OsRng);
             ryeos_engine::trust::pin_key(&key.verifying_key(), "test", &trust_dir, None).unwrap();
-            std::env::set_var("RYEOS_APP_ROOT", &user);
             write_node_bootstrap(root, &trust_dir, &key);
-            Self {
-                _env_guard: env_guard,
-                _user: user,
-                key,
-            }
-        }
-    }
-
-    impl Drop for HostedPolicyFixture {
-        fn drop(&mut self) {
-            std::env::remove_var("RYEOS_APP_ROOT");
+            Self { _user: user, key }
         }
     }
 

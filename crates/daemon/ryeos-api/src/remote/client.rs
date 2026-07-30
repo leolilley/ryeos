@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::Verifier;
 use serde_json::Value;
@@ -111,11 +111,14 @@ async fn read_json_checked_with_limit(
             .min(body_limit),
     );
     let mut truncated = false;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .with_context(|| format!("{method} {url}: failed to read response body"))?
-    {
+    loop {
+        let next_chunk = resp
+            .chunk()
+            .await
+            .with_context(|| format!("{method} {url}: failed to read response body"))?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         let remaining = body_limit.saturating_sub(body.len());
         if chunk.len() > remaining {
             if success {
@@ -993,7 +996,7 @@ impl RemoteClient {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let nonce_bytes = rand::Rng::gen::<[u8; 16]>(&mut rand::thread_rng());
+        let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
         let token_hash = admission_token_hash(token);
         let claim = admission_claim_string(
@@ -1176,7 +1179,7 @@ impl RemoteClient {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
-        let nonce_bytes = rand::Rng::gen::<[u8; 16]>(&mut rand::thread_rng());
+        let nonce_bytes = rand::Rng::r#gen::<[u8; 16]>(&mut rand::thread_rng());
         let nonce = base64::engine::general_purpose::STANDARD.encode(nonce_bytes);
 
         let body_hash = lillux::cas::sha256_hex(body);
@@ -2476,14 +2479,14 @@ impl AdmissionAttestationsForSubjectResponse {
                     attestation.subject_hash
                 );
             }
-            if let Some(policy) = policy {
-                if attestation.policy != policy {
-                    anyhow::bail!(
-                        "admission attestation policy mismatch: expected {}, got {}",
-                        policy,
-                        attestation.policy
-                    );
-                }
+            if let Some(policy) = policy
+                && attestation.policy != policy
+            {
+                anyhow::bail!(
+                    "admission attestation policy mismatch: expected {}, got {}",
+                    policy,
+                    attestation.policy
+                );
             }
         }
         Ok(())
@@ -2685,20 +2688,24 @@ mod tests {
         .validate_against_request(&[a.clone(), b.clone()], &[])
         .unwrap();
 
-        assert!(ObjectsHasResponse {
-            found_object_hashes: vec![a.clone()],
-            ..Default::default()
-        }
-        .validate_against_request(&[a.clone(), b.clone()], &[])
-        .is_err());
+        assert!(
+            ObjectsHasResponse {
+                found_object_hashes: vec![a.clone()],
+                ..Default::default()
+            }
+            .validate_against_request(&[a.clone(), b.clone()], &[])
+            .is_err()
+        );
 
-        assert!(ObjectsHasResponse {
-            found_blob_hashes: vec![a.clone()],
-            missing_blob_hashes: vec![a.clone()],
-            ..Default::default()
-        }
-        .validate_against_request(&[], &[a, b])
-        .is_err());
+        assert!(
+            ObjectsHasResponse {
+                found_blob_hashes: vec![a.clone()],
+                missing_blob_hashes: vec![a.clone()],
+                ..Default::default()
+            }
+            .validate_against_request(&[], &[a, b])
+            .is_err()
+        );
     }
 
     #[test]
@@ -2778,12 +2785,16 @@ mod tests {
         response
             .validate_against_request(&"11".repeat(32), Some("local-node-v1"))
             .unwrap();
-        assert!(response
-            .validate_against_request(&"33".repeat(32), Some("local-node-v1"))
-            .is_err());
-        assert!(response
-            .validate_against_request(&"11".repeat(32), Some("other"))
-            .is_err());
+        assert!(
+            response
+                .validate_against_request(&"33".repeat(32), Some("local-node-v1"))
+                .is_err()
+        );
+        assert!(
+            response
+                .validate_against_request(&"11".repeat(32), Some("other"))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2989,9 +3000,11 @@ mod tests {
                 }]
             }))
             .unwrap();
-        assert!(mismatched_attempt
-            .validate_against_request("job-a")
-            .is_err());
+        assert!(
+            mismatched_attempt
+                .validate_against_request("job-a")
+                .is_err()
+        );
     }
 
     #[test]

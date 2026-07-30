@@ -623,13 +623,17 @@ mod tests {
             acquired_tx.send(()).unwrap();
         });
 
-        assert!(acquired_rx
-            .recv_timeout(Duration::from_millis(100))
-            .is_err());
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
         drop(first_reader);
-        assert!(acquired_rx
-            .recv_timeout(Duration::from_millis(100))
-            .is_err());
+        assert!(
+            acquired_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
         drop(second_reader);
         acquired_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         writer.join().unwrap();

@@ -14,7 +14,7 @@ use serde::Serialize;
 
 use crate::config::{Config, ConfigSources};
 use crate::runtime_db::{RuntimeDb, RuntimeThreadHistoryDiscardReport};
-use crate::state_lock::{default_lock_path, StateLock};
+use crate::state_lock::{StateLock, default_lock_path};
 
 pub const EXECUTION_SCHEMA_CUTOVER_COMMAND: &str = "ryeos node gc --discard-thread-history --discard-project-heads --confirm-discard-thread-history --confirm-discard-project-heads";
 
@@ -748,9 +748,11 @@ mod tests {
         let directory = lillux::PinnedDirectory::open(tmp.path())
             .unwrap()
             .expect("scheduler parent exists");
-        assert!(open_scheduler_db(&path, &directory, true)
-            .unwrap()
-            .is_none());
+        assert!(
+            open_scheduler_db(&path, &directory, true)
+                .unwrap()
+                .is_none()
+        );
         assert!(!path.exists());
     }
 }

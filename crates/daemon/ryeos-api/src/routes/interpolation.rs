@@ -193,11 +193,7 @@ fn try_interpolate_string(
 
     result.push_str(remaining);
 
-    if changed {
-        Ok(Some(result))
-    } else {
-        Ok(None)
-    }
+    if changed { Ok(Some(result)) } else { Ok(None) }
 }
 
 #[cfg(test)]

@@ -243,19 +243,19 @@ fn validate_field_shape(
     }
 
     let value = value.unwrap();
-    if let Some(expected) = rule.expect_value_type {
-        if !expected.matches(value) {
-            return Err((
-                ResolutionStepNameWire::PipelineInit,
-                format!(
-                    "{ref_label}: `{}` of type {actual} but composer_config expects {expected_str} — \
-                     parser handler/declared-schema disagreement",
-                    rule.name,
-                    actual = json_value_type(value),
-                    expected_str = expected.as_str(),
-                ),
-            ));
-        }
+    if let Some(expected) = rule.expect_value_type
+        && !expected.matches(value)
+    {
+        return Err((
+            ResolutionStepNameWire::PipelineInit,
+            format!(
+                "{ref_label}: `{}` of type {actual} but composer_config expects {expected_str} — \
+                 parser handler/declared-schema disagreement",
+                rule.name,
+                actual = json_value_type(value),
+                expected_str = expected.as_str(),
+            ),
+        ));
     }
 
     if rule.strategy == ComposerStrategy::DictMergeRootLast && !value.is_object() {
@@ -345,22 +345,21 @@ fn apply_strategy(
                 .unwrap_or(false);
             if !child_has {
                 for parent in ancestor_parsed {
-                    if let Some(v) = parent.get(&rule.name) {
-                        if !v.is_null() {
-                            if let Value::Object(obj) = composed {
-                                obj.insert(rule.name.clone(), v.clone());
-                            }
-                            break;
-                        }
+                    if let Some(v) = parent.get(&rule.name)
+                        && !v.is_null()
+                        && let Value::Object(obj) = composed
+                    {
+                        obj.insert(rule.name.clone(), v.clone());
+                        break;
                     }
                 }
             }
         }
         ComposerStrategy::ReplaceRootLast => {
-            if let Some(value) = last_declared_field(ancestor_parsed, root_parsed, &rule.name) {
-                if let Value::Object(obj) = composed {
-                    obj.insert(rule.name.clone(), value.clone());
-                }
+            if let Some(value) = last_declared_field(ancestor_parsed, root_parsed, &rule.name)
+                && let Value::Object(obj) = composed
+            {
+                obj.insert(rule.name.clone(), value.clone());
             }
         }
         ComposerStrategy::DictMergeRootLast => {
@@ -403,13 +402,12 @@ fn apply_strategy(
             if !child_has {
                 // Child omitted the field — inherit from first ancestor that has it.
                 for parent in ancestor_parsed {
-                    if let Some(v) = parent.get(&rule.name) {
-                        if !v.is_null() {
-                            if let Value::Object(obj) = composed {
-                                obj.insert(rule.name.clone(), v.clone());
-                            }
-                            break;
-                        }
+                    if let Some(v) = parent.get(&rule.name)
+                        && !v.is_null()
+                        && let Value::Object(obj) = composed
+                    {
+                        obj.insert(rule.name.clone(), v.clone());
+                        break;
                     }
                 }
             } else {
@@ -670,43 +668,64 @@ fn string_array(v: &Value) -> Vec<String> {
 // The manifest-backed runtime-authority vocabulary lives in
 // `ryeos_bundle::runtime_authority` (`RuntimeAuthorityDecls` /
 // `RuntimeAuthorityRequirements`, `BundleEventOperation` /
-// `RuntimeVaultOperation`). Mirrored here so the composer can fail loud at
-// compose time without a dependency on that crate; the launch-time parser is
-// still the authoritative gate.
+// `RuntimeVaultOperation` / `ProjectSnapshotOperation`). Mirrored here so the
+// composer can fail loud at compose time without a dependency on that crate;
+// the launch-time parser is still the authoritative gate.
 const BUNDLE_EVENT_OPS: &[&str] = &["append", "scan"];
 const RUNTIME_VAULT_OPS: &[&str] = &["put", "get", "delete", "list"];
+const PROJECT_SNAPSHOT_OPS: &[&str] = &["status", "log", "show", "create"];
 
 /// The only key permitted directly under `requires.capabilities.manifest`: the
 /// `runtime_authority` family set the daemon mints from the signed manifest.
 const MANIFEST_KEYS: &[&str] = &["runtime_authority"];
 
-/// One runtime-authority family and how it narrows. Operation-based families
-/// (`ops = Some`) compare `(id, operation)` pairs; the pattern-based
-/// item-authoring family (`ops = None`) compares `(kind, namespace)` with the
-/// parent namespace pattern covering the child. Adding a family here teaches
-/// both the shape check and the narrowing check at once, mirroring the closed
-/// family set in `ryeos_bundle::runtime_authority`.
+/// One runtime-authority family and how it narrows. Resource-operation
+/// families compare `(id, operation)` pairs, operation-list families compare
+/// operations directly, and item authoring compares `(kind, namespace)` with
+/// the parent namespace pattern covering the child. Adding a family here
+/// teaches both the shape check and narrowing check at once, mirroring the
+/// closed family set in `ryeos_bundle::runtime_authority`.
+#[derive(Clone, Copy)]
+enum ManifestFamilyShape {
+    ResourceOperations {
+        id_key: &'static str,
+        operations: &'static [&'static str],
+    },
+    OperationList {
+        operations: &'static [&'static str],
+    },
+    ItemAuthoring,
+}
+
 struct ManifestFamily {
     key: &'static str,
-    id_key: &'static str,
-    ops: Option<&'static [&'static str]>,
+    shape: ManifestFamilyShape,
 }
 
 const RUNTIME_AUTHORITY_FAMILIES: &[ManifestFamily] = &[
     ManifestFamily {
         key: "bundle_events",
-        id_key: "event_kind",
-        ops: Some(BUNDLE_EVENT_OPS),
+        shape: ManifestFamilyShape::ResourceOperations {
+            id_key: "event_kind",
+            operations: BUNDLE_EVENT_OPS,
+        },
     },
     ManifestFamily {
         key: "runtime_vault",
-        id_key: "namespace",
-        ops: Some(RUNTIME_VAULT_OPS),
+        shape: ManifestFamilyShape::ResourceOperations {
+            id_key: "namespace",
+            operations: RUNTIME_VAULT_OPS,
+        },
     },
     ManifestFamily {
         key: "item_authoring",
-        id_key: "kind",
-        ops: None,
+        shape: ManifestFamilyShape::ItemAuthoring,
+    },
+    ManifestFamily {
+        key: "project_snapshots",
+        shape: ManifestFamilyShape::OperationList {
+            operations: PROJECT_SNAPSHOT_OPS,
+        },
     },
 ];
 
@@ -727,9 +746,10 @@ pub(crate) fn manifest_value(parsed: &Value) -> Option<&Value> {
 /// Strict shape check for the `manifest` sub-tree at compose time: the only key
 /// is `runtime_authority`, whose families are the operation-based
 /// `bundle_events` / `runtime_vault` resource lists (each entry a mapping with a
-/// non-empty id and a non-empty list of known operations) and the pattern-based
-/// `item_authoring` list (each entry a `{kind, namespace}` mapping). Fails loud
-/// rather than deferring malformed authoring to the launch parser.
+/// non-empty id and a non-empty list of known operations), the pattern-based
+/// `item_authoring` list (each entry a `{kind, namespace}` mapping), and the
+/// `project_snapshots` operation list. Fails loud rather than deferring
+/// malformed authoring to the launch parser.
 pub(crate) fn validate_manifest_shape(
     manifest: &Value,
 ) -> Result<(), (ResolutionStepNameWire, String)> {
@@ -767,11 +787,45 @@ pub(crate) fn validate_manifest_shape(
         }
     }
     for family in RUNTIME_AUTHORITY_FAMILIES {
-        match family.ops {
-            Some(ops) => {
-                validate_manifest_resources(ra_map.get(family.key), family.id_key, ops, family.key)?
+        match family.shape {
+            ManifestFamilyShape::ResourceOperations { id_key, operations } => {
+                validate_manifest_resources(ra_map.get(family.key), id_key, operations, family.key)?
             }
-            None => validate_item_authoring_entries(ra_map.get(family.key), family.key)?,
+            ManifestFamilyShape::OperationList { operations } => {
+                validate_manifest_operation_list(ra_map.get(family.key), operations, family.key)?
+            }
+            ManifestFamilyShape::ItemAuthoring => {
+                validate_item_authoring_entries(ra_map.get(family.key), family.key)?
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Shape check for a flat operation-list authority family.
+fn validate_manifest_operation_list(
+    list: Option<&Value>,
+    valid_operations: &[&str],
+    tag: &str,
+) -> Result<(), (ResolutionStepNameWire, String)> {
+    let err = |m: String| (ResolutionStepNameWire::PipelineInit, m);
+    let Some(value) = list else {
+        return Ok(());
+    };
+    let operations = value.as_array().ok_or_else(|| {
+        err(format!(
+            "`requires.capabilities.manifest.runtime_authority.{tag}` must be a list"
+        ))
+    })?;
+    for operation in operations {
+        let operation = operation
+            .as_str()
+            .ok_or_else(|| err(format!("`{tag}` operations must be strings")))?;
+        if !valid_operations.contains(&operation) {
+            return Err(err(format!(
+                "invalid operation `{operation}` for `{tag}` (allowed: {})",
+                valid_operations.join(", ")
+            )));
         }
     }
     Ok(())
@@ -917,15 +971,23 @@ fn manifest_missing(child: &Map<String, Value>, parent: &Map<String, Value>) -> 
     for family in RUNTIME_AUTHORITY_FAMILIES {
         let child_family = child_ra.and_then(|v| v.get(family.key));
         let parent_family = parent_ra.and_then(|v| v.get(family.key));
-        match family.ops {
-            Some(_) => collect_missing_resource_requirements(
+        match family.shape {
+            ManifestFamilyShape::ResourceOperations { id_key, .. } => {
+                collect_missing_resource_requirements(
+                    child_family,
+                    parent_family,
+                    id_key,
+                    family.key,
+                    &mut missing,
+                )
+            }
+            ManifestFamilyShape::OperationList { .. } => collect_missing_operation_requirements(
                 child_family,
                 parent_family,
-                family.id_key,
                 family.key,
                 &mut missing,
             ),
-            None => collect_missing_authoring_requirements(
+            ManifestFamilyShape::ItemAuthoring => collect_missing_authoring_requirements(
                 child_family,
                 parent_family,
                 family.key,
@@ -935,6 +997,30 @@ fn manifest_missing(child: &Map<String, Value>, parent: &Map<String, Value>) -> 
     }
     missing.sort();
     missing
+}
+
+/// Collect child operations that are not present in the parent's flat
+/// operation list.
+fn collect_missing_operation_requirements(
+    child: Option<&Value>,
+    parent: Option<&Value>,
+    tag: &str,
+    missing: &mut Vec<String>,
+) {
+    let Some(child_operations) = child.and_then(Value::as_array) else {
+        return;
+    };
+    let parent_operations: HashSet<&str> = parent
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    for operation in child_operations.iter().filter_map(Value::as_str) {
+        if !parent_operations.contains(operation) {
+            missing.push(format!("{tag}.{operation}"));
+        }
+    }
 }
 
 /// Collect child item-authoring `(kind, namespace)` entries the parent does not
@@ -1627,6 +1713,94 @@ mod tests {
                 "item_authoring": item_authoring,
             } } }
         })
+    }
+
+    /// A `requires` block carrying only project-snapshot operations.
+    fn snapshot_requires(project_snapshots: Value) -> Value {
+        json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "project_snapshots": project_snapshots,
+            } } }
+        })
+    }
+
+    #[test]
+    fn requires_project_snapshots_root_kept_verbatim() {
+        let child = json!({
+            "requires": snapshot_requires(json!(["status", "create"])),
+            "body": "b"
+        });
+        let view = run(requires_config(), child, vec![]).unwrap();
+        assert_eq!(
+            view.composed
+                .pointer("/requires/capabilities/manifest/runtime_authority/project_snapshots"),
+            Some(&json!(["status", "create"])),
+        );
+    }
+
+    #[test]
+    fn requires_project_snapshots_child_narrows_parent() {
+        let parent = json!({
+            "requires": snapshot_requires(json!(["status", "create"])),
+            "body": ""
+        });
+        let child = json!({
+            "extends": "parent",
+            "requires": snapshot_requires(json!(["status"])),
+            "body": "b"
+        });
+        let view = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap();
+        assert_eq!(
+            view.composed
+                .pointer("/requires/capabilities/manifest/runtime_authority/project_snapshots"),
+            Some(&json!(["status"])),
+        );
+    }
+
+    #[test]
+    fn requires_project_snapshots_child_cannot_widen_parent() {
+        let parent = json!({
+            "requires": snapshot_requires(json!(["status"])),
+            "body": ""
+        });
+        let child = json!({
+            "extends": "parent",
+            "requires": snapshot_requires(json!(["create"])),
+            "body": "b"
+        });
+        let error = run(
+            requires_config(),
+            child,
+            vec![ancestor_input("parent", parent)],
+        )
+        .unwrap_err();
+        assert!(
+            error.1.contains("widens parent requirement")
+                && error.1.contains("project_snapshots.create"),
+            "got: {}",
+            error.1
+        );
+    }
+
+    #[test]
+    fn requires_project_snapshots_rejects_unknown_operation() {
+        let child = json!({
+            "requires": snapshot_requires(json!(["restore"])),
+            "body": "b"
+        });
+        let error = run(requires_config(), child, vec![]).unwrap_err();
+        assert!(
+            error
+                .1
+                .contains("invalid operation `restore` for `project_snapshots`"),
+            "got: {}",
+            error.1
+        );
     }
 
     #[test]

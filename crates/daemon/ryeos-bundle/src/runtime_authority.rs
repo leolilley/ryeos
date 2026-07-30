@@ -2,14 +2,16 @@
 //!
 //! "Runtime authority" is the set of daemon callback capabilities a **signed
 //! bundle manifest** may declare for the bundle's own running code — today
-//! bundle events, runtime vault, and daemon-authored project item writes (see
-//! `ryeos/future/tool-runtime-authority`). Per that contract, this authority is
-//! *always minted by the daemon* from the signed manifest and is **never**
-//! grantable through a composed `permissions:` block.
+//! bundle events, runtime vault, daemon-authored project item writes, and
+//! daemon-mediated project snapshots (see `ryeos/future/tool-runtime-authority`).
+//! Per that contract, this authority is *always minted by the daemon* from the
+//! signed manifest and is **never** grantable through a composed `permissions:`
+//! block.
 //!
 //! This module is the single source of truth for that vocabulary:
 //!
-//! - the cap `kind` segments (`bundle-events`, `vault`, and ordinary item kinds),
+//! - the cap `kind` segments (`bundle-events`, `vault`, `project-snapshots`,
+//!   and ordinary item kinds),
 //! - the typed cap constructors the manifest declarations and the daemon
 //!   callback services both use to build/require caps, and
 //! - the classifier that rejects a user-composed grant which would overlap the
@@ -26,14 +28,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::manifest::{
-    BundleEventDecl, BundleEventOperation, ItemAuthorDecl, RuntimeAuthorityDecls, RuntimeVaultDecl,
-    RuntimeVaultOperation,
+    BundleEventDecl, BundleEventOperation, ItemAuthorDecl, ProjectSnapshotOperation,
+    RuntimeAuthorityDecls, RuntimeVaultDecl, RuntimeVaultOperation,
 };
 
 /// Capability `kind` segment for bundle-event authority.
 pub const CAP_KIND_BUNDLE_EVENTS: &str = "bundle-events";
 /// Capability `kind` segment for runtime-vault authority.
 pub const CAP_KIND_RUNTIME_VAULT: &str = "vault";
+/// Capability `kind` segment for project-snapshot authority.
+pub const CAP_KIND_PROJECT_SNAPSHOTS: &str = "project-snapshots";
 
 /// The `(verb, kind)` surfaces a signed manifest can mint into, derived once from
 /// the runtime-authority families themselves so this classification cannot drift
@@ -48,6 +52,9 @@ fn authority_surfaces() -> &'static [(&'static str, &'static str)] {
         }
         for op in RuntimeVaultOperation::ALL {
             surfaces.push((op.cap_verb(), CAP_KIND_RUNTIME_VAULT));
+        }
+        for op in ProjectSnapshotOperation::ALL {
+            surfaces.push((op.cap_verb(), CAP_KIND_PROJECT_SNAPSHOTS));
         }
         // `author` intentionally reserves every item kind: the capability shape
         // is `ryeos.author.<kind>.<bare-id>`, so no composed grant may self-mint
@@ -93,6 +100,27 @@ impl RuntimeVaultOperation {
     }
 }
 
+impl ProjectSnapshotOperation {
+    /// Every variant, so cap construction and reserved-surface derivation stay
+    /// exhaustive as the enum grows.
+    pub const ALL: &'static [ProjectSnapshotOperation] = &[
+        ProjectSnapshotOperation::Status,
+        ProjectSnapshotOperation::Log,
+        ProjectSnapshotOperation::Show,
+        ProjectSnapshotOperation::Create,
+    ];
+
+    /// The capability `verb` this operation authorizes.
+    pub fn cap_verb(&self) -> &'static str {
+        match self {
+            ProjectSnapshotOperation::Status => "status",
+            ProjectSnapshotOperation::Log => "log",
+            ProjectSnapshotOperation::Show => "show",
+            ProjectSnapshotOperation::Create => "create",
+        }
+    }
+}
+
 /// Build the bundle-event capability for `op` on `bundle_id`/`event_kind`.
 pub fn bundle_event_cap(op: &BundleEventOperation, bundle_id: &str, event_kind: &str) -> String {
     canonical_cap(
@@ -116,6 +144,12 @@ pub fn runtime_vault_cap(op: &RuntimeVaultOperation, bundle_id: &str, namespace:
 /// wildcard support comes only from the unified authorizer.
 pub fn item_author_cap(kind: &str, namespace: &str) -> String {
     canonical_cap(kind, namespace, "author")
+}
+
+/// Build the daemon-mediated capability for one snapshot operation against the
+/// exact live project already bound into the callback capability.
+pub fn project_snapshot_cap(op: &ProjectSnapshotOperation) -> String {
+    canonical_cap(CAP_KIND_PROJECT_SNAPSHOTS, "live", op.cap_verb())
 }
 
 impl BundleEventDecl {
@@ -155,6 +189,7 @@ impl RuntimeAuthorityDecls {
         self.bundle_events.is_empty()
             && self.runtime_vault.is_empty()
             && self.item_authoring.is_empty()
+            && self.project_snapshots.is_empty()
     }
 
     /// The full set of caps this manifest grants `bundle_id` as an authority
@@ -172,6 +207,7 @@ impl RuntimeAuthorityDecls {
         for decl in &self.item_authoring {
             caps.extend(decl.runtime_authority_caps());
         }
+        caps.extend(self.project_snapshots.iter().map(project_snapshot_cap));
         caps
     }
 
@@ -275,6 +311,7 @@ pub fn manifest_backs_requested_cap(manifest_caps: &BTreeSet<String>, requested_
 //             item_authoring:
 //               - kind: knowledge
 //                 namespace: runtime-authored/*
+//             project_snapshots: [status, log, show, create]
 //
 // `declared` is honored because the launcher refuses to spawn an unsigned
 // effective item — a signed item may assert its own execution authority.
@@ -338,6 +375,8 @@ pub struct RuntimeAuthorityRequirements {
     pub runtime_vault: Vec<RuntimeVaultRequirement>,
     #[serde(default)]
     pub item_authoring: Vec<ItemAuthorRequirement>,
+    #[serde(default)]
+    pub project_snapshots: Vec<ProjectSnapshotOperation>,
 }
 
 /// One bundle-event requirement: an event kind plus the operations the item
@@ -399,6 +438,7 @@ impl RuntimeAuthorityRequirements {
         self.bundle_events.is_empty()
             && self.runtime_vault.is_empty()
             && self.item_authoring.is_empty()
+            && self.project_snapshots.is_empty()
     }
 
     /// Whether the item declares any manifest-backed runtime authority at all —
@@ -420,6 +460,7 @@ impl RuntimeAuthorityRequirements {
         for req in &self.item_authoring {
             caps.extend(req.requested_caps());
         }
+        caps.extend(self.project_snapshots.iter().map(project_snapshot_cap));
         caps
     }
 
@@ -593,7 +634,7 @@ pub enum ComposedGrantError {
     /// a runtime-authority requirement. Refused outright.
     Malformed { grant: String, reason: String },
     /// A well-formed grant that overlaps the manifest runtime-authority
-    /// namespace (bundle events / vault / item authoring).
+    /// namespace (bundle events / vault / item authoring / project snapshots).
     Reserved { grant: String },
 }
 
@@ -607,8 +648,9 @@ impl std::fmt::Display for ComposedGrantError {
             ),
             ComposedGrantError::Reserved { grant } => write!(
                 f,
-                "capability '{grant}' is reserved: bundle-event, runtime-vault, and item-authoring capabilities are \
-                 manifest-backed runtime authority. Declare them under \
+                "capability '{grant}' is reserved: bundle-event, runtime-vault, item-authoring, \
+                 and project-snapshot capabilities are manifest-backed runtime authority. \
+                 Declare them under \
                  `requires.capabilities.manifest.runtime_authority`, not `requires.capabilities.declared` — the \
                  signed manifest is the authority upper bound and the item selects the subset it \
                  needs"
@@ -668,6 +710,10 @@ mod tests {
             item_author_cap("knowledge", "runtime-authored/*"),
             "ryeos.author.knowledge.runtime-authored/*"
         );
+        assert_eq!(
+            project_snapshot_cap(&ProjectSnapshotOperation::Create),
+            "ryeos.create.project-snapshots.live"
+        );
     }
 
     #[test]
@@ -693,8 +739,10 @@ mod tests {
             "ryeos.scan.bundle-events.example-bundle/example_event",
             "ryeos.author.knowledge.runtime-authored/*",
             "ryeos.author.tool.ryeos/*",
+            "ryeos.create.project-snapshots.live",
             "ryeos.scan.bundle-events.*",
             "ryeos.put.*",
+            "ryeos.*.project-snapshots.*",
             "ryeos.author.*",
             "ryeos.*.vault.*",
             "ryeos.put.vault", // implicit subject wildcard
@@ -717,6 +765,7 @@ mod tests {
             // node-vault is a *service* (kind=service, subject vault/list), not
             // runtime-vault authority — must not be flagged.
             "ryeos.execute.service.vault/list",
+            "ryeos.write.project.live",
             "not-a-ryeos-cap",
         ] {
             assert!(
@@ -779,11 +828,13 @@ mod tests {
     fn subject_path_wildcard_is_admitted_but_cannot_evade_reserved_surfaces() {
         // The trailing `/*` subject wildcard is valid grammar for ordinary
         // execute grants (the fleet-parent namespace case)…
-        assert!(reject_disallowed_composed_grants(&[
-            "ryeos.execute.tool.arc/*".into(),
-            "ryeos.execute.directive.arc/*".into(),
-        ])
-        .is_ok());
+        assert!(
+            reject_disallowed_composed_grants(&[
+                "ryeos.execute.tool.arc/*".into(),
+                "ryeos.execute.directive.arc/*".into(),
+            ])
+            .is_ok()
+        );
         // …and because classification keys on the verb/kind segments — which
         // the subject wildcard never touches — a path wildcard on a
         // manifest-authority surface still classifies Reserved.
@@ -880,6 +931,28 @@ mod tests {
             "bundle_events": [ { "event_kind": "e", "operations": ["frobnicate"] } ]
         } } } });
         assert!(parse_runtime_requires(&value).is_err());
+
+        let value = json!({ "capabilities": { "manifest": { "runtime_authority": {
+            "project_snapshots": ["frobnicate"]
+        } } } });
+        assert!(parse_runtime_requires(&value).is_err());
+    }
+
+    #[test]
+    fn project_snapshot_requirements_mint_exact_operation_caps() {
+        let reqs = parse_runtime_requires(&json!({
+            "capabilities": { "manifest": { "runtime_authority": {
+                "project_snapshots": ["status", "create"]
+            } } }
+        }))
+        .unwrap();
+        assert_eq!(
+            requested_runtime_caps(&reqs, "core"),
+            BTreeSet::from([
+                "ryeos.create.project-snapshots.live".to_string(),
+                "ryeos.status.project-snapshots.live".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -939,10 +1012,12 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(empty_ns
-            .validate()
-            .unwrap_err()
-            .contains("empty `namespace`"));
+        assert!(
+            empty_ns
+                .validate()
+                .unwrap_err()
+                .contains("empty `namespace`")
+        );
     }
 
     #[test]

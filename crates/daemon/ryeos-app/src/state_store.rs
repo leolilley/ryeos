@@ -3,21 +3,21 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use ryeos_runtime::checkpoint::{checkpoint_shape_limits, validate_checkpoint_shape};
 use ryeos_runtime::RuntimeJsonArrayBudget;
-use ryeos_state::chain::{ChainLock, SnapshotUpdate};
-use ryeos_state::objects::thread_snapshot::{parse_canonical_timestamp, ThreadStatus};
-use ryeos_state::objects::ThreadSnapshot;
-use ryeos_state::objects::ThreadUsage;
-use ryeos_state::queries;
-use ryeos_state::signer::Signer;
+use ryeos_runtime::checkpoint::{checkpoint_shape_limits, validate_checkpoint_shape};
 use ryeos_state::CreateChainWithEventSuccessorRequest;
 use ryeos_state::StateDb;
 use ryeos_state::UsageSubject;
+use ryeos_state::chain::{ChainLock, SnapshotUpdate};
+use ryeos_state::objects::ThreadSnapshot;
+use ryeos_state::objects::ThreadUsage;
+use ryeos_state::objects::thread_snapshot::{ThreadStatus, parse_canonical_timestamp};
+use ryeos_state::queries;
+use ryeos_state::signer::Signer;
 
 use crate::projection_health::ThreadProjectionHealth;
 use crate::runtime_db;
@@ -1182,17 +1182,28 @@ fn load_admitted_launch_capsule(
     Ok(capsule)
 }
 
+struct ContinuationCapsuleTransition<'a> {
+    chain_root_id: &'a str,
+    source_thread_id: &'a str,
+    launch_metadata: Option<&'a crate::launch_metadata::RuntimeLaunchMetadata>,
+    expected_result_snapshot_hash: Option<&'a str>,
+    kind: crate::launch_metadata::ContinuationAuthorityTransitionKind,
+}
+
 fn attach_continuation_launch_capsule(
     state_authority: &ryeos_state::PinnedStateAuthority,
     cas_guard: &ryeos_state::CasMutationGuard,
     inner: &Inner,
-    chain_root_id: &str,
-    source_thread_id: &str,
     snapshot: ThreadSnapshot,
-    launch_metadata: Option<&crate::launch_metadata::RuntimeLaunchMetadata>,
-    expected_result_snapshot_hash: Option<&str>,
-    transition_kind: crate::launch_metadata::ContinuationAuthorityTransitionKind,
+    transition: ContinuationCapsuleTransition<'_>,
 ) -> Result<(ThreadSnapshot, ThreadSnapshot)> {
+    let ContinuationCapsuleTransition {
+        chain_root_id,
+        source_thread_id,
+        launch_metadata,
+        expected_result_snapshot_hash,
+        kind,
+    } = transition;
     let source_snapshot =
         authoritative_snapshot_for_transition(inner, chain_root_id, source_thread_id)?;
     if let Some(successor_metadata) = launch_metadata {
@@ -1226,7 +1237,7 @@ fn attach_continuation_launch_capsule(
             source_resume,
             expected_result_snapshot_hash
                 .or(source_snapshot.result_project_snapshot_hash.as_deref()),
-            transition_kind,
+            kind,
         )?;
     }
     let source_capsule = source_snapshot
@@ -2508,7 +2519,8 @@ impl ThreadRuntimeAuthority {
         let current_threads = self
             .app_root
             .open_child_directory(std::ffi::OsStr::new("threads"))?;
-        match (&self.threads_root, current_threads) {
+        let bindings = (&self.threads_root, current_threads);
+        match bindings {
             (Some(expected), Some(current)) if expected.is_same_directory(&current)? => Ok(()),
             (None, None) => Ok(()),
             _ => bail!(
@@ -2577,7 +2589,8 @@ fn inspect_thread_runtime_files(
 fn delete_runtime_tree_contents(directory: &lillux::PinnedDirectory) -> Result<usize> {
     let mut deleted = 0usize;
     for name in directory.entry_names()? {
-        match directory.open_entry(&name, false)? {
+        let entry = directory.open_entry(&name, false)?;
+        match entry {
             Some(lillux::PinnedDirectoryEntry::Directory(child)) => {
                 deleted = deleted
                     .checked_add(delete_runtime_tree_contents(&child)?)
@@ -3619,12 +3632,11 @@ impl StateStore {
             bail!("thread creation is closed for daemon shutdown");
         }
         let launch_planning = g.runtime_db.launch_planning_by_thread(&thread.thread_id)?;
-        if let Some(planning) = launch_planning.as_ref() {
-            if planning.state != "planning"
-                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
-            {
-                return Err(LaunchPlanningInactive.into());
-            }
+        if let Some(planning) = launch_planning.as_ref()
+            && (planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id())
+        {
+            return Err(LaunchPlanningInactive.into());
         }
         // Initial facet events are subject to the same collection/key/value
         // limits as ordinary appends. The new thread is not projected yet, so
@@ -3695,14 +3707,13 @@ impl StateStore {
         } else {
             g.runtime_db
                 .insert_thread_runtime(&thread.thread_id, &thread.chain_root_id)?;
-            if let Some(launch_metadata) = launch_metadata {
-                if let Err(error) = g
+            if let Some(launch_metadata) = launch_metadata
+                && let Err(error) = g
                     .runtime_db
                     .set_launch_metadata(&thread.thread_id, launch_metadata)
-                {
-                    let _ = g.runtime_db.delete_thread_runtime(&thread.thread_id);
-                    return Err(error);
-                }
+            {
+                let _ = g.runtime_db.delete_thread_runtime(&thread.thread_id);
+                return Err(error);
             }
         }
         let committed = match event_successor_snapshot {
@@ -4072,14 +4083,14 @@ impl StateStore {
                 .project_authority
                 .operational_snapshot_projection()
                 .map(str::to_owned);
-            if let Some(requested_base) = base_project_snapshot_hash {
-                if Some(requested_base) != authoritative_base.as_deref() {
-                    bail!(
-                        "mark_running project snapshot mismatch for {thread_id}: authoritative {:?}, requested {:?}",
-                        authoritative_base,
-                        requested_base,
-                    );
-                }
+            if let Some(requested_base) = base_project_snapshot_hash
+                && Some(requested_base) != authoritative_base.as_deref()
+            {
+                bail!(
+                    "mark_running project snapshot mismatch for {thread_id}: authoritative {:?}, requested {:?}",
+                    authoritative_base,
+                    requested_base,
+                );
             }
 
             let now = lillux::time::iso8601_now();
@@ -4663,10 +4674,10 @@ impl StateStore {
             "has_error": update.error_json.is_some(),
             "artifact_count": update.artifacts.len(),
         });
-        if let Some(err) = &update.error_json {
-            if let Some(map) = terminal_payload.as_object_mut() {
-                map.insert("error".to_string(), err.clone());
-            }
+        if let Some(err) = &update.error_json
+            && let Some(map) = terminal_payload.as_object_mut()
+        {
+            map.insert("error".to_string(), err.clone());
         }
         events_to_append.push(NewEventRecord {
             event_type: terminal_event_type(&update.status)?.to_string(),
@@ -4714,12 +4725,11 @@ impl StateStore {
         let launch_planning = g
             .runtime_db
             .launch_planning_by_thread(&successor.thread_id)?;
-        if let Some(planning) = launch_planning.as_ref() {
-            if planning.state != "planning"
-                || planning.daemon_generation_id != runtime_db::daemon_generation_id()
-            {
-                return Err(LaunchPlanningInactive.into());
-            }
+        if let Some(planning) = launch_planning.as_ref()
+            && (planning.state != "planning"
+                || planning.daemon_generation_id != runtime_db::daemon_generation_id())
+        {
+            return Err(LaunchPlanningInactive.into());
         }
         validate_facet_event_admission(&g, &successor.thread_id, &initial_events)?;
         if !self
@@ -4762,12 +4772,14 @@ impl StateStore {
             &self.state_authority,
             permit.cas_guard(),
             &g,
-            chain_root_id,
-            source_thread_id,
             build_snapshot(&successor_with_upstream),
-            launch_metadata,
-            None,
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            ContinuationCapsuleTransition {
+                chain_root_id,
+                source_thread_id,
+                launch_metadata,
+                expected_result_snapshot_hash: None,
+                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            },
         )?;
         // Predecessor-immutability contract: terminal sources retain their
         // exact snapshot, while a running source is settled to `continued` in
@@ -4796,14 +4808,13 @@ impl StateStore {
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-            if let Some(launch_metadata) = launch_metadata {
-                if let Err(error) = g
+            if let Some(launch_metadata) = launch_metadata
+                && let Err(error) = g
                     .runtime_db
                     .set_launch_metadata(&successor.thread_id, launch_metadata)
-                {
-                    let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                    return Err(error);
-                }
+            {
+                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+                return Err(error);
             }
         }
 
@@ -5315,12 +5326,14 @@ impl StateStore {
             &self.state_authority,
             permit.cas_guard(),
             &g,
-            chain_root_id,
-            source_thread_id,
             build_continuation_snapshot(&successor_with_upstream, &successor_resume_context)?,
-            Some(&successor_meta),
-            source_result_snapshot_hash,
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            ContinuationCapsuleTransition {
+                chain_root_id,
+                source_thread_id,
+                launch_metadata: Some(&successor_meta),
+                expected_result_snapshot_hash: source_result_snapshot_hash,
+                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::Inherit,
+            },
         )?;
 
         // Runtime-db writes FIRST: insert the successor runtime row and seed its
@@ -5328,23 +5341,22 @@ impl StateStore {
         // settle. If the seed fails, only an orphan runtime row exists — no
         // state-db successor edge, source untouched and still running.
         {
-            if let Some(prepared) = successor_launch_metadata {
-                if prepared.native_resume != source_launch_metadata.native_resume
+            if let Some(prepared) = successor_launch_metadata
+                && (prepared.native_resume != source_launch_metadata.native_resume
                     || prepared.cancellation_mode != source_launch_metadata.cancellation_mode
-                    || prepared.launch_driver != source_launch_metadata.launch_driver
-                {
-                    bail!(
-                        "prepared successor execution policy differs from its source launch metadata"
-                    );
-                }
+                    || prepared.launch_driver != source_launch_metadata.launch_driver)
+            {
+                bail!(
+                    "prepared successor execution policy differs from its source launch metadata"
+                );
             }
             let _admission = g.state_db.authorize_runtime_pin(chain_root_id)?;
             g.runtime_db
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
-            if let Err(error) = g
+            let metadata_result = g
                 .runtime_db
-                .set_launch_metadata(&successor.thread_id, &successor_meta)
-            {
+                .set_launch_metadata(&successor.thread_id, &successor_meta);
+            if let Err(error) = metadata_result {
                 let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
                 return Err(error);
             }
@@ -5375,18 +5387,17 @@ impl StateStore {
             continued_snapshot_from_authoritative(source_snapshot_before.clone(), &now);
         source_snapshot_after.result_project_snapshot_hash =
             source_result_snapshot_hash.map(ToOwned::to_owned);
-        if let Some(result_hash) = source_result_snapshot_hash {
-            if successor_with_upstream
+        if let Some(result_hash) = source_result_snapshot_hash
+            && successor_with_upstream
                 .base_project_snapshot_hash
                 .as_deref()
                 != Some(result_hash)
-            {
-                bail!(
-                    "continuation successor {} base snapshot does not match frozen source result {}",
-                    successor.thread_id,
-                    result_hash
-                );
-            }
+        {
+            bail!(
+                "continuation successor {} base snapshot does not match frozen source result {}",
+                successor.thread_id,
+                result_hash
+            );
         }
         let edge_reason: Option<&str> = match &kind {
             RunningContinuationKind::Machine { sanitized_reason } => *sanitized_reason,
@@ -5614,12 +5625,14 @@ impl StateStore {
             &self.state_authority,
             permit.cas_guard(),
             &g,
-            chain_root_id,
-            source_thread_id,
             base_successor_snapshot,
-            effective_launch_metadata.as_ref(),
-            None,
-            crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            ContinuationCapsuleTransition {
+                chain_root_id,
+                source_thread_id,
+                launch_metadata: effective_launch_metadata.as_ref(),
+                expected_result_snapshot_hash: None,
+                kind: crate::launch_metadata::ContinuationAuthorityTransitionKind::OperatorFollowUp,
+            },
         )?;
         let source_snapshot_updated = !is_terminal_status(&source_row.status);
         let source_snapshot_after = if source_snapshot_updated {
@@ -5650,11 +5663,11 @@ impl StateStore {
                 .insert_thread_runtime(&successor.thread_id, chain_root_id)?;
 
             // Seed the operator launch context before the successor is visible.
-            if let Some(meta) = effective_launch_metadata.as_ref() {
-                if let Err(error) = g.runtime_db.set_launch_metadata(&successor.thread_id, meta) {
-                    let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
-                    return Err(error);
-                }
+            if let Some(meta) = effective_launch_metadata.as_ref()
+                && let Err(error) = g.runtime_db.set_launch_metadata(&successor.thread_id, meta)
+            {
+                let _ = g.runtime_db.delete_thread_runtime(&successor.thread_id);
+                return Err(error);
             }
         }
 
@@ -7323,18 +7336,24 @@ impl StateStore {
         deadline_at_ms: i64,
     ) -> Result<runtime_db::RecoveryWaitDisposition> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.wait_for_project_authority(
+        let g = self.lock()?;
+        let result = g.runtime_db.wait_for_project_authority(
             thread_id,
             reason,
             detail,
             now_ms,
             deadline_at_ms,
-        )
+        );
+        drop(g);
+        result
     }
 
     pub fn clear_recovery_wait(&self, thread_id: &str) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?.runtime_db.clear_recovery_wait(thread_id)
+        let g = self.lock()?;
+        let result = g.runtime_db.clear_recovery_wait(thread_id);
+        drop(g);
+        result
     }
 
     pub fn authoritative_result_project_snapshot(&self, thread_id: &str) -> Result<Option<String>> {
@@ -7392,7 +7411,9 @@ impl StateStore {
         let capsule = load_admitted_launch_capsule(&self.state_authority, capsule_hash)?;
         if &capsule.artifact_identity != attempted {
             bail!(
-                "thread {thread_id} recovery artifact identity differs from its authoritative admitted capsule"
+                "thread {thread_id} recovery artifact identity differs from its authoritative \
+                 admitted capsule: admitted={:?}, attempted={attempted:?}",
+                capsule.artifact_identity
             );
         }
         Ok(())
@@ -8458,9 +8479,12 @@ impl StateStore {
 
     pub fn abort_unsealed_detached_spawn_intent(&self, operation_id: &str) -> Result<bool> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        let g = self.lock()?;
+        let result = g
             .runtime_db
-            .abort_unsealed_detached_spawn_intent(operation_id)
+            .abort_unsealed_detached_spawn_intent(operation_id);
+        drop(g);
+        result
     }
 
     pub fn get_detached_spawn_intent(
@@ -8478,9 +8502,12 @@ impl StateStore {
         child_project_authority: &ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        let g = self.lock()?;
+        let result = g
             .runtime_db
-            .bind_detached_spawn_project_authority(operation_id, child_project_authority)
+            .bind_detached_spawn_project_authority(operation_id, child_project_authority);
+        drop(g);
+        result
     }
 
     pub fn seal_detached_spawn_intent(
@@ -8509,13 +8536,16 @@ impl StateStore {
                 "detached admitted capsule hash mismatch: expected {expected_capsule_hash}, stored {admitted_launch_capsule_hash}"
             );
         }
-        self.lock()?.runtime_db.seal_detached_spawn_intent(
+        let g = self.lock()?;
+        let result = g.runtime_db.seal_detached_spawn_intent(
             operation_id,
             child_project_authority,
             &admitted_launch_capsule_hash,
             launch_metadata,
             initial_events,
-        )
+        );
+        drop(g);
+        result
     }
 
     // ── Follow waiters ───────────────────────────────────────────────────
@@ -8539,9 +8569,12 @@ impl StateStore {
         authority: &ryeos_state::objects::ExecutionProjectAuthority,
     ) -> Result<()> {
         let _permit = self.acquire_write_permit()?;
-        self.lock()?
+        let g = self.lock()?;
+        let result = g
             .runtime_db
-            .bind_follow_project_authority(follow_key, authority)
+            .bind_follow_project_authority(follow_key, authority);
+        drop(g);
+        result
     }
 
     // Slot identity, item/spec identity, child lineage, and sealed authority
@@ -9591,9 +9624,11 @@ mod tests {
         let error = with_execution_schema_cutover_hint(mismatch);
         let rendered = format!("{error:#}");
         assert!(rendered.contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
-        assert!(error
-            .chain()
-            .any(|cause| cause.is::<ryeos_state::IncompatibleCurrentObjectSchema>()));
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.is::<ryeos_state::IncompatibleCurrentObjectSchema>())
+        );
 
         let unrelated = with_execution_schema_cutover_hint(anyhow!("untrusted signed head"));
         assert!(
@@ -9603,7 +9638,9 @@ mod tests {
         let newer = with_execution_schema_cutover_hint(anyhow::Error::new(
             ryeos_state::IncompatibleCurrentObjectSchema::new("thread snapshot", 9, 8),
         ));
-        assert!(!format!("{newer:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND));
+        assert!(
+            !format!("{newer:#}").contains(crate::offline_gc::EXECUTION_SCHEMA_CUTOVER_COMMAND)
+        );
     }
 
     fn test_store() -> StateStore {
@@ -9715,8 +9752,12 @@ mod tests {
         };
         let expected = positioned_test_event("T-root", 0, 1, None, None);
         assert!(matches!(
-            classify_event_append_readback(Some(&unchanged), &predecessor, &[expected.clone()])
-                .unwrap(),
+            classify_event_append_readback(
+                Some(&unchanged),
+                &predecessor,
+                std::slice::from_ref(&expected)
+            )
+            .unwrap(),
             EventAppendCommitReadback::ProvenAbsent
         ));
 
@@ -9833,10 +9874,12 @@ mod tests {
         let launch_id = store
             .reserve_launch_planning("T-planning", "fp:owner")
             .expect("reserve planning");
-        assert!(store
-            .get_thread("T-planning")
-            .expect("read absent authoritative row")
-            .is_none());
+        assert!(
+            store
+                .get_thread("T-planning")
+                .expect("read absent authoritative row")
+                .is_none()
+        );
         let task = tokio::spawn(std::future::pending::<()>());
         store
             .register_launch_task_abort("T-planning", task.abort_handle())
@@ -9852,10 +9895,12 @@ mod tests {
         store
             .settle_launch_planning_task_exit("T-planning")
             .expect("cancelled task exit must preserve cancelled outcome");
-        assert!(store
-            .get_thread("T-planning")
-            .expect("read absent authoritative row after cancel")
-            .is_none());
+        assert!(
+            store
+                .get_thread("T-planning")
+                .expect("read absent authoritative row after cancel")
+                .is_none()
+        );
         assert_eq!(
             store
                 .cancel_launch_planning(&launch_id, "fp:owner")
@@ -9901,10 +9946,12 @@ mod tests {
             store.register_launch_task_abort_bounded("T-capacity-two", refused.abort_handle(), 1,),
             Err(LaunchTaskAbortRegistrationError::CapacityExceeded)
         ));
-        assert!(refused
-            .await
-            .expect_err("capacity-refused task must be aborted")
-            .is_cancelled());
+        assert!(
+            refused
+                .await
+                .expect_err("capacity-refused task must be aborted")
+                .is_cancelled()
+        );
 
         store
             .settle_launch_planning_task_exit("T-capacity-two")
@@ -9919,10 +9966,12 @@ mod tests {
             })
         );
         first.abort();
-        assert!(first
-            .await
-            .expect_err("first task must be aborted during cleanup")
-            .is_cancelled());
+        assert!(
+            first
+                .await
+                .expect_err("first task must be aborted during cleanup")
+                .is_cancelled()
+        );
     }
 
     #[test]
@@ -9992,10 +10041,11 @@ mod tests {
             "binding must transfer cancellation to the durable thread rather than aborting its launch task"
         );
         task.abort();
-        assert!(task
-            .await
-            .expect_err("test cleanup must abort launch task")
-            .is_cancelled());
+        assert!(
+            task.await
+                .expect_err("test cleanup must abort launch task")
+                .is_cancelled()
+        );
         store
             .settle_launch_planning_task_exit("T-row-before-handoff")
             .expect("post-bind task exit must preserve thread binding");
@@ -10055,10 +10105,12 @@ mod tests {
             .settle_launch_planning_task_exit("T-pre-bind-task-exit")
             .expect("settle pre-bind task exit");
 
-        assert!(store
-            .get_thread("T-pre-bind-task-exit")
-            .expect("read absent authoritative row")
-            .is_none());
+        assert!(
+            store
+                .get_thread("T-pre-bind-task-exit")
+                .expect("read absent authoritative row")
+                .is_none()
+        );
         assert_eq!(
             store
                 .cancel_launch_planning(&launch_id, "fp:owner")
@@ -10099,11 +10151,12 @@ mod tests {
         assert_eq!(planning.launch_id, launch_id);
         assert_eq!(planning.state, "bound");
         assert_eq!(planning.bound_thread_id.as_deref(), Some(thread_id));
-        assert!(g
-            .state_db
-            .get_thread(thread_id)
-            .expect("read authoritative root directly")
-            .is_some());
+        assert!(
+            g.state_db
+                .get_thread(thread_id)
+                .expect("read authoritative root directly")
+                .is_some()
+        );
     }
 
     #[test]
@@ -10137,7 +10190,8 @@ mod tests {
             .expect("canceller thread")
             .expect("cancel resolution")
             .expect("owned planning record");
-        match (created, cancelled) {
+        let outcomes = (created, cancelled);
+        match outcomes {
             (Ok(_), LaunchCancellationResolution::Bound { thread_id }) => {
                 assert_eq!(thread_id, "T-bind-race")
             }
@@ -10150,7 +10204,9 @@ mod tests {
                 );
             }
             (created, cancelled) => {
-                panic!("invalid cancel-vs-bind race outcome: created={created:?}, cancelled={cancelled:?}")
+                panic!(
+                    "invalid cancel-vs-bind race outcome: created={created:?}, cancelled={cancelled:?}"
+                )
             }
         }
     }
@@ -10203,11 +10259,12 @@ mod tests {
             planning.bound_thread_id.as_deref(),
             Some(successor_thread_id)
         );
-        assert!(g
-            .state_db
-            .get_thread(successor_thread_id)
-            .expect("read authoritative successor directly")
-            .is_some());
+        assert!(
+            g.state_db
+                .get_thread(successor_thread_id)
+                .expect("read authoritative successor directly")
+                .is_some()
+        );
         assert_eq!(
             queries::continuation_successor(g.state_db.projection(), source_thread_id)
                 .expect("read continuation edge directly")
@@ -10252,10 +10309,12 @@ mod tests {
                 .any(|cause| cause.is::<LaunchPlanningInactive>()),
             "continuation publication must retain typed planning inactivity: {error:#}"
         );
-        assert!(store
-            .get_thread(successor_thread_id)
-            .expect("read absent continuation successor")
-            .is_none());
+        assert!(
+            store
+                .get_thread(successor_thread_id)
+                .expect("read absent continuation successor")
+                .is_none()
+        );
         let source = store
             .get_thread(source_thread_id)
             .expect("read unchanged continuation source")
@@ -10307,7 +10366,8 @@ mod tests {
             .expect("canceller thread")
             .expect("cancel resolution")
             .expect("owned planning record");
-        match (created, cancelled) {
+        let outcomes = (created, cancelled);
+        match outcomes {
             (Ok(_), LaunchCancellationResolution::Bound { thread_id }) => {
                 assert_eq!(thread_id, successor_thread_id);
                 let source = store
@@ -10319,10 +10379,12 @@ mod tests {
                     source.successor_thread_id.as_deref(),
                     Some(successor_thread_id)
                 );
-                assert!(store
-                    .get_thread(successor_thread_id)
-                    .expect("read published successor")
-                    .is_some());
+                assert!(
+                    store
+                        .get_thread(successor_thread_id)
+                        .expect("read published successor")
+                        .is_some()
+                );
             }
             (Err(error), LaunchCancellationResolution::Cancelled) => {
                 assert!(
@@ -10337,10 +10399,12 @@ mod tests {
                     .expect("continuation source");
                 assert_eq!(source.status, ThreadStatus::Created.as_str());
                 assert!(source.successor_thread_id.is_none());
-                assert!(store
-                    .get_thread(successor_thread_id)
-                    .expect("read absent successor")
-                    .is_none());
+                assert!(
+                    store
+                        .get_thread(successor_thread_id)
+                        .expect("read absent successor")
+                        .is_none()
+                );
             }
             (created, cancelled) => {
                 panic!(
@@ -10799,32 +10863,42 @@ mod tests {
                 &owner,
             )
             .expect_err("missing thread_started event must fail closed");
-        assert!(error
-            .to_string()
-            .contains("requires exactly one thread_started successor event"));
-        assert!(store
-            .get_thread(thread_id)
-            .expect("inspect rejected root")
-            .is_none());
+        assert!(
+            error
+                .to_string()
+                .contains("requires exactly one thread_started successor event")
+        );
+        assert!(
+            store
+                .get_thread(thread_id)
+                .expect("inspect rejected root")
+                .is_none()
+        );
         let inner = store.lock().expect("lock state store");
-        assert!(inner
-            .runtime_db
-            .get_runtime_info(thread_id)
-            .expect("inspect rejected runtime row")
-            .is_none());
-        assert!(inner
-            .runtime_db
-            .in_process_handler_reservations_after(
-                None,
-                runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-            )
-            .expect("inspect rejected reservation")
-            .is_empty());
-        assert!(inner
-            .state_db
-            .read_generic_head_ref("chains", thread_id)
-            .expect("inspect rejected chain head")
-            .is_none());
+        assert!(
+            inner
+                .runtime_db
+                .get_runtime_info(thread_id)
+                .expect("inspect rejected runtime row")
+                .is_none()
+        );
+        assert!(
+            inner
+                .runtime_db
+                .in_process_handler_reservations_after(
+                    None,
+                    runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+                )
+                .expect("inspect rejected reservation")
+                .is_empty()
+        );
+        assert!(
+            inner
+                .state_db
+                .read_generic_head_ref("chains", thread_id)
+                .expect("inspect rejected chain head")
+                .is_none()
+        );
     }
 
     #[test]
@@ -10849,9 +10923,11 @@ mod tests {
                 &stale,
             )
             .expect_err("unregistered owner must not publish an in-process root");
-        assert!(error
-            .to_string()
-            .contains("recorded in-process handler has no active daemon owner"));
+        assert!(
+            error
+                .to_string()
+                .contains("recorded in-process handler has no active daemon owner")
+        );
 
         let owner = store
             .register_in_process_handler(thread_id)
@@ -10865,10 +10941,12 @@ mod tests {
             )
             .expect_err("stale owner must not publish an in-process root");
         assert!(error.to_string().contains("stale in-process handler owner"));
-        assert!(store
-            .get_thread(thread_id)
-            .expect("inspect owner-rejected root")
-            .is_none());
+        assert!(
+            store
+                .get_thread(thread_id)
+                .expect("inspect owner-rejected root")
+                .is_none()
+        );
 
         store
             .create_in_process_root_with_events_and_launch_metadata(
@@ -10904,9 +10982,11 @@ mod tests {
             )
             .expect("publish original root");
         assert!(original_owner.has_committed_birth());
-        assert!(store
-            .unregister_in_process_handler(thread_id, &original_owner)
-            .expect("simulate loss of original volatile owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &original_owner)
+                .expect("simulate loss of original volatile owner")
+        );
         assert_eq!(
             original_owner.completion(),
             Some(InProcessHandlerCompletion::OwnerLostUnsettled)
@@ -10954,9 +11034,11 @@ mod tests {
             replayed_event_types(&store, thread_id),
             ["thread_created", "thread_started"]
         );
-        assert!(store
-            .unregister_in_process_handler(thread_id, &colliding_owner)
-            .expect("retire rejected colliding owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &colliding_owner)
+                .expect("retire rejected colliding owner")
+        );
         assert_eq!(
             colliding_owner.completion(),
             Some(InProcessHandlerCompletion::BirthAborted)
@@ -11030,34 +11112,44 @@ mod tests {
             .settle_ownerless_in_process_handler_reservation(thread_id)
             .expect_err("shutdown settlement must not steal from an active owner");
         assert!(error.to_string().contains("while its owner is active"));
-        assert!(store
-            .settle_in_process_handler_reservation_owned(thread_id, &owner)
-            .expect("exact owner settles terminal reservation"));
+        assert!(
+            store
+                .settle_in_process_handler_reservation_owned(thread_id, &owner)
+                .expect("exact owner settles terminal reservation")
+        );
         let error = store
             .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
             .expect_err("shutdown cleanup must not delete an active owner's reservation");
         assert!(error.to_string().contains("while its owner is active"));
         owner.mark_terminal_confirmed();
-        assert!(store
-            .unregister_in_process_handler(thread_id, &owner)
-            .expect("unregister exact owner"));
-        assert!(!store
-            .is_in_process_handler_active(thread_id)
-            .expect("inspect active owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &owner)
+                .expect("unregister exact owner")
+        );
+        assert!(
+            !store
+                .is_in_process_handler_active(thread_id)
+                .expect("inspect active owner")
+        );
         assert_eq!(
             owner.completion(),
             Some(InProcessHandlerCompletion::TerminalConfirmed)
         );
-        assert!(store
-            .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
-            .expect("ownerless shutdown cleanup deletes terminal reservation residue"));
-        assert!(store
-            .in_process_handler_reservations_after(
-                None,
-                runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
-            )
-            .expect("list settled reservations")
-            .is_empty());
+        assert!(
+            store
+                .delete_ownerless_terminal_in_process_handler_reservation(thread_id)
+                .expect("ownerless shutdown cleanup deletes terminal reservation residue")
+        );
+        assert!(
+            store
+                .in_process_handler_reservations_after(
+                    None,
+                    runtime_db::IN_PROCESS_HANDLER_RECONCILE_PAGE_SIZE,
+                )
+                .expect("list settled reservations")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -11090,9 +11182,11 @@ mod tests {
             let error = store
                 .request_thread_stop(thread_id, intent)
                 .expect_err("active in-process owner has no admitted stop contract");
-            assert!(error
-                .to_string()
-                .contains("has no declared cancellation/drain contract"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("has no declared cancellation/drain contract")
+            );
             let detail = store
                 .get_thread(thread_id)
                 .expect("read stop-fenced root")
@@ -11106,9 +11200,11 @@ mod tests {
             ["thread_created", "thread_started"],
             "rejected stop requests must not append terminal or tombstone events"
         );
-        assert!(store
-            .unregister_in_process_handler(thread_id, &owner)
-            .expect("unregister in-process owner"));
+        assert!(
+            store
+                .unregister_in_process_handler(thread_id, &owner)
+                .expect("unregister in-process owner")
+        );
     }
 
     #[test]
@@ -11122,10 +11218,12 @@ mod tests {
                 .expect("reserve fresh launch"),
             runtime_db::LaunchClaimOutcome::Claimed
         );
-        assert!(store
-            .get_thread(thread_id)
-            .expect("inspect unpublished thread")
-            .is_none());
+        assert!(
+            store
+                .get_thread(thread_id)
+                .expect("inspect unpublished thread")
+                .is_none()
+        );
 
         store
             .create_thread_for_test(&thread_record(thread_id, thread_id))
@@ -11135,9 +11233,11 @@ mod tests {
             .expect("read launch claim")
             .expect("claim remains attached after publication");
         assert_eq!(claim.claim_id, "claim-fresh");
-        assert!(store
-            .release_thread_launch_claim(thread_id, "claim-fresh")
-            .expect("release launch reservation"));
+        assert!(
+            store
+                .release_thread_launch_claim(thread_id, "claim-fresh")
+                .expect("release launch reservation")
+        );
     }
 
     #[test]
@@ -11150,10 +11250,12 @@ mod tests {
         let audit = launch_attempt_audit_events();
 
         // The runtime-authored boundary remains running-only.
-        assert!(store
-            .append_events_if_thread_running(thread_id, thread_id, &audit)
-            .expect("runtime append guard")
-            .is_none());
+        assert!(
+            store
+                .append_events_if_thread_running(thread_id, thread_id, &audit)
+                .expect("runtime append guard")
+                .is_none()
+        );
         assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
 
         assert_eq!(
@@ -11221,9 +11323,11 @@ mod tests {
         let wrong_storage_error = store
             .append_launch_attempt_audit(thread_id, thread_id, &wrong_storage)
             .expect_err("non-canonical audit storage must fail");
-        assert!(wrong_storage_error
-            .to_string()
-            .contains("canonical storage class"));
+        assert!(
+            wrong_storage_error
+                .to_string()
+                .contains("canonical storage class")
+        );
         assert_eq!(replayed_event_types(&store, thread_id), ["thread_created"]);
     }
 
@@ -11258,9 +11362,11 @@ mod tests {
         let terminal_error = terminal_store
             .append_launch_attempt_audit(terminal_id, terminal_id, &audit)
             .expect_err("terminal launch audit must fail");
-        assert!(terminal_error
-            .to_string()
-            .contains("requires a created or running thread"));
+        assert!(
+            terminal_error
+                .to_string()
+                .contains("requires a created or running thread")
+        );
         assert_eq!(
             replayed_event_types(&terminal_store, terminal_id),
             terminal_before
@@ -11617,22 +11723,28 @@ mod tests {
         let error = store
             .record_child_link(parent_id, child_id, "dispatch")
             .expect_err("active in-process child cannot inherit undeclared stop authority");
-        assert!(error
-            .to_string()
-            .contains("has no declared cancellation/drain contract"));
+        assert!(
+            error
+                .to_string()
+                .contains("has no declared cancellation/drain contract")
+        );
         let child = store
             .get_thread(child_id)
             .expect("read fenced child")
             .expect("fenced child row");
         assert_eq!(child.status, ThreadStatus::Running.as_str());
         assert_eq!(child.runtime.stop_intent, None);
-        assert!(store
-            .descendant_thread_ids(parent_id)
-            .expect("read parent descendants")
-            .is_empty());
-        assert!(store
-            .unregister_in_process_handler(child_id, &owner)
-            .expect("unregister in-process child owner"));
+        assert!(
+            store
+                .descendant_thread_ids(parent_id)
+                .expect("read parent descendants")
+                .is_empty()
+        );
+        assert!(
+            store
+                .unregister_in_process_handler(child_id, &owner)
+                .expect("unregister in-process child owner")
+        );
     }
 
     #[test]

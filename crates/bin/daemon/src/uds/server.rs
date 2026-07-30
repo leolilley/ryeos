@@ -3,11 +3,11 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
-use serde_json::json;
 #[cfg(test)]
 use serde_json::Value;
+use serde_json::json;
 use tokio::net::UnixListener;
 use tokio::sync::Semaphore;
 
@@ -157,7 +157,9 @@ pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) ->
                 let frame_bytes = Arc::clone(&frame_bytes);
                 connections.spawn(async move {
                     let _connection_permit = connection_permit;
-                    transport::handle_connection(stream, state, frame_bytes).await
+                    let result = transport::handle_connection(stream, state, frame_bytes).await;
+                    drop(_connection_permit);
+                    result
                 });
             }
             joined = connections.join_next(), if !connections.is_empty() => {
@@ -171,7 +173,11 @@ pub async fn serve_dynamic(listener: UnixListener, state: DynamicServerState) ->
     // No connection may outlive the supervised UDS listener. In particular,
     // shutdown must cancel frames already blocked in reads or runtime dispatch.
     connections.abort_all();
-    while let Some(joined) = connections.join_next().await {
+    loop {
+        let joined = connections.join_next().await;
+        let Some(joined) = joined else {
+            break;
+        };
         report_connection_exit(joined);
     }
 
@@ -296,9 +302,9 @@ pub(crate) async fn dispatch_runtime_method(
         // durable `cognition_in` for the running thread. Require BOTH proofs the
         // runtime holds: the per-request thread_auth_token (like dispatch_action)
         // AND the exact-thread callback token (write tier — it appends durable
-        // events). runtime.author_item is also a durable signed project write,
-        // so it uses the same two-proof boundary. Either proof alone is
-        // insufficient.
+        // events). runtime.author_item and runtime.project_snapshot may also
+        // perform durable project writes, so they use the same two-proof
+        // boundary. Either proof alone is insufficient.
         let tat = params
             .get("thread_auth_token")
             .and_then(|v| v.as_str())
@@ -544,6 +550,7 @@ fn is_running_runtime_mutation(method: &str) -> bool {
             | "runtime.spawn_follow_child"
             | "runtime.request_continuation"
             | "runtime.author_item"
+            | "runtime.project_snapshot"
             | "runtime.vault_put"
             | "runtime.vault_delete"
             | "runtime.bundle_events_append"
@@ -696,21 +703,20 @@ async fn handle_attach_process(
     let attached = match state.threads.attach_process_owned(&params, launch_owner) {
         Ok(thread) => thread,
         Err(error) => {
-            if let Some(identity) = params.process_identity.clone() {
-                if let Err(join_error) = tokio::task::spawn_blocking(move || {
+            if let Some(identity) = params.process_identity.clone()
+                && let Err(join_error) = tokio::task::spawn_blocking(move || {
                     ryeos_app::process::kill_by_action(
                         &identity,
                         ryeos_app::process::ShutdownAction::Hard,
                     )
                 })
                 .await
-                {
-                    tracing::warn!(
-                        thread_id = %params.thread_id,
-                        error = %join_error,
-                        "runtime.attach_process cleanup worker failed"
-                    );
-                }
+            {
+                tracing::warn!(
+                    thread_id = %params.thread_id,
+                    error = %join_error,
+                    "runtime.attach_process cleanup worker failed"
+                );
             }
             return Err(error)
                 .context("runtime.attach_process refused; spawned process-group kill attempted");
@@ -1508,7 +1514,7 @@ mod tests {
     use ryeos_app::callback_token::CallbackCapabilityStore;
     use ryeos_app::command_service::CommandService;
     use ryeos_app::event_store_service::EventStoreService;
-    use ryeos_app::event_stream::{ThreadEventHub, DEFAULT_EVENT_STREAM_CAPACITY};
+    use ryeos_app::event_stream::{DEFAULT_EVENT_STREAM_CAPACITY, ThreadEventHub};
     use ryeos_app::identity::NodeIdentity;
     use ryeos_app::kind_profiles::{KindProfileRegistry, ThreadKindProfile};
     use ryeos_app::state::AppState;
@@ -1613,9 +1619,11 @@ mod tests {
                     .expect("claimed test launch exists")
             }
         };
-        assert!(state
-            .callback_tokens
-            .set_launch_owner(&capability.token, claim.claimed_by.clone()));
+        assert!(
+            state
+                .callback_tokens
+                .set_launch_owner(&capability.token, claim.claimed_by.clone())
+        );
         capability.launch_owner = Some(claim.claimed_by);
         capability
     }
@@ -1675,7 +1683,6 @@ mod tests {
 
     /// Build a minimal AppState for UDS dispatch tests.
     fn setup_app_state() -> (TempDir, AppState) {
-        std::env::set_var("HOSTNAME", "testhost");
         let tmpdir = TempDir::new().unwrap();
         let runtime_state_dir = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -1754,14 +1761,15 @@ mod tests {
         let events = Arc::new(EventStoreService::new(state_store.clone()));
         let event_streams = Arc::new(ThreadEventHub::new(DEFAULT_EVENT_STREAM_CAPACITY));
         let threads = Arc::new(
-            ThreadLifecycleService::new(
+            ThreadLifecycleService::new_for_test_with_site_id(
                 state_store.clone(),
                 engine.clone(),
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
+                "site:testhost",
             )
-            .expect("HOSTNAME not set in test environment"),
+            .expect("valid test site identity"),
         );
         let live_input = Arc::new(ryeos_app::live_input_queue::LiveInputQueue::new());
         threads.set_live_input_queue(live_input.clone());
@@ -2065,13 +2073,49 @@ mod tests {
 
         assert_eq!(response, json!({"inputs": []}));
         assert!(cognition_inputs(&state, thread_id).is_empty());
-        assert!(state
-            .state_store
-            .get_thread(thread_id)
-            .unwrap()
-            .unwrap()
-            .successor_thread_id
-            .is_none());
+        assert!(
+            state
+                .state_store
+                .get_thread(thread_id)
+                .unwrap()
+                .unwrap()
+                .successor_thread_id
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn project_snapshot_callback_requires_a_running_thread() {
+        let (_tmp, state) = setup_app_state();
+        let thread_id = "T-snapshot-running-fence";
+        create_running_test_thread(&state, thread_id);
+        let params = json!({"thread_id": thread_id});
+
+        enforce_runtime_callback_admission("runtime.project_snapshot", &params, &state)
+            .expect("running thread admits snapshot callback");
+
+        state
+            .threads
+            .finalize_thread(&ThreadFinalizeParams {
+                thread_id: thread_id.to_string(),
+                status: "completed".to_string(),
+                outcome_code: Some("success".to_string()),
+                result: Some(json!({"ok": true})),
+                error: None,
+                metadata: None,
+                artifacts: Vec::new(),
+                final_cost: None,
+                summary_json: None,
+            })
+            .unwrap();
+
+        let error = enforce_runtime_callback_admission("runtime.project_snapshot", &params, &state)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("requires a running thread") && error.contains("is completed"),
+            "got: {error}"
+        );
     }
 
     #[tokio::test]
@@ -2100,10 +2144,12 @@ mod tests {
         assert_eq!(response["delivery"], "submitted");
         assert_eq!(response["thread_id"].as_str(), Some(thread_id));
         assert_eq!(response["pending"].as_u64(), Some(1));
-        assert!(response["notice"]
-            .as_str()
-            .unwrap()
-            .contains("missing_pgid"));
+        assert!(
+            response["notice"]
+                .as_str()
+                .unwrap()
+                .contains("missing_pgid")
+        );
         let first = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
         let second = handle_poll_input(&json!({"thread_id": thread_id}), &state).unwrap();
         assert_eq!(first["inputs"].as_array().unwrap().len(), 1);
@@ -2116,13 +2162,15 @@ mod tests {
             cognition_inputs(&state, thread_id),
             vec!["change course".to_string()]
         );
-        assert!(state
-            .state_store
-            .get_thread(thread_id)
-            .unwrap()
-            .unwrap()
-            .successor_thread_id
-            .is_none());
+        assert!(
+            state
+                .state_store
+                .get_thread(thread_id)
+                .unwrap()
+                .unwrap()
+                .successor_thread_id
+                .is_none()
+        );
     }
 
     fn rpc(method: &str, params: serde_json::Value) -> RpcRequest {
@@ -3379,10 +3427,15 @@ mod tests {
         // Auxiliary run riding the child's chain: own thread id, child's chain root.
         state
             .threads
-            .create_thread_for_test(&make_create_params("Kaux", "T-Cfollow"))
+            .create_thread_for_test(&make_create_params("T-Kaux", "T-Cfollow"))
             .unwrap();
-        state.threads.mark_running("Kaux").unwrap();
-        finalize_child(&state, "Kaux", "completed", Some(json!({ "positions": 1 })));
+        state.threads.mark_running("T-Kaux").unwrap();
+        finalize_child(
+            &state,
+            "T-Kaux",
+            "completed",
+            Some(json!({ "positions": 1 })),
+        );
 
         let waiter = state
             .state_store
@@ -4359,10 +4412,12 @@ mod tests {
                 limit: 100,
             })
             .unwrap();
-        assert!(!replay
-            .events
-            .iter()
-            .any(|event| event.event_type == "cognition_out"));
+        assert!(
+            !replay
+                .events
+                .iter()
+                .any(|event| event.event_type == "cognition_out")
+        );
     }
 
     #[tokio::test]

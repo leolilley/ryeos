@@ -23,10 +23,10 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use common::fast_fixture::{register_standard_bundle, FastFixture};
-use common::{build_signed_headers_for_bytes, DaemonHarness};
+use common::fast_fixture::{FastFixture, register_standard_bundle};
+use common::{DaemonHarness, build_signed_headers_for_bytes};
 use lillux::crypto::SigningKey;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Plant ZEN_API_KEY in the sealed vault so the graph runtime launch preflight
 /// passes (mirrors the crash-recovery + spawn-smoke fixtures).
@@ -132,17 +132,15 @@ fn all_events(state_path: &Path) -> Vec<(String, String, Value)> {
         Ok(s) => s,
         Err(_) => return Vec::new(),
     };
-    let rows = stmt
-        .query_map([], |row| {
-            let thread_id: String = row.get(0)?;
-            let event_type: String = row.get(1)?;
-            let payload_blob: Vec<u8> = row.get(2)?;
-            let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
-            Ok((thread_id, event_type, payload))
-        })
-        .and_then(|m| m.collect::<Result<Vec<_>, _>>())
-        .unwrap_or_default();
-    rows
+    stmt.query_map([], |row| {
+        let thread_id: String = row.get(0)?;
+        let event_type: String = row.get(1)?;
+        let payload_blob: Vec<u8> = row.get(2)?;
+        let payload: Value = serde_json::from_slice(&payload_blob).unwrap_or(Value::Null);
+        Ok((thread_id, event_type, payload))
+    })
+    .and_then(|m| m.collect::<Result<Vec<_>, _>>())
+    .unwrap_or_default()
 }
 
 fn count_event(events: &[(String, String, Value)], event_type: &str) -> usize {

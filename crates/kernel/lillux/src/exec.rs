@@ -210,8 +210,8 @@ pub fn supervised_launcher_status_pipe() -> Result<SupervisedLauncherStatusPipe,
 /// target, and that target blocks at the final backend boundary until the
 /// parent releases the writer retained in [`SupervisedProcessStatus`].
 #[cfg(target_os = "linux")]
-pub fn supervised_launcher_attachment_status_pipe(
-) -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
+pub fn supervised_launcher_attachment_status_pipe()
+-> Result<SupervisedLauncherAttachmentStatusPipe, String> {
     use std::os::fd::FromRawFd as _;
 
     let mut status_fds = [-1; 2];
@@ -257,8 +257,8 @@ pub fn supervised_launcher_attachment_status_pipe(
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn supervised_launcher_attachment_status_pipe(
-) -> Result<SupervisedLauncherAttachmentStatusPipe, String> {
+pub fn supervised_launcher_attachment_status_pipe()
+-> Result<SupervisedLauncherAttachmentStatusPipe, String> {
     Err("supervised-launcher attachment boundaries are supported only on Linux".to_string())
 }
 
@@ -329,13 +329,13 @@ fn sealed_memfd_with_flags(
 
     // SAFETY: memfd_create or F_DUPFD_CLOEXEC returned this uniquely owned fd.
     let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    if let Some(mode) = mode {
-        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } < 0 {
-            return Err(format!(
-                "restrict sealed executable memfd permissions: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+    if let Some(mode) = mode
+        && unsafe { libc::fchmod(file.as_raw_fd(), mode) } < 0
+    {
+        return Err(format!(
+            "restrict sealed executable memfd permissions: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     file.write_all(bytes)
         .map_err(|error| format!("write sealed memfd: {error}"))?;
@@ -3183,13 +3183,13 @@ fn validate_pinned_process_birth(
             observed_after_pin.process_group
         ));
     }
-    if let Some(expected_parent) = expected_parent {
-        if observed_after_pin.parent_pid != expected_parent {
-            return Err(format!(
-                "process {pid} parent changed before identity pin (expected {expected_parent}, observed {})",
-                observed_after_pin.parent_pid
-            ));
-        }
+    if let Some(expected_parent) = expected_parent
+        && observed_after_pin.parent_pid != expected_parent
+    {
+        return Err(format!(
+            "process {pid} parent changed before identity pin (expected {expected_parent}, observed {})",
+            observed_after_pin.parent_pid
+        ));
     }
     Ok(())
 }
@@ -3912,10 +3912,10 @@ fn set_envs(command: &mut process::Command, envs: &[String]) {
 }
 
 fn write_stdin(child: &mut process::Child, data: Option<&str>) {
-    if let Some(data) = data {
-        if let Some(mut s) = child.stdin.take() {
-            let _ = s.write_all(data.as_bytes());
-        }
+    if let Some(data) = data
+        && let Some(mut s) = child.stdin.take()
+    {
+        let _ = s.write_all(data.as_bytes());
     }
 }
 

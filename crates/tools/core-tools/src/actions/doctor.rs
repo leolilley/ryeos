@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_engine::canonical_ref::CanonicalRef;
 use ryeos_engine::contracts::{EffectivePrincipal, PlanContext, Principal, ProjectContext};
@@ -144,9 +144,14 @@ fn check_manifest(source: &Path) -> CheckResult {
             // `deny_unknown_fields` rejects a manifest still carrying the flat,
             // pre-nesting runtime-authority fields. Name the exact fix instead
             // of swallowing the error behind a generic "malformed" string.
-            let old_shape_field = ["bundle_events", "runtime_vault", "item_authoring"]
-                .into_iter()
-                .find(|f| msg.contains(&format!("unknown field `{f}`")));
+            let old_shape_field = [
+                "bundle_events",
+                "runtime_vault",
+                "item_authoring",
+                "project_snapshots",
+            ]
+            .into_iter()
+            .find(|f| msg.contains(&format!("unknown field `{f}`")));
             if let Some(field) = old_shape_field {
                 return CheckResult::new(
                     "manifest",
@@ -155,7 +160,7 @@ fn check_manifest(source: &Path) -> CheckResult {
                         "error": format!(
                             "manifest.source.yaml declares `{field}` as a top-level field"
                         ),
-                        "remedy": "nest bundle_events / runtime_vault / item_authoring under a single `runtime_authority:` block",
+                        "remedy": "nest bundle_events / runtime_vault / item_authoring / project_snapshots under a single `runtime_authority:` block",
                         "serde_error": msg,
                     }),
                 );
@@ -214,12 +219,16 @@ fn check_manifest(source: &Path) -> CheckResult {
     } else if declares_runtime_authority {
         (
             WARN,
-            json!("manifest name differs from the directory AND this bundle declares runtime authority — if the items' effective bundle id does not equal the manifest name, the daemon will reject runtime-cap minting. Verify with `ryeos bundle publish` (it hard-fails a real mismatch)."),
+            json!(
+                "manifest name differs from the directory AND this bundle declares runtime authority — if the items' effective bundle id does not equal the manifest name, the daemon will reject runtime-cap minting. Verify with `ryeos bundle publish` (it hard-fails a real mismatch)."
+            ),
         )
     } else {
         (
             WARN,
-            json!("manifest name differs from the directory; pass --name on publish if the effective bundle id differs"),
+            json!(
+                "manifest name differs from the directory; pass --name on publish if the effective bundle id differs"
+            ),
         )
     };
     CheckResult::new(
@@ -249,7 +258,7 @@ fn check_verify(
                 "verify",
                 FAIL,
                 json!({ "error": format!("isolation policy unavailable: {reason}") }),
-            )
+            );
         }
     };
     let manifest_source = source
@@ -470,11 +479,11 @@ fn collect_py(dir: &Path, tools_root: &Path, out: &mut Vec<String>) {
                 continue;
             }
             collect_py(&path, tools_root, out);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("py") {
-            if let Ok(rel) = path.strip_prefix(tools_root) {
-                let bare = rel.with_extension("");
-                out.push(format!("tool:{}", bare.to_string_lossy()));
-            }
+        } else if path.extension().and_then(|e| e.to_str()) == Some("py")
+            && let Ok(rel) = path.strip_prefix(tools_root)
+        {
+            let bare = rel.with_extension("");
+            out.push(format!("tool:{}", bare.to_string_lossy()));
         }
     }
 }
@@ -533,9 +542,11 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join(".ai")).unwrap();
         let r = check_manifest(tmp.path());
         assert_eq!(r.status, FAIL);
-        assert!(r.detail["error"]
-            .as_str()
-            .is_some_and(|error| error.contains("required")));
+        assert!(
+            r.detail["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("required"))
+        );
     }
 
     #[test]
@@ -547,38 +558,47 @@ mod tests {
         );
         let r = check_manifest(tmp.path());
         assert_eq!(r.status, FAIL, "{:?}", r.detail);
-        assert!(r.detail["remedy"]
-            .as_str()
-            .unwrap()
-            .contains("manifest-sign"));
+        assert!(
+            r.detail["remedy"]
+                .as_str()
+                .unwrap()
+                .contains("manifest-sign")
+        );
     }
 
     #[test]
     fn manifest_check_hints_old_shape_runtime_authority_fields() {
-        let tmp = tempfile::tempdir().unwrap();
-        // A manifest still carrying the flat pre-nesting field. `deny_unknown_fields`
-        // rejects it; doctor must name the field and the nesting fix, not a
-        // generic "malformed" string.
-        write(
-            &tmp.path().join(".ai/manifest.source.yaml"),
-            "name: arc\nversion: \"0.1.0\"\nbundle_events:\n  - event_kind: ev\n    operations: [append]\n",
-        );
-        let r = check_manifest(tmp.path());
-        assert_eq!(r.status, FAIL);
-        assert!(
-            r.detail["error"]
+        for (field, body) in [
+            (
+                "bundle_events",
+                "bundle_events:\n  - event_kind: ev\n    operations: [append]\n",
+            ),
+            ("runtime_vault", "runtime_vault: []\n"),
+            ("item_authoring", "item_authoring: []\n"),
+            ("project_snapshots", "project_snapshots: [status]\n"),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            // A manifest still carrying a flat pre-nesting field.
+            // `deny_unknown_fields` rejects it; doctor must name the field and
+            // nesting fix, not a generic "malformed" string.
+            write(
+                &tmp.path().join(".ai/manifest.source.yaml"),
+                &format!("name: arc\nversion: \"0.1.0\"\n{body}"),
+            );
+            let r = check_manifest(tmp.path());
+            assert_eq!(r.status, FAIL);
+            assert!(
+                r.detail["error"].as_str().unwrap().contains(field),
+                "error should name the offending field: {:?}",
+                r.detail
+            );
+            assert!(r.detail["remedy"]
                 .as_str()
                 .unwrap()
-                .contains("bundle_events"),
-            "error should name the offending field: {:?}",
-            r.detail
-        );
-        assert!(r.detail["remedy"]
-            .as_str()
-            .unwrap()
-            .contains("runtime_authority:"));
-        // The raw serde error is preserved for context.
-        assert!(r.detail["serde_error"].is_string());
+                .contains("runtime_authority:"));
+            // The raw serde error is preserved for context.
+            assert!(r.detail["serde_error"].is_string());
+        }
     }
 
     #[test]

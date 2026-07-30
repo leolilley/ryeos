@@ -7,12 +7,12 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use serde::de::DeserializeOwned;
 
 use crate::objects::{ChainState, ChainThreadEntry, ThreadEvent, ThreadSnapshot};
 use crate::signer::Signer;
-use crate::{refs, CachedHead, HeadCache, SignedRef, TrustStore};
+use crate::{CachedHead, HeadCache, SignedRef, TrustStore, refs};
 
 pub use self::types::*;
 
@@ -3402,9 +3402,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("does not match snapshot thread_id"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match snapshot thread_id")
+        );
         assert_eq!(count_files(&cas_root), before);
     }
 

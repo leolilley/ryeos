@@ -1,9 +1,9 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::RuntimeResult;
 use ryeos_app::state_store::ThreadTerminalAuthority;
 use ryeos_app::thread_lifecycle::ThreadFinalizeParams;
-use ryeos_runtime::envelope::{decode_follow_terminal_envelope, RuntimeCost, RuntimeResultStatus};
+use ryeos_runtime::envelope::{RuntimeCost, RuntimeResultStatus, decode_follow_terminal_envelope};
 use ryeos_state::objects::ThreadStatus;
 
 pub(super) struct FallbackFinalization {
@@ -267,7 +267,7 @@ mod tests {
                         "cost": null,
                         "warnings": ["warning"]
                     })),
-                }
+                };
             }
             ThreadStatus::Created | ThreadStatus::Running => {
                 panic!("authority helper requires terminal status")

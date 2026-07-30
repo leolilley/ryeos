@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::ExpressionCondition;
 use crate::compiled_template::{CompiledActionTemplate, CompiledTemplateError};
 use crate::events::RuntimeEventType;
 use crate::expression::{
-    compile_condition_for, CompilationLimits, CompiledExpression, EvaluationSession,
-    ExpressionError, ReferenceSet,
+    CompilationLimits, CompiledExpression, EvaluationSession, ExpressionError, ReferenceSet,
+    compile_condition_for,
 };
-use crate::ExpressionCondition;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -657,22 +657,26 @@ context_hooks: [{id: context, event: after_step, action: {item_id: tool:test/noo
 
         let error = validate_configured_hook_events(&sources).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("configured operator hook `typo`"));
+        assert!(
+            error
+                .to_string()
+                .contains("configured operator hook `typo`")
+        );
         assert!(error.to_string().contains("unknown event `graph_finishd`"));
     }
 
     #[test]
     fn source_documents_reject_unknown_fields_and_authored_precedence() {
-        assert!(serde_yaml::from_str::<HookConditionsConfig>(
-            "builtin_hooks: []\nunknown_hooks: []\n"
-        )
-        .is_err());
-        assert!(serde_yaml::from_str::<HookDefinition>(
-            "id: forged\nevent: after_step\nlayer: 6\naction: {item_id: tool:test/noop}\n"
-        )
-        .is_err());
+        assert!(
+            serde_yaml::from_str::<HookConditionsConfig>("builtin_hooks: []\nunknown_hooks: []\n")
+                .is_err()
+        );
+        assert!(
+            serde_yaml::from_str::<HookDefinition>(
+                "id: forged\nevent: after_step\nlayer: 6\naction: {item_id: tool:test/noop}\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]

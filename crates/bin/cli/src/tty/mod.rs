@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use ryeos_node::{LifecycleController, LifecycleStatus, LocalLifecycleEnv};
 use ryeos_state::event_types::{
-    outcome_code_is_failure, thread_terminal_outcome, ThreadOutcomeKind,
+    ThreadOutcomeKind, outcome_code_is_failure, thread_terminal_outcome,
 };
 use serde_json::Value;
 use unicode_width::UnicodeWidthChar;
@@ -1529,11 +1529,7 @@ fn scalar_summary(value: &Value) -> Option<String> {
 }
 
 fn empty_dash(value: &str) -> &str {
-    if value.trim().is_empty() {
-        "-"
-    } else {
-        value
-    }
+    if value.trim().is_empty() { "-" } else { value }
 }
 
 fn stream_failure_reason(payload: &Value, fallback: &str) -> String {

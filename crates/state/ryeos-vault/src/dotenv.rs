@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::policy::is_blocked_name;
 

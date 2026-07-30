@@ -37,9 +37,9 @@ pub use authority::{
 pub use backend::ResolvedIsolationBackend;
 pub use inspection::{IsolationBackendInspection, IsolationBackendStatus, IsolationInspection};
 pub use policy::{
-    IsolationEnvironmentPolicy, IsolationFilesystemPolicy, IsolationLimitsPolicy, IsolationMode,
-    IsolationNetworkMode, IsolationNetworkPolicy, IsolationPolicy, ISOLATION_POLICY_RELATIVE_PATH,
-    ISOLATION_POLICY_VERSION,
+    ISOLATION_POLICY_RELATIVE_PATH, ISOLATION_POLICY_VERSION, IsolationEnvironmentPolicy,
+    IsolationFilesystemPolicy, IsolationLimitsPolicy, IsolationMode, IsolationNetworkMode,
+    IsolationNetworkPolicy, IsolationPolicy,
 };
 use provenance::redacted_plan_digest;
 pub use provenance::{
@@ -200,14 +200,13 @@ impl Drop for VerifiedArtifactStore {
             if let Ok(Some(cleanup_lock)) = self
                 .stores_root
                 .open_regular(".cleanup.lock".as_ref(), true)
+                && unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } == 0
             {
-                if unsafe { libc::flock(cleanup_lock.as_raw_fd(), libc::LOCK_EX) } == 0 {
-                    let _ = remove_flat_artifact_generation(
-                        &self.stores_root,
-                        &self.generation,
-                        &self.root,
-                    );
-                }
+                let _ = remove_flat_artifact_generation(
+                    &self.stores_root,
+                    &self.generation,
+                    &self.root,
+                );
             }
         }
     }
@@ -405,7 +404,7 @@ impl VerifiedArtifactStore {
                     Err(error) => {
                         return Err(refused(format!(
                             "stale verified-code lifetime lock cannot be opened: {error}"
-                        )))
+                        )));
                     }
                 };
                 if let Some(_stale_guard) = stale_guard {
@@ -510,27 +509,28 @@ impl VerifiedArtifactStore {
             )));
         }
 
-        let file = if let Some(file) = self
+        let file = match self
             .root
             .open_regular(name.as_ref(), false)
             .map_err(|error| refused(format!("verified artifact cannot be opened: {error}")))?
         {
-            let (existing, _) = read_regular_file_handle_limited(
-                "verified artifact",
-                &artifact,
-                file.try_clone()
-                    .map_err(|error| refused(error.to_string()))?,
-                self.max_file_bytes,
-            )?;
-            if existing != content || lillux::cas::sha256_hex(&existing) != expected_hash {
-                return Err(refused(format!(
-                    "verified artifact {} exists with unexpected content",
-                    artifact.display()
-                )));
+            Some(file) => {
+                let (existing, _) = read_regular_file_handle_limited(
+                    "verified artifact",
+                    &artifact,
+                    file.try_clone()
+                        .map_err(|error| refused(error.to_string()))?,
+                    self.max_file_bytes,
+                )?;
+                if existing != content || lillux::cas::sha256_hex(&existing) != expected_hash {
+                    return Err(refused(format!(
+                        "verified artifact {} exists with unexpected content",
+                        artifact.display()
+                    )));
+                }
+                file
             }
-            file
-        } else {
-            match self
+            None => match self
                 .root
                 .atomic_create_regular(name.as_ref(), content, 0o500)
                 .map_err(|error| {
@@ -586,7 +586,7 @@ impl VerifiedArtifactStore {
                     }
                     file
                 }
-            }
+            },
         };
         protect_verified_artifact(&file, &artifact)?;
         let (captured, _) = read_regular_file_handle_limited(
@@ -1319,7 +1319,8 @@ impl IsolationRuntime {
             if !lexical_system_command || !is_on_system_runtime_surface(&canonical_command) {
                 return Err(refused(format!(
                     "restartable command lexical origin is outside the live project and authorized system runtime surfaces: {} -> {}",
-                    command.display(), canonical_command.display()
+                    command.display(),
+                    canonical_command.display()
                 )));
             }
             read_regular_file_bytes_limited("captured command", &canonical_command, max_file_bytes)?
@@ -1710,10 +1711,9 @@ impl IsolationRuntime {
                 let mut verified = context.verified_code.iter().collect::<Vec<_>>();
                 if let Some(admitted) =
                     verified_command_authority.map(IsolationCommandAuthorityRef::identity)
+                    && !verified.contains(&admitted)
                 {
-                    if !verified.contains(&admitted) {
-                        verified.push(admitted);
-                    }
+                    verified.push(admitted);
                 }
                 let mut sealed_command = None;
                 let mut sealed_code_map = BTreeMap::new();
@@ -2241,10 +2241,9 @@ impl IsolationRuntime {
         let mut verified_code = context.verified_code.iter().collect::<Vec<_>>();
         if let Some(command) =
             verified_command_authority.map(IsolationCommandAuthorityRef::identity)
+            && !verified_code.contains(&command)
         {
-            if !verified_code.contains(&command) {
-                verified_code.push(command);
-            }
+            verified_code.push(command);
         }
         let mut prepared_code = Vec::with_capacity(verified_code.len());
         let mut verified_code_handoff = BTreeMap::new();
@@ -2497,16 +2496,15 @@ impl IsolationRuntime {
         ] {
             if let (Some(required_destination), Some(required_source)) =
                 (required_destination, required_source)
-            {
-                if !writable_mounts.iter().any(|mount| {
+                && !writable_mounts.iter().any(|mount| {
                     required_source.starts_with(&mount.source)
                         && required_destination.starts_with(&mount.destination)
-                }) {
-                    return Err(refused(format!(
-                        "{kind} {} is not writable under the node isolation policy",
-                        required_destination.display()
-                    )));
-                }
+                })
+            {
+                return Err(refused(format!(
+                    "{kind} {} is not writable under the node isolation policy",
+                    required_destination.display()
+                )));
             }
         }
         if let (Some(requested), Some(canonical_requested)) = (
@@ -4325,7 +4323,7 @@ fn resolve_writable_mount(
             _ => {
                 return Err(refused(
                     "isolation checkpoint source/destination mismatch".to_string(),
-                ))
+                ));
             }
         },
         other => {
@@ -4617,14 +4615,14 @@ fn validate_writable_mount(
             )));
         }
     }
-    if let Some(socket) = validation.daemon_socket {
-        if paths_overlap(path, socket) {
-            return Err(refused(format!(
-                "isolation writable path {} overlaps protected daemon socket {}",
-                path.display(),
-                socket.display()
-            )));
-        }
+    if let Some(socket) = validation.daemon_socket
+        && paths_overlap(path, socket)
+    {
+        return Err(refused(format!(
+            "isolation writable path {} overlaps protected daemon socket {}",
+            path.display(),
+            socket.display()
+        )));
     }
 
     for protected in [
@@ -4643,17 +4641,17 @@ fn validate_writable_mount(
         }
     }
 
-    if let Some(home) = std::env::var_os("HOME") {
-        if let Ok(home) = std::fs::canonicalize(home) {
-            // Projects beneath HOME are normal; HOME itself or an ancestor is
-            // too broad because it would expose unrelated credentials/config.
-            if home.starts_with(path) {
-                return Err(refused(format!(
-                    "isolation writable path {} contains protected home directory {}",
-                    path.display(),
-                    home.display()
-                )));
-            }
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(home) = std::fs::canonicalize(home)
+    {
+        // Projects beneath HOME are normal; HOME itself or an ancestor is
+        // too broad because it would expose unrelated credentials/config.
+        if home.starts_with(path) {
+            return Err(refused(format!(
+                "isolation writable path {} contains protected home directory {}",
+                path.display(),
+                home.display()
+            )));
         }
     }
 
@@ -5468,18 +5466,22 @@ mod tests {
             runtime.inspection().backend.status,
             IsolationBackendStatus::Disabled
         );
-        assert!(runtime
-            .inspection()
-            .backend
-            .bundle_manifest_digest
-            .is_none());
+        assert!(
+            runtime
+                .inspection()
+                .backend
+                .bundle_manifest_digest
+                .is_none()
+        );
         assert!(runtime.inspection().backend.signer_fingerprint.is_none());
         assert!(runtime.inspection().backend.adapter_digest.is_none());
-        assert!(runtime
-            .inspection()
-            .backend
-            .declared_capabilities
-            .is_empty());
+        assert!(
+            runtime
+                .inspection()
+                .backend
+                .declared_capabilities
+                .is_empty()
+        );
         assert!(runtime.inspection().backend.adapter_build.is_none());
         assert!(runtime.inspection().backend.artifacts.is_empty());
     }
@@ -5604,9 +5606,11 @@ mod tests {
             .apply_with_provenance(request(), context(None))
             .err()
             .expect("external live authority must name its confinement");
-        assert!(error
-            .to_string()
-            .contains("requires an explicit filesystem confinement"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires an explicit filesystem confinement")
+        );
 
         let confined = IsolationLiveAccessAuthority::DescriptorRootedMasked {
             root: Arc::new(
@@ -5623,9 +5627,11 @@ mod tests {
             .apply_with_provenance(request(), context(Some(&confined)))
             .err()
             .expect("descriptor-rooted authority must be rejected when isolation is disabled");
-        assert!(error
-            .to_string()
-            .contains("descriptor-rooted live project authority requires enforced isolation"));
+        assert!(
+            error
+                .to_string()
+                .contains("descriptor-rooted live project authority requires enforced isolation")
+        );
     }
 
     #[test]
@@ -5664,9 +5670,11 @@ mod tests {
             )
             .err()
             .expect("runtime workspace must be rejected when isolation is disabled");
-        assert!(error
-            .to_string()
-            .contains("durable project execution requires an enforced isolation backend"));
+        assert!(
+            error
+                .to_string()
+                .contains("durable project execution requires an enforced isolation backend")
+        );
     }
 
     #[test]
@@ -5768,19 +5776,23 @@ mod tests {
         broadened_capabilities
             .effective_capabilities
             .insert(IsolationCapability::NetworkHost);
-        assert!(broadened_capabilities
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("exceed its signed declaration"));
+        assert!(
+            broadened_capabilities
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("exceed its signed declaration")
+        );
 
         let mut mismatched_artifacts = resolved_backend();
         mismatched_artifacts.inspected_artifacts.clear();
-        assert!(mismatched_artifacts
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("artifact sets do not exactly match"));
+        assert!(
+            mismatched_artifacts
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("artifact sets do not exactly match")
+        );
 
         let mut invalid_digest = resolved_backend();
         invalid_digest
@@ -5788,11 +5800,13 @@ mod tests {
             .get_mut(&IsolationArtifactRole::Launcher)
             .unwrap()
             .digest = "invalid".to_string();
-        assert!(invalid_digest
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("lowercase SHA-256"));
+        assert!(
+            invalid_digest
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("lowercase SHA-256")
+        );
     }
 
     #[test]
@@ -5804,9 +5818,11 @@ mod tests {
         write_policy(app_root.path(), &policy);
 
         let error = IsolationRuntime::load(app_root.path()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("requires signed bundle `example-isolation-backend`"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires signed bundle `example-isolation-backend`")
+        );
     }
 
     #[test]
@@ -5821,26 +5837,32 @@ mod tests {
         let mut unsupported = IsolationPolicy::default_disabled();
         unsupported.version = ISOLATION_POLICY_VERSION + 1;
         write_policy(app_root.path(), &unsupported);
-        assert!(IsolationRuntime::load(app_root.path())
-            .unwrap_err()
-            .to_string()
-            .contains("expected 1"));
+        assert!(
+            IsolationRuntime::load(app_root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("expected 1")
+        );
 
         let mut unknown = serde_yaml::to_string(&IsolationPolicy::default_disabled()).unwrap();
         unknown.push_str("unknown_policy_field: true\n");
         std::fs::write(&policy_path, unknown).unwrap();
-        assert!(IsolationRuntime::load(app_root.path())
-            .unwrap_err()
-            .to_string()
-            .contains("unknown field"));
+        assert!(
+            IsolationRuntime::load(app_root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
 
         let mut zero_output = IsolationPolicy::default_disabled();
         zero_output.limits.stdout_bytes = 0;
         write_policy(app_root.path(), &zero_output);
-        assert!(IsolationRuntime::load(app_root.path())
-            .unwrap_err()
-            .to_string()
-            .contains("stdout byte limit"));
+        assert!(
+            IsolationRuntime::load(app_root.path())
+                .unwrap_err()
+                .to_string()
+                .contains("stdout byte limit")
+        );
     }
 
     #[cfg(unix)]
@@ -5864,9 +5886,11 @@ mod tests {
 
         let error = IsolationRuntime::load(app_root.path()).unwrap_err();
         assert!(matches!(&error, EngineError::IsolationPolicyRefused { .. }));
-        assert!(error
-            .to_string()
-            .contains("node isolation policy cannot be opened"));
+        assert!(
+            error
+                .to_string()
+                .contains("node isolation policy cannot be opened")
+        );
     }
 
     #[test]
@@ -5895,26 +5919,30 @@ mod tests {
         let canonical_source = std::fs::canonicalize(&source).unwrap();
         let mut arguments = vec![format!("{}.backup", source.display())];
         let mut environment = Vec::new();
-        assert!(rewrite_verified_code_references(
-            &mut arguments,
-            &mut environment,
-            &source,
-            &canonical_source,
-            Path::new("/run/verified/entry.py"),
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("cannot be rewritten safely"));
+        assert!(
+            rewrite_verified_code_references(
+                &mut arguments,
+                &mut environment,
+                &source,
+                &canonical_source,
+                Path::new("/run/verified/entry.py"),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be rewritten safely")
+        );
     }
 
     #[test]
     fn namespace_and_thread_destinations_reject_ambiguous_paths() {
         validate_namespace_destination("test", Path::new("/safe/normal/path")).unwrap();
         for path in ["relative/path", "/safe/../usr"] {
-            assert!(validate_namespace_destination("test", Path::new(path))
-                .unwrap_err()
-                .to_string()
-                .contains("normal path components"));
+            assert!(
+                validate_namespace_destination("test", Path::new(path))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("normal path components")
+            );
         }
         for thread_id in ["", ".", "..", "../thread", "thread/child"] {
             assert!(

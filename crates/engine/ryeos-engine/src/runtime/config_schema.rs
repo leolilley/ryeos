@@ -133,15 +133,15 @@ fn coerce_scalar(s: &str, prop_schema: &Value) -> Option<Value> {
     let types = schema_types(prop_schema);
     // `integer` is stricter than `number`, so try it first; only fall to
     // `number` if the schema actually allows a float.
-    if types.iter().any(|t| t == "integer") {
-        if let Ok(n) = s.parse::<i64>() {
-            return Some(Value::from(n));
-        }
+    if types.iter().any(|t| t == "integer")
+        && let Ok(n) = s.parse::<i64>()
+    {
+        return Some(Value::from(n));
     }
-    if types.iter().any(|t| t == "number") {
-        if let Ok(f) = s.parse::<f64>() {
-            return serde_json::Number::from_f64(f).map(Value::Number);
-        }
+    if types.iter().any(|t| t == "number")
+        && let Ok(f) = s.parse::<f64>()
+    {
+        return serde_json::Number::from_f64(f).map(Value::Number);
     }
     if types.iter().any(|t| t == "boolean") {
         match s {

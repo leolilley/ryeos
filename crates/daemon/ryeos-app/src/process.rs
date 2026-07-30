@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
@@ -105,7 +105,7 @@ pub fn remove_stale_socket(path: &Path) -> Result<()> {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => {
-            return Err(error).with_context(|| format!("inspect daemon socket {}", path.display()))
+            return Err(error).with_context(|| format!("inspect daemon socket {}", path.display()));
         }
     };
     if !metadata.file_type().is_socket() {
@@ -129,7 +129,7 @@ pub fn remove_stale_socket(path: &Path) -> Result<()> {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
                 Err(error) => {
                     return Err(error)
-                        .with_context(|| format!("reinspect daemon socket {}", path.display()))
+                        .with_context(|| format!("reinspect daemon socket {}", path.display()));
                 }
             };
             if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
@@ -220,7 +220,7 @@ pub fn thread_process_identity_matches(pid: i64, pgid: i64, thread_id: &str) -> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("read runtime identity from {}", environ_path.display()))
+                .with_context(|| format!("read runtime identity from {}", environ_path.display()));
         }
     };
     let expected_uds = format!("RYEOSD_THREAD_ID={thread_id}");
@@ -1097,13 +1097,13 @@ fn graceful_kill(
             return KillResult {
                 success: false,
                 method: "stale_target_identity",
-            }
+            };
         }
         Err(IdentityPinError::Unavailable) => {
             return KillResult {
                 success: false,
                 method: "identity_unavailable",
-            }
+            };
         }
     };
 
@@ -1114,7 +1114,7 @@ fn graceful_kill(
                 return KillResult {
                     success: false,
                     method: "sigterm_failed",
-                }
+                };
             }
         }
         match wait_for_target_exit(target, deadline) {
@@ -1126,7 +1126,7 @@ fn graceful_kill(
                 return KillResult {
                     success: false,
                     method: "target_wait_failed",
-                }
+                };
             }
         }
     }
@@ -1158,14 +1158,14 @@ fn hard_kill_pinned_group(
             return KillResult {
                 success: true,
                 method: "already_dead",
-            }
+            };
         }
         SignalResult::Delivered => {}
         _ => {
             return KillResult {
                 success: false,
                 method: "sigkill_failed",
-            }
+            };
         }
     }
     let deadline = std::time::Instant::now()

@@ -162,9 +162,11 @@ mod tests {
         ]);
         assert!(nodes.iter().any(|node| node.path.is_empty()));
         assert!(nodes.iter().any(|node| node.path == vec!["rye", "core"]));
-        assert!(nodes
-            .iter()
-            .any(|node| node.path == vec!["rye", "file-system", "read"]));
+        assert!(
+            nodes
+                .iter()
+                .any(|node| node.path == vec!["rye", "file-system", "read"])
+        );
     }
 
     #[test]

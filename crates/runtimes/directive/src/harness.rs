@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use serde_json::Value;
@@ -459,10 +459,12 @@ mod tests {
             "same-turn retry must not consume a second turn"
         );
         harness.record_tokens(6, 4).unwrap();
-        assert!(harness
-            .check_retry_limits()
-            .unwrap_err()
-            .contains("token limit"));
+        assert!(
+            harness
+                .check_retry_limits()
+                .unwrap_err()
+                .contains("token limit")
+        );
     }
 
     #[test]

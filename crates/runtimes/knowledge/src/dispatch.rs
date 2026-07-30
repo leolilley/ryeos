@@ -43,7 +43,7 @@ pub fn dispatch(
             return Err(KnowledgeError::InvalidArg {
                 method: other.to_string(),
                 reason: "no handler registered for this method".into(),
-            })
+            });
         }
     };
     handler(payload, runtime_config)
@@ -144,10 +144,11 @@ mod tests {
         )
         .expect("validate must dispatch");
         assert_eq!(out["valid"], false);
-        assert!(out["errors"].as_array().unwrap().iter().any(|e| e
-            .as_str()
-            .unwrap()
-            .contains("root not found in corpus: k/a")));
+        assert!(out["errors"].as_array().unwrap().iter().any(|e| {
+            e.as_str()
+                .unwrap()
+                .contains("root not found in corpus: k/a")
+        }));
     }
 
     #[test]

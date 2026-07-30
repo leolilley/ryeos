@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use tracing_subscriber::{prelude::*, Layer};
+use tracing_subscriber::{Layer, prelude::*};
 
 #[test]
 fn file_sink_writes_ndjson() {

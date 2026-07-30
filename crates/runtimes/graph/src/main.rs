@@ -18,9 +18,10 @@ mod walker;
 
 use std::collections::HashSet;
 use std::io::Read;
+use std::path::PathBuf;
 
 use clap::Parser;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_runtime::callback_client::CallbackClient;
 use ryeos_runtime::checkpoint::CheckpointWriter;
@@ -33,7 +34,7 @@ struct Cli {
     graph_run_id: Option<String>,
 
     #[arg(long)]
-    daemon_socket: Option<String>,
+    daemon_socket: Option<PathBuf>,
 
     #[arg(long, env = "RYEOS_THREAD_ID", default_value = "graph-default")]
     thread_id: String,
@@ -191,11 +192,10 @@ fn main() -> anyhow::Result<()> {
             &thread_auth_token,
         ),
         None => {
-            if let Some(ref socket) = cli.daemon_socket {
-                std::env::set_var("RYEOSD_SOCKET_PATH", socket);
-            }
             let cb_env = EnvelopeCallback {
-                socket_path: ryeos_runtime::resolve_daemon_socket_path(None),
+                socket_path: ryeos_runtime::resolve_daemon_socket_path(
+                    cli.daemon_socket.as_deref(),
+                ),
                 token: std::env::var("RYEOSD_CALLBACK_TOKEN")
                     .expect("RYEOSD_CALLBACK_TOKEN must be set by daemon"),
             };
@@ -308,15 +308,15 @@ fn main() -> anyhow::Result<()> {
         params["resume_state"] = serde_json::to_value(rs)?;
     }
 
-    if let Some(ref schema) = graph.config.config_schema {
-        if let Err(err) = normalize_inputs_against_schema(&mut params, schema) {
-            let runtime_result = make_error_runtime_result(
-                &resolved.thread_id,
-                &format!("input validation failed: {err}"),
-            );
-            println!("{}", serde_json::to_string(&runtime_result)?);
-            std::process::exit(0);
-        }
+    if let Some(ref schema) = graph.config.config_schema
+        && let Err(err) = normalize_inputs_against_schema(&mut params, schema)
+    {
+        let runtime_result = make_error_runtime_result(
+            &resolved.thread_id,
+            &format!("input validation failed: {err}"),
+        );
+        println!("{}", serde_json::to_string(&runtime_result)?);
+        std::process::exit(0);
     }
 
     // Cooperative cancel: SIGTERM sets a flag the walker checks at each node
@@ -445,10 +445,10 @@ fn normalize_inputs_against_schema(params: &mut Value, schema: &Value) -> anyhow
     // 1. Enforce required
     if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
         for field in required {
-            if let Some(name) = field.as_str() {
-                if input_obj.get(name).is_none() {
-                    anyhow::bail!("missing required input: {name}");
-                }
+            if let Some(name) = field.as_str()
+                && input_obj.get(name).is_none()
+            {
+                anyhow::bail!("missing required input: {name}");
             }
         }
     }
@@ -567,10 +567,12 @@ mod tests {
         let mut params = json!({"inputs": {"count": "not a number"}});
         let result = normalize_inputs_against_schema(&mut params, &schema);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("expected type 'integer'"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("expected type 'integer'")
+        );
     }
 
     #[test]
@@ -661,6 +663,10 @@ mod tests {
             "/tmp/daemon.sock",
         ]);
         assert!(cli.is_ok(), "graph CLI must accept all daemon flags");
+        assert_eq!(
+            cli.unwrap().daemon_socket.as_deref(),
+            Some(std::path::Path::new("/tmp/daemon.sock"))
+        );
     }
 
     #[test]

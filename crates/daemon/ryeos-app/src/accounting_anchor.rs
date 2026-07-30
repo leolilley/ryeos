@@ -36,7 +36,7 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
 
 /// Filename of the anchor inside the runtime state directory.
@@ -605,10 +605,10 @@ mod tests {
             let slot: [u8; SLOT_SIZE] = bytes[index * SLOT_SIZE..(index + 1) * SLOT_SIZE]
                 .try_into()
                 .unwrap();
-            if let Some(record) = decode_slot(&slot) {
-                if record.financial_high_water == 3 {
-                    newest = Some(index);
-                }
+            if let Some(record) = decode_slot(&slot)
+                && record.financial_high_water == 3
+            {
+                newest = Some(index);
             }
         }
         let newest = newest.expect("advanced slot present");
@@ -671,9 +671,11 @@ mod tests {
         assert_eq!(anchor.read_valid().unwrap().financial_high_water, 2);
         // The delayed sequence-1 waiter observes the higher anchor and must
         // not overwrite it (regression refusal).
-        assert!(anchor
-            .compare_and_advance(SITE, EPOCH, 1, &digest_of("c1"))
-            .is_err());
+        assert!(
+            anchor
+                .compare_and_advance(SITE, EPOCH, 1, &digest_of("c1"))
+                .is_err()
+        );
     }
 
     #[test]

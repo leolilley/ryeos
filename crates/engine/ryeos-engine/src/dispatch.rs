@@ -705,9 +705,11 @@ mod tests {
         let ctx = test_engine_context();
         let completion = execute_plan(&plan, &ctx).unwrap();
         assert_eq!(completion.status, ThreadTerminalStatus::Completed);
-        assert!(completion.metadata.as_ref().unwrap()["pid"]
-            .as_u64()
-            .is_some());
+        assert!(
+            completion.metadata.as_ref().unwrap()["pid"]
+                .as_u64()
+                .is_some()
+        );
         // No flag ⇒ no debug block (the normal path is untouched).
         assert!(
             completion.metadata.as_ref().unwrap().get("debug").is_none(),
@@ -993,7 +995,7 @@ mod tests {
     #[test]
     fn truncate_tail_keeps_the_end() {
         let s = "abcdefghij"; // 10 bytes
-                              // Short input is returned whole.
+        // Short input is returned whole.
         assert_eq!(truncate_tail_for_error(s, 100), s);
         // Long input keeps the LAST max_len bytes plus a marker.
         let out = truncate_tail_for_error(s, 4);

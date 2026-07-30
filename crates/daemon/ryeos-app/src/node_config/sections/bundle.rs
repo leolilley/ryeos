@@ -6,7 +6,7 @@
 //! path: <absolute path to bundle root>
 //! ```
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use serde::Deserialize;
 use serde_json::Value;
 

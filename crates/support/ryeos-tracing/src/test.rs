@@ -78,11 +78,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use tracing::{span, Event, Id, Level, Subscriber};
+use tracing::{Event, Id, Level, Subscriber, span};
+use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::Layer;
 
 /// A recorded span with its fields, child spans, and events.
 #[derive(Debug, Clone)]
@@ -200,10 +200,10 @@ where
 
     fn on_record(&self, id: &Id, values: &span::Record<'_>, _ctx: Context<'_, S>) {
         let key = id.into_u64();
-        if let Ok(mut state) = self.state.lock() {
-            if let Some(node) = state.nodes.get_mut(&key) {
-                values.record(&mut FieldRecorder(&mut node.fields));
-            }
+        if let Ok(mut state) = self.state.lock()
+            && let Some(node) = state.nodes.get_mut(&key)
+        {
+            values.record(&mut FieldRecorder(&mut node.fields));
         }
     }
 
@@ -231,11 +231,11 @@ where
             .or_else(|| ctx.lookup_current().map(|sref| sref.id().into_u64()));
 
         if let Ok(mut state) = self.state.lock() {
-            if let Some(id) = target_id {
-                if let Some(node) = state.nodes.get_mut(&id) {
-                    node.events.push(recorded);
-                    return;
-                }
+            if let Some(id) = target_id
+                && let Some(node) = state.nodes.get_mut(&id)
+            {
+                node.events.push(recorded);
+                return;
             }
             state.orphan_events.push(recorded);
         }
@@ -353,8 +353,8 @@ impl tracing::field::Visit for EventFieldRecorder<'_> {
 pub fn prime_callsites() {
     use std::sync::Once;
     use tracing::subscriber::set_global_default;
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::Registry;
+    use tracing_subscriber::layer::SubscriberExt;
     static PRIMED: Once = Once::new();
     PRIMED.call_once(|| {
         let subscriber =

@@ -118,10 +118,10 @@ mod tests {
     use std::cell::Cell;
 
     use crate::head_cache::{CachedHead, HeadCache};
-    use crate::objects::chain_state::{ChainStateBuilder, ChainThreadEntry};
     use crate::objects::ThreadStatus;
+    use crate::objects::chain_state::{ChainStateBuilder, ChainThreadEntry};
 
-    use super::{project_initial_root_committed_chain, ProjectionDb};
+    use super::{ProjectionDb, project_initial_root_committed_chain};
 
     const ROOT: &str = "T-root";
 

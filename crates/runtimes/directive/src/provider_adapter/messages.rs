@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::directive::{
     AssistantToolCallsPlacement, MessageSchemas, ProviderMessage, SystemMessageMode, TextPlacement,
@@ -26,27 +26,29 @@ fn convert_openai(messages: &[ProviderMessage]) -> (Vec<Value>, Option<String>) 
                 None => obj["content"] = Value::Null,
             }
             if let Some(ref calls) = msg.tool_calls {
-                obj["tool_calls"] = json!(calls
-                    .iter()
-                    .map(|tc| {
-                        json!({
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": tc.arguments,
-                            }
+                obj["tool_calls"] = json!(
+                    calls
+                        .iter()
+                        .map(|tc| {
+                            json!({
+                                "id": tc.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": tc.arguments,
+                                }
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>());
+                        .collect::<Vec<_>>()
+                );
             }
             if let Some(ref id) = msg.tool_call_id {
                 obj["tool_call_id"] = json!(id);
             }
-            if msg.role == "assistant" {
-                if let Some(ref reasoning) = msg.reasoning_content {
-                    obj["reasoning_content"] = json!(reasoning);
-                }
+            if msg.role == "assistant"
+                && let Some(ref reasoning) = msg.reasoning_content
+            {
+                obj["reasoning_content"] = json!(reasoning);
             }
             obj
         })
@@ -142,10 +144,10 @@ fn convert_with_schemas(
 
         let mut obj = json!({ "role": mapped_role });
 
-        if msg.role == "assistant" {
-            if let Some(ref reasoning) = msg.reasoning_content {
-                obj["reasoning_content"] = json!(reasoning);
-            }
+        if msg.role == "assistant"
+            && let Some(ref reasoning) = msg.reasoning_content
+        {
+            obj["reasoning_content"] = json!(reasoning);
         }
 
         if msg.role == "system" && system_mode == SystemMessageMode::MessageRole {
@@ -448,9 +450,11 @@ mod tests {
         let (converted, system) = convert_messages(&msgs, &Some(schemas));
         assert_eq!(system, Some("You are helpful.".to_string()));
         assert_eq!(converted.len(), 2);
-        assert!(converted
-            .iter()
-            .all(|m| m.get("role").and_then(|r| r.as_str()) != Some("system")));
+        assert!(
+            converted
+                .iter()
+                .all(|m| m.get("role").and_then(|r| r.as_str()) != Some("system"))
+        );
     }
 
     #[test]

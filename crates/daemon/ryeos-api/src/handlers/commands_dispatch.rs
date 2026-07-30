@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
@@ -155,9 +155,12 @@ pub async fn handle(
         parent_execution_context: None,
     };
 
-    ryeos_executor::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state)
+    let result = ryeos_executor::dispatch::dispatch(&item_ref, &dispatch_req, &exec_ctx, &state)
         .await
-        .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")))
+        .map_err(|e| HandlerError::Internal(format!("dispatch failed: {e}")));
+    drop(dispatch_req);
+    drop(exec_ctx);
+    result
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

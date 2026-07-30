@@ -1,5 +1,5 @@
 use super::super::event::RyeOsUiIntent;
-use super::{bound_view_vm, RyeOsCore, RyeOsTone, RyeOsViewVm};
+use super::{RyeOsCore, RyeOsTone, RyeOsViewVm, bound_view_vm};
 
 // Keep the established `ui::view_model::RyeOsTimelineEntryVm` path stable
 // while grouping execution presentation behind this module.

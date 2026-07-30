@@ -182,13 +182,13 @@ pub async fn import_admitted_root(
     if req.expected_issuer.is_empty() {
         anyhow::bail!("remote import expected issuer must not be empty");
     }
-    if let Some(expected_attestation_hash) = req.expected_attestation_hash.as_deref() {
-        if !is_canonical_hash(expected_attestation_hash) {
-            anyhow::bail!(
-                "invalid remote import expected attestation hash: {}",
-                expected_attestation_hash
-            );
-        }
+    if let Some(expected_attestation_hash) = req.expected_attestation_hash.as_deref()
+        && !is_canonical_hash(expected_attestation_hash)
+    {
+        anyhow::bail!(
+            "invalid remote import expected attestation hash: {}",
+            expected_attestation_hash
+        );
     }
 
     let attestations = client
@@ -596,13 +596,15 @@ mod tests {
             attestation: value,
         };
 
-        assert!(verify_remote_attestation_record(
-            &record,
-            &subject,
-            policy,
-            &issuer,
-            &wrong_signer.verifying_key(),
-        )
-        .is_err());
+        assert!(
+            verify_remote_attestation_record(
+                &record,
+                &subject,
+                policy,
+                &issuer,
+                &wrong_signer.verifying_key(),
+            )
+            .is_err()
+        );
     }
 }

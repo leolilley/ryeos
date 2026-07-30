@@ -207,9 +207,11 @@ mod integration_tests {
             None,
         )
         .unwrap();
-        assert!(store
-            .set_follow_child("k1", 0, item_ref, &hash, "C2", "C2", &sealed)
-            .is_err());
+        assert!(
+            store
+                .set_follow_child("k1", 0, item_ref, &hash, "C2", "C2", &sealed)
+                .is_err()
+        );
         let w = store.get_follow_waiter_by_key("k1").unwrap().unwrap();
         assert_eq!(w.children.len(), 1);
         assert_eq!(w.children[0].child_thread_id, "C");
@@ -261,7 +263,7 @@ mod integration_tests {
             "result": { "x": 1 },
             "outputs": {},
             "warnings": [],
-            "cost": null
+            "cost": null,
         });
         // First terminal for the child chain: waiting → ready, returns true.
         let first = store
@@ -277,9 +279,11 @@ mod integration_tests {
             .unwrap();
         assert!(!second);
         // An unknown child chain has no waiter → false, not an error.
-        assert!(!store
-            .mark_follow_child_terminal("unknown-chain", "T-child", "completed", &envelope)
-            .unwrap());
+        assert!(
+            !store
+                .mark_follow_child_terminal("unknown-chain", "T-child", "completed", &envelope)
+                .unwrap()
+        );
     }
 
     /// Make `id` a RUNNING native-resume source with a captured ResumeContext —
@@ -594,12 +598,14 @@ mod integration_tests {
                 "P",
             )
             .unwrap();
-        assert!(store
-            .get_follow_waiter_by_key("k")
-            .unwrap()
-            .unwrap()
-            .parent_successor_thread_id
-            .is_none());
+        assert!(
+            store
+                .get_follow_waiter_by_key("k")
+                .unwrap()
+                .unwrap()
+                .parent_successor_thread_id
+                .is_none()
+        );
 
         // Recovery: the existing successor is the follow-resume one → adopt it
         // rather than re-create (which would fail: parent no longer running).
@@ -1311,10 +1317,12 @@ mod integration_tests {
                 .expect("reserve successor launch before publication"),
             ryeos_app::runtime_db::LaunchClaimOutcome::Claimed
         );
-        assert!(store
-            .get_thread(successor_id)
-            .expect("inspect unpublished successor")
-            .is_none());
+        assert!(
+            store
+                .get_thread(successor_id)
+                .expect("inspect unpublished successor")
+                .is_none()
+        );
 
         store
             .create_machine_continuation(
@@ -1384,18 +1392,22 @@ mod integration_tests {
             )
             .expect_err("prepared successor must carry the source execution policy");
 
-        assert!(error
-            .to_string()
-            .contains("execution policy differs from its source"));
+        assert!(
+            error
+                .to_string()
+                .contains("execution policy differs from its source")
+        );
         assert_eq!(
             store.get_thread("T-policy-source").unwrap().unwrap().status,
             "running"
         );
         assert!(store.get_thread("T-policy-successor").unwrap().is_none());
-        assert!(store
-            .get_launch_metadata("T-policy-successor")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .get_launch_metadata("T-policy-successor")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1813,10 +1825,12 @@ mod integration_tests {
             fp.is_none(),
             "follow-resume edge has no request fingerprint"
         );
-        assert!(store
-            .get_continuation_fingerprint("F-root")
-            .unwrap()
-            .is_none());
+        assert!(
+            store
+                .get_continuation_fingerprint("F-root")
+                .unwrap()
+                .is_none()
+        );
         assert!(
             store
                 .get_launch_metadata("F-succ")

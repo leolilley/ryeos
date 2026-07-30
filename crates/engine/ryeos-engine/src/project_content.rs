@@ -45,7 +45,7 @@ pub trait AuthoritativeProjectContent {
     /// Prove a whole-file digest observed during resolution against this
     /// authority's exact admitted tree.
     fn validates_file(&self, relative_path: &Path, content_hash: &str)
-        -> Result<bool, EngineError>;
+    -> Result<bool, EngineError>;
 
     /// Prove that one exact project-relative file is absent from the
     /// immutable tree.

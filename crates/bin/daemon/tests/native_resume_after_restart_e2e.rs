@@ -192,21 +192,12 @@ fn launch_metadata_from_spec_carries_native_resume() {
 }
 
 #[test]
-fn checkpoint_writer_roundtrip_via_env() {
-    // Subprocess-side primitive: a tool launched with
-    // RYEOS_CHECKPOINT_DIR + RYEOS_RESUME=1 reads back the latest
-    // checkpoint via CheckpointWriter::load_latest.
+fn checkpoint_writer_roundtrip_across_resume() {
     let dir = tempfile::TempDir::new().unwrap();
     let ckpt_dir = dir.path().to_path_buf();
 
     // First run: not a resume.
-    std::env::set_var("RYEOS_CHECKPOINT_DIR", &ckpt_dir);
-    std::env::remove_var("RYEOS_RESUME");
-    let writer1 = CheckpointWriter::from_env().expect("checkpoint writer from env");
-    assert!(
-        !CheckpointWriter::is_resume(),
-        "cold start should not be a resume"
-    );
+    let writer1 = CheckpointWriter::new(&ckpt_dir);
     writer1
         .write(&serde_json::json!({"step": 1, "data": "alpha"}))
         .expect("write checkpoint");
@@ -215,12 +206,7 @@ fn checkpoint_writer_roundtrip_via_env() {
         .expect("write second checkpoint");
 
     // Second run: resume = 1. Latest must come back.
-    std::env::set_var("RYEOS_RESUME", "1");
-    let writer2 = CheckpointWriter::from_env().expect("checkpoint writer from env");
-    assert!(
-        CheckpointWriter::is_resume(),
-        "RYEOS_RESUME=1 should be detected"
-    );
+    let writer2 = CheckpointWriter::new(&ckpt_dir);
     let latest = writer2
         .load_latest()
         .expect("load latest")
@@ -230,7 +216,4 @@ fn checkpoint_writer_roundtrip_via_env() {
         "load_latest should pick the newest write"
     );
     assert_eq!(latest["data"], "beta");
-
-    std::env::remove_var("RYEOS_CHECKPOINT_DIR");
-    std::env::remove_var("RYEOS_RESUME");
 }

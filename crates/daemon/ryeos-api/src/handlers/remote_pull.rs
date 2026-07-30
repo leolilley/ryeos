@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::{ffi::OsStr, ffi::OsString};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::registry::ServiceDescriptor;

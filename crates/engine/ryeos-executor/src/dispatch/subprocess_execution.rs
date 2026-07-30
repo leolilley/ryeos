@@ -970,11 +970,9 @@ fn finalize_streaming_success(
                 "streaming thread {thread_id} became terminal before its successful result was committed"
             )))
         }
-        crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => {
-            Err(DispatchError::Internal(anyhow::anyhow!(
-                "streaming thread {thread_id} completed after a durable stop won"
-            )))
-        }
+        crate::dispatch::MethodFinalizeOutcome::DurableStopSettled => Err(DispatchError::Internal(
+            anyhow::anyhow!("streaming thread {thread_id} completed after a durable stop won"),
+        )),
         crate::dispatch::MethodFinalizeOutcome::PreservedForShutdown => {
             Err(DispatchError::Internal(anyhow::anyhow!(
                 "streaming thread {thread_id} was interrupted by daemon shutdown and preserved for recovery"
@@ -1131,23 +1129,23 @@ async fn dispatch_tool_subprocess(
     // A method-dispatch wrapper carries the target's admission through the
     // recursive request above. Only a concrete subprocess root may attach that
     // admission to the locally resolved subject.
-    if request.previous_thread_id.is_none() {
-        if let Some(admission) = request.root_admission.as_ref() {
-            let local_subject = verified.ok_or_else(|| {
-                DispatchError::InvalidRef(
-                    item_ref.clone(),
-                    "terminal subprocess root did not resolve and verify".to_string(),
-                )
-            })?;
-            admission
-                .ensure_matches_subject(&ctx.engine, local_subject, thread_profile)
-                .map_err(DispatchError::Internal)?;
-            resolved.plan_context = admission.plan_context().clone();
-            resolved.root_admission = Some(admission.clone());
-            admission
-                .ensure_matches_request(&resolved)
-                .map_err(DispatchError::Internal)?;
-        }
+    if request.previous_thread_id.is_none()
+        && let Some(admission) = request.root_admission.as_ref()
+    {
+        let local_subject = verified.ok_or_else(|| {
+            DispatchError::InvalidRef(
+                item_ref.clone(),
+                "terminal subprocess root did not resolve and verify".to_string(),
+            )
+        })?;
+        admission
+            .ensure_matches_subject(&ctx.engine, local_subject, thread_profile)
+            .map_err(DispatchError::Internal)?;
+        resolved.plan_context = admission.plan_context().clone();
+        resolved.root_admission = Some(admission.clone());
+        admission
+            .ensure_matches_request(&resolved)
+            .map_err(DispatchError::Internal)?;
     }
 
     if let Some(target) = request.target_site_id {

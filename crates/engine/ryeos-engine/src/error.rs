@@ -37,7 +37,9 @@ pub enum EngineError {
         source: std::io::Error,
     },
 
-    #[error("ambiguous resolution for `{canonical_ref}`: multiple candidates in {space} ({candidates:?})")]
+    #[error(
+        "ambiguous resolution for `{canonical_ref}`: multiple candidates in {space} ({candidates:?})"
+    )]
     AmbiguousResolution {
         canonical_ref: String,
         space: String,
@@ -184,9 +186,7 @@ pub enum EngineError {
     #[error("binary `{bin}` not found in bundle (searched: {searched})")]
     BinNotFound { bin: String, searched: String },
 
-    #[error(
-        "bundle manifest missing: no refs/bundles/manifest under bundle root at {bundle_root}"
-    )]
+    #[error("bundle manifest missing: no refs/bundles/manifest under bundle root at {bundle_root}")]
     BinManifestMissing { bundle_root: String },
 
     #[error("binary `{bin}` bundle executor manifest is invalid: {reason}")]
@@ -224,7 +224,9 @@ pub enum EngineError {
     #[error("binary `{bin}` item-source sidecar invalid: {reason}")]
     BinSidecarInvalid { bin: String, reason: String },
 
-    #[error("qualified binary target bundle `{bundle}` not found (searched: {searched:?}; skipped invalid manifests: {skipped:?})")]
+    #[error(
+        "qualified binary target bundle `{bundle}` not found (searched: {searched:?}; skipped invalid manifests: {skipped:?})"
+    )]
     QualifiedBinBundleNotFound {
         bundle: String,
         searched: Vec<String>,
@@ -237,7 +239,9 @@ pub enum EngineError {
     #[error("qualified binary target bundle `{bundle}` is ambiguous (matches: {roots:?})")]
     QualifiedBinBundleAmbiguous { bundle: String, roots: Vec<PathBuf> },
 
-    #[error("bundle `{source_bundle}` may not use binary bundle `{target_bundle}`: source requires/uses no kind provided by target")]
+    #[error(
+        "bundle `{source_bundle}` may not use binary bundle `{target_bundle}`: source requires/uses no kind provided by target"
+    )]
     QualifiedBinDependencyMissing {
         source_bundle: String,
         target_bundle: String,
@@ -277,7 +281,9 @@ pub enum EngineError {
     #[error("runtime config uses reserved env key: {key}")]
     ReservedEnvKey { key: String },
 
-    #[error("host env passthrough ${{{var}}} not allowed by daemon policy (RYEOS_TOOL_ENV_PASSTHROUGH allowlist)")]
+    #[error(
+        "host env passthrough ${{{var}}} not allowed by daemon policy (RYEOS_TOOL_ENV_PASSTHROUGH allowlist)"
+    )]
     HostEnvPassthroughNotAllowed { var: String },
 
     #[error(
@@ -285,9 +291,7 @@ pub enum EngineError {
     )]
     HostEnvPassthroughMissing { var: String },
 
-    #[error(
-        "reserved host env passthrough ${{{var}}} is not allowed (RYEOS_* prefix is reserved)"
-    )]
+    #[error("reserved host env passthrough ${{{var}}} is not allowed (RYEOS_* prefix is reserved)")]
     ReservedHostEnvPassthrough { var: String },
 
     #[error("unknown executor alias `{alias}` for kind `{kind}`")]

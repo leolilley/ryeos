@@ -24,12 +24,12 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use common::DaemonHarness;
 use common::fast_fixture::{
-    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
-    FastFixture,
+    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
-use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 use tokio::time::Instant;
 
@@ -253,7 +253,9 @@ async fn read_timed_until_terminal(
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining.min(Duration::from_secs(2)), resp.chunk()).await {
+        let next_chunk =
+            tokio::time::timeout(remaining.min(Duration::from_secs(2)), resp.chunk()).await;
+        match next_chunk {
             Ok(Ok(Some(chunk))) => {
                 buf.extend_from_slice(&chunk);
                 // Re-parse the whole buffer, but keep each already-seen event's
@@ -364,13 +366,17 @@ async fn open_gateway_stream(
 
     // Read until stream_started (id) AND thread_created (row exists).
     let mut buf: Vec<u8> = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Loaded CI runners can spend more than ten seconds admitting the launch
+    // before either opening event is emitted. This bounds the wait without
+    // weakening the later assertions that the chain tail attached live.
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(
             Instant::now() < deadline,
             "gateway did not emit stream_started + thread_created before deadline"
         );
-        match tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await {
+        let next_chunk = tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await;
+        match next_chunk {
             Ok(Ok(Some(chunk))) => {
                 buf.extend_from_slice(&chunk);
                 let events = parse_complete_events(&buf, Instant::now());
@@ -450,9 +456,21 @@ async fn gateway_stream_delivers_events_incrementally_not_buffered() {
         first.event, "execution_planning",
         "first event is execution_planning"
     );
+    let planning_payload: serde_json::Value =
+        serde_json::from_str(&first.data).expect("execution_planning data is JSON");
     assert!(
-        events.iter().any(|event| event.event == "stream_started"),
-        "durable stream handoff must follow execution planning"
+        planning_payload
+            .get("launch_id")
+            .and_then(|value| value.as_str())
+            .is_some_and(|launch_id| launch_id.starts_with("L-")),
+        "execution_planning carries an opaque launch id"
+    );
+    assert!(
+        events
+            .iter()
+            .skip(1)
+            .any(|event| event.event == "stream_started"),
+        "stream_started must follow execution_planning"
     );
 
     let terminal = events
@@ -490,7 +508,12 @@ async fn chain_tail_attached_before_terminal_receives_terminal_live() {
     let (gw_resp, thread_id) = open_gateway_stream(&h, &user_sk, &node_fp, &project_path).await;
     let drain = tokio::spawn(async move {
         let mut resp = gw_resp;
-        while let Ok(Some(_)) = resp.chunk().await {}
+        loop {
+            let next_chunk = resp.chunk().await;
+            if !matches!(next_chunk, Ok(Some(_))) {
+                break;
+            }
+        }
     });
 
     // For a root thread, chain_root_id == thread_id. Attach the chain tail now,

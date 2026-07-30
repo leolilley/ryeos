@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{run_service_standalone_fresh, StandaloneHarness};
+use common::{StandaloneHarness, run_service_standalone_fresh};
 
 // ── 5.1 rebuild standalone — succeeds on fresh state ────────────────────
 

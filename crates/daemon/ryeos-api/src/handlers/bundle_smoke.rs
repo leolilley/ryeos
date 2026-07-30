@@ -17,13 +17,13 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
 use crate::registry::ServiceDescriptor;
 use ryeos_app::state::AppState;
-use ryeos_bundle::manifest::{validate_smoke_decls, BundleManifestSource, SmokeDecl};
+use ryeos_bundle::manifest::{BundleManifestSource, SmokeDecl, validate_smoke_decls};
 use ryeos_executor::executor::ServiceAvailability;
 
 #[derive(serde::Deserialize)]
@@ -163,14 +163,12 @@ pub async fn handle(
     // Keep the state root whenever it may still be wanted: explicit request
     // or anything failed (the transcripts under it are the diagnostics).
     let keep = req.keep_state || !success;
-    if !keep {
-        if let Err(e) = std::fs::remove_dir_all(&state_root) {
-            tracing::warn!(
-                state_root = %state_root.display(),
-                error = %e,
-                "smoke state-root cleanup failed"
-            );
-        }
+    if !keep && let Err(e) = std::fs::remove_dir_all(&state_root) {
+        tracing::warn!(
+            state_root = %state_root.display(),
+            error = %e,
+            "smoke state-root cleanup failed"
+        );
     }
 
     Ok(json!({

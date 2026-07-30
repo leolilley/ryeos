@@ -128,10 +128,10 @@ impl StartupSnapshot {
         {
             return Err("startup timestamps must not be empty");
         }
-        if let (Some(done), Some(total)) = (self.chains_done, self.chains_total) {
-            if done > total {
-                return Err("startup chains_done cannot exceed chains_total");
-            }
+        if let (Some(done), Some(total)) = (self.chains_done, self.chains_total)
+            && done > total
+        {
+            return Err("startup chains_done cannot exceed chains_total");
         }
         if self
             .error

@@ -14,11 +14,11 @@ pub mod descriptor;
 pub mod registry;
 
 pub use builder::{
-    build_method_call_stdin, build_subprocess_spec, BuildError, BuildRequest, CallbackBindings,
+    BuildError, BuildRequest, CallbackBindings, build_method_call_stdin, build_subprocess_spec,
 };
-pub use descriptor::{validate_method_runtime_protocol, ProtocolDescriptor};
+pub use descriptor::{ProtocolDescriptor, validate_method_runtime_protocol};
 pub use registry::{
-    validate_admitted_protocol_descriptor, ProtocolError, ProtocolRegistry, VerifiedProtocol,
+    ProtocolError, ProtocolRegistry, VerifiedProtocol, validate_admitted_protocol_descriptor,
 };
 
 /// Protocol ABI version this engine supports.

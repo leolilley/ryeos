@@ -28,12 +28,12 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
+use common::DaemonHarness;
 use common::fast_fixture::{
-    register_config_fixture_bundle, register_standard_bundle, write_authorized_key_signed_by,
-    FastFixture,
+    FastFixture, register_config_fixture_bundle, register_standard_bundle,
+    write_authorized_key_signed_by,
 };
 use common::mock_provider::{MockProvider, MockResponse};
-use common::DaemonHarness;
 use lillux::crypto::{Signer, SigningKey};
 
 fn live_execution_policy(
@@ -256,10 +256,12 @@ async fn post_execute_stream(
         req = req.header(k.as_str(), v.as_str());
     }
 
-    tokio::time::timeout(Duration::from_secs(timeout_secs), req.send())
+    let response = tokio::time::timeout(Duration::from_secs(timeout_secs), req.send())
         .await
         .expect("POST /execute/stream timed out")
-        .expect("POST /execute/stream send failed")
+        .expect("POST /execute/stream send failed");
+    drop(client);
+    response
 }
 
 async fn assert_pre_admission_rejection(resp: reqwest::Response, expected_message: &str) {
@@ -405,6 +407,18 @@ async fn sse_dispatch_launch_e2e_round_trip() {
             .is_some(),
         "execution_planning carries its opaque launch id"
     );
+    let launch_id = planning_payload
+        .get("launch_id")
+        .and_then(|value| value.as_str())
+        .expect("execution_planning carries launch_id");
+    assert!(
+        launch_id.starts_with("L-"),
+        "launch id must start with L-: {launch_id}"
+    );
+    assert!(
+        planning_payload.get("thread_id").is_none(),
+        "execution_planning must precede thread creation"
+    );
 
     // The later handoff event publishes the durable thread identity and also
     // remains synthetic (no Last-Event-ID).
@@ -417,9 +431,9 @@ async fn sse_dispatch_launch_e2e_round_trip() {
         "stream_started must have no id (would corrupt Last-Event-ID resume); got id={:?}",
         stream_started.id
     );
-    let payload: serde_json::Value =
+    let stream_started_payload: serde_json::Value =
         serde_json::from_str(&stream_started.data).expect("stream_started data is JSON");
-    let thread_id = payload
+    let thread_id = stream_started_payload
         .get("thread_id")
         .and_then(|v| v.as_str())
         .expect("stream_started carries thread_id")

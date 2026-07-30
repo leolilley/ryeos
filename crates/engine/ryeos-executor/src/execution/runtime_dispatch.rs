@@ -98,7 +98,7 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         "thread auth token validated: using server-side principal",
     );
 
-    handle_execute(
+    let result = handle_execute(
         params,
         state,
         &thread_auth,
@@ -106,7 +106,10 @@ pub async fn handle(params: &Value, state: &AppState) -> Result<Value> {
         &caller_thread.chain_root_id,
         child_provenance,
     )
-    .await
+    .await;
+    drop(caller_thread);
+    drop(thread_auth);
+    result
 }
 
 fn hook_integrity(detail: impl Into<String>) -> anyhow::Error {
@@ -862,27 +865,33 @@ mod tests {
             facets: None,
             launch_window: None,
         };
-        assert!(validate_hook_identity_authority(
-            &hook,
-            &action,
-            "directive:test/fixture",
-            &"a".repeat(64),
-        )
-        .is_ok());
-        assert!(validate_hook_identity_authority(
-            &hook,
-            &action,
-            "directive:test/other",
-            &"a".repeat(64),
-        )
-        .is_err());
-        assert!(validate_hook_identity_authority(
-            &hook,
-            &action,
-            "directive:test/fixture",
-            &"c".repeat(64),
-        )
-        .is_err());
+        assert!(
+            validate_hook_identity_authority(
+                &hook,
+                &action,
+                "directive:test/fixture",
+                &"a".repeat(64),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_hook_identity_authority(
+                &hook,
+                &action,
+                "directive:test/other",
+                &"a".repeat(64),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_hook_identity_authority(
+                &hook,
+                &action,
+                "directive:test/fixture",
+                &"c".repeat(64),
+            )
+            .is_err()
+        );
     }
 
     #[test]

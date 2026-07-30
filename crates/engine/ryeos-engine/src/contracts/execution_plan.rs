@@ -515,18 +515,22 @@ mod tests {
 
     #[test]
     fn subject_resolution_authority_rejects_projectless_path_and_bad_hashes() {
-        assert!(SubjectResolutionAuthority::Projectless
-            .validate_for_project_context(&ProjectContext::LocalPath {
-                path: PathBuf::from("/tmp/project"),
+        assert!(
+            SubjectResolutionAuthority::Projectless
+                .validate_for_project_context(&ProjectContext::LocalPath {
+                    path: PathBuf::from("/tmp/project"),
+                })
+                .is_err()
+        );
+        assert!(
+            SubjectResolutionAuthority::PinnedGeneration {
+                snapshot_hash: "not-a-hash".to_owned(),
+            }
+            .validate_for_project_context(&ProjectContext::SnapshotHash {
+                hash: "not-a-hash".to_owned(),
             })
-            .is_err());
-        assert!(SubjectResolutionAuthority::PinnedGeneration {
-            snapshot_hash: "not-a-hash".to_owned(),
-        }
-        .validate_for_project_context(&ProjectContext::SnapshotHash {
-            hash: "not-a-hash".to_owned(),
-        })
-        .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -535,14 +539,18 @@ mod tests {
         let snapshot_context = ProjectContext::SnapshotHash {
             hash: snapshot.clone(),
         };
-        assert!(SubjectResolutionAuthority::LiveFs
+        assert!(
+            SubjectResolutionAuthority::LiveFs
+                .validate_for_project_context(&snapshot_context)
+                .is_err()
+        );
+        assert!(
+            SubjectResolutionAuthority::CowWorkspace {
+                base_snapshot_hash: snapshot.clone(),
+                current_operational_generation: snapshot,
+            }
             .validate_for_project_context(&snapshot_context)
-            .is_err());
-        assert!(SubjectResolutionAuthority::CowWorkspace {
-            base_snapshot_hash: snapshot.clone(),
-            current_operational_generation: snapshot,
-        }
-        .validate_for_project_context(&snapshot_context)
-        .is_err());
+            .is_err()
+        );
     }
 }

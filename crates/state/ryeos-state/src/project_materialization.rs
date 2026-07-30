@@ -744,12 +744,14 @@ mod tests {
             .cas
             .store_object(&policy_source_tree.to_value())
             .unwrap();
-        assert!(VerifiedProjectTreeClosure::load(
-            &fixture.cas,
-            &policy_source_hash,
-            &fixture.policy_hash,
-        )
-        .is_err());
+        assert!(
+            VerifiedProjectTreeClosure::load(
+                &fixture.cas,
+                &policy_source_hash,
+                &fixture.policy_hash,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -854,11 +856,15 @@ mod tests {
     fn observed_content_proofs_reject_noncanonical_relative_paths() {
         let (root, materialization) = fixture();
         let escaped = root.join("../outside");
-        assert!(materialization
-            .validates_observed_file(&escaped, &"a".repeat(64))
-            .is_err());
-        assert!(materialization
-            .validates_observed_absence(&escaped)
-            .is_err());
+        assert!(
+            materialization
+                .validates_observed_file(&escaped, &"a".repeat(64))
+                .is_err()
+        );
+        assert!(
+            materialization
+                .validates_observed_absence(&escaped)
+                .is_err()
+        );
     }
 }

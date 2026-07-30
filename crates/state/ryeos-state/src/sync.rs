@@ -631,13 +631,13 @@ fn pin_standalone_export_authority(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Signer as _;
     use crate::objects::{
         CapturedItemTrustClass, CapturedNodeHistoryPolicyProvenance, CapturedPolicyProvenance,
         CapturedThreadHistoryPolicy, ChainThreadEntry, ThreadHistoryRetention,
         ThreadSnapshotBuilder, ThreadStatus,
     };
     use crate::signer::TestSigner;
-    use crate::Signer as _;
     use std::collections::BTreeMap;
     use std::fs;
     use std::sync::Arc;

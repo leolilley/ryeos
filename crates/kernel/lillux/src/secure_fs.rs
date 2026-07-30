@@ -1769,7 +1769,8 @@ impl PinnedDirectory {
                     )),
                     Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
                         anyhow::anyhow!(
-                            "conditional replace refused an unexpected target; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                            "conditional replace refused an unexpected target; it remains preserved as {} because restoration raced: {error:#}; {restore:#}",
+                            self.path.join(&quarantine_name).display()
                         ),
                     )),
                 };
@@ -1785,7 +1786,8 @@ impl PinnedDirectory {
                     )),
                     Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
                         anyhow::anyhow!(
-                            "conditional replace refused changed target content; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                            "conditional replace refused changed target content; it remains preserved as {} because restoration raced: {error:#}; {restore:#}",
+                            self.path.join(&quarantine_name).display()
                         ),
                     )),
                 };
@@ -1808,7 +1810,8 @@ impl PinnedDirectory {
                     )),
                     Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
                         anyhow::anyhow!(
-                            "conditional replace did not publish; the verified prior target remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                            "conditional replace did not publish; the verified prior target remains preserved as {} because restoration raced: {error:#}; {restore:#}",
+                            self.path.join(&quarantine_name).display()
                         ),
                     )),
                 };
@@ -2105,7 +2108,8 @@ impl PinnedDirectory {
                     )),
                     Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
                         anyhow::anyhow!(
-                            "conditional remove refused an unexpected target; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                            "conditional remove refused an unexpected target; it remains preserved as {} because restoration raced: {error:#}; {restore:#}",
+                            self.path.join(&quarantine_name).display()
                         ),
                     )),
                 };
@@ -2122,7 +2126,8 @@ impl PinnedDirectory {
                     )),
                     Err(restore) => Err(crate::atomic_fs::AtomicMutationError::namespace_changed(
                         anyhow::anyhow!(
-                            "conditional remove refused changed target content; it remains preserved as {} because restoration raced: {error:#}; {restore:#}", self.path.join(&quarantine_name).display()
+                            "conditional remove refused changed target content; it remains preserved as {} because restoration raced: {error:#}; {restore:#}",
+                            self.path.join(&quarantine_name).display()
                         ),
                     )),
                 };
@@ -2738,14 +2743,14 @@ where
         let name_c = std::ffi::CString::new(name.as_bytes())?;
         if let Some(child_directory) = open_child_directory(directory, &name_c, &display)? {
             if !prune(&relative, true)? {
-                if let Some(state) = budget.as_ref() {
-                    if depth >= state.max_depth {
-                        anyhow::bail!(
-                            "secure directory traversal exceeds maximum depth {} at {}",
-                            state.max_depth,
-                            display.display()
-                        );
-                    }
+                if let Some(state) = budget.as_ref()
+                    && depth >= state.max_depth
+                {
+                    anyhow::bail!(
+                        "secure directory traversal exceeds maximum depth {} at {}",
+                        state.max_depth,
+                        display.display()
+                    );
                 }
                 visit_from_open_directory(
                     root,
@@ -2983,16 +2988,18 @@ mod tests {
         std::fs::remove_file(destination_path.join("value")).unwrap();
         std::fs::write(destination_path.join("value"), b"local edit").unwrap();
 
-        assert!(destination
-            .replace_regular_from_if_matches_atomic(
-                OsStr::new("value"),
-                Some(&expected),
-                |_| Ok(()),
-                &source,
-                OsStr::new("staged"),
-                &staged,
-            )
-            .is_err());
+        assert!(
+            destination
+                .replace_regular_from_if_matches_atomic(
+                    OsStr::new("value"),
+                    Some(&expected),
+                    |_| Ok(()),
+                    &source,
+                    OsStr::new("staged"),
+                    &staged,
+                )
+                .is_err()
+        );
         assert_eq!(
             std::fs::read(destination_path.join("value")).unwrap(),
             b"local edit"
@@ -3016,9 +3023,11 @@ mod tests {
         std::fs::remove_file(root.path().join("value")).unwrap();
         std::fs::write(root.path().join("value"), b"local edit").unwrap();
 
-        assert!(directory
-            .remove_if_same_atomic(OsStr::new("value"), &expected)
-            .is_err());
+        assert!(
+            directory
+                .remove_if_same_atomic(OsStr::new("value"), &expected)
+                .is_err()
+        );
         assert_eq!(
             std::fs::read(root.path().join("value")).unwrap(),
             b"local edit"
@@ -3078,17 +3087,21 @@ mod tests {
         std::fs::rename(&target, dir.path().join("old.yaml")).unwrap();
         std::fs::write(&target, b"replacement").unwrap();
 
-        assert!(directory
-            .atomic_write_if_same(
-                OsStr::new("schedule.yaml"),
-                Some(&expected),
-                b"desired",
-                0o600,
-            )
-            .is_err());
-        assert!(directory
-            .remove_if_same(OsStr::new("schedule.yaml"), &expected)
-            .is_err());
+        assert!(
+            directory
+                .atomic_write_if_same(
+                    OsStr::new("schedule.yaml"),
+                    Some(&expected),
+                    b"desired",
+                    0o600,
+                )
+                .is_err()
+        );
+        assert!(
+            directory
+                .remove_if_same(OsStr::new("schedule.yaml"), &expected)
+                .is_err()
+        );
         assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
     }
 
@@ -3152,9 +3165,11 @@ mod tests {
         std::fs::write(&target, b"existing").unwrap();
         let directory = PinnedDirectory::open(dir.path()).unwrap().unwrap();
 
-        assert!(directory
-            .atomic_write_if_same(OsStr::new("cas-entry"), None, b"replacement", 0o600)
-            .is_err());
+        assert!(
+            directory
+                .atomic_write_if_same(OsStr::new("cas-entry"), None, b"replacement", 0o600)
+                .is_err()
+        );
         assert_eq!(std::fs::read(&target).unwrap(), b"existing");
     }
 
@@ -3188,14 +3203,16 @@ mod tests {
             )
             .unwrap();
         std::fs::write(destination.path().join("conflict"), b"different").unwrap();
-        assert!(destination
-            .link_regular_from(
-                OsStr::new("conflict"),
-                &source,
-                OsStr::new("payload"),
-                &payload,
-            )
-            .is_err());
+        assert!(
+            destination
+                .link_regular_from(
+                    OsStr::new("conflict"),
+                    &source,
+                    OsStr::new("payload"),
+                    &payload,
+                )
+                .is_err()
+        );
         assert_eq!(
             std::fs::read(destination.path().join("linked")).unwrap(),
             b"immutable"
@@ -3231,13 +3248,15 @@ mod tests {
             .open_regular(OsStr::new("next"), false)
             .unwrap()
             .unwrap();
-        assert!(directory
-            .rename_regular_child_noreplace_atomic(
-                OsStr::new("next"),
-                OsStr::new("recovered"),
-                &next,
-            )
-            .is_err());
+        assert!(
+            directory
+                .rename_regular_child_noreplace_atomic(
+                    OsStr::new("next"),
+                    OsStr::new("recovered"),
+                    &next,
+                )
+                .is_err()
+        );
         assert_eq!(std::fs::read(dir.path().join("next")).unwrap(), b"next");
     }
 
@@ -3346,26 +3365,30 @@ mod tests {
         std::fs::write(unsupported.path().join("target"), b"value").unwrap();
         symlink("target", unsupported.path().join("link")).unwrap();
         let pinned = PinnedDirectory::open(unsupported.path()).unwrap().unwrap();
-        assert!(pinned
-            .visit_regular_files_bounded(
-                DirectoryTraversalBudget::new(8, 1),
-                |_relative, _directory| Ok(false),
-                |_relative, _file| Ok(()),
-            )
-            .is_err());
+        assert!(
+            pinned
+                .visit_regular_files_bounded(
+                    DirectoryTraversalBudget::new(8, 1),
+                    |_relative, _directory| Ok(false),
+                    |_relative, _file| Ok(()),
+                )
+                .is_err()
+        );
 
         std::fs::remove_file(unsupported.path().join("link")).unwrap();
         let fifo =
             std::ffi::CString::new(unsupported.path().join("pipe").as_os_str().as_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let pinned = PinnedDirectory::open(unsupported.path()).unwrap().unwrap();
-        assert!(pinned
-            .visit_regular_files_bounded(
-                DirectoryTraversalBudget::new(8, 1),
-                |_relative, _directory| Ok(false),
-                |_relative, _file| Ok(()),
-            )
-            .is_err());
+        assert!(
+            pinned
+                .visit_regular_files_bounded(
+                    DirectoryTraversalBudget::new(8, 1),
+                    |_relative, _directory| Ok(false),
+                    |_relative, _file| Ok(()),
+                )
+                .is_err()
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-use super::{validate_object_kind, SCHEMA_VERSION};
+use super::{SCHEMA_VERSION, validate_object_kind};
 use crate::objects::thread_snapshot::{
-    parse_canonical_timestamp, validate_canonical_hash, ThreadStatus,
+    ThreadStatus, parse_canonical_timestamp, validate_canonical_hash,
 };
 
 /// Entry for a single thread within a ChainState.

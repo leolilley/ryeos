@@ -376,7 +376,9 @@ impl ExecutionProvenance {
         match &mut self {
             Self::Projectless { .. } => {
                 if override_root.is_some() {
-                    panic!("ExecutionProvenance::with_state_root: projectless execution cannot redirect project state");
+                    panic!(
+                        "ExecutionProvenance::with_state_root: projectless execution cannot redirect project state"
+                    );
                 }
             }
             Self::RootLiveProject { state_root, .. }
@@ -556,18 +558,15 @@ impl ExecutionProvenance {
             if !workspace_lifeline.owns_effective_path(effective_path) {
                 anyhow::bail!("pinned provenance lifeline does not own its effective project path");
             }
-            match pinned_materialization.verified() {
-                Some(materialization) => {
-                    if materialization.snapshot_hash() != snapshot_hash
-                        || !materialization.owns_path(effective_path)?
-                    {
-                        anyhow::bail!(
-                            "pinned provenance materialization proof contradicts its snapshot or path"
-                        );
-                    }
-                    materialization.ensure_root_binding()?;
+            if let Some(materialization) = pinned_materialization.verified() {
+                if materialization.snapshot_hash() != snapshot_hash
+                    || !materialization.owns_path(effective_path)?
+                {
+                    anyhow::bail!(
+                        "pinned provenance materialization proof contradicts its snapshot or path"
+                    );
                 }
-                None => {}
+                materialization.ensure_root_binding()?;
             }
         }
         match &mut self {
@@ -613,6 +612,22 @@ impl ExecutionProvenance {
                 project_authority, ..
             } => project_authority,
         }
+    }
+
+    /// Select the canonical live project root for a daemon-mediated read.
+    ///
+    /// A pinned materialization is an execution view, never an ambient route
+    /// back to mutable live state.
+    pub fn durable_live_read_root(&self) -> anyhow::Result<&Path> {
+        let root = self.project_authority().authorized_live_read_root()?;
+        if root != self.original_project_path() {
+            anyhow::bail!(
+                "durable live read root {} does not match provenance project identity {}",
+                root.display(),
+                self.original_project_path().display()
+            );
+        }
+        Ok(root)
     }
 
     /// Select the durable project root for a daemon-mediated live mutation.
@@ -1054,6 +1069,25 @@ mod tests {
     }
 
     #[test]
+    fn state_root_override_does_not_replace_durable_live_project_authority() {
+        let provenance =
+            live("/live", engine()).with_state_root(Some(PathBuf::from("/separate-state")));
+
+        assert_eq!(
+            provenance.state_root_override(),
+            Some(Path::new("/separate-state"))
+        );
+        assert_eq!(
+            provenance.durable_live_read_root().unwrap(),
+            Path::new("/live")
+        );
+        assert_eq!(
+            provenance.durable_live_write_root("project").unwrap(),
+            Path::new("/live")
+        );
+    }
+
+    #[test]
     fn descriptor_rooted_live_authority_preserves_root_identity_and_masks() {
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir(project.path().join(ryeos_engine::AI_DIR)).unwrap();
@@ -1210,9 +1244,11 @@ mod tests {
             pinned(Path::new("/laptop"), &"a".repeat(64)),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not match its effective path"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its effective path")
+        );
     }
 
     #[test]
@@ -1423,7 +1459,8 @@ mod tests {
         )
         .unwrap();
 
-        match root.clone_for_borrowed_child() {
+        let child = root.clone_for_borrowed_child();
+        match child {
             ExecutionProvenance::ChildPinnedGeneration { .. } => {}
             other => panic!("expected ChildPinnedGeneration, got {other:?}"),
         }

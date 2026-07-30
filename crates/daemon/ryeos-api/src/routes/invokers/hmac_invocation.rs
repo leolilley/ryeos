@@ -49,6 +49,14 @@ pub fn compile_hmac_verifier(
     route_id: &str,
     auth_config: &Value,
 ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+    compile_hmac_verifier_with_secret_lookup(route_id, auth_config, |name| std::env::var(name).ok())
+}
+
+fn compile_hmac_verifier_with_secret_lookup(
+    route_id: &str,
+    auth_config: &Value,
+    read_secret: impl FnOnce(&str) -> Option<String>,
+) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
     let cfg: RawHmacConfig = serde_json::from_value(auth_config.clone()).map_err(|e| {
         RouteConfigError::InvalidSourceConfig {
             id: route_id.into(),
@@ -63,7 +71,7 @@ pub fn compile_hmac_verifier(
             "secret_env must be a non-empty environment variable name",
         ));
     }
-    let secret = std::env::var(&cfg.secret_env).map_err(|_| {
+    let secret = read_secret(&cfg.secret_env).ok_or_else(|| {
         cfg_err(
             route_id,
             &format!(
@@ -348,10 +356,10 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
                 let mut out = Vec::new();
                 for part in raw_header_value.split(',') {
                     let part = part.trim();
-                    if let Some((k, v)) = part.split_once('=') {
-                        if k == key {
-                            out.push(v);
-                        }
+                    if let Some((k, v)) = part.split_once('=')
+                        && k == key
+                    {
+                        out.push(v);
                     }
                 }
                 if out.is_empty() {
@@ -457,10 +465,10 @@ impl CompiledRouteInvocation for CompiledHmacVerifier {
             metadata.insert("delivery_id".into(), did);
         }
         for name in &self.forwarded_headers {
-            if let Some(v) = headers.get(name) {
-                if let Ok(s) = v.to_str() {
-                    metadata.insert(format!("header.{}", name.as_str()), s.into());
-                }
+            if let Some(v) = headers.get(name)
+                && let Ok(s) = v.to_str()
+            {
+                metadata.insert(format!("header.{}", name.as_str()), s.into());
             }
         }
 
@@ -664,12 +672,9 @@ fn compile_signed_payload_item(
                     &format!("{label} from=header only accepts `header`"),
                 ));
             }
-            let name = raw
-                .header
-                .as_ref()
-                .ok_or_else(|| {
-                    cfg_err(route_id, &format!("{label} from=header requires `header`"))
-                })?;
+            let name = raw.header.as_ref().ok_or_else(|| {
+                cfg_err(route_id, &format!("{label} from=header requires `header`"))
+            })?;
             let h = validate_header_name(route_id, &format!("{label}.header"), name)?;
             Ok(SignedPayloadItem::Header(h))
         }
@@ -718,9 +723,7 @@ fn compile_signed_payload_item(
                 )
             })?;
             validate_json_path(route_id, &format!("{label}.path"), path)?;
-            Ok(SignedPayloadItem::BodyJsonPath {
-                path: path.clone(),
-            })
+            Ok(SignedPayloadItem::BodyJsonPath { path: path.clone() })
         }
         "synthesized" => Err(cfg_err(
             route_id,
@@ -959,15 +962,17 @@ fn compile_value_extract(
                 parse_synthesized_template(route_id, &format!("{label}.template"), template)?;
             Ok(ValueExtract::Synthesized(parts))
         }
-        other => {
-            Err(cfg_err(
-                route_id,
-                &format!(
+        other => Err(cfg_err(
+            route_id,
+            &format!(
                 "{label} unknown `from` '{other}'; allowed: header, header_pair, body_json_path{}",
-                if allow_synthesized { ", synthesized" } else { "" }
+                if allow_synthesized {
+                    ", synthesized"
+                } else {
+                    ""
+                }
             ),
-            ))
-        }
+        )),
     }
 }
 
@@ -1125,10 +1130,10 @@ fn read_header<'a>(
 fn extract_pair_value<'a>(header_value: &'a str, key: &str) -> Option<&'a str> {
     for part in header_value.split(',') {
         let part = part.trim();
-        if let Some((k, v)) = part.split_once('=') {
-            if k == key {
-                return Some(v);
-            }
+        if let Some((k, v)) = part.split_once('=')
+            && k == key
+        {
+            return Some(v);
         }
     }
     None
@@ -1223,26 +1228,41 @@ mod tests {
         }
     }
 
-    async fn with_secret_env<F, Fut, R>(env_var: &str, value: &str, f: F) -> R
-    where
-        F: FnOnce(String) -> Fut,
-        Fut: std::future::Future<Output = R>,
-    {
-        std::env::set_var(env_var, value);
-        let result = f(env_var.to_string()).await;
-        std::env::remove_var(env_var);
-        result
+    struct TestSecret {
+        env_var: String,
+        value: String,
     }
 
-    fn with_secret_env_sync<F: FnOnce(&str) -> R, R>(env_var: &str, value: &str, f: F) -> R {
-        std::env::set_var(env_var, value);
-        let result = f(env_var);
-        std::env::remove_var(env_var);
-        result
+    async fn with_secret<F, Fut, R>(env_var: &str, value: &str, f: F) -> R
+    where
+        F: FnOnce(TestSecret) -> Fut,
+        Fut: std::future::Future<Output = R>,
+    {
+        f(TestSecret {
+            env_var: env_var.to_string(),
+            value: value.to_string(),
+        })
+        .await
+    }
+
+    fn with_secret_sync<F: FnOnce(TestSecret) -> R, R>(env_var: &str, value: &str, f: F) -> R {
+        f(TestSecret {
+            env_var: env_var.to_string(),
+            value: value.to_string(),
+        })
+    }
+
+    fn compile_with_secret(
+        route_id: &str,
+        config: &Value,
+        secret: &TestSecret,
+    ) -> Result<Arc<dyn CompiledRouteInvocation>, RouteConfigError> {
+        compile_hmac_verifier_with_secret_lookup(route_id, config, |name| {
+            (name == secret.env_var).then(|| secret.value.clone())
+        })
     }
 
     fn build_test_state() -> (tempfile::TempDir, ryeos_app::state::AppState) {
-        std::env::set_var("HOSTNAME", "testhost");
         let tmpdir = tempfile::TempDir::new().unwrap();
         let runtime_state_dir = tmpdir.path().join(".ai").join("state");
         let runtime_db_path = tmpdir.path().join("runtime.sqlite3");
@@ -1295,14 +1315,15 @@ mod tests {
         ));
         let event_streams = std::sync::Arc::new(ryeos_app::event_stream::ThreadEventHub::new(16));
         let threads = std::sync::Arc::new(
-            ryeos_app::thread_lifecycle::ThreadLifecycleService::new(
+            ryeos_app::thread_lifecycle::ThreadLifecycleService::new_for_test_with_site_id(
                 state_store.clone(),
                 engine.clone(),
                 kind_profiles.clone(),
                 events.clone(),
                 event_streams.clone(),
+                "site:testhost",
             )
-            .expect("HOSTNAME not set in test environment"),
+            .expect("valid test site identity"),
         );
         let commands = std::sync::Arc::new(ryeos_app::command_service::CommandService::new(
             state_store.clone(),
@@ -1415,9 +1436,9 @@ mod tests {
 
     #[tokio::test]
     async fn stripe_style_valid_signature_accepted() {
-        with_secret_env("RYEOSD_TEST_HMAC_STRIPE_OK", "stripe-secret", |env| async move {
+        with_secret("RYEOSD_TEST_HMAC_STRIPE_OK", "stripe-secret", |secret| async move {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [
                     { "from": "header_pair", "header": "stripe-signature", "key": "t" },
                     { "literal": "." },
@@ -1436,7 +1457,7 @@ mod tests {
                     "extract": { "from": "body_json_path", "path": "id" },
                 },
             });
-            let compiled = compile_hmac_verifier("r1", &cfg).unwrap();
+            let compiled = compile_with_secret("r1", &cfg, &secret).unwrap();
             let now = now_unix();
             let body = b"{\"id\":\"evt_1\"}";
             let mut sp = Vec::new();
@@ -1466,9 +1487,9 @@ mod tests {
 
     #[tokio::test]
     async fn stripe_style_wrong_secret_rejected() {
-        with_secret_env("RYEOSD_TEST_HMAC_STRIPE_BAD", "real-secret", |env| async move {
+        with_secret("RYEOSD_TEST_HMAC_STRIPE_BAD", "real-secret", |secret| async move {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [
                     { "from": "header_pair", "header": "stripe-signature", "key": "t" },
                     { "literal": "." },
@@ -1484,7 +1505,7 @@ mod tests {
                     "tolerance_secs": 300,
                 },
             });
-            let compiled = compile_hmac_verifier("r1", &cfg).unwrap();
+            let compiled = compile_with_secret("r1", &cfg, &secret).unwrap();
             let now = now_unix();
             let body = b"{}";
             let mut sp = Vec::new();
@@ -1505,9 +1526,9 @@ mod tests {
 
     #[tokio::test]
     async fn github_style_valid_and_replay() {
-        with_secret_env("RYEOSD_TEST_HMAC_GH_OK", "gh-secret", |env| async move {
+        with_secret("RYEOSD_TEST_HMAC_GH_OK", "gh-secret", |secret| async move {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [ { "from": "body" } ],
                 "signature": {
                     "header": "x-hub-signature-256",
@@ -1520,7 +1541,7 @@ mod tests {
                 "dedupe": { "ttl_secs": 600, "max_entries": 1024 },
                 "forwarded_headers": [ "x-github-event" ],
             });
-            let compiled = compile_hmac_verifier("r1", &cfg).unwrap();
+            let compiled = compile_with_secret("r1", &cfg, &secret).unwrap();
             let body = b"{\"action\":\"opened\"}";
             let sig = hex_encode(&hmac_sha256(b"gh-secret", body), false);
             let headers = header_map(&[
@@ -1565,16 +1586,20 @@ mod tests {
 
     #[test]
     fn compile_rejects_missing_auth_config() {
-        let err = expect_err(compile_hmac_verifier("r1", &serde_json::json!(null)));
+        let err = expect_err(compile_hmac_verifier_with_secret_lookup(
+            "r1",
+            &serde_json::json!(null),
+            |_| None,
+        ));
         // null deserializes as unit, not as the expected struct
         assert!(format!("{err}").contains("invalid"), "got: {err}");
     }
 
     #[test]
     fn compile_rejects_no_timestamp_no_dedupe() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_NO_REPLAY", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_NO_REPLAY", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1582,7 +1607,7 @@ mod tests {
                     "select": { "kind": "exact" },
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("timestamp` or `dedupe`"),
                 "got: {err}"
@@ -1594,9 +1619,9 @@ mod tests {
 
     #[tokio::test]
     async fn stripe_style_stale_timestamp_rejected() {
-        with_secret_env("RYEOSD_TEST_HMAC_STRIPE_STALE", "stripe-secret", |env| async move {
+        with_secret("RYEOSD_TEST_HMAC_STRIPE_STALE", "stripe-secret", |secret| async move {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [
                     { "from": "header_pair", "header": "stripe-signature", "key": "t" },
                     { "literal": "." },
@@ -1612,7 +1637,7 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let compiled = compile_hmac_verifier("r1", &cfg).unwrap();
+            let compiled = compile_with_secret("r1", &cfg, &secret).unwrap();
             let now = now_unix();
             let stale = now.saturating_sub(600);
             let body = b"{}";
@@ -1634,9 +1659,9 @@ mod tests {
 
     #[tokio::test]
     async fn slack_style_valid_signature_with_synthesized_delivery_id() {
-        with_secret_env("RYEOSD_TEST_HMAC_SLACK_OK", "slack-secret", |env| async move {
+        with_secret("RYEOSD_TEST_HMAC_SLACK_OK", "slack-secret", |secret| async move {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [
                     { "literal": "v0:" },
                     { "from": "header", "header": "x-slack-request-timestamp" },
@@ -1659,7 +1684,7 @@ mod tests {
                     },
                 },
             });
-            let compiled = compile_hmac_verifier("r1", &cfg).unwrap();
+            let compiled = compile_with_secret("r1", &cfg, &secret).unwrap();
             let now = now_unix();
             let body = b"token=xxx&team_id=T1";
             let mut sp = Vec::new();
@@ -1695,7 +1720,6 @@ mod tests {
 
     #[test]
     fn compile_rejects_unset_env() {
-        std::env::remove_var("RYEOSD_TEST_HMAC_UNSET_VAR");
         let cfg = serde_json::json!({
             "secret_env": "RYEOSD_TEST_HMAC_UNSET_VAR",
             "signed_payload": [{ "from": "body" }],
@@ -1709,15 +1733,17 @@ mod tests {
                 "tolerance_secs": 30,
             },
         });
-        let err = expect_err(compile_hmac_verifier("r1", &cfg));
+        let err = expect_err(compile_hmac_verifier_with_secret_lookup("r1", &cfg, |_| {
+            None
+        }));
         assert!(format!("{err}").contains("is not set"), "got: {err}");
     }
 
     #[test]
     fn compile_rejects_empty_signed_payload() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_EMPTY_PAYLOAD", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_EMPTY_PAYLOAD", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [],
                 "signature": {
                     "header": "x-sig",
@@ -1729,7 +1755,7 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("signed_payload must not be empty"),
                 "got: {err}"
@@ -1739,9 +1765,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_uppercase_header_name() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_UC_HEADER", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_UC_HEADER", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [
                     { "from": "header", "header": "X-Sig" },
                 ],
@@ -1755,7 +1781,7 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("must be lowercase ASCII"),
                 "got: {err}"
@@ -1765,9 +1791,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_forbidden_header_name() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_FORBID", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_FORBID", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "authorization",
@@ -1779,16 +1805,16 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(format!("{err}").contains("forbidden list"), "got: {err}");
         });
     }
 
     #[test]
     fn compile_rejects_bad_encoding() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_BAD_ENC", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_BAD_ENC", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1800,16 +1826,16 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(format!("{err}").contains("encoding 'rot13'"), "got: {err}");
         });
     }
 
     #[test]
     fn compile_rejects_select_kind_pair_values_without_key() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_SELECT_NO_KEY", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_SELECT_NO_KEY", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1821,16 +1847,16 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(format!("{err}").contains("requires `key`"), "got: {err}");
         });
     }
 
     #[test]
     fn compile_rejects_select_kind_prefix_without_prefix() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_SELECT_NO_PREFIX", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_SELECT_NO_PREFIX", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1842,16 +1868,16 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(format!("{err}").contains("requires `prefix`"), "got: {err}");
         });
     }
 
     #[test]
     fn compile_rejects_select_kind_unknown() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_SELECT_UNK", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_SELECT_UNK", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1863,7 +1889,7 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("select.kind 'magic'"),
                 "got: {err}"
@@ -1873,9 +1899,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_zero_tolerance() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_ZERO_TOL", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_ZERO_TOL", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1887,7 +1913,7 @@ mod tests {
                     "tolerance_secs": 0,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("tolerance_secs must be > 0"),
                 "got: {err}"
@@ -1897,9 +1923,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_zero_dedupe_ttl() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_ZERO_TTL", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_ZERO_TTL", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1911,7 +1937,7 @@ mod tests {
                 },
                 "dedupe": { "ttl_secs": 0, "max_entries": 10 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("dedupe.ttl_secs must be > 0"),
                 "got: {err}"
@@ -1921,9 +1947,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_zero_dedupe_capacity() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_ZERO_CAP", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_ZERO_CAP", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1935,7 +1961,7 @@ mod tests {
                 },
                 "dedupe": { "ttl_secs": 60, "max_entries": 0 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("dedupe.max_entries must be > 0"),
                 "got: {err}"
@@ -1945,9 +1971,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_dedupe_without_delivery_id() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_DEDUP_NO_DID", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_DEDUP_NO_DID", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -1956,7 +1982,7 @@ mod tests {
                 },
                 "dedupe": { "ttl_secs": 60, "max_entries": 10 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("requires `delivery_id`"),
                 "got: {err}"
@@ -1966,9 +1992,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_synthesized_in_signed_payload() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_SYN_PAYLOAD", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_SYN_PAYLOAD", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [
                     { "from": "synthesized", "template": "${header.x-foo}" },
                 ],
@@ -1982,7 +2008,7 @@ mod tests {
                     "tolerance_secs": 30,
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("from=synthesized is not allowed in signed_payload"),
                 "got: {err}"
@@ -1992,9 +2018,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_nested_json_path() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_NESTED_PATH", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_NESTED_PATH", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -2009,7 +2035,7 @@ mod tests {
                     "extract": { "from": "body_json_path", "path": "data.id" },
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(
                 format!("{err}").contains("nested paths are not supported"),
                 "got: {err}"
@@ -2019,9 +2045,9 @@ mod tests {
 
     #[test]
     fn compile_rejects_unknown_template_variable() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_BAD_TEMPLATE", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_BAD_TEMPLATE", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -2039,16 +2065,16 @@ mod tests {
                     },
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(format!("{err}").contains("unknown variable"), "got: {err}");
         });
     }
 
     #[test]
     fn compile_rejects_unterminated_template() {
-        with_secret_env_sync("RYEOSD_TEST_HMAC_UNTERM_TEMPL", "x", |env| {
+        with_secret_sync("RYEOSD_TEST_HMAC_UNTERM_TEMPL", "x", |secret| {
             let cfg = serde_json::json!({
-                "secret_env": env,
+                "secret_env": &secret.env_var,
                 "signed_payload": [{ "from": "body" }],
                 "signature": {
                     "header": "x-sig",
@@ -2066,7 +2092,7 @@ mod tests {
                     },
                 },
             });
-            let err = expect_err(compile_hmac_verifier("r1", &cfg));
+            let err = expect_err(compile_with_secret("r1", &cfg, &secret));
             assert!(format!("{err}").contains("unterminated"), "got: {err}");
         });
     }
@@ -2142,55 +2168,59 @@ mod tests {
 
     #[tokio::test]
     async fn dedupe_isolated_per_route() {
-        with_secret_env("RYEOSD_TEST_HMAC_DEDUP_ISO", "secret", |env| async move {
-            let cfg = serde_json::json!({
-                "secret_env": env,
-                "signed_payload": [{ "from": "body" }],
-                "signature": {
-                    "header": "x-sig",
-                    "encoding": "hex_lower",
-                    "select": { "kind": "exact" },
-                },
-                "delivery_id": { "extract": { "from": "header", "header": "x-id" } },
-                "dedupe": { "ttl_secs": 600, "max_entries": 64 },
-            });
-            let compiled_a = compile_hmac_verifier("route_a", &cfg).unwrap();
-            let compiled_b = compile_hmac_verifier("route_b", &cfg).unwrap();
-            let body = b"";
-            let sig = hex_encode(&hmac_sha256(b"secret", body), false);
-            let headers = header_map(&[("x-sig", &sig), ("x-id", "evt_1")]);
-            let (_tmp, state) = build_test_state();
-            let dedupe =
-                std::sync::Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new());
+        with_secret(
+            "RYEOSD_TEST_HMAC_DEDUP_ISO",
+            "secret",
+            |secret| async move {
+                let cfg = serde_json::json!({
+                    "secret_env": &secret.env_var,
+                    "signed_payload": [{ "from": "body" }],
+                    "signature": {
+                        "header": "x-sig",
+                        "encoding": "hex_lower",
+                        "select": { "kind": "exact" },
+                    },
+                    "delivery_id": { "extract": { "from": "header", "header": "x-id" } },
+                    "dedupe": { "ttl_secs": 600, "max_entries": 64 },
+                });
+                let compiled_a = compile_with_secret("route_a", &cfg, &secret).unwrap();
+                let compiled_b = compile_with_secret("route_b", &cfg, &secret).unwrap();
+                let body = b"";
+                let sig = hex_encode(&hmac_sha256(b"secret", body), false);
+                let headers = header_map(&[("x-sig", &sig), ("x-id", "evt_1")]);
+                let (_tmp, state) = build_test_state();
+                let dedupe =
+                    std::sync::Arc::new(crate::routes::webhook_dedupe::WebhookDedupeStore::new());
 
-            // Same delivery_id on two unrelated routes — both fresh.
-            // Each context uses the correct route_id so dedupe is isolated.
-            let mut ctx_a = make_invocation_ctx_with_dedupe(
-                state.clone(),
-                headers.clone(),
-                body,
-                dedupe.clone(),
-            );
-            ctx_a.route_id = "route_a".into();
-            let result_a = compiled_a.invoke(ctx_a).await.unwrap();
-            assert!(matches!(result_a, RouteInvocationResult::Principal(_)));
+                // Same delivery_id on two unrelated routes — both fresh.
+                // Each context uses the correct route_id so dedupe is isolated.
+                let mut ctx_a = make_invocation_ctx_with_dedupe(
+                    state.clone(),
+                    headers.clone(),
+                    body,
+                    dedupe.clone(),
+                );
+                ctx_a.route_id = "route_a".into();
+                let result_a = compiled_a.invoke(ctx_a).await.unwrap();
+                assert!(matches!(result_a, RouteInvocationResult::Principal(_)));
 
-            let mut ctx_b = make_invocation_ctx_with_dedupe(
-                state.clone(),
-                headers.clone(),
-                body,
-                dedupe.clone(),
-            );
-            ctx_b.route_id = "route_b".into();
-            let result_b = compiled_b.invoke(ctx_b).await.unwrap();
-            assert!(matches!(result_b, RouteInvocationResult::Principal(_)));
+                let mut ctx_b = make_invocation_ctx_with_dedupe(
+                    state.clone(),
+                    headers.clone(),
+                    body,
+                    dedupe.clone(),
+                );
+                ctx_b.route_id = "route_b".into();
+                let result_b = compiled_b.invoke(ctx_b).await.unwrap();
+                assert!(matches!(result_b, RouteInvocationResult::Principal(_)));
 
-            // Second hit on route_a → replay.
-            let mut ctx_a2 = make_invocation_ctx_with_dedupe(state, headers, body, dedupe);
-            ctx_a2.route_id = "route_a".into();
-            let err = expect_dispatch_err(compiled_a.invoke(ctx_a2).await);
-            assert!(matches!(err, RouteDispatchError::Unauthorized));
-        })
+                // Second hit on route_a → replay.
+                let mut ctx_a2 = make_invocation_ctx_with_dedupe(state, headers, body, dedupe);
+                ctx_a2.route_id = "route_a".into();
+                let err = expect_dispatch_err(compiled_a.invoke(ctx_a2).await);
+                assert!(matches!(err, RouteDispatchError::Unauthorized));
+            },
+        )
         .await;
     }
 }

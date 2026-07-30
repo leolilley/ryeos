@@ -1,7 +1,7 @@
 [package]
 name = "lillux"
-version = "0.5.70"
-edition = "2021"
+version = "0.5.71"
+edition = "2024"
 description = "Lillux microkernel — Execute, Memory, Identity, Time"
 license.workspace = true
 repository = "https://github.com/leolilley/ryeos"

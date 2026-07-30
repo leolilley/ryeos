@@ -397,12 +397,12 @@ impl GraphDefinition {
             std::borrow::Cow::Owned(lillux::signature::strip_signature_lines(raw))
         };
         let definition_hash = lillux::cas::sha256_hex(definition_content.as_bytes());
-        if let Some((_, expected_digest)) = verified_identity {
-            if definition_hash != expected_digest {
-                anyhow::bail!(
-                    "verified graph content digest mismatch: envelope={expected_digest}, runtime={definition_hash}"
-                );
-            }
+        if let Some((_, expected_digest)) = verified_identity
+            && definition_hash != expected_digest
+        {
+            anyhow::bail!(
+                "verified graph content digest mismatch: envelope={expected_digest}, runtime={definition_hash}"
+            );
         }
         let mut file: GraphFile = serde_yaml::from_str(definition_content.as_ref())?;
         let runtime_capability_requirements = match file.requires {
@@ -806,6 +806,7 @@ requires:
         runtime_vault:
           - namespace: oauth
             operations: [get]
+        project_snapshots: [status]
 "#;
         let def = GraphDefinition::from_yaml(yaml, Some("test.yaml")).unwrap();
         assert_eq!(
@@ -821,6 +822,7 @@ requires:
             vec![
                 "ryeos.append.bundle-events.arc/arc_pattern_event".to_string(),
                 "ryeos.get.vault.arc/oauth".to_string(),
+                "ryeos.status.project-snapshots.live".to_string(),
             ]
         );
     }

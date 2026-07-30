@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use crate::directive::*;
 use ryeos_directive_core::ResolvedProviderSnapshot;
@@ -115,26 +115,26 @@ pub fn bootstrap(
     // Parse directive-declared hooks (header.hooks) as the authored layer.
     // Source ownership, not authored data, fixes their precedence before all
     // configured layers.
-    if let Some(ref header_hooks) = header.hooks {
-        if !header_hooks.is_empty() {
-            tracing::info!(
-                count = header_hooks.len(),
-                "directive runtime: merging directive-declared hooks"
-            );
-            for (idx, def) in header_hooks.iter().cloned().enumerate() {
-                // Dead-config: a directive-authored `continuation` hook can only
-                // fire when continuation is enabled. Validate here, before the
-                // merge loses header provenance, and fail loud rather than ship a
-                // hook that silently never runs.
-                if def.event == "continuation" && !header.continuation.enabled() {
-                    return Err(anyhow::anyhow!(
-                        "directive header hooks[{idx}]: a `continuation` event hook is \
+    if let Some(ref header_hooks) = header.hooks
+        && !header_hooks.is_empty()
+    {
+        tracing::info!(
+            count = header_hooks.len(),
+            "directive runtime: merging directive-declared hooks"
+        );
+        for (idx, def) in header_hooks.iter().cloned().enumerate() {
+            // Dead-config: a directive-authored `continuation` hook can only
+            // fire when continuation is enabled. Validate here, before the
+            // merge loses header provenance, and fail loud rather than ship a
+            // hook that silently never runs.
+            if def.event == "continuation" && !header.continuation.enabled() {
+                return Err(anyhow::anyhow!(
+                    "directive header hooks[{idx}]: a `continuation` event hook is \
                          declared but `continuation` is disabled — it can never fire. \
                          Enable `continuation` or remove the hook."
-                    ));
-                }
-                directive_hooks.push(def);
+                ));
             }
+            directive_hooks.push(def);
         }
     }
 

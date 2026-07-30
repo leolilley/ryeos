@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use crate::evaluation::validate_runtime_shape;
 use crate::model::{ErrorRecord, GraphDefinition, MAX_GRAPH_STEPS};
-use ryeos_runtime::envelope::{RuntimeCost, COST_BASIS_ROLLUP};
+use ryeos_runtime::envelope::{COST_BASIS_ROLLUP, RuntimeCost};
 use ryeos_runtime::{EvaluationLimits, RuntimeJsonArrayBudget};
 
 use super::outcome::GraphAccounting;

@@ -4,10 +4,10 @@
 ## Status
 
 Not a new runtime binary yet. The current implementation provides the first
-safe resource-authority slice: direct tool executions may receive exact, self-
-bundle bundle-event, runtime-vault, and item-authoring capabilities derived
-from a signed bundle manifest. The callback protocol also exposes a baseline
-thread-local method surface, described separately below.
+safe resource-authority slice: direct tool executions may receive exact,
+bundle-event, runtime-vault, item-authoring, and project-snapshot capabilities
+derived from a signed bundle manifest. The callback protocol also exposes a
+baseline thread-local method surface, described separately below.
 
 This document records the full target model so future work does not accidentally turn tool metadata into a self-grant surface.
 
@@ -44,21 +44,22 @@ call, and who decides?
 
 ## Current branch implementation
 
-Direct tool bundle-event authority is intentionally narrow:
+Direct tool manifest-backed runtime authority is intentionally narrow:
 
 1. The daemon resolves and verifies the direct tool item.
 2. The executor derives `effective_bundle_id` from the verified canonical tool ref.
 3. The executor locates the resolved tool's containing `.ai` directory.
 4. The executor reads signed generated `.ai/manifest.yaml` only.
-5. If the signed manifest declares bundle events, `manifest.name` must match the derived `effective_bundle_id`.
-6. The executor mints only exact caps for declared event kinds and operations:
+5. If the signed manifest declares runtime authority, `manifest.name` must match the derived `effective_bundle_id`.
+6. The executor mints only exact caps requested by the item and declared by the manifest, including:
    - `ryeos.append.bundle-events.<bundle>/<event_kind>`
    - `ryeos.scan.bundle-events.<bundle>/<event_kind>`
+   - `ryeos.<operation>.project-snapshots.live`
 7. The daemon runtime API still derives bundle identity from the callback token and enforces those exact caps.
 
 Missing or empty manifest declarations produce no resource caps. That is deny-
-by-default for capability-gated bundle, vault, and authoring operations, not
-backward-compatibility authority.
+by-default for capability-gated bundle, vault, authoring, and snapshot
+operations, not backward-compatibility authority.
 
 ## Baseline thread-local callback surface
 
@@ -87,9 +88,20 @@ runtime_authority:
       operations: [append, scan]
     - event_kind: suppression_event
       operations: [append, scan]
+  project_snapshots: [status, log, show, create]
 ```
 
-The manifest declares only event kinds and operations. It does not declare the bundle namespace for the cap. The namespace comes from the verified executing tool ref and must match `manifest.name` when declarations are non-empty.
+The manifest declares only bounded resource identities and typed operations.
+It does not declare the bundle namespace for bundle-scoped caps. That namespace
+comes from the verified executing tool ref and must match `manifest.name` when
+declarations are non-empty.
+
+Project snapshots require two independent proofs. The caller-derived project
+proof is the sealed `ExecutionProjectAuthority`, created only after admission
+authorized the required live-project access and retained through recovery. The
+runtime proof is the executing item's corresponding signed-manifest snapshot
+operation. A tool's `required_caps` gates launch and never becomes callback
+authority or a thread-auth transport scope.
 
 ## Why not tool `permissions`?
 

@@ -1,7 +1,7 @@
 [package]
 name = "ryeos-expression"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Bounded rye-expr/1 compilation and evaluation"
 license.workspace = true
 

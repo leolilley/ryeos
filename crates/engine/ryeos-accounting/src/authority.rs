@@ -237,14 +237,14 @@ impl ProviderAccountingAuthority {
         if self.provider_id.is_empty() || self.model_name.is_empty() {
             return Err("authority attribution fields must be non-empty".to_string());
         }
-        if let SpendBoundAuthority::Paid { maximum, .. } = &self.spend_bound {
-            if maximum.is_zero() {
-                return Err(
-                    "paid spend bound must have a positive maximum; zero cost requires an \
-                     explicitly-free contract"
-                        .to_string(),
-                );
-            }
+        if let SpendBoundAuthority::Paid { maximum, .. } = &self.spend_bound
+            && maximum.is_zero()
+        {
+            return Err(
+                "paid spend bound must have a positive maximum; zero cost requires an \
+                 explicitly-free contract"
+                    .to_string(),
+            );
         }
         if let ChargeReconciliationAuthority::DeterministicTariff { tariff } = &self.reconciliation
         {
@@ -515,25 +515,33 @@ mod tests {
 
     #[test]
     fn dimension_set_is_canonical() {
-        assert!(ClosedBillableDimensionSet::new(vec![
-            BillableDimension::OutputTokens,
-            BillableDimension::InputTokens,
-        ])
-        .is_ok());
-        assert!(ClosedBillableDimensionSet::new(vec![
-            BillableDimension::InputTokens,
-            BillableDimension::InputTokens,
-        ])
-        .is_err());
+        assert!(
+            ClosedBillableDimensionSet::new(vec![
+                BillableDimension::OutputTokens,
+                BillableDimension::InputTokens,
+            ])
+            .is_ok()
+        );
+        assert!(
+            ClosedBillableDimensionSet::new(vec![
+                BillableDimension::InputTokens,
+                BillableDimension::InputTokens,
+            ])
+            .is_err()
+        );
         // Wire decoding requires canonical order.
-        assert!(serde_json::from_str::<ClosedBillableDimensionSet>(
-            "[\"output_tokens\",\"input_tokens\"]"
-        )
-        .is_err());
-        assert!(serde_json::from_str::<ClosedBillableDimensionSet>(
-            "[\"input_tokens\",\"output_tokens\"]"
-        )
-        .is_ok());
+        assert!(
+            serde_json::from_str::<ClosedBillableDimensionSet>(
+                "[\"output_tokens\",\"input_tokens\"]"
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<ClosedBillableDimensionSet>(
+                "[\"input_tokens\",\"output_tokens\"]"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -615,15 +623,17 @@ mod tests {
 
     #[test]
     fn credential_binding_rejects_duplicate_secret_names() {
-        assert!(credential_binding_digest(
-            BINDING_KEY,
-            &authority(),
-            &[
-                ("API_KEY".to_string(), "one".to_string()),
-                ("API_KEY".to_string(), "two".to_string()),
-            ],
-        )
-        .is_err());
+        assert!(
+            credential_binding_digest(
+                BINDING_KEY,
+                &authority(),
+                &[
+                    ("API_KEY".to_string(), "one".to_string()),
+                    ("API_KEY".to_string(), "two".to_string()),
+                ],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -656,9 +666,10 @@ mod tests {
             .unwrap();
         assert_eq!(bound.to_canonical_string(), "0.42288");
         // Missing a covered dimension's bound is an error, not zero.
-        assert!(t
-            .worst_case_charge(&[(BillableDimension::InputTokens, 100_000)])
-            .is_err());
+        assert!(
+            t.worst_case_charge(&[(BillableDimension::InputTokens, 100_000)])
+                .is_err()
+        );
     }
 
     #[test]

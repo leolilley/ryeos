@@ -68,10 +68,10 @@ pub fn strip_fenced_yaml_block(content: &str) -> Result<String, KnowledgeError> 
 /// Skip leading HTML signature comment (<!-- ryeos:signed:... -->).
 fn skip_signature_comment(content: &str) -> &str {
     let trimmed = content.trim_start();
-    if trimmed.starts_with("<!--") {
-        if let Some(end) = trimmed.find("-->") {
-            return trimmed[end + 3..].trim_start();
-        }
+    if trimmed.starts_with("<!--")
+        && let Some(end) = trimmed.find("-->")
+    {
+        return trimmed[end + 3..].trim_start();
     }
     trimmed
 }
@@ -84,10 +84,10 @@ fn skip_signature_comment(content: &str) -> &str {
 /// to skip the HTML signature before looking for `---` frontmatter.
 fn after_leading_signatures(content: &str) -> &str {
     let mut s = content.trim_start();
-    if s.starts_with("<!--") {
-        if let Some(end) = s.find("-->") {
-            s = s[end + 3..].trim_start();
-        }
+    if s.starts_with("<!--")
+        && let Some(end) = s.find("-->")
+    {
+        s = s[end + 3..].trim_start();
     }
     if s.starts_with("# ryeos:signed:") || s.starts_with("# ryeos: cas:") {
         s = match s.find('\n') {

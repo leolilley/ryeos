@@ -63,10 +63,10 @@ impl RemoteDescriptor {
                 self.version
             );
         }
-        if let Some(name) = &self.name {
-            if name.trim().is_empty() {
-                anyhow::bail!("remote descriptor name must not be empty when present");
-            }
+        if let Some(name) = &self.name
+            && name.trim().is_empty()
+        {
+            anyhow::bail!("remote descriptor name must not be empty when present");
         }
         validate_url(&self.url)?;
         let key = decode_signing_key(&self.node.public_key)

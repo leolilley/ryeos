@@ -2,14 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::VerifyingKey;
 use ryeos_engine::trust::{
-    MAX_TRUST_DIRECTORY_BYTES, MAX_TRUST_DOCUMENTS, MAX_TRUST_DOCUMENT_BYTES,
+    MAX_TRUST_DIRECTORY_BYTES, MAX_TRUST_DOCUMENT_BYTES, MAX_TRUST_DOCUMENTS,
     MAX_TRUST_TRAVERSAL_DEPTH, MAX_TRUST_TRAVERSAL_ENTRIES,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 const MAX_CONFIG_SOURCE_BYTES: u64 = 1024 * 1024;
@@ -1028,10 +1028,10 @@ impl VerifiedLoader {
             if let Some(header) = lillux::signature::parse_signature_line(line, prefix, suffix) {
                 return Some(header);
             }
-            if prefix != "#" {
-                if let Some(header) = lillux::signature::parse_signature_line(line, "#", None) {
-                    return Some(header);
-                }
+            if prefix != "#"
+                && let Some(header) = lillux::signature::parse_signature_line(line, "#", None)
+            {
+                return Some(header);
             }
         }
         None
@@ -1555,12 +1555,10 @@ impl VerifiedLoader {
             }
         }
 
-        if include_project {
-            if let Some(node_config_root) = &self.node_config_root {
-                let path = node_config_root.join(&item_path);
-                if path.exists() {
-                    candidate_paths.push((path, "node", ConfigCandidateRootClass::Node));
-                }
+        if include_project && let Some(node_config_root) = &self.node_config_root {
+            let path = node_config_root.join(&item_path);
+            if path.exists() {
+                candidate_paths.push((path, "node", ConfigCandidateRootClass::Node));
             }
         }
 
@@ -2167,10 +2165,12 @@ pem = """
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("content hash mismatch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("content hash mismatch")
+        );
     }
 
     #[test]
@@ -2193,10 +2193,12 @@ pem = """
         let result = loader.load_verified("directive", &path);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("signature verification failed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("signature verification failed")
+        );
     }
 
     #[test]
@@ -2292,7 +2294,9 @@ pem = """
         oversized.push(b'\n');
         fs::write(path, oversized).unwrap();
         let error = TrustStore::load(Path::new("/missing-project"), &trust_dir).unwrap_err();
-        assert!(format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes")));
+        assert!(
+            format!("{error:#}").contains(&format!("exceeds {MAX_TRUST_DOCUMENT_BYTES} bytes"))
+        );
     }
 
     #[test]

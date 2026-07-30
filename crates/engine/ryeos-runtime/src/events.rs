@@ -13,9 +13,9 @@
 //! ephemeral live-stream events; everything else is an `indexed`
 //! milestone unless a caller deliberately requests `journal_only`.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 // Wire strings live in `ryeos-state` (the lower shared layer the projection also
 // reads), so the enum and the projection reference one source of truth.
@@ -729,7 +729,8 @@ mod tests {
         let mut tampered = CognitionInAssembler::default();
         let mut error = None;
         for payload in &payloads {
-            match tampered.push(payload) {
+            let push_result = tampered.push(payload);
+            match push_result {
                 Ok(_) => {}
                 Err(observed) => {
                     error = Some(observed);
@@ -737,9 +738,11 @@ mod tests {
                 }
             }
         }
-        assert!(error
-            .map(|error| error.to_string().contains("content hash mismatch"))
-            .unwrap_or(false));
+        assert!(
+            error
+                .map(|error| error.to_string().contains("content hash mismatch"))
+                .unwrap_or(false)
+        );
     }
 
     /// Every variant round-trips its `as_str` through `parse` to the

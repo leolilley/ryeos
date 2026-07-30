@@ -10,7 +10,7 @@ use super::scene_model::RyeOsSceneModel;
 use super::view_model::{RyeOsMotionEventVm, RyeOsNoticeVm, RyeOsTone, RyeOsViewModel};
 use crate::atlas::AtlasUiStateVm;
 use crate::surface::{
-    builtin_default, SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec,
+    SlotContentSpec, SlotSpec, SlotsSpec, SurfaceSpec, SurfaceStyleSpec, builtin_default,
 };
 use crate::workspace::{ViewLocalState, ViewSpec, Workspace};
 use std::collections::HashMap;
@@ -619,10 +619,10 @@ impl RyeOsCore {
         core.runtime.viewport = viewport;
         core.runtime.now_ms = now_ms;
         core.runtime.last_tick_ms = now_ms;
-        if let Some(route) = input_route {
-            if let Ok(value) = serde_json::to_value(&route) {
-                core.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
-            }
+        if let Some(route) = input_route
+            && let Ok(value) = serde_json::to_value(&route)
+        {
+            core.seat.append_facet(super::seat::KEY_INPUT_ROUTE, value);
         }
         // Edge slots initialize FROM the surface slots block; the
         // fallback surface's slots are the only default source.
@@ -1519,13 +1519,12 @@ impl RyeOsCore {
         let focused = self.workspace.focused_tile;
         if let Some(ViewSpec { view_ref }) =
             self.workspace.tiles.get(&focused).map(|tile| &tile.view)
+            && let Some(input) = self.views.get(view_ref).and_then(|b| b.input.as_ref())
         {
-            if let Some(input) = self.views.get(view_ref).and_then(|b| b.input.as_ref()) {
-                return Some((
-                    InputBufferKey::new(focused.0.to_string(), view_ref.clone(), input.id.clone()),
-                    view_ref.clone(),
-                ));
-            }
+            return Some((
+                InputBufferKey::new(focused.0.to_string(), view_ref.clone(), input.id.clone()),
+                view_ref.clone(),
+            ));
         }
         None
     }

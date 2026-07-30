@@ -9,7 +9,7 @@
 mod common;
 
 use common::DaemonHarness;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// Spawn the fast-fixture daemon harness with `RYEOS_APP_ROOT`
 /// pointed at a per-test isolated copy of the `core` bundle. Use this

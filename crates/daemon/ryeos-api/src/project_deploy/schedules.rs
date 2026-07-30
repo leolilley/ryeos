@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ryeos_app::node_config::writer;
 use ryeos_scheduler::types::ScheduleSpecRecord;
 use serde::Deserialize;
@@ -1038,7 +1038,8 @@ impl ScheduleReconcileTx {
             match &backup.yaml_bytes {
                 Some(bytes) => {
                     if let Some(name) = yaml_path.file_name() {
-                        if let Ok(expected) = self.directory.open_regular(name, false) {
+                        let opened = self.directory.open_regular(name, false);
+                        if let Ok(expected) = opened {
                             let _ = self.directory.atomic_write_if_same(
                                 name,
                                 expected.as_ref(),
@@ -1050,7 +1051,8 @@ impl ScheduleReconcileTx {
                 }
                 None => {
                     if let Some(name) = yaml_path.file_name() {
-                        if let Ok(Some(file)) = self.directory.open_regular(name, false) {
+                        let opened = self.directory.open_regular(name, false);
+                        if let Ok(Some(file)) = opened {
                             let _ = self.directory.remove_if_same(name, &file);
                         }
                     }
@@ -1087,7 +1089,7 @@ fn reload_touched(ctx: &ProjectDeployContext<'_>, touched: &HashSet<String>) {
 mod tests {
     use super::require_project_reconcile_schedule_owner;
     use crate::handler_context::HandlerContext;
-    use crate::handler_error::{extract_handler_error, HandlerError};
+    use crate::handler_error::{HandlerError, extract_handler_error};
 
     fn verified(fp: &str) -> HandlerContext {
         HandlerContext::new(fp.to_string(), vec!["*".to_string()], true)

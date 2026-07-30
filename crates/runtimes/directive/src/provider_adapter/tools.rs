@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::directive::{ToolSchema, ToolSchemaConfig};
 
@@ -117,19 +117,21 @@ fn empty_object_schema() -> Value {
 /// is provided (e.g. test code or minimal profiles). Produces the standard
 /// `{type: "function", function: {name, description, parameters}}` shape.
 fn serialize_openai_default(tools: &[ToolSchema]) -> Value {
-    json!(tools
-        .iter()
-        .map(|t| {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.input_schema.clone().unwrap_or_else(empty_object_schema),
-                }
+    json!(
+        tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema.clone().unwrap_or_else(empty_object_schema),
+                    }
+                })
             })
-        })
-        .collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    )
 }
 
 #[cfg(test)]

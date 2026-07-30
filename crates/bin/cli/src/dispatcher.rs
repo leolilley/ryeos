@@ -469,7 +469,7 @@ fn stream_descriptor_path(response: &Value) -> Result<Option<(String, bool)>, Cl
                 detail: format!(
                     "unsupported stream follow mode '{other}' (expected 'thread' or 'chain')"
                 ),
-            })
+            });
         }
     };
     Ok(Some((path.to_string(), braid)))
@@ -894,7 +894,7 @@ fn strip_declared_control_flags(
                 Some(other) => {
                     return Err(CliError::Local {
                         detail: format!("invalid value for --{name}: {other}"),
-                    })
+                    });
                 }
             };
             if !on {
@@ -1350,13 +1350,13 @@ async fn post_to_daemon_streaming(
         0,
     )?;
     crate::transport::http::post_json_streaming(&url, &headers, &body_bytes, |ev| {
-        if ev.event == "stream_started" {
-            if let Ok(v) = serde_json::from_str::<Value>(&ev.data) {
-                thread_id = v
-                    .get("thread_id")
-                    .and_then(|t| t.as_str())
-                    .map(String::from);
-            }
+        if ev.event == "stream_started"
+            && let Ok(v) = serde_json::from_str::<Value>(&ev.data)
+        {
+            thread_id = v
+                .get("thread_id")
+                .and_then(|t| t.as_str())
+                .map(String::from);
         }
         let outcome = match presenter.stream_event(ev) {
             Ok(outcome) => outcome,
@@ -1382,12 +1382,12 @@ async fn post_to_daemon_streaming(
     match terminal {
         Some(Err(StreamTerminalFailure::Io(error))) => return Err(CliError::Io(error)),
         Some(Err(StreamTerminalFailure::Outcome(detail))) => {
-            return Err(CliError::Reported { detail })
+            return Err(CliError::Reported { detail });
         }
         None => {
             return Err(CliError::Local {
                 detail: "execute stream ended before a terminal event".into(),
-            })
+            });
         }
         Some(Ok(())) => {}
     }
@@ -1447,7 +1447,7 @@ fn print_result(
     match presenter.structured_result(&command, &payload, previous_lines)? {
         crate::presenter::StructuredPresentation::Rendered => return Ok(()),
         crate::presenter::StructuredPresentation::Failed(detail) => {
-            return Err(CliError::Local { detail })
+            return Err(CliError::Local { detail });
         }
         crate::presenter::StructuredPresentation::Machine => {}
     }
@@ -1455,16 +1455,16 @@ fn print_result(
     // A state-root override echoes both roots as top-level `execution`
     // diagnostics; surface them on stderr so stdout stays the bare result
     // for scripts.
-    if let Some(execution) = payload.get("execution") {
-        if let (Some(source), Some(state)) = (
+    if let Some(execution) = payload.get("execution")
+        && let (Some(source), Some(state)) = (
             execution.get("source_root").and_then(|v| v.as_str()),
             execution.get("state_root").and_then(|v| v.as_str()),
-        ) {
-            crate::tty::write_machine_diagnostics(&[
-                format!("source_root: {source}"),
-                format!("state_root:  {state}"),
-            ])?;
-        }
+        )
+    {
+        crate::tty::write_machine_diagnostics(&[
+            format!("source_root: {source}"),
+            format!("state_root:  {state}"),
+        ])?;
     }
     let result = payload.get("result").cloned().unwrap_or(payload);
     crate::tty::write_json(&result)?;
@@ -1630,21 +1630,6 @@ mod tests {
             &serde_json::json!([{"uri": "cas://x"}])
         );
         assert!(result.get("error").unwrap().is_null());
-    }
-
-    fn with_app_root<T>(f: impl FnOnce() -> T) -> T {
-        let _g = crate::test_env::lock();
-        let saved = std::env::var_os("RYEOS_APP_ROOT");
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(ryeos_engine::AI_DIR)).unwrap();
-        std::env::set_var("RYEOS_APP_ROOT", tmp.path());
-        let result = f();
-        if let Some(v) = saved {
-            std::env::set_var("RYEOS_APP_ROOT", v);
-        } else {
-            std::env::remove_var("RYEOS_APP_ROOT");
-        }
-        result
     }
 
     fn s(v: &[&str]) -> Vec<String> {
@@ -2240,36 +2225,36 @@ mod tests {
             out[0..4],
             s(&["remote", "bind-project", "--remote", "prod"])
         );
-        assert!(out
-            .windows(2)
-            .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy())
+        );
     }
 
     #[test]
     fn remote_doctor_accepts_optional_project_after_command() {
-        with_app_root(|| {
-            let tmp = tempfile::tempdir().unwrap();
-            let commands = vec![command(
-                &["remote", "doctor"],
-                vec![vec![("remote", CommandArgumentKind::String)]],
-                CommandProjectResolution::Optional,
-            )];
-            let out = canonicalize_tokens_with_commands(
-                &s(&[
-                    "remote",
-                    "doctor",
-                    "prod",
-                    "--project",
-                    &tmp.path().to_string_lossy(),
-                ]),
-                &commands,
-            )
-            .unwrap();
-            assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
-            assert!(out
-                .windows(2)
-                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy()));
-        });
+        let tmp = tempfile::tempdir().unwrap();
+        let commands = vec![command(
+            &["remote", "doctor"],
+            vec![vec![("remote", CommandArgumentKind::String)]],
+            CommandProjectResolution::Optional,
+        )];
+        let out = canonicalize_tokens_with_commands(
+            &s(&[
+                "remote",
+                "doctor",
+                "prod",
+                "--project",
+                &tmp.path().to_string_lossy(),
+            ]),
+            &commands,
+        )
+        .unwrap();
+        assert_eq!(out[0..4], s(&["remote", "doctor", "--remote", "prod"]));
+        assert!(
+            out.windows(2)
+                .any(|w| w[0] == "--project" && w[1] == tmp.path().to_string_lossy())
+        );
     }
 
     #[test]
@@ -2299,71 +2284,67 @@ mod tests {
 
     #[test]
     fn remote_execute_remote_then_item_is_normalized() {
-        with_app_root(|| {
-            let commands = vec![command(
-                &["remote", "execute"],
+        let commands = vec![command(
+            &["remote", "execute"],
+            vec![
                 vec![
-                    vec![
-                        ("remote", CommandArgumentKind::String),
-                        ("item_ref", CommandArgumentKind::CanonicalRef),
-                    ],
-                    vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+                    ("remote", CommandArgumentKind::String),
+                    ("item_ref", CommandArgumentKind::CanonicalRef),
                 ],
-                CommandProjectResolution::Optional,
-            )];
-            let out = canonicalize_tokens_with_commands(
-                &s(&[
-                    "remote",
-                    "execute",
-                    "railway",
-                    "service:health/status",
-                    "--no-project",
-                ]),
-                &commands,
-            )
-            .unwrap();
-            assert_eq!(
-                out,
-                s(&[
-                    "remote",
-                    "execute",
-                    "--item-ref",
-                    "service:health/status",
-                    "--remote",
-                    "railway",
-                    "--no-project",
-                ])
-            );
-        });
+                vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+            ],
+            CommandProjectResolution::Optional,
+        )];
+        let out = canonicalize_tokens_with_commands(
+            &s(&[
+                "remote",
+                "execute",
+                "railway",
+                "service:health/status",
+                "--no-project",
+            ]),
+            &commands,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            s(&[
+                "remote",
+                "execute",
+                "--item-ref",
+                "service:health/status",
+                "--remote",
+                "railway",
+                "--no-project",
+            ])
+        );
     }
 
     #[test]
     fn remote_execute_item_only_is_left_for_default_remote() {
-        with_app_root(|| {
-            let commands = vec![command(
-                &["remote", "execute"],
+        let commands = vec![command(
+            &["remote", "execute"],
+            vec![
                 vec![
-                    vec![
-                        ("remote", CommandArgumentKind::String),
-                        ("item_ref", CommandArgumentKind::CanonicalRef),
-                    ],
-                    vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+                    ("remote", CommandArgumentKind::String),
+                    ("item_ref", CommandArgumentKind::CanonicalRef),
                 ],
-                CommandProjectResolution::Optional,
-            )];
-            let input = s(&["remote", "execute", "service:health/status", "--no-project"]);
-            let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
-            assert_eq!(
-                out,
-                s(&[
-                    "remote",
-                    "execute",
-                    "--item-ref",
-                    "service:health/status",
-                    "--no-project",
-                ])
-            );
-        });
+                vec![("item_ref", CommandArgumentKind::CanonicalRef)],
+            ],
+            CommandProjectResolution::Optional,
+        )];
+        let input = s(&["remote", "execute", "service:health/status", "--no-project"]);
+        let out = canonicalize_tokens_with_commands(&input, &commands).unwrap();
+        assert_eq!(
+            out,
+            s(&[
+                "remote",
+                "execute",
+                "--item-ref",
+                "service:health/status",
+                "--no-project",
+            ])
+        );
     }
 
     #[test]

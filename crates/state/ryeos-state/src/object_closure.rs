@@ -738,16 +738,16 @@ fn collect_object_closure_from_source(
                         )
                     })? {
                     Some((actual_size, actual_hash)) => {
-                        if let Some(expected_size) = project_file_size {
-                            if actual_size != expected_size {
-                                report.malformed_objects.push(MalformedObject {
-                                    hash: hash.clone(),
-                                    reason: format!(
-                                        "project_file declares size {expected_size}, but blob {blob} has size {actual_size}"
-                                    ),
-                                });
-                                continue;
-                            }
+                        if let Some(expected_size) = project_file_size
+                            && actual_size != expected_size
+                        {
+                            report.malformed_objects.push(MalformedObject {
+                                hash: hash.clone(),
+                                reason: format!(
+                                    "project_file declares size {expected_size}, but blob {blob} has size {actual_size}"
+                                ),
+                            });
+                            continue;
                         }
                         if !report.blob_hashes.contains(&blob) {
                             if report.blob_hashes.len() + 1 > limits.max_blobs {
@@ -1453,18 +1453,22 @@ mod tests {
         write_raw_object_at(&cas_root, &wrong_hash, canonical.as_bytes());
         let wrong = collect_object_closure(&cas_root, [wrong_hash]).unwrap();
         assert!(!wrong.is_complete());
-        assert!(wrong.malformed_objects[0]
-            .reason
-            .contains("object bytes hash mismatch"));
+        assert!(
+            wrong.malformed_objects[0]
+                .reason
+                .contains("object bytes hash mismatch")
+        );
 
         let pretty = serde_json::to_vec_pretty(&value).unwrap();
         let pretty_hash = lillux::sha256_hex(&pretty);
         write_raw_object_at(&cas_root, &pretty_hash, &pretty);
         let noncanonical = collect_object_closure(&cas_root, [pretty_hash]).unwrap();
         assert!(!noncanonical.is_complete());
-        assert!(noncanonical.malformed_objects[0]
-            .reason
-            .contains("canonical JSON"));
+        assert!(
+            noncanonical.malformed_objects[0]
+                .reason
+                .contains("canonical JSON")
+        );
     }
 
     #[test]
@@ -1517,10 +1521,12 @@ mod tests {
 
         let report = collect_object_closure(&cas_root, [manifest]).unwrap();
         assert!(!report.is_complete());
-        assert!(report
-            .malformed_objects
-            .iter()
-            .any(|object| object.reason.contains("does not match embedded")));
+        assert!(
+            report
+                .malformed_objects
+                .iter()
+                .any(|object| object.reason.contains("does not match embedded"))
+        );
     }
 
     #[test]

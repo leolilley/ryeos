@@ -259,7 +259,7 @@ impl InvocationInputContract {
                 other => {
                     return Err(format!(
                         "schema field '{name}' has unsupported type '{other}'"
-                    ))
+                    ));
                 }
             };
             let ty = if array_element.is_some() {
@@ -406,7 +406,9 @@ pub enum CommandRegistryError {
         first: String,
         second: String,
     },
-    #[error("command '{name}' claim {claim_kind}={claim_value} requires missing registration capability '{required_cap}' (source: {source_file})")]
+    #[error(
+        "command '{name}' claim {claim_kind}={claim_value} requires missing registration capability '{required_cap}' (source: {source_file})"
+    )]
     MissingRegistrationCap {
         name: String,
         claim_kind: String,
@@ -701,7 +703,7 @@ mod tests {
                         value: "direct_execute_item_ref".into(),
                     },
                     required_caps: vec![
-                        "ryeos.register.command.dispatch.direct_execute_item_ref".into()
+                        "ryeos.register.command.dispatch.direct_execute_item_ref".into(),
                     ],
                 },
             ],

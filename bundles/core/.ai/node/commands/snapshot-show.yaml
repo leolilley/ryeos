@@ -1,4 +1,4 @@
-# ryeos:signed:2026-07-22T12:09:33Z:3a7ecd4456d1c1055485b2646761702320116c224dcd7d63b5188f27fe01b33d:hIV9Z6O/8KCF4ZpY0lIbLM8p9JCxyJSAvAU2u/0GN3Z+awVMPpwjG/9tyO57u1fTTztVBd+SzJLnawZHQdWQDQ==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-30T01:37:14Z:ee4422009e18610d0b203e4f479599338ec7ec3833a953e7769ae36fa1649920:TvPNv7aUb8HWhsEadT3f1WgnqyuA4pf0HTqbNiwlB23Mkh01zjSBAuYLzvPY4ZpZ5FlgUJm4mjdpl+THXgk+AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 tokens:
 - snapshot
 - show
@@ -6,7 +6,11 @@ description: Show metadata for a local snapshot
 forms:
 - slots:
   - field: snapshot_hash
+project:
+  resolution: required
+  request_project_path: true
+  bind_parameter: project_path
 dispatch:
   kind: execute_ref
-  execute: tool:ryeos/core/snapshot-show
+  execute: tool:core/snapshot-show
   availability: daemon

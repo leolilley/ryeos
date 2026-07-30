@@ -84,11 +84,11 @@ fn extract_context_refs(yaml: &str) -> Option<Vec<(String, Vec<String>)>> {
         } else if line.starts_with("  ") && trimmed.starts_with("- ") {
             // List item like "  - knowledge:arc/foundation"
             let value = trimmed.trim_start_matches("- ").trim().to_string();
-            if let Some(last) = result.last_mut() {
-                if last.0 == current_key {
-                    last.1.push(value);
-                    continue;
-                }
+            if let Some(last) = result.last_mut()
+                && last.0 == current_key
+            {
+                last.1.push(value);
+                continue;
             }
             result.push((current_key.clone(), vec![value]));
         } else if line.starts_with("    ") && trimmed.starts_with("- ") {

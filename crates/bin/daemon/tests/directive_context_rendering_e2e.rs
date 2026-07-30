@@ -14,9 +14,9 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::{register_config_fixture_bundle, register_standard_bundle, FastFixture};
-use common::mock_provider::{MockProvider, MockResponse};
 use common::DaemonHarness;
+use common::fast_fixture::{FastFixture, register_config_fixture_bundle, register_standard_bundle};
+use common::mock_provider::{MockProvider, MockResponse};
 use lillux::crypto::SigningKey;
 
 fn plant_mock_provider(

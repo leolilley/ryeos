@@ -10,7 +10,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::net::TcpListener;
 
 use ryeos_api::handlers::{
@@ -572,10 +572,12 @@ async fn sync_admitted_heads_records_partial_progress_on_later_failure() {
                 .expect("partial result should be recorded");
             assert_eq!(result["partial"], true);
             assert_eq!(result["imported_heads"].as_u64().unwrap(), 1);
-            assert!(result["error"]
-                .as_str()
-                .unwrap()
-                .contains("incomplete after local verification"));
+            assert!(
+                result["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("incomplete after local verification")
+            );
             assert!(!job.fetched_hashes.contains(&bad_attestation));
             Ok::<_, anyhow::Error>(())
         })
@@ -694,9 +696,10 @@ async fn sync_admitted_heads_rejects_wrong_pinned_key_before_importing() {
     local_state
         .state_store
         .with_state_db(|db| {
-            assert!(db
-                .get_cas_entry(CasEntryKind::Object, &subject_hash)?
-                .is_none());
+            assert!(
+                db.get_cas_entry(CasEntryKind::Object, &subject_hash)?
+                    .is_none()
+            );
             let jobs = db.list_sync_jobs_by_state(Some(SyncJobState::Failed), 10)?;
             let job = jobs
                 .iter()
@@ -707,11 +710,12 @@ async fn sync_admitted_heads_rejects_wrong_pinned_key_before_importing() {
             assert!(job.roots.is_empty());
             assert!(job.heads.is_empty());
             assert!(job.fetched_hashes.is_empty());
-            assert!(job
-                .last_error
-                .as_deref()
-                .unwrap()
-                .contains("failed to verify federated head"));
+            assert!(
+                job.last_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("failed to verify federated head")
+            );
             let result = job
                 .result
                 .as_ref()
@@ -823,7 +827,9 @@ fn import_services_expose_safe_default_and_admin_escape_hatch() {
         remote_sync_admitted_heads::DESCRIPTOR.required_caps,
         &["ryeos.execute.service.remote/sync-admitted-heads"]
     );
-    assert!(!ryeos_api::handlers::ALL
-        .iter()
-        .any(|descriptor| descriptor.endpoint == "remote.import-admitted-root"));
+    assert!(
+        !ryeos_api::handlers::ALL
+            .iter()
+            .any(|descriptor| descriptor.endpoint == "remote.import-admitted-root")
+    );
 }

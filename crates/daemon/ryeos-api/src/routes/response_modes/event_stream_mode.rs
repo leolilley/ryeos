@@ -20,8 +20,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::response::sse::{KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{KeepAlive, Sse};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_stream::StreamExt;
@@ -409,26 +409,26 @@ pub fn validate_and_extract_path_capture(
     }
 
     // Extract the capture name.
-    if let Some(rest) = trimmed.strip_prefix(prefix) {
-        if let Some(name) = rest.strip_suffix(suffix) {
-            let declared_captures = extract_path_captures(route_path);
-            if !declared_captures.contains(name) {
-                return Err(RouteConfigError::InvalidSourceConfig {
-                    id: route_id.into(),
-                    src: source_name.into(),
-                    reason: format!(
-                        "{field} references undeclared path capture '{name}'; \
-                         route path declares: [{declared}]",
-                        declared = declared_captures
-                            .iter()
-                            .map(|c| format!("'{c}'"))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                });
-            }
-            return Ok(name.to_string());
+    if let Some(rest) = trimmed.strip_prefix(prefix)
+        && let Some(name) = rest.strip_suffix(suffix)
+    {
+        let declared_captures = extract_path_captures(route_path);
+        if !declared_captures.contains(name) {
+            return Err(RouteConfigError::InvalidSourceConfig {
+                id: route_id.into(),
+                src: source_name.into(),
+                reason: format!(
+                    "{field} references undeclared path capture '{name}'; \
+                     route path declares: [{declared}]",
+                    declared = declared_captures
+                        .iter()
+                        .map(|c| format!("'{c}'"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
         }
+        return Ok(name.to_string());
     }
 
     Err(RouteConfigError::InvalidSourceConfig {
@@ -1151,14 +1151,16 @@ mod tests {
 
     #[test]
     fn extract_path_capture_rejects_non_path() {
-        assert!(validate_and_extract_path_capture(
-            "${query.id}",
-            "thread_events",
-            "thread_id",
-            "r1",
-            "/threads/{id}/stream",
-        )
-        .is_err());
+        assert!(
+            validate_and_extract_path_capture(
+                "${query.id}",
+                "thread_events",
+                "thread_id",
+                "r1",
+                "/threads/{id}/stream",
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1171,25 +1173,29 @@ mod tests {
 
     #[test]
     fn validate_rejects_double_interpolation() {
-        assert!(validate_and_extract_path_capture(
-            "${path.x}-${path.y}",
-            "thread_events",
-            "f",
-            "r1",
-            "/threads/{x}/{y}",
-        )
-        .is_err());
+        assert!(
+            validate_and_extract_path_capture(
+                "${path.x}-${path.y}",
+                "thread_events",
+                "f",
+                "r1",
+                "/threads/{x}/{y}",
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn validate_rejects_static_string() {
-        assert!(validate_and_extract_path_capture(
-            "static",
-            "thread_events",
-            "f",
-            "r1",
-            "/threads/{id}",
-        )
-        .is_err());
+        assert!(
+            validate_and_extract_path_capture(
+                "static",
+                "thread_events",
+                "f",
+                "r1",
+                "/threads/{id}",
+            )
+            .is_err()
+        );
     }
 }

@@ -23,7 +23,9 @@ fn default_remote() -> String {
 
 pub async fn handle(req: Request, state: Arc<AppState>) -> Result<Value> {
     let client = RemoteClient::from_named_remote(&state, &req.remote, None)?;
-    client.vault_list().await
+    let result = client.vault_list().await;
+    drop(client);
+    result
 }
 
 pub const DESCRIPTOR: ServiceDescriptor = ServiceDescriptor {

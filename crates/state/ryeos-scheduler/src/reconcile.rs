@@ -133,10 +133,12 @@ async fn recover_inflight_fires<Ctx: SchedulerContext>(ctx: &Ctx) -> Result<Vec<
     for fire in &inflight {
         match &fire.thread_id {
             Some(thread_id) => {
-                match ctx.get_thread_status(thread_id) {
+                let thread_status = ctx.get_thread_status(thread_id);
+                match thread_status {
                     Ok(Some(status)) if crate::thread_status_is_terminal(&status) => {
                         let result_outcome = if status == "completed" {
-                            match ctx.get_thread_result_outcome(thread_id) {
+                            let thread_result = ctx.get_thread_result_outcome(thread_id);
+                            match thread_result {
                                 Ok(outcome) => outcome,
                                 Err(e) => {
                                     tracing::warn!(
@@ -262,10 +264,10 @@ async fn update_fire_terminal<Ctx: SchedulerContext>(
     outcome: &str,
 ) -> Result<()> {
     let now = lillux::time::timestamp_millis();
-    if let Some(thread_id) = thread_id {
-        if fire.thread_id.as_deref() != Some(thread_id) {
-            anyhow::bail!("terminal fire update changed deterministic thread identity");
-        }
+    if let Some(thread_id) = thread_id
+        && fire.thread_id.as_deref() != Some(thread_id)
+    {
+        anyhow::bail!("terminal fire update changed deterministic thread identity");
     }
     let fired_at = fire.fired_at.context("dispatched fire has no fired_at")?;
 

@@ -1,9 +1,14 @@
-# ryeos:signed:2026-07-27T09:00:07Z:bdb50c075052d9614771e8fcc9eb74c03aa1d6fa016e722aa42897869c3a4da6:p2WQ6IQWbC+EaYibW6rYWjbgejLUu16PrJHd3gF6rM2cvc2G5+G/mJbN6Fdi6s9u62W9hstNgbj+2yyKFEMqDg==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
+# ryeos:signed:2026-07-30T00:35:10Z:7046016027e5bdaf38fc73627ac6e0dc0aa9aeca32c4cceb3881a637b1ee2bce:GLxKA1u/+C4TXZbiSmqL3wkth5u61N8qKX31vJifAry02AKzlpsmnPxBiDUsYzXLQPyvd8QCvlOxmKZwzqHYCw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea
 version: "1.0.0"
 executor_id: "@subprocess"
-category: "ryeos/core"
+category: "core"
 name: "snapshot-create"
 required_caps: ["ryeos.write.project.live"]
+requires:
+  capabilities:
+    manifest:
+      runtime_authority:
+        project_snapshots: [create]
 description: "Create a local project snapshot from the current worktree."
 
 config:

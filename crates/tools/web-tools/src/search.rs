@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -381,12 +381,13 @@ fn percent_decode(value: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
         }
         out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;

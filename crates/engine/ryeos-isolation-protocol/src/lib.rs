@@ -483,7 +483,7 @@ impl IsolationPlan {
             _ => {
                 return Err(ProtocolValidationError::new(
                     "target executable authority is missing or has the wrong purpose",
-                ))
+                ));
             }
         }
 
@@ -1224,11 +1224,13 @@ mod tests {
             artifacts: BTreeMap::from([(IsolationArtifactRole::Launcher, "launcher".to_string())]),
             capabilities: BTreeSet::from([IsolationCapability::FilesystemPrivateRoot]),
         };
-        assert!(declaration
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("duplicate target"));
+        assert!(
+            declaration
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate target")
+        );
 
         declaration.targets.truncate(1);
         declaration.adapter = "../adapter".to_string();
@@ -1285,10 +1287,12 @@ mod tests {
     #[test]
     fn strict_json_rejects_unknown_fields_trailing_data_and_excessive_depth() {
         let unknown = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3},"extra":true}"#;
-        assert!(from_json_str_strict::<AdapterInspectionRequest>(unknown)
-            .unwrap_err()
-            .to_string()
-            .contains("unknown field"));
+        assert!(
+            from_json_str_strict::<AdapterInspectionRequest>(unknown)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown field")
+        );
 
         let valid = r#"{"protocol":"ryeos.isolation-adapter/v1","target":"x86_64-unknown-linux-gnu","backend_id":"example","artifacts":{"launcher":3}}"#;
         assert!(
@@ -1303,10 +1307,12 @@ mod tests {
             "[".repeat(MAX_JSON_DEPTH + 1),
             "]".repeat(MAX_JSON_DEPTH + 1)
         );
-        assert!(from_json_str_strict::<Value>(&deeply_nested)
-            .unwrap_err()
-            .to_string()
-            .contains("nesting exceeds"));
+        assert!(
+            from_json_str_strict::<Value>(&deeply_nested)
+                .unwrap_err()
+                .to_string()
+                .contains("nesting exceeds")
+        );
     }
 
     #[test]
@@ -1338,47 +1344,52 @@ mod tests {
             6,
             IsolationAuthorityPurpose::ReadOnlyMount,
         ));
-        assert!(plan
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("every inherited authority"));
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("every inherited authority")
+        );
 
         let (mut plan, authorities) = complete_plan();
         plan.mounts[1].access = IsolationMountAccess::Writable;
-        assert!(plan
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("purpose"));
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("purpose")
+        );
 
         let (mut plan, authorities) = complete_plan();
         plan.mounts[2].layer = 0;
-        assert!(plan
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("deterministically ordered"));
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("deterministically ordered")
+        );
     }
 
     #[test]
     fn plan_validation_requires_one_read_only_target_mount() {
         let (mut plan, authorities) = complete_plan();
         plan.mounts.remove(0);
-        assert!(plan
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("exactly one mount"));
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one mount")
+        );
 
         let (mut plan, mut authorities) = complete_plan();
         plan.mounts[0].access = IsolationMountAccess::Writable;
         authorities[0].purpose = IsolationAuthorityPurpose::WritableMount;
-        assert!(plan
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("target executable authority"));
+        assert!(
+            plan.validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("target executable authority")
+        );
     }
 
     #[test]
@@ -1447,50 +1458,59 @@ mod tests {
             MAX_AUTHORITIES + 1,
             authority("overflow", 99, IsolationAuthorityPurpose::ReadOnlyMount),
         );
-        assert!(plan
-            .validate(&too_many_authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("too many authorities"));
+        assert!(
+            plan.validate(&too_many_authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("too many authorities")
+        );
 
         let (mut too_many_mounts, authorities) = complete_plan();
         too_many_mounts
             .mounts
             .resize(MAX_MOUNTS + 1, too_many_mounts.mounts[1].clone());
-        assert!(too_many_mounts
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("too many mounts"));
+        assert!(
+            too_many_mounts
+                .validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("too many mounts")
+        );
 
         let (mut too_many_arguments, authorities) = complete_plan();
         too_many_arguments
             .target
             .arguments
             .resize(MAX_ARGUMENTS + 1, "argument".to_string());
-        assert!(too_many_arguments
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("too many target arguments"));
+        assert!(
+            too_many_arguments
+                .validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("too many target arguments")
+        );
 
         let (mut too_many_environment, authorities) = complete_plan();
         too_many_environment.environment.values = (0..=MAX_ENVIRONMENT_ENTRIES)
             .map(|index| (format!("KEY_{index}"), "value".to_string()))
             .collect();
-        assert!(too_many_environment
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("too many environment entries"));
+        assert!(
+            too_many_environment
+                .validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("too many environment entries")
+        );
 
         let (mut oversized_string, authorities) = complete_plan();
         oversized_string.target.argv0 = "x".repeat(MAX_STRING_BYTES + 1);
-        assert!(oversized_string
-            .validate(&authorities)
-            .unwrap_err()
-            .to_string()
-            .contains("exceeds"));
+        assert!(
+            oversized_string
+                .validate(&authorities)
+                .unwrap_err()
+                .to_string()
+                .contains("exceeds")
+        );
     }
 
     #[test]
@@ -1502,11 +1522,13 @@ mod tests {
                 .map(|index| (format!("detail_{index}"), "value".to_string()))
                 .collect(),
         };
-        assert!(diagnostic
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("too many diagnostic"));
+        assert!(
+            diagnostic
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("too many diagnostic")
+        );
     }
 
     #[test]
@@ -1531,10 +1553,12 @@ mod tests {
                 },
             )]),
         };
-        assert!(response
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("lowercase SHA-256"));
+        assert!(
+            response
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("lowercase SHA-256")
+        );
     }
 }

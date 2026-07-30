@@ -3,7 +3,7 @@ use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -73,7 +73,10 @@ pub(super) async fn handle_connection(
         let request_owner = tokio::spawn(tracing::Instrument::instrument(
             async move {
                 let _frame_permit = frame_permit;
-                super::routing::dispatch_dynamic(request, &request_state, peer.as_ref()).await
+                let response =
+                    super::routing::dispatch_dynamic(request, &request_state, peer.as_ref()).await;
+                drop(_frame_permit);
+                response
             },
             span,
         ));

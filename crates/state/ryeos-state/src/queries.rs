@@ -1614,7 +1614,7 @@ pub fn consecutive_machine_continuation_depth(
         // The edge that created `current` lives on `upstream`'s thread_continued.
         let Some((successor, reason, fingerprint)) = continuation_edge(db, &upstream)? else {
             break; // upstream has no continuation edge — `current`'s upstream link
-                   // is not a continuation (e.g. a compose-context child)
+            // is not a continuation (e.g. a compose-context child)
         };
         if successor != current {
             break; // upstream continued to a DIFFERENT thread — not this one
@@ -1626,7 +1626,7 @@ pub fn consecutive_machine_continuation_depth(
         }
         if reason.as_deref() == Some(ContinuationReasonMarker::GraphFollowResume.as_str()) {
             break; // graph follow-resume edge (daemon-only marker) — structural
-                   // progress, not an autonomous segment-cut; resets the run
+            // progress, not an autonomous segment-cut; resets the run
         }
         count += 1; // verified machine continuation link
         current = upstream;

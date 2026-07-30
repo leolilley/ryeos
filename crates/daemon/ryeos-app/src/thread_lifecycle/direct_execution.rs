@@ -617,22 +617,21 @@ pub fn prepare_item_plan(
     engine.with_checked_bundle_generation(|_generation| {
         let verified = super::verified_execution_subject(engine, resolved)?;
         let mut plan = super::build_execution_plan_for_request(engine, resolved, &verified)?;
-        let root_subject_source_identity = if resolved.resolved_item.source_space
-            == ryeos_engine::contracts::ItemSpace::Bundle
-        {
-            let ai = resolved
-                .resolved_item
-                .source_path
-                .ancestors()
-                .find(|path| {
-                    path.file_name()
-                        .is_some_and(|name| name == ryeos_engine::AI_DIR)
-                })
-                .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
-            let root = ai
-                .parent()
-                .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
-            let expected_name = engine
+        let root_subject_source_identity =
+            if resolved.resolved_item.source_space == ryeos_engine::contracts::ItemSpace::Bundle {
+                let ai = resolved
+                    .resolved_item
+                    .source_path
+                    .ancestors()
+                    .find(|path| {
+                        path.file_name()
+                            .is_some_and(|name| name == ryeos_engine::AI_DIR)
+                    })
+                    .ok_or_else(|| anyhow!("bundle item source has no .ai ancestor"))?;
+                let root = ai
+                    .parent()
+                    .ok_or_else(|| anyhow!("bundle .ai path has no root"))?;
+                let expected_name = engine
                 .registered_bundle_name_for_root(root)
                 .ok_or_else(|| {
                     anyhow!(
@@ -640,18 +639,18 @@ pub fn prepare_item_plan(
                         root.display()
                     )
                 })?;
-            let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
-                root,
-                expected_name,
-                &engine.node_trust_store,
-            )?;
-            ryeos_state::objects::DirectRootSourceIdentity::Bundle {
-                manifest_hash: identity.body_digest,
-                manifest_signer_fingerprint: identity.signer_fingerprint,
-            }
-        } else {
-            ryeos_state::objects::DirectRootSourceIdentity::Project
-        };
+                let identity = ryeos_engine::plan_builder::verify_bundle_source_manifest_identity(
+                    root,
+                    expected_name,
+                    &engine.node_trust_store,
+                )?;
+                ryeos_state::objects::DirectRootSourceIdentity::Bundle {
+                    manifest_hash: identity.body_digest,
+                    manifest_signer_fingerprint: identity.signer_fingerprint,
+                }
+            } else {
+                ryeos_state::objects::DirectRootSourceIdentity::Project
+            };
         if lifecycle_authority.recovery
             == ryeos_state::objects::ExecutionRecoveryAuthority::RestartRecoverable
         {
@@ -800,28 +799,28 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
     // build), so it never reaches here.
     if let Some(ts_dir) = thread_state_dir {
         for node in &plan.nodes {
-            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node {
-                if spec.execution.native_resume.is_some() {
-                    let ckpt = ts_dir.join(crate::launch_metadata::CHECKPOINTS_SUBDIR);
-                    std::fs::create_dir_all(&ckpt).map_err(|e| {
-                        anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
-                    })?;
-                    let mut bindings = vec![EnvBinding::new(
-                        "RYEOS_CHECKPOINT_DIR",
-                        ckpt.display().to_string(),
+            if let ryeos_engine::contracts::PlanNode::DispatchSubprocess { spec, .. } = node
+                && spec.execution.native_resume.is_some()
+            {
+                let ckpt = ts_dir.join(crate::launch_metadata::CHECKPOINTS_SUBDIR);
+                std::fs::create_dir_all(&ckpt).map_err(|e| {
+                    anyhow!("failed to create checkpoint dir {}: {e}", ckpt.display())
+                })?;
+                let mut bindings = vec![EnvBinding::new(
+                    "RYEOS_CHECKPOINT_DIR",
+                    ckpt.display().to_string(),
+                    EnvSourceDetail::DaemonResume,
+                )];
+                if is_resume {
+                    bindings.push(EnvBinding::new(
+                        "RYEOS_RESUME",
+                        "1",
                         EnvSourceDetail::DaemonResume,
-                    )];
-                    if is_resume {
-                        bindings.push(EnvBinding::new(
-                            "RYEOS_RESUME",
-                            "1",
-                            EnvSourceDetail::DaemonResume,
-                        ));
-                    }
-                    allocated_checkpoint_dir = Some(ckpt);
-                    resume_env_for_first_native_resume = Some(bindings);
-                    break; // first DispatchSubprocess wins, mirrors FirstWins
+                    ));
                 }
+                allocated_checkpoint_dir = Some(ckpt);
+                resume_env_for_first_native_resume = Some(bindings);
+                break; // first DispatchSubprocess wins, mirrors FirstWins
             }
         }
     }
@@ -873,10 +872,10 @@ pub fn spawn_item(params: SpawnItemParams<'_>) -> Result<SpawnedItemAwaitingAtta
 
             builder = builder.with_typed_bindings(protocol_env_bindings.iter().cloned())?;
 
-            if spec.execution.native_resume.is_some() {
-                if let Some(resume_bindings) = resume_env_for_first_native_resume.take() {
-                    builder = builder.with_typed_bindings(resume_bindings)?;
-                }
+            if spec.execution.native_resume.is_some()
+                && let Some(resume_bindings) = resume_env_for_first_native_resume.take()
+            {
+                builder = builder.with_typed_bindings(resume_bindings)?;
             }
 
             spec.env = builder.build().into_iter().collect();

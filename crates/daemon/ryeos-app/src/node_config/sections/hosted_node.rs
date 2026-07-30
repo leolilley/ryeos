@@ -4,7 +4,7 @@
 //! as public remotes. It is loaded from bundles/system state but is not an
 //! execution-authority mechanism.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

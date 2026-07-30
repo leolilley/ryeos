@@ -74,13 +74,13 @@ pub async fn handle(
             req.provider_id, validation.r#ref
         )));
     }
-    if let Some(model) = req.model.as_deref() {
-        if !setup.models.iter().any(|declared| declared.name == model) {
-            return Err(HandlerError::BadRequest(format!(
-                "provider '{}' does not declare model '{}' for setup",
-                req.provider_id, model
-            )));
-        }
+    if let Some(model) = req.model.as_deref()
+        && !setup.models.iter().any(|declared| declared.name == model)
+    {
+        return Err(HandlerError::BadRequest(format!(
+            "provider '{}' does not declare model '{}' for setup",
+            req.provider_id, model
+        )));
     }
     let runtime_provider = req
         .model
@@ -160,12 +160,16 @@ pub async fn handle(
     let status = response.status();
     if !status.is_success() {
         let mut body = Zeroizing::new(Vec::new());
-        while let Some(chunk) = response.chunk().await.map_err(|error| {
-            HandlerError::BadRequest(format!(
-                "provider '{}' validation error body failed: {error}",
-                req.provider_id
-            ))
-        })? {
+        loop {
+            let next_chunk = response.chunk().await.map_err(|error| {
+                HandlerError::BadRequest(format!(
+                    "provider '{}' validation error body failed: {error}",
+                    req.provider_id
+                ))
+            })?;
+            let Some(chunk) = next_chunk else {
+                break;
+            };
             if body.len().saturating_add(chunk.len()) > 64 * 1024 {
                 return Err(HandlerError::BadRequest(format!(
                     "provider '{}' validation returned HTTP {} with an oversized error body",

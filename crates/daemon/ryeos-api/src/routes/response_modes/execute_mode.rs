@@ -21,7 +21,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::remote::config::{LoadedRemote, ProjectSyncScope, ResolvedRemote, TargetSiteError};
 use crate::route_error::{RouteConfigError, RouteDispatchError};
@@ -33,7 +33,7 @@ use ryeos_app::execution_policy::{
     PinnedRealization, PinnedSource, ProjectExecutionPolicy, TerminalPublication,
 };
 use ryeos_app::route_raw::{RawRequestBody, RawRouteSpec};
-use ryeos_executor::execution::project_source::{self, ProjectSource, NO_PROJECT_SENTINEL};
+use ryeos_executor::execution::project_source::{self, NO_PROJECT_SENTINEL, ProjectSource};
 use ryeos_runtime::authorizer::AuthorizationPolicy;
 use ryeos_state::ignore::IgnoreMatcher;
 
@@ -226,6 +226,7 @@ fn resolve_project_authority(
     project_path: Option<&Path>,
     snapshot_hash: Option<&str>,
     isolation: &ryeos_engine::isolation::IsolationRuntime,
+    capability_ceiling: &[String],
 ) -> anyhow::Result<ryeos_state::objects::ExecutionProjectAuthority> {
     use ryeos_state::objects::{
         ChildProjectAuthorityPolicy, EnvironmentAuthority, EnvironmentNameAuthority,
@@ -325,7 +326,7 @@ fn resolve_project_authority(
                     isolation.mode(),
                 ),
                 environment,
-                Vec::new(),
+                capability_ceiling.to_vec(),
             )
         }
         ProjectExecutionPolicy::Pinned { realization, .. } => {
@@ -361,7 +362,7 @@ fn resolve_project_authority(
                 snapshot_hash.to_string(),
                 realization,
                 environment,
-                Vec::new(),
+                capability_ceiling.to_vec(),
             )
         }
     }?;
@@ -453,6 +454,7 @@ pub(crate) fn resolve_execution_contract(
         (!no_project_requested).then_some(project_ctx.original_path.as_path()),
         project_ctx.snapshot_hash.as_deref(),
         &state.isolation,
+        caller_scopes,
     )?;
     authorize_terminal_publication(
         policy,
@@ -1473,7 +1475,8 @@ impl CompiledResponseMode for CompiledExecuteMode {
 
             tokio::spawn(async move {
                 let _workspace_guard = workspace_guard;
-                match handle.await {
+                let outcome = handle.await;
+                match outcome {
                     Ok(Ok(())) => {
                         tracing::debug!(thread_id = %thread_id, "accepted execute background dispatch completed");
                     }
@@ -1615,13 +1618,10 @@ impl CompiledResponseMode for CompiledExecuteMode {
                     remote_ignore: &remote_ignore,
                     call: None,
                 };
-                match crate::remote::forward::execute_unary_forward(
-                    &state_arc,
-                    &client,
-                    forward_req,
-                )
-                .await
-                {
+                let forwarded =
+                    crate::remote::forward::execute_unary_forward(&state_arc, &client, forward_req)
+                        .await;
+                match forwarded {
                     Ok(result) => {
                         // The remote executed successfully and pull-back
                         // completed. Return the remote result in the normal
@@ -1695,20 +1695,18 @@ impl CompiledResponseMode for CompiledExecuteMode {
             if !matches!(
                 &exec_ctx.plan_ctx.subject_resolution_authority,
                 ryeos_engine::contracts::SubjectResolutionAuthority::LiveFs
-            ) {
-                if let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
-                    preflight.root_dispatch_evidence.applicability(),
-                    &root_admission,
-                    &request.ref_bindings,
-                    &lifecycle_authority,
-                    &provenance,
-                    &exec_ctx,
-                    &state,
-                )
-                .await
-                {
-                    return Ok(dispatch_error_response(error));
-                }
+            ) && let Err(error) = ryeos_executor::dispatch::admit_launch_contract(
+                preflight.root_dispatch_evidence.applicability(),
+                &root_admission,
+                &request.ref_bindings,
+                &lifecycle_authority,
+                &provenance,
+                &exec_ctx,
+                &state,
+            )
+            .await
+            {
+                return Ok(dispatch_error_response(error));
             }
             // An in-process admission is an exact threadless resolution
             // handoff: it carries no selected executor route and no pre-minted
@@ -1765,16 +1763,16 @@ impl CompiledResponseMode for CompiledExecuteMode {
                 // Execution diagnostics: with a state-root override in play,
                 // both selected roots ride on the response so the caller can
                 // see exactly where source resolution and runtime state went.
-                if let Some(sr) = &state_root {
-                    if let Some(obj) = value.as_object_mut() {
-                        obj.insert(
-                            "execution".to_string(),
-                            json!({
-                                "source_root": project_ctx.effective_path,
-                                "state_root": sr,
-                            }),
-                        );
-                    }
+                if let Some(sr) = &state_root
+                    && let Some(obj) = value.as_object_mut()
+                {
+                    obj.insert(
+                        "execution".to_string(),
+                        json!({
+                            "source_root": project_ctx.effective_path,
+                            "state_root": sr,
+                        }),
+                    );
                 }
                 Ok(axum::Json(value).into_response())
             }
@@ -2046,7 +2044,9 @@ fn map_forward_error_to_dispatch(
         RemoteForwardError::PullUnrelatedSnapshot { pushed, result } => {
             ryeos_executor::dispatch_error::DispatchError::TargetSiteForwardBadGateway {
                 target_site_id: target_site_id.to_string(),
-                detail: format!("remote result snapshot '{result}' is not a descendant of pushed snapshot '{pushed}'"),
+                detail: format!(
+                    "remote result snapshot '{result}' is not a descendant of pushed snapshot '{pushed}'"
+                ),
             }
         }
     }
@@ -2125,6 +2125,27 @@ mod tests {
             validate_project_path_presence(&live, None),
             Err("project-backed execution policy requires project_path")
         );
+    }
+
+    #[test]
+    fn live_project_authority_seals_admitted_caller_capability_ceiling() {
+        let project = tempfile::tempdir().unwrap();
+        let policy = ExecutionPolicy::local_live(ExecutionResponse::Wait);
+        let capability_ceiling = vec![
+            "ryeos.execute.tool.core/snapshot-create".to_string(),
+            ryeos_app::execution_policy::LIVE_PROJECT_WRITE_CAPABILITY.to_string(),
+        ];
+
+        let authority = resolve_project_authority(
+            &policy,
+            Some(project.path()),
+            None,
+            &ryeos_engine::isolation::IsolationRuntime::default(),
+            &capability_ceiling,
+        )
+        .unwrap();
+
+        assert_eq!(authority.capability_ceiling(), capability_ceiling);
     }
 
     #[test]

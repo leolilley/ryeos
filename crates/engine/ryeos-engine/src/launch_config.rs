@@ -18,12 +18,12 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{ItemSpace, TrustClass as ContractTrustClass};
 use crate::error::EngineError;
-use crate::item_resolution::{parse_signature_header, ResolutionRoot, ResolutionRoots};
+use crate::item_resolution::{ResolutionRoot, ResolutionRoots, parse_signature_header};
 use crate::kind_registry::{ExtensionSpec, KindRegistry};
 use crate::parsers::dispatcher::ParserDispatcher;
 use crate::resolution::TrustClass;
 use crate::runtime_registry::{ConfigMergeMode, LaunchConfigInputDecl, LaunchItemSpace};
-use crate::trust::{content_hash_after_signature, verify_item_signature_with_hash, TrustStore};
+use crate::trust::{TrustStore, content_hash_after_signature, verify_item_signature_with_hash};
 
 const MAX_CATALOG_ENTRIES: usize = 256;
 const MAX_CONTRIBUTORS: usize = 16;
@@ -333,11 +333,11 @@ fn authoritative_dependency_matches(
         };
     }
 
-    Ok(&observe_catalog_state_from_content(
+    Ok(observe_catalog_state_from_content(
         content,
         &project_relative,
         &dependency.catalog_extensions,
-    )? == &dependency.state)
+    )? == dependency.state)
 }
 
 #[derive(Debug, Clone)]
@@ -552,7 +552,7 @@ fn load_launch_config_snapshots_with_proof_from_authority(
                                 return Err(invalid(
                                     name,
                                     format!("inspect {}: {error}", catalog_root.display()),
-                                ))
+                                ));
                             }
                         }
                         validate_config_directory(&catalog_root, &root.ai_root, name)?;
@@ -1015,7 +1015,7 @@ fn item_path<'a>(
                         "config contributor is not a regular non-symlink file: {}",
                         path.display()
                     ),
-                ))
+                ));
             }
         }
     }

@@ -38,110 +38,105 @@ pub(super) fn harvest_chunk_meta(
 
         let metadata = streaming.and_then(|config| config.metadata.as_ref());
         if let Some(metadata) = metadata {
-            if let Some(path) = metadata.response_id_path.as_deref() {
-                if let Some(response_id) = resolve_path(&parsed, path).and_then(Value::as_str) {
-                    if !response_id.is_empty() {
-                        *last_response_id = Some(response_id.to_string());
-                    }
-                }
+            if let Some(path) = metadata.response_id_path.as_deref()
+                && let Some(response_id) = resolve_path(&parsed, path).and_then(Value::as_str)
+                && !response_id.is_empty()
+            {
+                *last_response_id = Some(response_id.to_string());
             }
-            if let Some(usage_config) = metadata.usage.as_ref() {
-                if let Some(usage) =
+            if let Some(usage_config) = metadata.usage.as_ref()
+                && let Some(usage) =
                     resolve_path(&parsed, &usage_config.path).filter(|value| !value.is_null())
+            {
+                let mut anomalies = Vec::new();
+                let mut metadata_anomalies = Vec::new();
+                let input_tokens = read_required_u64(
+                    usage,
+                    usage_config.input_tokens_path.as_deref(),
+                    &mut anomalies,
+                );
+                let output_tokens = read_required_u64(
+                    usage,
+                    usage_config.output_tokens_path.as_deref(),
+                    &mut anomalies,
+                );
+                let reasoning_tokens = read_optional_u64(
+                    usage,
+                    usage_config.reasoning_tokens_path.as_deref(),
+                    &mut anomalies,
+                );
+                let mut reported_cost_usd_raw = usage_config
+                    .reported_cost_path
+                    .as_deref()
+                    .and_then(|cost_path| {
+                        let full_path = if usage_config.path.is_empty() {
+                            cost_path.to_string()
+                        } else if cost_path.is_empty() {
+                            usage_config.path.clone()
+                        } else {
+                            format!("{}.{}", usage_config.path, cost_path)
+                        };
+                        raw_json_value_at_path(&payload, &full_path)
+                    });
+                let reported_cost_usd = read_optional_nonnegative_cost(
+                    usage,
+                    usage_config.reported_cost_path.as_deref(),
+                    &mut reported_cost_usd_raw,
+                    &mut metadata_anomalies,
+                );
+                let cost_details = usage_config
+                    .cost_details_path
+                    .as_deref()
+                    .and_then(|path| resolve_path(usage, path))
+                    .cloned();
+                let is_byok = read_optional_bool(
+                    usage,
+                    usage_config.is_byok_path.as_deref(),
+                    &mut metadata_anomalies,
+                );
+                if usage_config.reasoning_included_in_output
+                    && let (Some(reasoning_tokens), Some(output_tokens)) =
+                        (reasoning_tokens, output_tokens)
+                    && reasoning_tokens > output_tokens
                 {
-                    let mut anomalies = Vec::new();
-                    let mut metadata_anomalies = Vec::new();
-                    let input_tokens = read_required_u64(
-                        usage,
-                        usage_config.input_tokens_path.as_deref(),
-                        &mut anomalies,
-                    );
-                    let output_tokens = read_required_u64(
-                        usage,
-                        usage_config.output_tokens_path.as_deref(),
-                        &mut anomalies,
-                    );
-                    let reasoning_tokens = read_optional_u64(
-                        usage,
-                        usage_config.reasoning_tokens_path.as_deref(),
-                        &mut anomalies,
-                    );
-                    let mut reported_cost_usd_raw = usage_config
-                        .reported_cost_path
-                        .as_deref()
-                        .and_then(|cost_path| {
-                            let full_path = if usage_config.path.is_empty() {
-                                cost_path.to_string()
-                            } else if cost_path.is_empty() {
-                                usage_config.path.clone()
-                            } else {
-                                format!("{}.{}", usage_config.path, cost_path)
-                            };
-                            raw_json_value_at_path(&payload, &full_path)
-                        });
-                    let reported_cost_usd = read_optional_nonnegative_cost(
-                        usage,
-                        usage_config.reported_cost_path.as_deref(),
-                        &mut reported_cost_usd_raw,
-                        &mut metadata_anomalies,
-                    );
-                    let cost_details = usage_config
-                        .cost_details_path
-                        .as_deref()
-                        .and_then(|path| resolve_path(usage, path))
-                        .cloned();
-                    let is_byok = read_optional_bool(
-                        usage,
-                        usage_config.is_byok_path.as_deref(),
-                        &mut metadata_anomalies,
-                    );
-                    if usage_config.reasoning_included_in_output {
-                        if let (Some(reasoning_tokens), Some(output_tokens)) =
-                            (reasoning_tokens, output_tokens)
-                        {
-                            if reasoning_tokens > output_tokens {
-                                anomalies.push(format!(
-                                    "reasoning tokens {reasoning_tokens} exceed output tokens \
-                                     {output_tokens}"
-                                ));
-                            }
-                        }
+                    anomalies.push(format!(
+                        "reasoning tokens {reasoning_tokens} exceed output tokens \
+                             {output_tokens}"
+                    ));
+                }
+                let update = TokenUsage {
+                    input_tokens,
+                    output_tokens,
+                    reasoning_tokens,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    reported_cost_usd,
+                    reported_cost_usd_raw,
+                    cost_details,
+                    is_byok,
+                    source: ProviderUsageSource::SignedMetadata,
+                    comparability: Default::default(),
+                    provider_limit_contract: Default::default(),
+                    anomalies,
+                    metadata_anomalies,
+                    spend_anomalies: Vec::new(),
+                    contract_anomalies: Vec::new(),
+                    snapshots_seen: 0,
+                };
+                match usage_config.aggregation {
+                    UsageAggregation::CumulativeFields => {
+                        update_usage_cumulative(last_usage, update)
                     }
-                    let update = TokenUsage {
-                        input_tokens,
-                        output_tokens,
-                        reasoning_tokens,
-                        cache_read_tokens: None,
-                        cache_write_tokens: None,
-                        reported_cost_usd,
-                        reported_cost_usd_raw,
-                        cost_details,
-                        is_byok,
-                        source: ProviderUsageSource::SignedMetadata,
-                        comparability: Default::default(),
-                        provider_limit_contract: Default::default(),
-                        anomalies,
-                        metadata_anomalies,
-                        spend_anomalies: Vec::new(),
-                        contract_anomalies: Vec::new(),
-                        snapshots_seen: 0,
-                    };
-                    match usage_config.aggregation {
-                        UsageAggregation::CumulativeFields => {
-                            update_usage_cumulative(last_usage, update)
-                        }
-                        UsageAggregation::LatestSnapshot => {
-                            update_usage_latest(last_usage, update, usage_config.single_snapshot)
-                        }
+                    UsageAggregation::LatestSnapshot => {
+                        update_usage_latest(last_usage, update, usage_config.single_snapshot)
                     }
                 }
             }
-            if let Some(path) = metadata.finish_reason_path.as_deref() {
-                if let Some(reason) = resolve_path(&parsed, path).and_then(Value::as_str) {
-                    if !reason.is_empty() {
-                        *last_finish = Some(reason.to_string());
-                    }
-                }
+            if let Some(path) = metadata.finish_reason_path.as_deref()
+                && let Some(reason) = resolve_path(&parsed, path).and_then(Value::as_str)
+                && !reason.is_empty()
+            {
+                *last_finish = Some(reason.to_string());
             }
         }
 
@@ -200,18 +195,15 @@ fn update_usage_latest(
         if let (Some(previous_raw), Some(update_raw)) = (
             previous.reported_cost_usd_raw.as_deref(),
             update.reported_cost_usd_raw.as_deref(),
-        ) {
-            if let (Ok((previous_cost, _)), Ok((update_cost, _))) = (
-                ryeos_accounting::UsdNanos::parse_reported_round_up(previous_raw),
-                ryeos_accounting::UsdNanos::parse_reported_round_up(update_raw),
-            ) {
-                if update_cost < previous_cost {
-                    update.metadata_anomalies.push(format!(
-                        "reported_cost_usd revised downward from {previous_raw} to {update_raw} \
-                         in latest-snapshot usage metadata"
-                    ));
-                }
-            }
+        ) && let (Ok((previous_cost, _)), Ok((update_cost, _))) = (
+            ryeos_accounting::UsdNanos::parse_reported_round_up(previous_raw),
+            ryeos_accounting::UsdNanos::parse_reported_round_up(update_raw),
+        ) && update_cost < previous_cost
+        {
+            update.metadata_anomalies.push(format!(
+                "reported_cost_usd revised downward from {previous_raw} to {update_raw} \
+                 in latest-snapshot usage metadata"
+            ));
         }
         // A later snapshot that carries no cost fields must not erase an
         // earlier reported cost — "provider did not report a usable final
@@ -288,18 +280,17 @@ fn update_usage_cumulative(last_usage: &mut Option<TokenUsage>, update: TokenUsa
     );
     let (reported_cost_usd, reported_cost_usd_raw) =
         if let Some(update_raw) = update.reported_cost_usd_raw {
-            if let Some(previous_raw) = previous.reported_cost_usd_raw.as_deref() {
-                if let (Ok((previous_cost, _)), Ok((update_cost, _))) = (
+            if let Some(previous_raw) = previous.reported_cost_usd_raw.as_deref()
+                && let (Ok((previous_cost, _)), Ok((update_cost, _))) = (
                     ryeos_accounting::UsdNanos::parse_reported_round_up(previous_raw),
                     ryeos_accounting::UsdNanos::parse_reported_round_up(&update_raw),
-                ) {
-                    if update_cost < previous_cost {
-                        spend_anomalies.push(format!(
-                            "reported_cost_usd regressed from {previous_raw} to {update_raw} in \
-                         cumulative usage metadata"
-                        ));
-                    }
-                }
+                )
+                && update_cost < previous_cost
+            {
+                spend_anomalies.push(format!(
+                    "reported_cost_usd regressed from {previous_raw} to {update_raw} in \
+                     cumulative usage metadata"
+                ));
             }
             (update.reported_cost_usd, Some(update_raw))
         } else {
@@ -517,10 +508,12 @@ mod tests {
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, Some(10));
         assert_eq!(usage.output_tokens, Some(9));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("regressed")));
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("regressed"))
+        );
         assert_eq!(finish.as_deref(), Some("stop"));
     }
 
@@ -617,10 +610,12 @@ mod tests {
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, Some(10));
         assert_eq!(usage.output_tokens, Some(9));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("regressed")));
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("regressed"))
+        );
         assert_eq!(usage.reported_cost_usd, Some(0.5));
     }
 
@@ -646,10 +641,12 @@ mod tests {
         );
 
         let usage = usage.unwrap();
-        assert!(usage
-            .spend_anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("regressed")));
+        assert!(
+            usage
+                .spend_anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("regressed"))
+        );
         assert_eq!(usage.reported_cost_usd_raw.as_deref(), Some("9000000000"));
     }
 
@@ -676,22 +673,30 @@ mod tests {
         let usage = usage.unwrap();
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, Some(5));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("prompt_tokens is not a u64")));
-        assert!(usage
-            .anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("reasoning tokens 7 exceed")));
-        assert!(usage
-            .metadata_anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("cost is negative")));
-        assert!(usage
-            .metadata_anomalies
-            .iter()
-            .any(|anomaly| anomaly.contains("is_byok is not a boolean")));
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("prompt_tokens is not a u64"))
+        );
+        assert!(
+            usage
+                .anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("reasoning tokens 7 exceed"))
+        );
+        assert!(
+            usage
+                .metadata_anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("cost is negative"))
+        );
+        assert!(
+            usage
+                .metadata_anomalies
+                .iter()
+                .any(|anomaly| anomaly.contains("is_byok is not a boolean"))
+        );
     }
 
     #[test]

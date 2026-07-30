@@ -1,6 +1,6 @@
 use anyhow::Context;
 
-use super::{project_event, refresh_chain_retention, ProjectionDb, ProjectionMeta};
+use super::{ProjectionDb, ProjectionMeta, project_event, refresh_chain_retention};
 
 /// Project a thread snapshot into the projection database.
 ///

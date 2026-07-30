@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::identity::NodeIdentity;
 /// Render the exact signed bytes for one path-owned `kind: node` item without

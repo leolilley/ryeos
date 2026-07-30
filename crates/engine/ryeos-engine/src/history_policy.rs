@@ -111,12 +111,12 @@ impl ResolvedNodeThreadHistoryPolicy {
     }
 
     fn validate(&self) -> Result<(), EngineError> {
-        if let NodeHistoryPolicyProvenance::SignedConfig { path, .. } = &self.provenance {
-            if path != Path::new(NODE_HISTORY_POLICY_CONFIG) {
-                return Err(invalid_node_policy(format!(
-                    "signed node history provenance path must be exactly `{NODE_HISTORY_POLICY_CONFIG}`"
-                )));
-            }
+        if let NodeHistoryPolicyProvenance::SignedConfig { path, .. } = &self.provenance
+            && path != Path::new(NODE_HISTORY_POLICY_CONFIG)
+        {
+            return Err(invalid_node_policy(format!(
+                "signed node history provenance path must be exactly `{NODE_HISTORY_POLICY_CONFIG}`"
+            )));
         }
         let (ThreadHistoryRetention::TerminalFor { seconds }, Some(minimum_terminal_for_seconds)) =
             (&self.default_retention, self.minimum_terminal_for_seconds)
@@ -209,7 +209,7 @@ pub fn load_node_thread_history_policy(
                 return Err(invalid_node_policy(format!(
                     "could not read {}: {error:#}",
                     path.display()
-                )))
+                )));
             }
         };
         let raw = String::from_utf8(raw).map_err(|error| {
@@ -1038,9 +1038,11 @@ mod tests {
             &ResolvedNodeThreadHistoryPolicy::durable_without_config(),
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("content changed after verification"));
+        assert!(
+            error
+                .to_string()
+                .contains("content changed after verification")
+        );
     }
 
     #[test]
@@ -1095,9 +1097,11 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("must be exactly `config/execution/execution.yaml`"));
+        assert!(
+            error
+                .to_string()
+                .contains("must be exactly `config/execution/execution.yaml`")
+        );
     }
 
     #[test]

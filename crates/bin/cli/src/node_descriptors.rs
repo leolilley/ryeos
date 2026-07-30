@@ -266,18 +266,37 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_commands_bind_the_selected_project_to_the_tool_schema_field() {
+    fn snapshot_commands_target_core_authority_items_and_bind_project_authority() {
         for file in [
             "snapshot-create.yaml",
             "snapshot-log.yaml",
+            "snapshot-show.yaml",
             "snapshot-status.yaml",
         ] {
             let command = source_command("core", file);
+            assert!(
+                matches!(
+                    &command.dispatch,
+                    CommandDispatch::ExecuteRef { execute, .. }
+                        if execute.starts_with("tool:core/snapshot-")
+                ),
+                "snapshot command {file} must target an authority-bearing item in the core bundle namespace",
+            );
+            let project = command
+                .project
+                .as_ref()
+                .unwrap_or_else(|| panic!("snapshot command {file} must declare project policy"));
             assert_eq!(
-                command
-                    .project
-                    .as_ref()
-                    .and_then(|project| project.bind_parameter.as_deref()),
+                project.resolution,
+                ryeos_runtime::CommandProjectResolution::Required,
+                "snapshot command {file} must require live project resolution",
+            );
+            assert!(
+                project.request_project_path,
+                "snapshot command {file} must carry the resolved project into daemon execution authority",
+            );
+            assert_eq!(
+                project.bind_parameter.as_deref(),
                 Some("project_path"),
                 "snapshot command {file} must satisfy the target tool's required project_path",
             );

@@ -320,18 +320,16 @@ impl Walker {
                 NextOnError::PolicyFail => (None, false, true),
             }
         };
-        if commit_candidate {
-            if let Some(key) = collect_key {
-                if !state.is_object() {
-                    *state = Value::Object(serde_json::Map::new());
-                }
-                state
-                    .as_object_mut()
-                    .unwrap()
-                    .insert(key, Value::Array(results.clone()));
+        if commit_candidate && let Some(key) = collect_key {
+            if !state.is_object() {
+                *state = Value::Object(serde_json::Map::new());
             }
-            // The fanout variable is lexical, not a temporary state key.
+            state
+                .as_object_mut()
+                .unwrap()
+                .insert(key, Value::Array(results.clone()));
         }
+        // The fanout variable is lexical, not a temporary state key.
         let result_hash = match hash_json_value(&json!({
             "results": &results,
             "statuses": &statuses,

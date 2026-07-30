@@ -198,7 +198,7 @@ pub fn resolve_project_context(
         (ProjectSource::LiveFs, Some(_)) => {
             return Err(ProjectSourceError::Other(
                 "live project context cannot carry a pinned realization".to_string(),
-            ))
+            ));
         }
         (
             ProjectSource::PushedHead
@@ -214,7 +214,7 @@ pub fn resolve_project_context(
         ) => {
             return Err(ProjectSourceError::Other(
                 "pinned project context requires an explicit realization".to_string(),
-            ))
+            ));
         }
     };
 

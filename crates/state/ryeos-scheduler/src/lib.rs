@@ -23,8 +23,8 @@ pub mod types;
 // Re-export primary types
 pub use db::SchedulerDb;
 pub use result_outcome::{
-    classify_result_payload, completed_fire_outcome, fire_outcome_for_terminal,
-    fire_status_for_thread_status, thread_status_is_terminal, ThreadResultOutcome,
+    ThreadResultOutcome, classify_result_payload, completed_fire_outcome,
+    fire_outcome_for_terminal, fire_status_for_thread_status, thread_status_is_terminal,
 };
 pub use types::{FireRecord, PendingFire, ReloadSignal, ScheduleSpecRecord};
 

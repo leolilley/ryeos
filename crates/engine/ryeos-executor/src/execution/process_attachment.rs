@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use serde_json::json;
 
 use ryeos_app::state::AppState;
-use ryeos_app::state_store::{is_terminal_status, StopIntent};
+use ryeos_app::state_store::{StopIntent, is_terminal_status};
 use ryeos_app::temp_dir_guard::TempDirGuard;
 use ryeos_app::thread_lifecycle::{ThreadAttachProcessParams, ThreadFinalizeParams};
 

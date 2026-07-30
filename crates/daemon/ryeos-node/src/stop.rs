@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
@@ -49,7 +49,7 @@ pub async fn stop_with_progress(
             return Ok(StopReport {
                 status,
                 already_stopped: true,
-            })
+            });
         }
         LifecycleStatus::Stale { diagnostics, .. } => {
             bail!("stale daemon metadata: {}", diagnostics.message)
@@ -201,7 +201,8 @@ async fn pin_live_daemon(env: &LocalLifecycleEnv) -> Result<LiveDaemonTarget> {
         else {
             continue;
         };
-        if let Ok(target) = pin_verified_ryeosd_peer(&stream, pid as u32) {
+        let pinned = pin_verified_ryeosd_peer(&stream, pid as u32);
+        if let Ok(target) = pinned {
             return Ok(target);
         }
     }

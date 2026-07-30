@@ -121,15 +121,15 @@ pub fn report_previous_exit(state_dir: &Path) {
 /// Warn if the state filesystem is low on free space. Best-effort: a failed
 /// probe is silently ignored (never blocks startup).
 pub fn check_disk_space(state_dir: &Path) {
-    if let Some(free) = available_bytes(state_dir) {
-        if free < LOW_DISK_THRESHOLD_BYTES {
-            tracing::warn!(
-                free_mib = free / (1024 * 1024),
-                threshold_mib = LOW_DISK_THRESHOLD_BYTES / (1024 * 1024),
-                path = %state_dir.display(),
-                "low free disk space on the state filesystem — runtime writes (events, CAS, traces) may fail"
-            );
-        }
+    if let Some(free) = available_bytes(state_dir)
+        && free < LOW_DISK_THRESHOLD_BYTES
+    {
+        tracing::warn!(
+            free_mib = free / (1024 * 1024),
+            threshold_mib = LOW_DISK_THRESHOLD_BYTES / (1024 * 1024),
+            path = %state_dir.display(),
+            "low free disk space on the state filesystem — runtime writes (events, CAS, traces) may fail"
+        );
     }
 }
 

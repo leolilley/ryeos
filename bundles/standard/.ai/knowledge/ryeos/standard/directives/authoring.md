@@ -1,8 +1,8 @@
-<!-- ryeos:signed:2026-07-27T04:06:35Z:63d146c3be0e544edbe4b10153fd9df52b2aeb3dfbbbbb8f6573cdd5fba033b3:+oyI8RH/E+CnHW/MUnYlyEfAIlGNk9+dz9Su//iWHqqY9/PEckX2HBb/AuYEuZplZdz6ASPGf+07oJ5yAPt/AA==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
+<!-- ryeos:signed:2026-07-30T00:35:21Z:841f4d5cd9d31b9732b2b0899de8c9fa12e009cbf25a82c9fbfe9e576b6b240f:DxPx3zfHiOHf+11LpVJ8VC1zQZC9fv8N+JBrjpozImP10roh0NVQbpu5lzOEDepqKA3unO9xVoIAy47FTTdRAw==:741a8bc609b398aaec0685e5aefb682faf5129a66bd192f888d23bb642c18eea -->
 ---
 category: ryeos/standard/directives
 tags: [directive, authoring, frontmatter]
-version: "1.0.0"
+version: "1.0.1"
 description: How to author directive markdown files.
 ---
 
@@ -29,7 +29,7 @@ Instructions for the runtime.
 
 - `extends`: parent directive ref. Children inherit through `extends-chain`.
 - `requires.capabilities.declared`: a flat list of self-asserted capability strings (the cap encodes its own verb, e.g. `ryeos.execute.tool.echo`). Children may narrow but not widen the parent's declared set.
-- `requires.capabilities.manifest.runtime_authority`: runtime callback authority (bundle events / vault / item authoring) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
+- `requires.capabilities.manifest.runtime_authority`: runtime callback authority (bundle events / vault / item authoring / project snapshots) the daemon mints only as the signed bundle manifest backs it — not self-grantable.
 - `context`: knowledge refs grouped by position (`system`, `before`, `after`).
 - `model`: optional explicit provider/model/context window; otherwise routing tiers apply.
 - `limits`: runtime limits such as turn/token/spend budgets.

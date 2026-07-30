@@ -106,10 +106,10 @@ impl ReturnNudge {
     /// header carries a non-empty string, else the built-in message naming
     /// the declared outputs.
     pub fn message(&self, declared_outputs: &[String]) -> String {
-        if let ReturnNudge::Message(text) = self {
-            if !text.trim().is_empty() {
-                return text.clone();
-            }
+        if let ReturnNudge::Message(text) = self
+            && !text.trim().is_empty()
+        {
+            return text.clone();
         }
         format!(
             "This directive declares structured outputs ({}) that have not been \
@@ -659,10 +659,12 @@ mod tests {
         // message rather than injecting an empty stimulus.
         let blank: DirectiveHeader = serde_yaml::from_str("return_nudge: \"  \"").unwrap();
         assert!(blank.return_nudge.enabled());
-        assert!(blank
-            .return_nudge
-            .message(&outs)
-            .contains("directive_return"));
+        assert!(
+            blank
+                .return_nudge
+                .message(&outs)
+                .contains("directive_return")
+        );
     }
 
     #[test]

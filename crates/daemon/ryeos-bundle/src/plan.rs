@@ -7,9 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::PathBuf;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
-use crate::manifest::{materialize_manifest_source, parse_manifest, BundleManifest};
+use crate::manifest::{BundleManifest, materialize_manifest_source, parse_manifest};
 
 pub type BundleName = String;
 pub type KindName = String;

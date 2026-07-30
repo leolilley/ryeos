@@ -6,10 +6,10 @@
 //!
 //! If the daemon is not running, `ryeos gc` runs directly — no quiesce needed.
 
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use tokio::sync::Notify;
 
 /// Write barrier states.

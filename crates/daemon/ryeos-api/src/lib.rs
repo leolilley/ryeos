@@ -19,7 +19,7 @@ pub mod routes;
 pub mod surface_views;
 
 pub use api_state::ApiState;
-pub use registry::{build_service_registry, RawHandlerFn, ServiceAvailability, ServiceDescriptor};
+pub use registry::{RawHandlerFn, ServiceAvailability, ServiceDescriptor, build_service_registry};
 
 /// Build the axum router for the API surface.
 ///

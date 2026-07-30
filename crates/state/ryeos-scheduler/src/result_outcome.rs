@@ -22,12 +22,12 @@ pub fn classify_result_payload(value: &Value) -> ThreadResultOutcome {
         };
     }
 
-    if let Some(inner) = value.get("result") {
-        if has_success_false(inner) {
-            return ThreadResultOutcome::ResultFailed {
-                reason: extract_failure_reason(inner),
-            };
-        }
+    if let Some(inner) = value.get("result")
+        && has_success_false(inner)
+    {
+        return ThreadResultOutcome::ResultFailed {
+            reason: extract_failure_reason(inner),
+        };
     }
 
     ThreadResultOutcome::Success

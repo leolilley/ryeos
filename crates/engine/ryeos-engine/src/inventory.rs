@@ -42,8 +42,8 @@ use serde_json::Value;
 
 use crate::canonical_ref::CanonicalRef;
 use crate::error::EngineError;
-use crate::item_resolution::{enumerate_kind_refs, resolve_item_full, ResolutionRoots};
-use crate::kind_registry::{apply_extraction_rules, KindRegistry, KindSchema};
+use crate::item_resolution::{ResolutionRoots, enumerate_kind_refs, resolve_item_full};
+use crate::kind_registry::{KindRegistry, KindSchema, apply_extraction_rules};
 use crate::parsers::ParserDispatcher;
 
 /// One inventoried item, fully resolved by the daemon's engine. The
@@ -312,10 +312,10 @@ fn is_not_directly_invokable_tool_descriptor(
 /// or no candidate is present.
 fn pick_schema(parsed: &Value, keys: &[String]) -> Option<Value> {
     for key in keys {
-        if let Some(v) = parsed.get(key) {
-            if !v.is_null() {
-                return Some(v.clone());
-            }
+        if let Some(v) = parsed.get(key)
+            && !v.is_null()
+        {
+            return Some(v.clone());
         }
     }
     None

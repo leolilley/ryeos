@@ -690,7 +690,7 @@ pub fn emit_process_exit_summary() {
 
 #[cfg(test)]
 mod tests {
-    use super::{duration_us, DirectiveStageTimings, MAX_PROVIDER_CALL_TIMING_RECORDS};
+    use super::{DirectiveStageTimings, MAX_PROVIDER_CALL_TIMING_RECORDS, duration_us};
     use std::time::Instant;
 
     #[test]

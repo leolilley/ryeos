@@ -201,31 +201,34 @@ async fn read_sse_stream(
     }
 
     let mut buf: Vec<u8> = Vec::new();
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| CliTransportError::BodyDecode {
-            detail: format!("stream frame: {e}"),
-        })?
-    {
+    loop {
+        let next_chunk = resp
+            .chunk()
+            .await
+            .map_err(|e| CliTransportError::BodyDecode {
+                detail: format!("stream frame: {e}"),
+            })?;
+        let Some(chunk) = next_chunk else {
+            break;
+        };
         buf.extend_from_slice(&chunk);
         // Drain every complete event (terminated by a blank line, LF or CRLF)
         // from the front of the buffer, leaving any partial tail for the next
         // frame.
         while let Some(end) = find_event_end(&buf) {
             let block: Vec<u8> = buf.drain(..end).collect();
-            if let Some(ev) = parse_sse_block(&block) {
-                if on_event(&ev) {
-                    return Ok(());
-                }
+            if let Some(ev) = parse_sse_block(&block)
+                && on_event(&ev)
+            {
+                return Ok(());
             }
         }
     }
     // Tolerate a final event not terminated by a blank line at EOF.
-    if !buf.is_empty() {
-        if let Some(ev) = parse_sse_block(&buf) {
-            on_event(&ev);
-        }
+    if !buf.is_empty()
+        && let Some(ev) = parse_sse_block(&buf)
+    {
+        on_event(&ev);
     }
     Ok(())
 }

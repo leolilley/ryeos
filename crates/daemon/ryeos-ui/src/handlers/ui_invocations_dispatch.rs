@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use ryeos_api::registry::ServiceDescriptor;
 use ryeos_app::handler_context::HandlerContext;
 use ryeos_app::handler_error::HandlerError;
 use ryeos_app::service_registry::{
-    extract_required_caps, extract_ui_dispatch, extract_ui_read_only, UiDispatchMode,
+    UiDispatchMode, extract_required_caps, extract_ui_dispatch, extract_ui_read_only,
 };
 use ryeos_app::state::AppState;
 use ryeos_engine::canonical_ref::CanonicalRef;
@@ -399,7 +399,7 @@ async fn execute_prepared_item_ref(
         parent_execution_context: None,
     };
 
-    ryeos_executor::dispatch::dispatch_verified_with_handler_context(
+    let result = ryeos_executor::dispatch::dispatch_verified_with_handler_context(
         item_ref,
         verified,
         local_handler_context,
@@ -409,7 +409,9 @@ async fn execute_prepared_item_ref(
     )
     .await
     .map_err(dispatch_error_to_handler)
-    .map_err(Into::into)
+    .map_err(Into::into);
+    drop(dispatch_req);
+    result
 }
 
 fn map_dispatch_error(error: anyhow::Error) -> HandlerError {

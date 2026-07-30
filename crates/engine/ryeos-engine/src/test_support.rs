@@ -25,9 +25,9 @@ use base64::Engine as _;
 use lillux::crypto::{DecodePublicKey, VerifyingKey};
 
 use crate::handlers::HandlerRegistry;
+use crate::parsers::ParserRegistry;
 use crate::parsers::descriptor::ParserDescriptor;
 use crate::parsers::dispatcher::ParserDispatcher;
-use crate::parsers::ParserRegistry;
 use crate::resolution::TrustClass;
 use crate::trust::{TrustStore, TrustedSigner};
 

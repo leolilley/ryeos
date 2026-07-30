@@ -16,7 +16,7 @@ use crate::config_loading::ConfigLoadContext;
 use crate::contracts::RuntimeEnvSource;
 use crate::error::EngineError;
 use crate::execution_policy::ExecutionPolicyResolver;
-use crate::runtime::{expand_template, is_reserved_env_name, CompileContext, RuntimeHandler};
+use crate::runtime::{CompileContext, RuntimeHandler, expand_template, is_reserved_env_name};
 
 pub const KEY: &str = "config";
 

@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use lillux::crypto::{DecodePrivateKey, EncodePrivateKey};
 use lillux::crypto::{Signature, Signer, SigningKey, Verifier, VerifyingKey};

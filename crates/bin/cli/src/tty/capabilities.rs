@@ -32,15 +32,29 @@ impl TerminalCapabilities {
     pub fn detect(force_plain: bool) -> Self {
         let override_mode = std::env::var("RYEOS_TTY").unwrap_or_else(|_| "auto".into());
         let term_dumb = std::env::var("TERM").is_ok_and(|term| term == "dumb");
-        let tty = match override_mode.as_str() {
+        let streams_are_tty = io::stdout().is_terminal() && io::stderr().is_terminal();
+        Self::detect_with(
+            force_plain,
+            &override_mode,
+            term_dumb,
+            streams_are_tty,
+            std::env::var_os("NO_COLOR").is_none(),
+            terminal_width(),
+        )
+    }
+
+    fn detect_with(
+        force_plain: bool,
+        override_mode: &str,
+        term_dumb: bool,
+        streams_are_tty: bool,
+        color_allowed: bool,
+        width: usize,
+    ) -> Self {
+        let tty = match override_mode {
             "always" if !force_plain && !term_dumb => true,
             "never" => false,
-            _ => {
-                !force_plain
-                    && !term_dumb
-                    && io::stdout().is_terminal()
-                    && io::stderr().is_terminal()
-            }
+            _ => !force_plain && !term_dumb && streams_are_tty,
         };
         let mode = if tty {
             HumanOutputMode::Tty
@@ -49,9 +63,9 @@ impl TerminalCapabilities {
         };
         Self {
             mode,
-            color: tty && std::env::var_os("NO_COLOR").is_none(),
+            color: tty && color_allowed,
             unicode: tty,
-            width: terminal_width(),
+            width,
         }
     }
 
@@ -104,14 +118,7 @@ mod tests {
 
     #[test]
     fn explicit_never_is_plain_and_ascii() {
-        let _lock = crate::test_env::lock();
-        let previous = std::env::var_os("RYEOS_TTY");
-        std::env::set_var("RYEOS_TTY", "never");
-        let caps = TerminalCapabilities::detect(false);
-        match previous {
-            Some(value) => std::env::set_var("RYEOS_TTY", value),
-            None => std::env::remove_var("RYEOS_TTY"),
-        }
+        let caps = TerminalCapabilities::detect_with(false, "never", false, true, true, 80);
         assert_eq!(caps.mode, HumanOutputMode::Plain);
         assert!(!caps.color);
         assert!(!caps.unicode);
@@ -119,34 +126,14 @@ mod tests {
 
     #[test]
     fn machine_mode_wins_over_always() {
-        let _lock = crate::test_env::lock();
-        let previous = std::env::var_os("RYEOS_TTY");
-        std::env::set_var("RYEOS_TTY", "always");
-        let caps = TerminalCapabilities::detect(true);
-        match previous {
-            Some(value) => std::env::set_var("RYEOS_TTY", value),
-            None => std::env::remove_var("RYEOS_TTY"),
-        }
+        let caps = TerminalCapabilities::detect_with(true, "always", false, true, true, 80);
         assert_eq!(caps.mode, HumanOutputMode::Plain);
         assert!(!caps.color);
     }
 
     #[test]
     fn dumb_terminal_wins_over_always() {
-        let _lock = crate::test_env::lock();
-        let previous_override = std::env::var_os("RYEOS_TTY");
-        let previous_term = std::env::var_os("TERM");
-        std::env::set_var("RYEOS_TTY", "always");
-        std::env::set_var("TERM", "dumb");
-        let caps = TerminalCapabilities::detect(false);
-        match previous_override {
-            Some(value) => std::env::set_var("RYEOS_TTY", value),
-            None => std::env::remove_var("RYEOS_TTY"),
-        }
-        match previous_term {
-            Some(value) => std::env::set_var("TERM", value),
-            None => std::env::remove_var("TERM"),
-        }
+        let caps = TerminalCapabilities::detect_with(false, "always", true, true, true, 80);
         assert_eq!(caps.mode, HumanOutputMode::Plain);
         assert!(!caps.unicode);
     }

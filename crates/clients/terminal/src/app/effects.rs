@@ -94,10 +94,9 @@ async fn effect_data(
                 params
                     .as_object_mut()
                     .and_then(|map| map.get_mut("project_path")),
-            ) {
-                if slot.as_str().map(str::is_empty).unwrap_or(slot.is_null()) {
-                    *slot = serde_json::Value::String(project.to_string());
-                }
+            ) && slot.as_str().map(str::is_empty).unwrap_or(slot.is_null())
+            {
+                *slot = serde_json::Value::String(project.to_string());
             }
             let body = serde_json::json!({
                 "target": { "kind": "ref", "ref": source_ref },
@@ -233,10 +232,10 @@ fn fill_project_path_slot(params: &mut serde_json::Value, project: &str) {
         }
         return;
     }
-    if let Some(slot) = params.get_mut("project_path") {
-        if slot.as_str().map(str::is_empty).unwrap_or(slot.is_null()) {
-            *slot = serde_json::Value::String(project.to_string());
-        }
+    if let Some(slot) = params.get_mut("project_path")
+        && slot.as_str().map(str::is_empty).unwrap_or(slot.is_null())
+    {
+        *slot = serde_json::Value::String(project.to_string());
     }
 }
 

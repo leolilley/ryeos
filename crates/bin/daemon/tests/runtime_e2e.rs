@@ -24,8 +24,8 @@ mod common;
 
 use std::path::Path;
 
-use common::fast_fixture::FastFixture;
 use common::DaemonHarness;
+use common::fast_fixture::FastFixture;
 use lillux::crypto::SigningKey;
 
 // ── Helpers (signing setup uses the fast fixture's publisher key) ──────

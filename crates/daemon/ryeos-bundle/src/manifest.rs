@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ryeos_engine::contracts::{SignatureEnvelope, TrustClass};
 use ryeos_engine::trust::TrustStore;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,15 @@ pub enum RuntimeVaultOperation {
     Get,
     Delete,
     List,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProjectSnapshotOperation {
+    Status,
+    Log,
+    Show,
+    Create,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -66,6 +75,8 @@ pub struct RuntimeAuthorityDecls {
     pub runtime_vault: Vec<RuntimeVaultDecl>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub item_authoring: Vec<ItemAuthorDecl>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub project_snapshots: Vec<ProjectSnapshotOperation>,
 }
 
 /// One declared smoke execution: an item the bundle's author nominates as a
@@ -345,7 +356,7 @@ pub fn load_verified_manifest(
         }
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("failed to stat {}", manifest_path.display()))
+                .with_context(|| format!("failed to stat {}", manifest_path.display()));
         }
     };
     if file_type.is_symlink() || !file_type.is_file() {
@@ -430,7 +441,7 @@ pub fn parse_manifest(source: &Path, expected_name: &str) -> Result<BundleManife
         }
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect manifest {}", manifest_path.display()))
+                .with_context(|| format!("inspect manifest {}", manifest_path.display()));
         }
     };
     if file_type.is_symlink() || !file_type.is_file() {
@@ -488,7 +499,7 @@ pub(crate) fn materialize_manifest_source(
         }
         Err(error) => {
             return Err(error)
-                .with_context(|| format!("inspect manifest source {}", source_path.display()))
+                .with_context(|| format!("inspect manifest source {}", source_path.display()));
         }
     };
     if file_type.is_symlink() || !file_type.is_file() {
@@ -953,9 +964,11 @@ typo_field: oops
         let error =
             parse_current_manifest_body("name: demo\nversion: 1.0.0\nprovides_kinds: []\n", origin)
                 .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("missing required field 'requires_kinds'"));
+        assert!(
+            error
+                .to_string()
+                .contains("missing required field 'requires_kinds'")
+        );
     }
 
     #[test]
@@ -963,7 +976,12 @@ typo_field: oops
         // Hard switch: the runtime-authority families live under
         // `runtime_authority:` only. Old top-level siblings fail loudly rather
         // than silently dropping authority — no back-compat.
-        for field in ["bundle_events", "runtime_vault", "item_authoring"] {
+        for field in [
+            "bundle_events",
+            "runtime_vault",
+            "item_authoring",
+            "project_snapshots",
+        ] {
             let yaml = format!(
                 "name: test\nversion: \"1.0\"\nprovides_kinds: []\nrequires_kinds: []\n{field}: []\n"
             );

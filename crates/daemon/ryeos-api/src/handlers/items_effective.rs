@@ -48,7 +48,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::handler_context::HandlerContext;
 use crate::handler_error::HandlerError;
@@ -414,10 +414,12 @@ mod tests {
             crate::handler_error::HandlerError::Structured { code, body, .. } => {
                 assert_eq!(code, "contract_violation");
                 assert_eq!(body["error_code"], "contract_violation");
-                assert!(body["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("surface:ryeos/ui/base"));
+                assert!(
+                    body["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("surface:ryeos/ui/base")
+                );
                 assert!(body["error"].as_str().unwrap().contains("2 errors"));
                 assert!(body["error"].as_str().unwrap().contains("1 warning"));
 

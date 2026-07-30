@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use lillux::cas::CasStore;
 pub use lillux::crypto::SigningKey;
 use lillux::signature::{compute_fingerprint, sign_content};
@@ -387,22 +387,28 @@ mod tests {
         fs::write(&binary, b"binary").unwrap();
 
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(unix_mode(&binary)
-            .unwrap_err()
-            .to_string()
-            .contains("not executable"));
+        assert!(
+            unix_mode(&binary)
+                .unwrap_err()
+                .to_string()
+                .contains("not executable")
+        );
 
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o4755)).unwrap();
-        assert!(unix_mode(&binary)
-            .unwrap_err()
-            .to_string()
-            .contains("special permission bits"));
+        assert!(
+            unix_mode(&binary)
+                .unwrap_err()
+                .to_string()
+                .contains("special permission bits")
+        );
 
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o775)).unwrap();
-        assert!(unix_mode(&binary)
-            .unwrap_err()
-            .to_string()
-            .contains("group/other-writable"));
+        assert!(
+            unix_mode(&binary)
+                .unwrap_err()
+                .to_string()
+                .contains("group/other-writable")
+        );
 
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(unix_mode(&binary).unwrap(), 0o755);

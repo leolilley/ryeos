@@ -687,10 +687,10 @@ impl RuntimeLaunchMetadata {
         where
             T: Clone + Serialize,
         {
-            if let (Some(authoritative), Some(attempt)) = (authoritative, attempt) {
-                if serde_json::to_value(authoritative)? != serde_json::to_value(attempt)? {
-                    anyhow::bail!("process attach changed admitted {label}");
-                }
+            if let (Some(authoritative), Some(attempt)) = (authoritative, attempt)
+                && serde_json::to_value(authoritative)? != serde_json::to_value(attempt)?
+            {
+                anyhow::bail!("process attach changed admitted {label}");
             }
             Ok(authoritative.clone().or_else(|| attempt.clone()))
         }
@@ -1084,7 +1084,7 @@ impl RuntimeLaunchMetadata {
         let admitted_project_authority = self
             .sealed_root_request
             .as_ref()
-            .and_then(|_| self.resume_context.as_ref())
+            .and(self.resume_context.as_ref())
             .map(|resume| resume.project_authority.clone());
         Self {
             schema_version: self.schema_version,
@@ -1195,20 +1195,24 @@ mod tests {
         contradictory.admitted_project_authority =
             Some(ryeos_state::objects::ExecutionProjectAuthority::PROJECTLESS);
         let error = contradictory.validate().unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("contains subprocess-only authority"));
+        assert!(
+            error
+                .to_string()
+                .contains("contains subprocess-only authority")
+        );
     }
 
     #[test]
     fn in_process_handler_metadata_rejects_missing_or_recoverable_lifecycle_authority() {
         let missing = RuntimeLaunchMetadata::default()
             .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler);
-        assert!(missing
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("has no lifecycle authority"));
+        assert!(
+            missing
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("has no lifecycle authority")
+        );
 
         let recoverable = RuntimeLaunchMetadata::default()
             .with_launch_driver(ryeos_state::objects::ExecutionLaunchDriver::InProcessHandler)
@@ -1225,11 +1229,13 @@ mod tests {
         let no_driver = RuntimeLaunchMetadata::default().with_in_process_lifecycle_authority(
             ryeos_state::objects::ExecutionLifecycleAuthority::DAEMON_NON_RECOVERABLE,
         );
-        assert!(no_driver
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("requires the in-process handler launch driver"));
+        assert!(
+            no_driver
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("requires the in-process handler launch driver")
+        );
     }
 
     #[test]
@@ -1367,13 +1373,15 @@ mod tests {
         });
         let mut changed = source.clone();
         changed.parameters = serde_json::json!({"input": "new"});
-        assert!(changed
-            .validate_continuation_transition_from(
-                &source,
-                None,
-                ContinuationAuthorityTransitionKind::Inherit,
-            )
-            .is_err());
+        assert!(
+            changed
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::Inherit,
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1397,13 +1405,15 @@ mod tests {
             .unwrap();
 
         operator.item_ref = "tool:test/other".to_string();
-        assert!(operator
-            .validate_continuation_transition_from(
-                &source,
-                None,
-                ContinuationAuthorityTransitionKind::OperatorFollowUp,
-            )
-            .is_err());
+        assert!(
+            operator
+                .validate_continuation_transition_from(
+                    &source,
+                    None,
+                    ContinuationAuthorityTransitionKind::OperatorFollowUp,
+                )
+                .is_err()
+        );
     }
 
     #[test]

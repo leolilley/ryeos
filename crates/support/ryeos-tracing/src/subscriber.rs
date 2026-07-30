@@ -182,14 +182,13 @@ impl TraceSink {
             .unwrap_or_default();
         rotated_name.push(".1");
         let rotated = self.path.with_file_name(rotated_name);
-        if std::fs::rename(&self.path, &rotated).is_ok() {
-            if let Ok(fresh) = std::fs::OpenOptions::new()
+        if std::fs::rename(&self.path, &rotated).is_ok()
+            && let Ok(fresh) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&self.path)
-            {
-                self.file = fresh;
-            }
+        {
+            self.file = fresh;
         }
         self.bytes = 0;
     }

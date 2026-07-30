@@ -4,12 +4,12 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
-use rand::rngs::OsRng;
 use rand::RngCore;
+use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::env_contract::{DaemonRootEnv, EnvBinding, EnvSourceDetail, EnvSourceKind};
 use crate::event_store_service::EventStoreService;
@@ -36,8 +36,8 @@ use ryeos_engine::history_policy::{
     ResolvedThreadHistoryPolicy,
 };
 use ryeos_engine::resolution::TrustClass as ResolutionTrustClass;
-use ryeos_state::objects::ThreadStatus;
 use ryeos_state::UsageSubject;
+use ryeos_state::objects::ThreadStatus;
 
 /// Re-export so daemon crates that depend only on `ryeos-app` (e.g. `ryeos-ui`)
 /// can name the watch sort without a direct `ryeos-state` dependency.
@@ -48,12 +48,12 @@ mod sealed_request;
 mod validation;
 
 pub use direct_execution::{
-    prepare_item_plan, spawn_item, PreparedItemPlan, RunningItem, SpawnItemParams,
-    SpawnedItemAwaitingAttachment,
+    PreparedItemPlan, RunningItem, SpawnItemParams, SpawnedItemAwaitingAttachment,
+    prepare_item_plan, spawn_item,
 };
-pub use sealed_request::SealedRootExecutionRequest;
 #[cfg(test)]
 use sealed_request::SEALED_ROOT_EXECUTION_REQUEST_SCHEMA_VERSION;
+pub use sealed_request::SealedRootExecutionRequest;
 
 use validation::{
     normalize_terminal_status, validate_kind, validate_launch_mode, validate_thread_id_format,
@@ -683,13 +683,13 @@ fn validate_continued_completion(completion: &ryeos_runtime::TerminalCompletion)
     if completion.error.is_some() {
         bail!("continued completion must not carry a terminal error");
     }
-    if let Some(outcome_code) = completion.outcome_code.as_deref() {
-        if outcome_code != ThreadTerminalStatus::Continued.as_str() {
-            bail!(
-                "continued completion outcome_code must be `{}`, received `{outcome_code}`",
-                ThreadTerminalStatus::Continued.as_str()
-            );
-        }
+    if let Some(outcome_code) = completion.outcome_code.as_deref()
+        && outcome_code != ThreadTerminalStatus::Continued.as_str()
+    {
+        bail!(
+            "continued completion outcome_code must be `{}`, received `{outcome_code}`",
+            ThreadTerminalStatus::Continued.as_str()
+        );
     }
 
     let runtime_cost = completion
@@ -1047,12 +1047,10 @@ impl AdmittedProjectBinding {
                     workspace_lifeline,
                 },
             ) => {
-                if let (Some(path), Some(lifeline)) = (effective_path, workspace_lifeline) {
-                    if !lifeline.owns_effective_path(path) {
-                        bail!(
-                            "projectless materialization lifeline does not own its effective path"
-                        );
-                    }
+                if let (Some(path), Some(lifeline)) = (effective_path, workspace_lifeline)
+                    && !lifeline.owns_effective_path(path)
+                {
+                    bail!("projectless materialization lifeline does not own its effective path");
                 }
             }
             (
@@ -1068,12 +1066,10 @@ impl AdmittedProjectBinding {
                 if canonical_root != path || canonical_root != materialized_root {
                     bail!("live project authority contradicts its planning materialization");
                 }
-                if let Some(lifeline) = workspace_lifeline {
-                    if !lifeline.owns_effective_path(canonical_root) {
-                        bail!(
-                            "live project materialization lifeline does not own its canonical root"
-                        );
-                    }
+                if let Some(lifeline) = workspace_lifeline
+                    && !lifeline.owns_effective_path(canonical_root)
+                {
+                    bail!("live project materialization lifeline does not own its canonical root");
                 }
             }
             (
@@ -2085,7 +2081,9 @@ impl RootExecutionAdmission {
             );
         }
         if request.ref_bindings != self.ref_bindings {
-            bail!("resolved execution request secondary identities do not match the sealed root admission");
+            bail!(
+                "resolved execution request secondary identities do not match the sealed root admission"
+            );
         }
         if request.current_site_id != self.plan_context.current_site_id
             || request.origin_site_id != self.plan_context.origin_site_id
@@ -3689,35 +3687,33 @@ impl ThreadLifecycleService {
         if matches!(
             ThreadStatus::from_str_lossy(terminal_status),
             Some(ThreadStatus::Failed | ThreadStatus::Killed)
-        ) {
-            if let Some(stderr_tail) = effective
+        ) && let Some(stderr_tail) = effective
+            .error_json
+            .as_ref()
+            .and_then(|e| e.get("stderr"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let exit_code = effective
                 .error_json
                 .as_ref()
-                .and_then(|e| e.get("stderr"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                let exit_code = effective
-                    .error_json
-                    .as_ref()
-                    .and_then(|e| e.get("exit_code"))
-                    .and_then(Value::as_i64);
-                let soft_failure = effective
-                    .error_json
-                    .as_ref()
-                    .and_then(|e| e.get("soft_failure"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                tracing::error!(
-                    thread_id,
-                    outcome_code = outcome_code.unwrap_or(""),
-                    exit_code,
-                    soft_failure,
-                    stderr_tail = %stderr_tail,
-                    "thread failed; tool stderr tail follows"
-                );
-            }
+                .and_then(|e| e.get("exit_code"))
+                .and_then(Value::as_i64);
+            let soft_failure = effective
+                .error_json
+                .as_ref()
+                .and_then(|e| e.get("soft_failure"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            tracing::error!(
+                thread_id,
+                outcome_code = outcome_code.unwrap_or(""),
+                exit_code,
+                soft_failure,
+                stderr_tail = %stderr_tail,
+                "thread failed; tool stderr tail follows"
+            );
         }
 
         self.update_scheduler_fire_on_thread_terminal(
@@ -4426,34 +4422,35 @@ impl ThreadLifecycleService {
             .ok()
             .and_then(|guard| guard.clone());
         let app_root = self.app_root.read().ok().and_then(|guard| guard.clone());
-        if let (Some(db), Some(app_root)) = (db, app_root) {
-            if let Ok(Some(fire)) = db.find_fire_by_thread(thread_id) {
-                let fire_status = ryeos_scheduler::fire_status_for_thread_status(terminal_status);
-                let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
-                let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
-                    terminal_status,
-                    result_outcome.as_ref(),
-                    outcome_code,
-                );
-                let now = lillux::time::timestamp_millis();
-                let completed_fired_at = fire.fired_at.unwrap_or(now);
+        let scheduler = (db, app_root);
+        if let (Some(db), Some(app_root)) = scheduler
+            && let Ok(Some(fire)) = db.find_fire_by_thread(thread_id)
+        {
+            let fire_status = ryeos_scheduler::fire_status_for_thread_status(terminal_status);
+            let result_outcome = result.map(ryeos_scheduler::classify_result_payload);
+            let outcome_str = ryeos_scheduler::fire_outcome_for_terminal(
+                terminal_status,
+                result_outcome.as_ref(),
+                outcome_code,
+            );
+            let now = lillux::time::timestamp_millis();
+            let completed_fired_at = fire.fired_at.unwrap_or(now);
 
-                let updated = ryeos_scheduler::types::FireRecord {
-                    status: fire_status.to_string(),
-                    outcome: Some(outcome_str.to_string()),
-                    fired_at: Some(completed_fired_at),
-                    completed_at: Some(now),
-                    ..fire
-                };
-                if let Err(e) =
-                    ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &updated)
-                {
-                    tracing::warn!(
-                        thread_id = %thread_id,
-                        error = %e,
-                        "scheduler: failed to update fire status on thread completion"
-                    );
-                }
+            let updated = ryeos_scheduler::types::FireRecord {
+                status: fire_status.to_string(),
+                outcome: Some(outcome_str.to_string()),
+                fired_at: Some(completed_fired_at),
+                completed_at: Some(now),
+                ..fire
+            };
+            if let Err(e) =
+                ryeos_scheduler::projection::persist_fire_snapshot(&app_root, &db, &updated)
+            {
+                tracing::warn!(
+                    thread_id = %thread_id,
+                    error = %e,
+                    "scheduler: failed to update fire status on thread completion"
+                );
             }
         }
     }
@@ -4519,24 +4516,22 @@ impl ThreadLifecycleService {
         status: &str,
         upstream_thread_id: Option<&str>,
     ) -> Result<Option<FollowFact>> {
-        if status == ThreadStatus::Continued.as_str() {
-            if let Some(w) = self
+        if status == ThreadStatus::Continued.as_str()
+            && let Some(w) = self
                 .state_store
                 .get_follow_waiter_by_parent_thread(thread_id)?
-            {
-                return Ok(Some(FollowFact::suspended_parent(&w)));
-            }
+        {
+            return Ok(Some(FollowFact::suspended_parent(&w)));
         }
         if let Some(w) = self.state_store.get_follow_waiter_by_successor(thread_id)? {
             return Ok(Some(FollowFact::resume_successor_live(&w)));
         }
-        if let Some(upstream) = upstream_thread_id {
-            if self
+        if let Some(upstream) = upstream_thread_id
+            && self
                 .state_store
                 .is_follow_resume_successor(upstream, thread_id)?
-            {
-                return Ok(Some(FollowFact::resume_successor_durable(thread_id)));
-            }
+        {
+            return Ok(Some(FollowFact::resume_successor_durable(thread_id)));
         }
         Ok(None)
     }
@@ -4661,29 +4656,28 @@ impl ThreadLifecycleService {
         filter: &ryeos_state::queries::ThreadListFilter,
         facets: &std::collections::HashMap<String, Vec<(String, String)>>,
     ) -> bool {
-        if let Some(principal) = &filter.principal {
-            if item.requested_by.as_deref() != Some(principal.as_str()) {
-                return false;
-            }
+        if let Some(principal) = &filter.principal
+            && item.requested_by.as_deref() != Some(principal.as_str())
+        {
+            return false;
         }
-        if let Some(status) = &filter.status {
-            if !item.status.contains(status) {
-                return false;
-            }
+        if let Some(status) = &filter.status
+            && !item.status.contains(status)
+        {
+            return false;
         }
-        if let Some(kind) = &filter.kind {
-            if !item.kind.contains(kind) {
-                return false;
-            }
+        if let Some(kind) = &filter.kind
+            && !item.kind.contains(kind)
+        {
+            return false;
         }
-        if let Some(requested_by) = &filter.requested_by {
-            if !item
+        if let Some(requested_by) = &filter.requested_by
+            && !item
                 .requested_by
                 .as_deref()
                 .is_some_and(|value| value.contains(requested_by))
-            {
-                return false;
-            }
+        {
+            return false;
         }
         if filter
             .exclude_item_prefixes
@@ -4692,10 +4686,10 @@ impl ThreadLifecycleService {
         {
             return false;
         }
-        if let Some(project_root) = &filter.project_root {
-            if item.project_root.as_deref().map(Path::new) != Some(project_root.as_path()) {
-                return false;
-            }
+        if let Some(project_root) = &filter.project_root
+            && item.project_root.as_deref().map(Path::new) != Some(project_root.as_path())
+        {
+            return false;
         }
         if let Some((key, value)) = &filter.facet {
             let has_facet = facets
@@ -6515,9 +6509,11 @@ mod tests {
                 .expect_err(
                     "equivalent engine configuration must not replace the provenance engine",
                 );
-        assert!(error
-            .to_string()
-            .contains("does not match execution provenance engine"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not match execution provenance engine")
+        );
     }
 
     #[test]
@@ -6564,9 +6560,11 @@ mod tests {
         let error = old_schema
             .restore(&empty_test_engine(), capsule_root.path())
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("sealed root execution request schema mismatch"));
+        assert!(
+            error
+                .to_string()
+                .contains("sealed root execution request schema mismatch")
+        );
     }
 
     fn signed_verified_item(

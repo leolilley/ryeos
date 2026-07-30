@@ -27,7 +27,9 @@ pub enum RouteConfigError {
     UnknownResponseMode { id: String, name: String },
     #[error("invalid limits for route '{id}': {reason}")]
     InvalidLimits { id: String, reason: String },
-    #[error("path collision between routes '{id_a}' and '{id_b}' on pattern '{pattern}' method {method}")]
+    #[error(
+        "path collision between routes '{id_a}' and '{id_b}' on pattern '{pattern}' method {method}"
+    )]
     PathCollision {
         id_a: String,
         id_b: String,
